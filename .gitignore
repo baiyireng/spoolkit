@@ -20,6 +20,9 @@ __pycache__/
 # 临时试验目录
 scratch_lab/
 
+# 设计讨论时的可视化伴侣产物
+.superpowers/
+
 # 编辑器
 .vscode/
 .idea/
