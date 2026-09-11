@@ -175,6 +175,7 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--session", default="cli")
     parser.add_argument("--provider", default="")
     parser.add_argument("--model", default="")
+    parser.add_argument("--script", default="", help="假模型的应答脚本（配合 --provider fake）")
     parser.add_argument("--proxy", default="")
     parser.add_argument("--policy", default="")
     parser.add_argument("--scope", default="")

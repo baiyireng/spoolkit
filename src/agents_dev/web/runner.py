@@ -19,11 +19,15 @@ from typing import Sequence
 
 from agents_dev.web.protocol import (
     AWAIT,
+    CONFIRM,
+    DIFF,
     FINAL,
     USAGE,
     Event,
     parse_line,
 )
+
+NOISE_LINES = 3
 
 
 class Runner:
@@ -46,6 +50,14 @@ class Runner:
         self._usage: dict = {}
         self._final: dict | None = None
         self._finished = False
+        # 最近几条不是事件的输出。子进程崩了的时候，原因多半就写在这里
+        # （异常回溯、参数错误提示都在 stderr 上，而 stderr 也接到了本管道）。
+        # 丢掉它们的话，界面只会说「退出码 2」，谁都猜不出为什么。
+        self._noise: list[str] = []
+        # 待确认的 diff。断线重连的页面拿不到漏掉的事件，只能靠快照；
+        # 快照里没有 diff 的话，按钮会回来、内容却是空的——
+        # 那时候用户只能盲点「应用」。
+        self._diffs: list[dict] = []
 
     # --- 命令 ---
 
@@ -82,6 +94,8 @@ class Runner:
             self._usage = {}
             self._final = None
             self._finished = False
+            self._noise = []
+            self._diffs = []
             self._process = subprocess.Popen(
                 self.command(goal),
                 cwd=str(self.project_root),
@@ -138,6 +152,7 @@ class Runner:
                 "goal": self._goal,
                 "usage": dict(self._usage),
                 "final": dict(self._final) if self._final else None,
+                "diffs": [dict(item) for item in self._diffs],
                 "session": self.session,
             }
 
@@ -151,11 +166,16 @@ class Runner:
         with self._lock:
             if event.type == AWAIT:
                 self._awaiting = int(event.data.get("count", 1))
+            elif event.type == DIFF:
+                self._diffs.append(dict(event.data))
+            elif event.type == CONFIRM:
+                self._diffs = []
             elif event.type == USAGE:
                 self._usage = dict(event.data)
             elif event.type == FINAL:
                 self._final = dict(event.data)
                 self._awaiting = 0
+                self._diffs = []
 
     def _pump(self, process: subprocess.Popen) -> None:
         """后台读取子进程输出，逐行解析并广播。"""
@@ -163,6 +183,7 @@ class Runner:
             for raw in process.stdout:
                 event = parse_line(raw)
                 if event is None:
+                    self._note_noise(raw)
                     continue
                 self._absorb(event)
                 self._broadcast(event)
@@ -171,11 +192,29 @@ class Runner:
             self._finished = True
             self._awaiting = 0
             code = process.returncode
-            had_final = self._final is not None
-        if not had_final:
-            # 子进程没给结局就退出了（崩了、被杀了）。**必须补一条结局**，
-            # 否则界面会永远停在「运行中」，而你会以为它还在干活。
-            self._broadcast(
-                Event(FINAL, {"ok": False, "text": f"进程退出，退出码 {code}"})
-            )
+            fallback = None
+            if self._final is None:
+                # 子进程没给结局就退出了（崩了、被杀了）。**必须补一条结局**，
+                # 否则界面会永远停在「运行中」，而你会以为它还在干活。
+                #
+                # 补的这条要同时进快照，而且要和 finished 一起写：分两步写的话
+                # 中间有个瞬间是「已完成、却没有结局」，那一刻恰好连上来的页面
+                # 什么都显示不出来——既像跑完了又像没跑，比报错还难查。
+                fallback = Event(FINAL, {"ok": False, "text": self._death_note(code)})
+                self._final = dict(fallback.data)
+        if fallback is not None:
+            self._broadcast(fallback)
 
+    def _note_noise(self, raw: str) -> None:
+        text = raw.strip()
+        if not text:
+            return
+        with self._lock:
+            self._noise.append(text)
+            del self._noise[:-NOISE_LINES]
+
+    def _death_note(self, code: int | None) -> str:
+        """给一句能查下去的失败原因。调用方必须已持有锁。"""
+        reason = "；".join(self._noise[-NOISE_LINES:])
+        head = f"进程退出，退出码 {code}"
+        return f"{head}：{reason}" if reason else head

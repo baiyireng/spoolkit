@@ -40,3 +40,8 @@ def test_确认按钮点击后会禁用() -> None:
     assert "decided" in HTML
     assert "disabled = true" in HTML
 
+
+def test_页面能按快照重建待确认面板() -> None:
+    """断线重连时事件已经漏掉了，只能按快照补上。"""
+    assert "state.diffs" in HTML
+    assert "showPending" in HTML

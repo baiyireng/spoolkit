@@ -73,6 +73,8 @@ const meta = document.getElementById('meta');
 const conn = document.getElementById('conn');
 const startBtn = document.getElementById('start');
 let running = false, decided = false;
+let session = 'cli';
+let pendings = [];
 
 function add(text, cls) {
   const div = document.createElement('div');
@@ -82,9 +84,13 @@ function add(text, cls) {
   stream.scrollTop = stream.scrollHeight;
 }
 
-function showDiff(path, text) {
+function diffBox(path, text) {
   const box = document.createElement('div');
   box.className = 'diff';
+  const head = document.createElement('div');
+  head.className = 'dim';
+  head.textContent = '待确认：' + path;
+  box.appendChild(head);
   for (const raw of text.split('\\n')) {
     const line = document.createElement('div');
     line.className = raw.startsWith('+') ? 'add'
@@ -92,10 +98,13 @@ function showDiff(path, text) {
     line.textContent = raw;
     box.appendChild(line);
   }
+  return box;
+}
+
+function showPending(items) {
   pending.innerHTML = '';
   pending.className = '';
-  pending.appendChild(document.createTextNode('待确认：' + path));
-  pending.appendChild(box);
+  for (const item of items) { pending.appendChild(diffBox(item.path, item.text)); }
 }
 
 function setRunning(value) {
@@ -104,36 +113,74 @@ function setRunning(value) {
   startBtn.textContent = value ? '运行中…' : '开始';
 }
 
+function setMeta(steps) {
+  meta.textContent = session + ' · ' + (steps || 0) + ' 步';
+}
+
+function clearPending() {
+  pendings = [];
+  pending.className = 'dim';
+  pending.textContent = '当前没有待确认的改动。';
+}
+
 function applyState(state) {
+  session = state.session || session;
   const usage = state.usage || {};
-  meta.textContent = state.session + ' · ' + (usage.steps || 0) + ' 步';
+  setMeta(usage.steps);
   setRunning(state.running);
-  if (!state.awaiting) { actions.style.display = 'none'; }
+  // 断线重连时事件已经漏掉了，只能按快照把待确认面板整个重建出来。
+  pendings = state.diffs || [];
+  if (pendings.length) { showPending(pendings); }
+  if (state.awaiting) { showActions(); } else { actions.style.display = 'none'; }
+}
+
+function showActions() {
+  decided = false;
+  actions.style.display = 'flex';
+  document.getElementById('apply').disabled = false;
+  document.getElementById('reject').disabled = false;
 }
 
 function onEvent(event) {
   const data = JSON.parse(event.data);
   if (data.type === 'state') { applyState(data); return; }
+  // 点下「开始」到服务回话之间按钮还是可点的，再点一次会被拒（409）。
+  // 拿事件里的 start 当权威信号，按钮就不会骗人。
+  if (data.type === 'start') { setRunning(true); clearPending(); return; }
   if (data.type === 'step') { add('── 第 ' + data.n + ' 步', 'dim'); return; }
   if (data.type === 'tool') {
     add('  ' + data.name + ' → ' + (data.ok ? '成功' : '失败'),
         data.ok ? 'ok' : 'bad');
     return;
   }
-  if (data.type === 'diff') { showDiff(data.path, data.text); return; }
-  if (data.type === 'await') {
-    decided = false;
-    actions.style.display = 'flex';
-    document.getElementById('apply').disabled = false;
-    document.getElementById('reject').disabled = false;
+  if (data.type === 'diff') {
+    pendings.push({path: data.path, text: data.text});
+    showPending(pendings);
     return;
   }
-  if (data.type === 'usage') { add('用量：' + JSON.stringify(data), 'dim'); return; }
+  if (data.type === 'await') { showActions(); return; }
+  if (data.type === 'confirm') {
+    // auto 策略下改动是静默落盘的，界面上必须留一句话，
+    // 否则「它自己改了文件」这件事只有翻 git 才知道。
+    if (data.auto) {
+      add('自动应用 ' + data.count + ' 处改动（策略 auto 且范围内）', 'dim');
+    }
+    clearPending();
+    return;
+  }
+  if (data.type === 'usage') {
+    setMeta(data.steps);
+    add('用量：' + (data.steps || 0) + ' 步 · ' + (data.calls || 0) + ' 次调用 · '
+        + (data.prompt_tokens || 0) + '+' + (data.completion_tokens || 0) + ' token',
+        'dim');
+    return;
+  }
   if (data.type === 'final') {
     add(data.ok ? '完成：' + data.text : '失败：' + data.text,
         data.ok ? 'ok' : 'bad');
     setRunning(false);
     actions.style.display = 'none';
+    clearPending();
     return;
   }
   if (data.type === 'error') { add('错误：' + data.message, 'bad'); }
@@ -182,4 +229,3 @@ connect();
 </body>
 </html>
 """
-
