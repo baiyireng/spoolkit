@@ -18,7 +18,7 @@ class ChatRequest:
 
     messages: tuple[Message, ...]
     max_tokens: int
-    grammar: str | None = None
+    response_schema: dict | None = None
 
 
 @dataclass(frozen=True)

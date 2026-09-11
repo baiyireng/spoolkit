@@ -15,7 +15,7 @@ from agents_dev.llm.types import ChatRequest, Message
 API_KEY = "test-key-not-real"
 
 
-def _reply(text: str = '{"thought":"t","tool_calls":[],"final":"好"}') -> dict:
+def _reply(text: str = '{"thought":"t","tool_calls":[],"done":true,"final":"好"}') -> dict:
     return {
         "candidates": [{"content": {"parts": [{"text": text}]}}],
         "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7},
@@ -26,8 +26,8 @@ def _gateway(handler, **kwargs) -> GeminiGateway:
     return GeminiGateway(API_KEY, transport=httpx.MockTransport(handler), **kwargs)
 
 
-def _request(*messages: Message, max_tokens: int = 256) -> ChatRequest:
-    return ChatRequest(messages=messages, max_tokens=max_tokens)
+def _request(*messages: Message, max_tokens: int = 256, schema=None) -> ChatRequest:
+    return ChatRequest(messages=messages, max_tokens=max_tokens, response_schema=schema)
 
 
 def test_解析文本与用量统计() -> None:
@@ -98,7 +98,7 @@ def test_助手消息映射为model角色() -> None:
     gateway.close()
 
 
-def test_要求返回JSON且默认不附带schema() -> None:
+def test_默认附带schema且使用请求指定的结构() -> None:
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -106,27 +106,30 @@ def test_要求返回JSON且默认不附带schema() -> None:
         return httpx.Response(200, json=_reply())
 
     gateway = _gateway(handler)
-    gateway.chat(_request(Message(role="user", content="任务")))
+    custom = {
+        "type": "object",
+        "properties": {"arguments": {"type": "object", "properties": {"path": {"type": "string"}}}},
+    }
+    gateway.chat(_request(Message(role="user", content="任务"), schema=custom))
     config = seen["payload"]["generationConfig"]
     assert config["responseMimeType"] == "application/json"
     assert config["temperature"] == 0.0
-    # 自由形式的工具参数与 schema 约束冲突：无属性的对象会被约束成空对象，
-    # 模型无处安放参数。因此默认不加 responseSchema。
-    assert "responseSchema" not in config
+    assert config["responseSchema"]["properties"]["arguments"]["properties"] == {
+        "path": {"type": "STRING"}
+    }
     gateway.close()
 
 
-def test_显式开启时附带schema() -> None:
+def test_可以关闭schema以兼容接口差异() -> None:
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["payload"] = json.loads(request.content)
         return httpx.Response(200, json=_reply())
 
-    gateway = _gateway(handler, use_schema=True)
+    gateway = _gateway(handler, use_schema=False)
     gateway.chat(_request(Message(role="user", content="任务")))
-    schema = seen["payload"]["generationConfig"]["responseSchema"]
-    assert schema["type"] == "OBJECT"
+    assert "responseSchema" not in seen["payload"]["generationConfig"]
     gateway.close()
 
 

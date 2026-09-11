@@ -8,6 +8,7 @@ def _payload(**overrides) -> str:
         "thought": "先读文件",
         "tool_calls": [{"name": "read_file", "arguments": {"path": "a.py"}}],
         "state": {"current": "读 a.py"},
+        "done": False,
         "final": None,
     }
     base.update(overrides)
@@ -25,14 +26,18 @@ def test_解析正常输出() -> None:
 
 
 def test_解析最终答复() -> None:
-    turn = parse_turn(_payload(tool_calls=[], final="完成了"))
+    turn = parse_turn(_payload(tool_calls=[], done=True, final="完成了"))
     assert isinstance(turn, AgentTurn)
     assert turn.final == "完成了"
     assert turn.tool_calls == ()
+    assert turn.done is True
 
 
 def test_无状态块时状态增量为空() -> None:
-    raw = json.dumps({"thought": "t", "tool_calls": [], "final": "ok"}, ensure_ascii=False)
+    raw = json.dumps(
+        {"thought": "t", "tool_calls": [], "done": True, "final": "ok"},
+        ensure_ascii=False,
+    )
     turn = parse_turn(raw)
     assert isinstance(turn, AgentTurn)
     assert turn.state_delta is None
@@ -43,7 +48,7 @@ def test_非JSON返回解析失败而非抛错() -> None:
 
 
 def test_缺少thought字段返回解析失败() -> None:
-    raw = json.dumps({"tool_calls": [], "final": None}, ensure_ascii=False)
+    raw = json.dumps({"tool_calls": [], "done": False, "final": None}, ensure_ascii=False)
     assert isinstance(parse_turn(raw), ParseFailure)
 
 
@@ -56,8 +61,29 @@ def test_工具调用参数不是对象返回解析失败() -> None:
     assert isinstance(parse_turn(raw), ParseFailure)
 
 
-def test_既无工具调用也无最终答复返回失败() -> None:
-    assert isinstance(parse_turn(_payload(tool_calls=[], final=None)), ParseFailure)
+def test_缺少done字段返回解析失败() -> None:
+    raw = json.dumps(
+        {"thought": "t", "tool_calls": [], "final": None}, ensure_ascii=False
+    )
+    assert isinstance(parse_turn(raw), ParseFailure)
+
+
+def test_未完成又没调用工具返回失败() -> None:
+    assert isinstance(
+        parse_turn(_payload(tool_calls=[], done=False, final=None)), ParseFailure
+    )
+
+
+def test_标记完成但答复为空返回失败() -> None:
+    assert isinstance(parse_turn(_payload(tool_calls=[], done=True, final="")), ParseFailure)
+
+
+def test_标记完成但答复缺失返回失败() -> None:
+    raw = json.dumps(
+        {"thought": "t", "tool_calls": [], "done": True, "final": None},
+        ensure_ascii=False,
+    )
+    assert isinstance(parse_turn(raw), ParseFailure)
 
 
 def test_失败信息说明原因() -> None:

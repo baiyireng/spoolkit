@@ -10,7 +10,7 @@
 from dataclasses import dataclass, field
 from typing import Callable
 
-from agents_dev.agent.protocol import ParseFailure, parse_turn
+from agents_dev.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from agents_dev.agent.state import TaskState, save_state
 from agents_dev.config import Config
 from agents_dev.context.assembler import Assembler
@@ -24,8 +24,9 @@ from agents_dev.tools.registry import ToolRegistry
 SYSTEM_PROMPT = """你是本地运行的编程助手。每轮只做一件事。
 必须只输出一个 JSON 对象，不要有任何其他文字。
 格式：
-{{"thought":"这一步的打算","tool_calls":[{{"name":"工具名","arguments":{{"参数名":值}}}}],"state":{{"current":"当前在做什么"}},"final":null}}
-调用工具时把 final 设为 null；任务完成时 tool_calls 设为 [] 并把 final 设为给用户的答复。
+{{"thought":"这一步的打算","tool_calls":[{{"name":"工具名","arguments":{{"参数名":值}}}}],"state":{{"current":"当前在做什么"}},"done":false,"final":null}}
+还要工具就调用工具，此时 done 必须是 false。
+已经有答案要交付时，tool_calls 设为 []，done 设为 true，final 设为给用户的完整答复。
 可用工具：
 {tools}"""
 
@@ -61,6 +62,7 @@ class AgentLoop:
         self.config = config
         self.prefetch = prefetch
         self._budget = Budget(window=config.context_window)
+        self._schema = build_turn_schema(registry)
 
     def _assemble(
         self,
@@ -112,6 +114,7 @@ class AgentLoop:
                 ChatRequest(
                     messages=assembled.messages,
                     max_tokens=self._budget.output_reserve(),
+                    response_schema=self._schema,
                 )
             )
             turn = parse_turn(response.text)
@@ -121,7 +124,8 @@ class AgentLoop:
                 history.append(Message(role="assistant", content=response.text))
                 history.append(Message(role="user", content=feedback))
                 state.step_forward()
-                trace.append(f"step{state.step}: 解析失败 - {turn.reason}")
+                snippet = response.text.strip().replace("\n", " ")[:160]
+                trace.append(f"step{state.step}: 解析失败 - {turn.reason} | 原始: {snippet}")
                 continue
 
             if turn.state_delta is not None:
@@ -141,9 +145,11 @@ class AgentLoop:
             state.step_forward()
             save_state(state, self.config.task_path(task_id))
 
-            if turn.final is not None:
+            if turn.done:
                 trace.append(f"step{state.step}: 完成")
-                return LoopResult(True, turn.final, state, state.step, resets, trace)
+                return LoopResult(
+                    True, turn.final or "", state, state.step, resets, trace
+                )
 
         return LoopResult(
             False, "已达步数上限，任务未完成", state, state.step, resets, trace

@@ -12,13 +12,20 @@ from pathlib import Path
 
 from agents_dev.agent.loop import AgentLoop
 from agents_dev.config import Config
-from agents_dev.llm.gateway import ModelGateway
-from agents_dev.llm.gemini import GeminiGateway, load_env_file
 from agents_dev.index.indexer import index_project
 from agents_dev.index.rank import prefetch as prefetch_text
 from agents_dev.index.tools import file_symbols_spec, find_symbol_spec
 from agents_dev.llm.fake import FakeModel
+from agents_dev.llm.gateway import ModelGateway
+from agents_dev.llm.providers import (
+    ProviderConfig,
+    ProviderError,
+    describe_providers,
+    load_gateway,
+    provider_names,
+)
 from agents_dev.llm.tokenizer import OfflineTokenCounter
+from agents_dev.net import system_proxy
 from agents_dev.store.db import init_schema, open_db
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.registry import ToolRegistry
@@ -80,34 +87,34 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
     )
 
 
-def _gemini_gateway(project_root: Path, model: str) -> GeminiGateway:
-    """从环境变量或项目根的 .env 读取密钥，构造网关。"""
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        api_key = load_env_file(project_root / ".env").get("GEMINI_API_KEY", "")
-    return GeminiGateway(api_key, model=model)
-
-
 def _run(args: argparse.Namespace) -> int:
     project_root = Path(args.root).resolve()
 
-    if args.engine == "gemini":
-        try:
-            gateway: ModelGateway = _gemini_gateway(project_root, args.model)
-        except Exception as exc:
-            print(f"无法初始化 Gemini 网关: {exc}", file=sys.stderr)
-            return 2
-    else:
+    script: tuple[str, ...] = ()
+    if args.provider == "fake":
         script_path = Path(args.script)
         if not script_path.exists():
-            print(f"脚本文件不存在: {script_path}", file=sys.stderr)
+            print(f"假模型需要 --script，文件不存在: {script_path}", file=sys.stderr)
             return 2
         raw = json.loads(script_path.read_text(encoding="utf-8"))
-        script = [
+        script = tuple(
             item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
             for item in raw
-        ]
-        gateway = FakeModel(script=script, tokenizer=OfflineTokenCounter())
+        )
+
+    provider_config = ProviderConfig(
+        project_root=project_root,
+        model=args.model,
+        base_url=args.base_url,
+        proxy=args.proxy if args.proxy else system_proxy(),
+        script=script,
+        env=dict(os.environ),
+    )
+    try:
+        gateway = load_gateway(args.provider, provider_config)
+    except ProviderError as exc:
+        print(f"无法装载供应商 {args.provider}: {exc}", file=sys.stderr)
+        return 2
 
     loop = assemble_loop(
         project_root, gateway, window=args.window, max_steps=args.max_steps
@@ -127,9 +134,18 @@ def main(argv: list[str] | None = None) -> int:
 
     run_parser = sub.add_parser("run", help="运行一次任务")
     run_parser.add_argument("--goal", required=True)
-    run_parser.add_argument("--engine", choices=("fake", "gemini"), default="fake")
+    run_parser.add_argument(
+        "--provider",
+        "--engine",
+        dest="provider",
+        choices=provider_names(),
+        default="fake",
+        help="模型供应商；" + describe_providers(),
+    )
     run_parser.add_argument("--script", default="", help="假模型脚本 JSON")
-    run_parser.add_argument("--model", default="gemini-3.6-flash")
+    run_parser.add_argument("--model", default="", help="留空则用供应商默认模型")
+    run_parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
+    run_parser.add_argument("--proxy", default="", help="留空则使用系统代理")
     run_parser.add_argument("--root", default=".")
     run_parser.add_argument("--window", type=int, default=4096)
     run_parser.add_argument("--max-steps", type=int, default=10)

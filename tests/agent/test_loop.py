@@ -10,9 +10,17 @@ from agents_dev.tools.fs import list_dir_spec
 from agents_dev.tools.registry import ToolRegistry
 
 
-def _turn(thought: str, calls=None, state=None, final=None) -> str:
+def _turn(thought: str, calls=None, state=None, final=None, done=None) -> str:
+    if done is None:
+        done = final is not None
     return json.dumps(
-        {"thought": thought, "tool_calls": calls or [], "state": state, "final": final},
+        {
+            "thought": thought,
+            "tool_calls": calls or [],
+            "state": state,
+            "done": done,
+            "final": final,
+        },
         ensure_ascii=False,
     )
 

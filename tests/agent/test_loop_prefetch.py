@@ -10,7 +10,7 @@ from agents_dev.tools.registry import ToolRegistry
 
 def _turn(final: str) -> str:
     return json.dumps(
-        {"thought": "完成", "tool_calls": [], "state": None, "final": final},
+        {"thought": "完成", "tool_calls": [], "state": None, "done": True, "final": final},
         ensure_ascii=False,
     )
 
@@ -44,4 +44,3 @@ def test_预取返回空串时不产生多余区段(tmp_path: Path) -> None:
     loop = _loop(tmp_path, prefetch=lambda goal: "")
     loop.run("随便")
     assert len(loop.gateway.requests[0].messages) >= 1
-

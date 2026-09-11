@@ -12,6 +12,7 @@ def test_端到端完成一次读文件并回答(tmp_path: Path) -> None:
                 "thought": "读取配置",
                 "tool_calls": [{"name": "read_file", "arguments": {"path": "config.py"}}],
                 "state": {"current": "读 config.py"},
+                "done": False,
                 "final": None,
             },
             ensure_ascii=False,
@@ -21,6 +22,7 @@ def test_端到端完成一次读文件并回答(tmp_path: Path) -> None:
                 "thought": "已获得答案",
                 "tool_calls": [],
                 "state": {"done_added": ["读 config.py"]},
+                "done": True,
                 "final": "超时配置是 30",
             },
             ensure_ascii=False,
@@ -42,9 +44,16 @@ def test_命令行读取脚本文件并运行(tmp_path: Path) -> None:
                     "thought": "读文件",
                     "tool_calls": [{"name": "read_file", "arguments": {"path": "a.txt"}}],
                     "state": None,
+                    "done": False,
                     "final": None,
                 },
-                {"thought": "完成", "tool_calls": [], "state": None, "final": "答案是 42"},
+                {
+                    "thought": "完成",
+                    "tool_calls": [],
+                    "state": None,
+                    "done": True,
+                    "final": "答案是 42",
+                },
             ],
             ensure_ascii=False,
         ),
@@ -95,7 +104,7 @@ def test_命令行装配后索引工具已注册且预取生效(tmp_path: Path) 
 
 def _最简单的一轮() -> str:
     return json.dumps(
-        {"thought": "完成", "tool_calls": [], "state": None, "final": "好"},
+        {"thought": "完成", "tool_calls": [], "state": None, "done": True, "final": "好"},
         ensure_ascii=False,
     )
 

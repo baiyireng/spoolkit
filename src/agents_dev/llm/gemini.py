@@ -17,6 +17,7 @@ import httpx
 
 from agents_dev.agent.protocol import TURN_SCHEMA
 from agents_dev.llm.types import ChatRequest, ChatResponse, Message
+from agents_dev.net import system_proxy
 
 DEFAULT_MODEL = "gemini-3.6-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
@@ -119,7 +120,8 @@ class GeminiGateway:
         model: str = DEFAULT_MODEL,
         timeout: float = 90.0,
         transport: httpx.BaseTransport | None = None,
-        use_schema: bool = False,
+        use_schema: bool = True,
+        proxy: str | None = None,
     ) -> None:
         if not api_key:
             raise GeminiError("缺少 API 密钥")
@@ -130,6 +132,7 @@ class GeminiGateway:
             base_url=BASE_URL,
             timeout=timeout,
             transport=transport,
+            proxy=proxy if proxy is not None else system_proxy(),
             headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
         )
 
@@ -141,7 +144,9 @@ class GeminiGateway:
             "responseMimeType": "application/json",
         }
         if self._use_schema:
-            generation["responseSchema"] = to_gemini_schema(TURN_SCHEMA)
+            generation["responseSchema"] = to_gemini_schema(
+                request.response_schema or TURN_SCHEMA
+            )
 
         payload: dict[str, Any] = {
             "contents": contents,
