@@ -80,3 +80,22 @@ def test_脚本文件不存在时返回非零(tmp_path: Path) -> None:
     )
     assert exit_code == 2
 
+
+def test_命令行装配后索引工具已注册且预取生效(tmp_path: Path) -> None:
+    (tmp_path / "parser.py").write_text(
+        "def parse_config(path):\n    return path\n", encoding="utf-8"
+    )
+    loop = build_loop(tmp_path, script=[_最简单的一轮()], window=4096)
+
+    assert loop.registry.get("find_symbol") is not None
+    assert loop.registry.get("file_symbols") is not None
+    assert loop.prefetch is not None
+    assert "parser.py" in loop.prefetch("修复 parse_config")
+
+
+def _最简单的一轮() -> str:
+    return json.dumps(
+        {"thought": "完成", "tool_calls": [], "state": None, "final": "好"},
+        ensure_ascii=False,
+    )
+

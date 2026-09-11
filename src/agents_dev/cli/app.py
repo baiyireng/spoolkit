@@ -11,11 +11,35 @@ from pathlib import Path
 
 from agents_dev.agent.loop import AgentLoop
 from agents_dev.config import Config
+from agents_dev.index.indexer import index_project
+from agents_dev.index.rank import prefetch as prefetch_text
+from agents_dev.index.tools import file_symbols_spec, find_symbol_spec
 from agents_dev.llm.fake import FakeModel
 from agents_dev.llm.tokenizer import OfflineTokenCounter
+from agents_dev.store.db import init_schema, open_db
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.search import search_code_spec
+
+PREFETCH_BUDGET = 400
+
+
+def _attach_index(project_root: Path, registry: ToolRegistry, tokenizer):
+    """建立（或复用）代码索引，注册索引工具并返回预取函数。
+
+    索引是可选增强：建索引失败不应让整个 agent 起不来，
+    所以这里只做最保守的处理，失败时退化为无索引模式。
+    """
+    try:
+        conn = open_db(project_root / ".agent" / "index.db")
+        init_schema(conn)
+        index_project(project_root, conn)
+    except Exception:
+        return None
+
+    registry.register(find_symbol_spec(project_root, conn))
+    registry.register(file_symbols_spec(conn))
+    return lambda goal: prefetch_text(conn, goal, tokenizer, PREFETCH_BUDGET)
 
 
 def build_loop(project_root: Path, script: list[str], window: int = 4096) -> AgentLoop:
@@ -32,6 +56,7 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
         tokenizer=tokenizer,
         registry=registry,
         config=config,
+        prefetch=_attach_index(project_root, registry, tokenizer),
     )
 
 
