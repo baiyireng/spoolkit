@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 本地运行时数据（记忆库、索引、检查点）
+.agent/
+*.db
+*.db-wal
+*.db-shm
+
+# 编辑器
+.vscode/
+.idea/
+
