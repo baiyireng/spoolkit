@@ -1,0 +1,5 @@
+{
+  "goal": "length.py 的 length 收到 None 会报 TypeError，把整条链路带崩。None 当 0 处理。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

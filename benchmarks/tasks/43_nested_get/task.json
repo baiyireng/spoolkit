@@ -1,0 +1,5 @@
+{
+  "goal": "nested.py 的 setting 只要中间少一层就 KeyError。任何一层缺失都返回 None。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

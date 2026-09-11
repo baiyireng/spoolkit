@@ -1,0 +1,5 @@
+{
+  "goal": "average.py 的 average 算错了：它的结果等于「a 加上 b 的一半」，不是两者平均。修好它。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

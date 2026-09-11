@@ -1,0 +1,5 @@
+{
+  "goal": "user.py 的 name_of 取错了键名，一调用就 KeyError。修好它。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

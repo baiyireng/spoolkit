@@ -1,0 +1,5 @@
+{
+  "goal": "bounds.py 的 clamp 名字叫钳制，实际什么都没做。把超出的值压到区间边界上。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

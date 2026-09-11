@@ -1,0 +1,5 @@
+{
+  "goal": "counter.py 的 merge_counts 直接返回了第二个字典，同名计数被覆盖而不是相加。让它们相加。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

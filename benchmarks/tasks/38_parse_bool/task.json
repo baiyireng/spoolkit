@@ -1,0 +1,5 @@
+{
+  "goal": "flags.py 的 to_bool 把字符串 \"false\" 和 \"0\" 都判成 True（非空字符串的真值）。让它们返回 False，\"true\" 之类的仍然是 True。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

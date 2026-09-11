@@ -1,0 +1,5 @@
+{
+  "goal": "lines.py 的 line_count 在文本以换行结尾时会多算一行。修好它。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

@@ -1,0 +1,5 @@
+{
+  "goal": "chunker.py 的 chunks 每块少了一个元素（切片的结束位置算错）。修好它。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

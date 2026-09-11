@@ -1,0 +1,5 @@
+{
+  "goal": "ranking.py 的 by_points 收了 descending 参数却没用，永远升序。让这个参数生效。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

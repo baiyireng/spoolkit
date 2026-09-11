@@ -1,0 +1,5 @@
+{
+  "goal": "stats.py 的 largest 返回的是最小值。改成返回最大值。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

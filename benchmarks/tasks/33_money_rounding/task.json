@@ -1,0 +1,5 @@
+{
+  "goal": "money.py 的 total 算金额时会出浮点误差（比如 0.1 + 0.2）。结果保留两位小数。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

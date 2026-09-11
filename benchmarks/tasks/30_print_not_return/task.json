@@ -1,0 +1,5 @@
+{
+  "goal": "calc.py 的 add 把结果打印出来就不管了，函数返回 None，调用方拿不到值。让它返回结果。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

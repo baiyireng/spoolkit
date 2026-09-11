@@ -1,0 +1,5 @@
+{
+  "goal": "prefix.py 的 without_prefix 用的是 replace，会把中间出现的同样文本也删掉。只该去掉开头那一个前缀。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

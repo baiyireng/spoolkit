@@ -1,0 +1,5 @@
+{
+  "goal": "flag.py 的 is_positive 判断反了：正数被判成 False。修好它。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

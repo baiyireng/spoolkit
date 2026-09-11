@@ -1,0 +1,5 @@
+{
+  "goal": "paths.py 的 join_path 只是把两段字符串直接拼起来，漏了中间的斜杠；如果目录已经以斜杠结尾又不能多一个。修好它。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

@@ -1,0 +1,5 @@
+{
+  "goal": "dedupe.py 的 unique 用 set 去重，顺序被打乱了。改成保留首次出现的顺序。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

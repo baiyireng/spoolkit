@@ -1,0 +1,5 @@
+{
+  "goal": "config_lookup.py 的 timeout_of 在配置里没有 timeout 时会 KeyError。缺省时返回 30。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

@@ -1,0 +1,5 @@
+{
+  "goal": "compare.py 的 gap 本该是两数之间的距离，但 a 比 b 小时会返回负数。修好它。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

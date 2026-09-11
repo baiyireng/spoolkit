@@ -1,0 +1,5 @@
+{
+  "goal": "sequence.py 的 evens 名字叫偶数，实际每隔三个取一个。修成真正的偶数序列（不含上限）。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

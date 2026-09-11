@@ -1,0 +1,5 @@
+{
+  "goal": "parity.py 的 is_even 判反了，偶数返回 False。修好它。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

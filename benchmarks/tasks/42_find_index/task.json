@@ -1,0 +1,5 @@
+{
+  "goal": "lookup.py 的 index_of 找不到时会抛 ValueError，调用方没有防备。找不到时返回 -1。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

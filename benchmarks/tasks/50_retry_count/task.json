@@ -1,0 +1,5 @@
+{
+  "goal": "retry.py 的 attempts 声称返回尝试次数，实际少返回一次。修好它。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

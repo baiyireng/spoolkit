@@ -1,0 +1,5 @@
+{
+  "goal": "text.py 的 clean 只做了小写转换，两头空白没去掉。让它也去掉空白。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}

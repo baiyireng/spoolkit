@@ -1,0 +1,5 @@
+{
+  "goal": "box.py 的 add_item 有可变的默认参数，不传 box 时多次调用会互相污染。修好它，显式传入的 box 行为不能变。",
+  "acceptance": {"command": ["python", "-m", "pytest", "-q"], "tests": ["test_acceptance.py"]},
+  "scope": ["**"]
+}
