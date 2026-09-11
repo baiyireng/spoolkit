@@ -18,10 +18,17 @@ def _script(tmp_path: Path, name: str, body: str) -> str:
     return str(tmp_path / name)
 
 
-def test_白名单外的命令被拒绝(tmp_path: Path) -> None:
+def test_永久禁止的命令被拒绝(tmp_path: Path) -> None:
     result = _run(tmp_path, command=["rm", "-rf", "/"])
     assert result.ok is False
-    assert "不在白名单内" in result.content
+    assert "永久禁止" in result.content
+
+
+def test_白名单外但非禁止的命令需要申请(tmp_path: Path) -> None:
+    # 没有询问渠道时应当明确说明，而不是含糊地失败
+    result = _run(tmp_path, command=["npm", "run", "build"])
+    assert result.ok is False
+    assert "需要用户批准" in result.content
 
 
 def test_python任意代码执行入口被拒绝(tmp_path: Path) -> None:

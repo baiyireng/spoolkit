@@ -46,6 +46,7 @@ from agents_dev.net import system_proxy
 from agents_dev.store.db import init_schema, open_db
 from agents_dev.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
 from agents_dev.tools.exec import run_command_spec
+from agents_dev.tools.grant import Grants
 from agents_dev.tools.edit import load_baseline, revert
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.registry import ToolRegistry
@@ -146,13 +147,15 @@ def assemble_loop(
     memory=None,
     distiller=None,
     pending=None,
+    approver=None,
+    grants=None,
 ) -> AgentLoop:
     """用给定网关装配完整循环：注册全部工具、建索引、接上预取。"""
     registry = ToolRegistry()
     registry.register(read_file_spec(project_root))
     registry.register(list_dir_spec(project_root))
     registry.register(search_code_spec(project_root))
-    registry.register(run_command_spec(project_root, pending))
+    registry.register(run_command_spec(project_root, pending, approver, grants))
     if pending is not None:
         registry.register(write_file_spec(project_root, pending))
         registry.register(replace_lines_spec(project_root, pending))
@@ -191,6 +194,27 @@ def build_memory(project_root: Path, window: int, session_id: str = "cli"):
         context_window=window,
         session_id=session_id,
     )
+
+
+def build_approver(project_root: Path):
+    """构造命令授权询问器。返回 (approver, grants)。
+
+    只在交互路径上用。无人值守时传入的 approver 为 None，
+    工具会拒绝并向模型说明「需要用户手动执行」。
+    """
+    grants = Grants(path=project_root / ".agent" / "grants.json")
+
+    def approver(argv, reason: str) -> str:
+        print(f"\n模型请求执行一条白名单外的命令：\n  {' '.join(argv)}")
+        print(f"原因：{reason}")
+        answer = input("[s]本轮允许 / [a]永久允许 / [n]拒绝 → ").strip().lower()
+        if answer in ("a", "always"):
+            return "always"
+        if answer in ("s", "y", "session"):
+            return "session"
+        return "deny"
+
+    return approver, grants
 
 
 def build_loop(project_root: Path, script: list[str], window: int = 4096) -> AgentLoop:
@@ -249,6 +273,7 @@ def _run(args: argparse.Namespace) -> int:
     memory = None
     distiller = None
     pending = PendingChanges(project_root)
+    approver, grants = build_approver(project_root)
     registry = ToolRegistry()
     registry.register(read_file_spec(project_root))
     registry.register(list_dir_spec(project_root))
@@ -307,6 +332,8 @@ def _run(args: argparse.Namespace) -> int:
         memory=memory,
         distiller=distiller,
         pending=pending,
+        approver=approver,
+        grants=grants,
     )
     result = loop.run(args.goal)
 
@@ -400,6 +427,8 @@ def _execute_step(
     step,
     scope: Sequence[str],
     non_interactive: bool,
+    approver=None,
+    grants=None,
 ):
     """执行一个计划步骤。两条路径共用，避免策略在其中一条上悄悄失效。"""
     report_policy(resolve_policy(args, project_root), scope)
@@ -414,6 +443,8 @@ def _execute_step(
         subagent_steps=args.subagent_steps,
         memory=memory,
         pending=pending,
+        approver=approver,
+        grants=grants,
     )
     result = loop.run(render_step_prompt(plan, step))
 
@@ -476,8 +507,17 @@ def _advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
     # 打印的是**这一步实际生效**的范围，不是运行级默认值：
     # 安全边界的输出报错比不输出更糟——看到「**」会以为整个项目都放行了。
     scope = resolve_scope(args, step.scope, default=())
+    approver, grants = build_approver(project_root)
     result, pending = _execute_step(
-        args, project_root, gateway, plan, step, scope, non_interactive=False
+        args,
+        project_root,
+        gateway,
+        plan,
+        step,
+        scope,
+        non_interactive=False,
+        approver=approver,
+        grants=grants,
     )
     _record_step(
         project_root,
@@ -544,7 +584,15 @@ def _run_autonomous(args: argparse.Namespace, project_root: Path, gateway) -> in
 
         print(f"\n执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
         result, pending = _execute_step(
-            args, project_root, gateway, plan, step, effective, non_interactive=True
+            args,
+            project_root,
+            gateway,
+            plan,
+            step,
+            effective,
+            non_interactive=True,
+            approver=None,
+            grants=Grants(path=project_root / ".agent" / "grants.json"),
         )
         _record_step(
             project_root,

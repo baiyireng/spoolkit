@@ -80,6 +80,11 @@ def build_workflow(registry: ToolRegistry) -> str:
             "全量套件慢；命令超时时调大 timeout 再试，不要用同样的超时反复重试。"
         )
         lines.append(
+            "- 需要白名单外的命令时直接调用 run_command，系统会替你向用户申请；"
+            "只有永久禁止的操作（递归删除、改写版本历史、提权、联网下载）无法申请，"
+            "遇到这类限制请改用项目内可逆的方式，或说明需要用户手动执行什么。"
+        )
+        lines.append(
             "- 缺依赖时用 run_command 执行 uv add <包名>；不要用 pip——"
             "它会绕过审核，且改动不留下可复查的痕迹。"
         )

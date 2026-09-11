@@ -27,6 +27,7 @@ from agents_dev.errors import PathOutsideProjectError
 from agents_dev.paths import resolve_within
 from agents_dev.tools.trial import trial_workspace
 from agents_dev.tools.types import ToolResult, ToolSpec
+from agents_dev.tools.grant import ALLOWED, ASK, DENIED, Grants, classify
 
 # 60 秒对真实测试套件是不够的：这个项目自己的套件跑一次就要十几秒，
 # 加上试跑副本的开销很容易翻倍。超时太小会逼着模型去瞎摸索，
@@ -195,11 +196,42 @@ def _execute(
     )
 
 
-def _run(root: Path, args: dict, pending=None) -> ToolResult:
+def _request_approval(
+    argv: list[str], reason: str, approver, grants: Grants
+) -> tuple[bool, str]:
+    """向用户申请执行权限。返回（是否获批，说明）。"""
+    if grants.allows(argv):
+        return True, ""
+    if approver is None:
+        return False, (
+            f"这条命令不在白名单内，需要用户批准：{reason}\n"
+            "当前无人可询问（无人值守运行）。如果它确实必要，"
+            "请在结论里说明需要用户手动执行什么。"
+        )
+
+    answer = approver(argv, reason)
+    if answer in ("session", "always"):
+        grants.grant(argv, permanent=answer == "always")
+        return True, ""
+    return False, f"用户拒绝了执行：{' '.join(argv)}"
+
+
+def _run(
+    root: Path,
+    args: dict,
+    pending=None,
+    approver=None,
+    grants: Grants | None = None,
+) -> ToolResult:
     argv = list(args["command"])
-    problem = validate_command(argv)
-    if problem is not None:
-        return ToolResult(ok=False, content=problem)
+    level, reason = classify(argv)
+    if level == DENIED:
+        return ToolResult(ok=False, content=reason)
+    if level == ASK:
+        store = grants if grants is not None else Grants()
+        allowed, message = _request_approval(argv, reason, approver, store)
+        if not allowed:
+            return ToolResult(ok=False, content=message)
 
     # 回显模型自己写的那份命令，而不是换算后的。把解释器全路径暴露出去，
     # 模型会把它当成参数再传回来，实测里演变成了 "can't open file <解释器路径>"。
@@ -226,7 +258,9 @@ def _run(root: Path, args: dict, pending=None) -> ToolResult:
     return _execute(root, resolved, requested, cwd_arg, timeout)
 
 
-def run_command_spec(root: Path, pending=None) -> ToolSpec:
+def run_command_spec(
+    root: Path, pending=None, approver=None, grants: Grants | None = None
+) -> ToolSpec:
     """执行白名单命令。有未落盘改动时自动在试跑副本上执行。"""
     return ToolSpec(
         name="run_command",
@@ -246,5 +280,5 @@ def run_command_spec(root: Path, pending=None) -> ToolSpec:
             "required": ["command"],
             "additionalProperties": False,
         },
-        handler=lambda args: _run(root, args, pending),
+        handler=lambda args: _run(root, args, pending, approver, grants),
     )
