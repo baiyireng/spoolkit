@@ -19,6 +19,7 @@ from typing import Any, Sequence
 
 from agents_dev.llm.gateway import ModelGateway
 from agents_dev.llm.types import ChatRequest, Message
+from agents_dev.context import templates as T
 
 PENDING = "pending"
 DONE = "done"
@@ -43,23 +44,7 @@ PLAN_SCHEMA: dict[str, Any] = {
     "required": ["steps"],
 }
 
-DECOMPOSE_PROMPT = """你负责把一个较大的目标拆成可逐步执行的任务序列。
-
-目标：{goal}
-
-已有信息：
-{context}
-
-要求：
-- 每一步都必须是「一次能在有限上下文里做完」的单元；
-- 每一步都必须给出可执行的验收标准（能跑什么、看什么、判定依据是什么）；
-- 每一步都要声明 scope：这一步允许改动哪些路径（目录前缀或通配符）。
-  范围要尽量窄——它是这一步能自动落盘的边界，写宽了就失去意义；
-- 顺序要正确：后面的步骤可以依赖前面步骤的产物；
-- 步骤数量控制在 {limit} 步以内，宁可少而准，不要凑数；
-- 不要写「调研一下」「优化一下」这类无法验收的步骤。
-
-只输出 JSON。"""
+DECOMPOSE_PROMPT = T.DECOMPOSE
 
 
 @dataclass

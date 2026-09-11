@@ -19,6 +19,7 @@ from agents_dev.agents.runtime import (
     run_role,
 )
 from agents_dev.config import Config
+from agents_dev.context import templates as T
 from agents_dev.llm.gateway import ModelGateway
 from agents_dev.llm.types import ChatRequest, Message
 from agents_dev.tools.registry import ToolRegistry
@@ -37,18 +38,7 @@ PLAN_SCHEMA: dict[str, Any] = {
     "required": ["delegate", "reason", "goal"],
 }
 
-PLAN_PROMPT = """判断下面这个编程任务该由你自己直接完成，还是派给一个独立的实现者。
-
-任务：{goal}
-
-已有线索：
-{context}
-
-派发的代价是多几次模型调用，收益是主循环的上下文不被实现细节挤占。
-简单的一次性改动自己做更划算；需要读多处代码、有明确验收标准的改动适合派发。
-
-如果要派发，必须同时给出验收标准——没有可执行判断依据的改动不允许派发。
-只输出 JSON。"""
+PLAN_PROMPT = T.DISPATCH
 
 
 @dataclass(frozen=True)
@@ -156,4 +146,3 @@ def run_delegated(
     result.reviewer_final = reviewed.final
     result.trace.extend(f"[审查] {line}" for line in reviewed.trace)
     return result
-

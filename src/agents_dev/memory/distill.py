@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agents_dev.agent.state import TaskState
+from agents_dev.context import templates as T
 from agents_dev.llm.gateway import ModelGateway
 from agents_dev.llm.retry import chat_with_escalation
 from agents_dev.llm.types import ChatRequest, Message
@@ -51,21 +52,7 @@ DISTILL_SCHEMA: dict[str, Any] = {
     "required": ["entries"],
 }
 
-PROMPT = """你在整理一个编程任务结束后值得长期记住的结论。
-
-{body}
-
-可用分类：fact（项目客观事实，如构建命令、目录约定）、preference（稳定偏好）、
-decision（做过的选择及其理由）、lesson（从失败提炼的规则）。
-
-trigger 是「什么时候该用这条」，写成逗号分隔的关键词，例如「解析,正则,格式」。
-lesson 必须给 trigger，否则它永远不会在需要的时候被推送出来，等于白记；
-fact / preference / decision 的 trigger 留空即可。
-
-只提取具备跨任务复用价值的条目，宁可少也不要凑数。
-过程细节、一次性步骤、显而易见的内容都不要提取。
-最多 {limit} 条，没有就返回空数组。
-只输出 JSON。"""
+PROMPT = T.DISTILL
 
 
 @dataclass(frozen=True)
@@ -79,12 +66,7 @@ class DistillResult:
     raw: str = ""
 
 
-GROUP_TITLES = {
-    "过程": "已完成的过程",
-    "已排除": "已排除的方案",
-    "结论": "交付给用户的答复",
-    "材料": "材料",
-}
+GROUP_TITLES = T.DISTILL_GROUP_TITLES
 
 
 def segments_of(state: TaskState, final: str) -> list[tuple[str, str]]:

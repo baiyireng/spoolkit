@@ -16,22 +16,14 @@ from agents_dev.config import Config
 from agents_dev.context.assembler import Assembler
 from agents_dev.context.budget import Budget
 from agents_dev.context.sections import Section
+from agents_dev.context import templates as T
 from agents_dev.llm.gateway import ModelGateway
 from agents_dev.llm.retry import chat_with_escalation
 from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.llm.types import ChatRequest, Message
 from agents_dev.tools.registry import ToolRegistry
 
-SYSTEM_PROMPT = """你是本地运行的编程助手。每轮只做一件事。
-必须只输出一个 JSON 对象，不要有任何其他文字。
-格式：
-{{"thought":"这一步的打算","tool_calls":[{{"name":"工具名","arguments":{{"参数名":值}}}}],"state":{{"current":"当前在做什么"}},"done":false,"final":null}}
-还要工具就调用工具，此时 done 必须是 false。
-已经有答案要交付时，tool_calls 设为 []，done 设为 true，final 设为给用户的完整答复。
-可用工具：
-{tools}
-
-{workflow}"""
+SYSTEM_PROMPT = T.SYSTEM
 
 LOOKUP_TOOLS = ("find_symbol", "file_symbols", "find_callers")
 EDIT_TOOLS = ("replace_lines", "write_file")
@@ -64,45 +56,28 @@ def build_workflow(registry: ToolRegistry) -> str:
 
     lookup = [name for name in LOOKUP_TOOLS if registry.get(name) is not None]
     if lookup:
-        lines.append(
-            "- 查符号优先用 " + " / ".join(lookup) + "，不要整份读文件；索引已经建好。"
-        )
+        lines.append(T.WORKFLOW_FIND.format(names=" / ".join(lookup)))
     if registry.get("find_callers") is not None:
-        lines.append("- 改代码前先用 find_callers 看波及面，避免改坏调用方。")
+        lines.append(T.WORKFLOW_IMPACT)
 
     edits = [name for name in EDIT_TOOLS if registry.get(name) is not None]
     if edits:
         if set(edits) == set(EDIT_TOOLS):
-            lines.append(
-                "- 改动优先用 replace_lines 精确替换；write_file 只用于新文件或整份重写。"
-            )
+            lines.append(T.WORKFLOW_EDIT_FULL)
         else:
-            lines.append("- 改动使用 " + "、".join(edits) + " 精确替换。")
-        lines.append("- 写操作只生成 diff 并需用户确认，不必回避提出改动。")
+            lines.append(T.WORKFLOW_EDIT_PARTIAL.format(names="、".join(edits)))
+        lines.append(T.WORKFLOW_WRITE_SAFE)
 
     if registry.get("recall") is not None:
-        lines.append("- 要回忆过去的结论、决策或失败教训时，用 recall 查历史记忆。")
+        lines.append(T.WORKFLOW_RECALL)
 
     if registry.get("run_command") is not None:
-        lines.append(
-            "- 改完代码后用 run_command 跑测试验证，例如 python -m pytest -q；"
-            "看到失败要读报错再改，不要凭猜测下结论。"
-        )
-        lines.append(
-            "- 跑测试优先只跑相关文件（如 python -m pytest scratch_lab -q），"
-            "全量套件慢；命令超时时调大 timeout 再试，不要用同样的超时反复重试。"
-        )
-        lines.append(
-            "- 需要白名单外的命令时直接调用 run_command，系统会替你向用户申请；"
-            "只有永久禁止的操作（递归删除、改写版本历史、提权、联网下载）无法申请，"
-            "遇到这类限制请改用项目内可逆的方式，或说明需要用户手动执行什么。"
-        )
-        lines.append(
-            "- 缺依赖时用 run_command 执行 uv add <包名>；不要用 pip——"
-            "它会绕过审核，且改动不留下可复查的痕迹。"
-        )
+        lines.append(T.WORKFLOW_RUN)
+        lines.append(T.WORKFLOW_TEST_SCOPE)
+        lines.append(T.WORKFLOW_PERMISSION)
+        lines.append(T.WORKFLOW_DEPENDENCY)
 
-    lines.append("- 信息不足先查，不要猜；确实找不到就直说找不到。")
+    lines.append(T.WORKFLOW_NO_GUESS)
     return "\n".join(lines)
 
 MAX_RECENT_TURNS = 6

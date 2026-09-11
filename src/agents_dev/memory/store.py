@@ -18,7 +18,6 @@ MEMORY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS memory (
     id            INTEGER PRIMARY KEY,
     kind          TEXT NOT NULL,
-    scope         TEXT NOT NULL DEFAULT 'project',
     text          TEXT NOT NULL,
     trigger       TEXT NOT NULL DEFAULT '',
     source        TEXT NOT NULL DEFAULT '',
@@ -61,7 +60,7 @@ CREATE TABLE IF NOT EXISTS transcript (
     created_at REAL NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory(kind, scope);
+CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory(kind);
 """
 
 _CJK = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
@@ -104,14 +103,13 @@ def add_memory(
     source: str = "",
     confidence: float = 0.5,
     trigger: str = "",
-    scope: str = "project",
 ) -> Memory:
     """写入一条记忆，并同步维护检索索引。"""
     cursor = conn.execute(
         "INSERT INTO memory"
-        "(kind, scope, text, trigger, source, confidence, created_at)"
-        " VALUES (?,?,?,?,?,?,?)",
-        (kind, scope, text, trigger, source, confidence, time.time()),
+        "(kind, text, trigger, source, confidence, created_at)"
+        " VALUES (?,?,?,?,?,?)",
+        (kind, text, trigger, source, confidence, time.time()),
     )
     memory_id = cursor.lastrowid
     conn.execute(
@@ -157,18 +155,42 @@ def list_memories(conn: sqlite3.Connection, kind: str | None = None) -> list[Mem
 
 
 def search_memories(conn: sqlite3.Connection, query: str) -> list[Memory]:
-    """关键词检索。查询为空或全是停用符号时返回空列表。"""
+    """关键词检索，按「用过多少次 + 多久没用」重排。
+
+    FTS5 只给出「匹配上了」，给不出「哪条更有用」。这里叠加两个维度：
+    用过次数多的更可能有用；很久没被翻出来的逐渐沉底。
+
+    规则很土，但胜在可解释——排序不合预期时，一眼能看出是频率还是
+    时间把某条顶上来的。
+    """
     if not query.strip():
         return []
     try:
         rows = conn.execute(
             "SELECT m.* FROM memory_fts f JOIN memory m ON m.id = f.rowid"
-            " WHERE memory_fts MATCH ? ORDER BY m.id",
+            " WHERE memory_fts MATCH ?",
             (_phrase_query(query),),
         ).fetchall()
     except sqlite3.OperationalError:
         return []
-    return [_to_memory(row) for row in rows]
+    return [_to_memory(row) for row in _rank(rows)]
+
+
+FREQUENCY_WEIGHT = 0.6
+RECENCY_WEIGHT = 0.4
+
+
+def _rank(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    """按使用频率与新鲜度重排。"""
+    now = time.time()
+
+    def score(row: sqlite3.Row) -> float:
+        last = row["last_used_at"] or row["created_at"]
+        age_days = max(0.0, (now - last) / 86400)
+        recency = 1.0 / (1.0 + age_days)
+        return row["use_count"] * FREQUENCY_WEIGHT + recency * RECENCY_WEIGHT
+
+    return sorted(rows, key=score, reverse=True)
 
 
 def touch_memory(conn: sqlite3.Connection, memory_id: int) -> None:
@@ -254,6 +276,13 @@ def get_session(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row | None
     return conn.execute(
         "SELECT * FROM session WHERE id = ?", (session_id,)
     ).fetchone()
+
+
+def list_sessions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """列出全部会话，最近活跃的在前。"""
+    return conn.execute(
+        "SELECT * FROM session ORDER BY last_active DESC"
+    ).fetchall()
 
 
 def check_binding(

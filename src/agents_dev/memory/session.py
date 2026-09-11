@@ -12,7 +12,7 @@ from agents_dev.agent.state import TaskState
 from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.memory.archive import ArchiveResult, archive_task
 from agents_dev.memory.hot import hot_budget, read_hot, render_hot, trim_to_budget
-from agents_dev.memory.store import search_episodes, search_memories
+from agents_dev.memory.store import search_episodes, search_memories, touch_memory
 
 
 class MemorySession:
@@ -46,9 +46,14 @@ class MemorySession:
 
     def recall(self, query: str, limit: int = 5) -> str:
         """按关键词从冷记忆与历史事件里召回，附来源便于追溯。"""
+        hits = search_memories(self._conn, query)[:limit]
+        # 记一次使用：没有这一步，打分里的「使用频率」永远是初始值，
+        # 那条维度等于不存在。
+        for item in hits:
+            touch_memory(self._conn, item.id)
         lines = [
             f"[{item.kind}] {item.text}（来源 {item.source or '未标注'}）"
-            for item in search_memories(self._conn, query)[:limit]
+            for item in hits
         ]
 
         # 事件表以前只写不读，等于几百条历史躺在库里没人用。

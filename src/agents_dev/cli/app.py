@@ -16,6 +16,7 @@ from agents_dev.cli.commands.plan import make_plan
 from agents_dev.cli.commands.policy import policy_command
 from agents_dev.cli.commands.revert import revert_command
 from agents_dev.cli.commands.run import run
+from agents_dev.cli.commands.session import session_command
 from agents_dev.cli.options import (
     DEFAULT_WINDOW,
     MAX_AUTO_WINDOW,
@@ -155,6 +156,12 @@ def _add_bench_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=bench)
 
 
+def _add_session_command(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("session", help="列出这个工作区里的会话")
+    parser.add_argument("--root", default=".")
+    parser.set_defaults(func=session_command)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agents-dev")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -163,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_policy_command(sub)
     _add_revert_command(sub)
     _add_bench_command(sub)
+    _add_session_command(sub)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

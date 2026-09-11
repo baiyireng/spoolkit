@@ -59,8 +59,8 @@ def record_lesson(
     """写入一条教训。trigger 是「什么时候该用它」的关键词。"""
     cursor = conn.execute(
         "INSERT INTO memory"
-        "(kind, scope, text, trigger, source, confidence, created_at)"
-        " VALUES (?, 'project', ?, ?, ?, ?, ?)",
+        "(kind, text, trigger, source, confidence, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
         (KIND, rule.strip(), trigger.strip(), source, confidence, time.time()),
     )
     conn.commit()
