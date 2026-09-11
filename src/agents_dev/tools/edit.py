@@ -9,6 +9,7 @@
 
 import difflib
 import json
+from typing import Any
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +17,45 @@ from agents_dev.errors import PathOutsideProjectError
 from agents_dev.paths import resolve_within
 from agents_dev.tools.types import ToolResult, ToolSpec
 from agents_dev.check.constraints import check_source, format_violations
+
+# 项目里所有代码文件都不超过这个行数时，只提供整份重写。
+#
+# 实测把行号手术交给 7B 的代价：8 条失败里有 5 条死在 replace_lines 上——
+# 它算错区间、拼错片段，留下重复行和悬空语句，而且看不出来自己错了。
+# 同一批题里它的强项是「把整份文件交出来」：单发对照 25/25 用的就是那个形态。
+# 选项少一个，它反而更容易做对。
+WHOLE_FILE_LINE_LIMIT = 150
+
+_SKIP_DIRS = frozenset({".agent", ".git", ".venv", "__pycache__", "node_modules"})
+
+
+def is_small_project(root: Path, limit: int = WHOLE_FILE_LINE_LIMIT) -> bool:
+    """项目里是否都是小文件。
+
+    只要有一个文件超过阈值，就说明这个项目会需要行号级编辑，
+    此时两把工具都要给。
+    """
+    for path in root.rglob("*.py"):
+        if _SKIP_DIRS & set(path.parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if text.count("\n") + 1 > limit:
+            return False
+    return True
+
+
+def register_edit_tools(registry: Any, root: Path, pending: PendingChanges) -> None:
+    """按项目规模决定给哪几把编辑工具。
+
+    集中在一处：主循环和子智能体各注册一遍的话，两边的判定迟早会分叉，
+    而那种分叉只会表现为「同一个项目里子智能体做得到、主循环做不到」。
+    """
+    registry.register(write_file_spec(root, pending))
+    if not is_small_project(root):
+        registry.register(replace_lines_spec(root, pending))
 
 
 def make_diff(path: str, old: str, new: str) -> str:
@@ -218,7 +258,10 @@ def write_file_spec(root: Path, pending: PendingChanges) -> ToolSpec:
 
     return ToolSpec(
         name="write_file",
-        description="新建或整体覆盖一个文件；只生成 diff，需用户确认后才写入",
+        description=(
+            "新建或整体覆盖一个文件，给出完整内容；只生成 diff，需用户确认后才写入。"
+            "文件不大时首选它——整份给出比算行号区间更不容易出错"
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -252,7 +295,10 @@ def replace_lines_spec(root: Path, pending: PendingChanges) -> ToolSpec:
 
     return ToolSpec(
         name="replace_lines",
-        description="替换文件的指定行区间；只生成 diff，需用户确认后才写入",
+        description=(
+            "替换文件的指定行区间；只生成 diff，需用户确认后才写入。"
+            "只用于大文件或只动一两行的情况"
+        ),
         parameters={
             "type": "object",
             "properties": {

@@ -15,6 +15,7 @@ from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
 from agents_dev.tools.fs import read_file_spec
 from agents_dev.tools.registry import ToolRegistry
+from agents_dev.tools.types import ToolResult
 
 
 def _turn(thought: str, calls=None, final=None) -> str:
@@ -108,3 +109,36 @@ def test_收窄时说明原因(tmp_path: Path) -> None:
     last = loop.gateway.requests[NO_EDIT_LIMIT]
     text = "\n".join(message.content for message in last.messages)
     assert "没有提出任何改动" in text
+
+
+def test_自动验证的结果会回灌给模型(tmp_path: Path) -> None:
+    """模型不会自己去跑测试，所以跑完必须把结论放到它面前。"""
+    script = [_turn("改", [_edit()]), _turn("完成", final="好了")]
+    loop = _build(tmp_path, script)
+    calls = []
+
+    def verify() -> ToolResult:
+        calls.append(1)
+        return ToolResult(ok=False, content="test_v 失败：assert 1 == 2")
+
+    loop.verify = verify
+    loop.run("改一下")
+
+    assert len(calls) == 1
+    prompt = _text_of(loop.gateway.requests[-1])
+    assert "自动跑了一遍项目里的测试" in prompt
+    assert "assert 1 == 2" in prompt
+
+
+def test_没有改动就不验证(tmp_path: Path) -> None:
+    """只查看的那几步不该顺带跑测试——那是白花时间。"""
+    script = [_turn("看", [_read()]), _turn("完成", final="看完了")]
+    loop = _build(tmp_path, script)
+    calls = []
+    loop.verify = lambda: calls.append(1) or ToolResult(ok=True, content="通过")
+    loop.run("看看")
+    assert calls == []
+
+
+def _text_of(request) -> str:
+    return "\n".join(message.content for message in request.messages)

@@ -282,3 +282,25 @@ def run_command_spec(
         },
         handler=lambda args: _run(root, args, pending, approver, grants),
     )
+
+
+def run_once(
+    root: Path,
+    argv: list[str],
+    pending=None,
+    approver=None,
+    grants: Grants | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> ToolResult:
+    """执行一条命令，语义与 run_command 工具完全一致。
+
+    给自动验证用：它必须走同一套白名单与试跑副本，否则「模型不能随便
+    跑命令、但系统可以」就成了一条暗门——而暗门是最难审计的那种东西。
+    """
+    return _run(
+        root,
+        {"command": list(argv), "cwd": ".", "timeout": timeout},
+        pending,
+        approver,
+        grants,
+    )

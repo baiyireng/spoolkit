@@ -46,7 +46,11 @@ WORKFLOW_EDIT_FULL = (
     "直接给出完整新内容，不必先算行号；只动一两行、或者文件很大时才用 "
     "replace_lines 精确替换。"
 )
-WORKFLOW_EDIT_PARTIAL = "- 改动使用 {names} 精确替换。"
+WORKFLOW_EDIT_WHOLE = (
+    "- 这个项目的文件都不大：改动一律用 write_file 交出**完整**的新内容。"
+    "不要只写改动的那几行，要把整个文件写出来——被删掉的内容找不回来。"
+)
+WORKFLOW_EDIT_PRECISE = "- 改动使用 replace_lines 精确替换。"
 WORKFLOW_WRITE_SAFE = "- 写操作只生成 diff 并需用户确认，不必回避提出改动。"
 WORKFLOW_RECALL = "- 要回忆过去的结论、决策或失败教训时，用 recall 查历史记忆。"
 WORKFLOW_RUN = (

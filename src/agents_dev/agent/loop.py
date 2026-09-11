@@ -95,10 +95,14 @@ def build_workflow(registry: ToolRegistry) -> str:
         lines.append(T.WORKFLOW_ACT)
 
     if edits:
-        if set(edits) == set(EDIT_TOOLS):
+        if "write_file" in edits and "replace_lines" in edits:
             lines.append(T.WORKFLOW_EDIT_FULL)
+        elif "write_file" in edits:
+            # 小项目只给整份重写：这时候再说「精确替换」就是在提一个
+            # 不存在的工具，模型会浪费步数去找它。
+            lines.append(T.WORKFLOW_EDIT_WHOLE)
         else:
-            lines.append(T.WORKFLOW_EDIT_PARTIAL.format(names="、".join(edits)))
+            lines.append(T.WORKFLOW_EDIT_PRECISE)
         lines.append(T.WORKFLOW_WRITE_SAFE)
 
     if registry.get("recall") is not None:
@@ -157,6 +161,7 @@ class AgentLoop:
         memory: Any | None = None,
         distiller: Callable[[TaskState, str], list[tuple[str, str]]] | None = None,
         lessons: Callable[[str], list[tuple[int, str]]] | None = None,
+        verify: Callable[[], ToolResult] | None = None,
         persona: str = "",
         on_event: Callable[[str, dict], None] | None = None,
     ) -> None:
@@ -168,6 +173,7 @@ class AgentLoop:
         self.memory = memory
         self.distiller = distiller
         self.lessons = lessons
+        self.verify = verify
         self.persona = persona
         self.on_event = on_event
         self._budget = Budget(window=config.context_window)
@@ -325,12 +331,15 @@ class AgentLoop:
 
             if turn.tool_calls:
                 outputs = []
+                edited = False
                 for call in turn.tool_calls:
                     signature = call_signature(call)
                     repeats = repeats + 1 if signature == last_signature else 1
                     last_signature = signature
                     result = self._invoke_guarded(call, repeats)
                     self._note_progress(state, call, result)
+                    if result.ok and call.name in EDIT_TOOLS:
+                        edited = True
                     if repeats >= REPEAT_WARN_AT:
                         trace.append(
                             f"step{state.step}: 重复调用第 {repeats} 次：{call.name}"
@@ -353,6 +362,24 @@ class AgentLoop:
                     detail = "" if result.ok else f": {flat[:400]}"
                     trace.append(f"step{state.step}: 工具 {call.name} -> {status}{detail}")
                 history.append(Message(role="tool", content="\n".join(outputs)))
+
+                # 改完就替它验一次。模型不会主动去跑测试——实测 8 条失败里
+                # 一条 run_command 都没有——所以这件事由循环来做，把结果
+                # 当场顶回去，它才有机会发现自己改错了。
+                if edited and self.verify is not None:
+                    report, passed = self._run_verification()
+                    trace.append(
+                        f"step{state.step}: 自动验证 -> {'通过' if passed else '失败'}"
+                    )
+                    self._emit(
+                        "tool",
+                        {
+                            "name": "自动验证",
+                            "ok": passed,
+                            "detail": " ".join(report.split())[:200],
+                        },
+                    )
+                    feedback = report
 
             if any(call.name in EDIT_TOOLS for call in turn.tool_calls):
                 no_edit_steps = 0
@@ -425,6 +452,30 @@ class AgentLoop:
                 ),
             )
         return result
+
+    def _run_verification(self) -> tuple[str, bool]:
+        """替模型跑一遍项目测试，把结果整理成它看得懂的一段话。
+
+        验证本身出问题（命令跑不起来、超时）不算任务失败，只作为一条
+        诚实的反馈告诉模型——把工具故障说成「你的代码错了」，
+        会把它引到完全错误的方向上去。
+        """
+        try:
+            result = self.verify()
+        except Exception as exc:
+            return (f"自动验证没能跑起来（{type(exc).__name__}）：{exc}", False)
+        body = " ".join(result.content.split())[:400]
+        if result.ok:
+            return (
+                f"系统自动跑了一遍项目里的测试：**通过**（{body}）。"
+                "如果没有别的要改，直接给出结论收尾。",
+                True,
+            )
+        return (
+            f"系统自动跑了一遍项目里的测试：**失败**。输出：{body}。"
+            "按这个报错改正，不要凭猜测下结论。",
+            False,
+        )
 
     @staticmethod
     def _note_progress(state: TaskState, call, result) -> None:

@@ -26,11 +26,12 @@ from agents_dev.memory.store import check_binding, init_memory_schema, record_se
 from agents_dev.memory.tools import recall_spec
 from agents_dev.memory.transcript import recent_messages, render_transcript
 from agents_dev.store.db import init_schema, open_db
-from agents_dev.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
+from agents_dev.tools.edit import PendingChanges, register_edit_tools
 from agents_dev.tools.exec import run_command_spec
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.grant import Grants
 from agents_dev.tools.registry import ToolRegistry
+from agents_dev.tools.verify import make_verifier
 from agents_dev.tools.search import search_code_spec
 
 # 符号表给人「有哪些东西」，内容给人「它是怎么写的」。两块都要：
@@ -59,6 +60,10 @@ class LoopWiring:
     grants: object | None = None
     lessons: object | None = None
     on_event: object | None = None
+    # 改完自动跑一遍项目测试并把结果顶回去。默认开——实测模型自己
+    # 几乎从不去跑（8 条失败里 0 次 run_command），指望它养成习惯不现实。
+    auto_verify: bool = True
+    verify: object | None = None
 
 
 def provider_gateway(args, project_root):
@@ -146,14 +151,16 @@ def assemble_loop(
         run_command_spec(project_root, parts.pending, parts.approver, parts.grants)
     )
     if parts.pending is not None:
-        registry.register(write_file_spec(project_root, parts.pending))
-        registry.register(replace_lines_spec(project_root, parts.pending))
+        register_edit_tools(registry, project_root, parts.pending)
     if parts.memory is not None:
         # 主循环用的注册表在这里构造，所以 recall 也必须在这里注册，
         # 否则提示词会提到一个只有派发路径才有的工具。
         registry.register(recall_spec(parts.memory))
 
     tokenizer = OfflineTokenCounter()
+    verifier = parts.verify
+    if verifier is None and parts.auto_verify and parts.pending is not None:
+        verifier = make_verifier(project_root, parts.pending)
     return AgentLoop(
         gateway=gateway,
         tokenizer=tokenizer,
@@ -164,6 +171,7 @@ def assemble_loop(
         lessons=parts.lessons,
         distiller=parts.distiller,
         on_event=parts.on_event,
+        verify=verifier,
     )
 
 

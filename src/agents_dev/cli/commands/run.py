@@ -230,7 +230,7 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
 def _plain_registry(project_root, pending):
     """派发路径用的注册表：不带记忆与教训，子智能体只拿任务说明。"""
     from agents_dev.cli.runtime import attach_index
-    from agents_dev.tools.edit import replace_lines_spec, write_file_spec
+    from agents_dev.tools.edit import register_edit_tools
     from agents_dev.tools.exec import run_command_spec
     from agents_dev.tools.fs import list_dir_spec, read_file_spec
     from agents_dev.tools.registry import ToolRegistry
@@ -241,8 +241,9 @@ def _plain_registry(project_root, pending):
     registry.register(list_dir_spec(project_root))
     registry.register(search_code_spec(project_root))
     registry.register(run_command_spec(project_root))
-    registry.register(write_file_spec(project_root, pending))
-    registry.register(replace_lines_spec(project_root, pending))
+    # 与主循环共用同一套判定，否则会出现「同一个项目里子智能体有一把
+    # 主循环没有的工具」这种分叉，而它只会在跑偏时才暴露。
+    register_edit_tools(registry, project_root, pending)
     attach_index(project_root, registry, OfflineTokenCounter())
     return registry
 
