@@ -39,7 +39,14 @@ def test_小窗口下把配额从历史挪向代码() -> None:
 
 def test_分配表可查询() -> None:
     table = Budget(window=8192).allocation()
-    assert set(table) == {"system", "hot_memory", "task_state", "retrieval", "code"}
+    assert set(table) == {
+        "system",
+        "hot_memory",
+        "task_state",
+        "retrieval",
+        "code",
+        "lessons",
+    }
     assert all(value > 0 for value in table.values())
 
 

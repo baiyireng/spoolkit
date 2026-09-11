@@ -42,6 +42,7 @@ DISTILL_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "kind": {"type": "string", "enum": list(KINDS)},
                     "text": {"type": "string"},
+                    "trigger": {"type": "string"},
                 },
                 "required": ["kind", "text"],
             },
@@ -56,6 +57,10 @@ PROMPT = """你在整理一个编程任务结束后值得长期记住的结论�
 
 可用分类：fact（项目客观事实，如构建命令、目录约定）、preference（稳定偏好）、
 decision（做过的选择及其理由）、lesson（从失败提炼的规则）。
+
+trigger 是「什么时候该用这条」，写成逗号分隔的关键词，例如「解析,正则,格式」。
+lesson 必须给 trigger，否则它永远不会在需要的时候被推送出来，等于白记；
+fact / preference / decision 的 trigger 留空即可。
 
 只提取具备跨任务复用价值的条目，宁可少也不要凑数。
 过程细节、一次性步骤、显而易见的内容都不要提取。
@@ -128,8 +133,12 @@ def _request(
     )
 
 
-def _parse_entries(text: str, limit: int) -> list[tuple[str, str]]:
-    """解析归纳结果。解析不出来就当作没有，由调用方决定是否重试。"""
+def _parse_entries(text: str, limit: int) -> list[tuple[str, str, str]]:
+    """解析归纳结果，返回（类型，内容，触发词）。
+
+    触发词只有教训用得上：它决定「什么时候该把这条推到模型面前」。
+    没有触发词的教训推不出去，只能靠检索偶然命中——那正是我们要修的问题。
+    """
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
@@ -137,7 +146,7 @@ def _parse_entries(text: str, limit: int) -> list[tuple[str, str]]:
     if not isinstance(payload, dict):
         return []
 
-    entries: list[tuple[str, str]] = []
+    entries: list[tuple[str, str, str]] = []
     for item in payload.get("entries") or []:
         if not isinstance(item, dict):
             continue
@@ -145,23 +154,32 @@ def _parse_entries(text: str, limit: int) -> list[tuple[str, str]]:
         content = item.get("text")
         if kind not in KINDS or not isinstance(content, str) or not content.strip():
             continue
-        entries.append((kind, content.strip()))
+        trigger = item.get("trigger")
+        entries.append(
+            (
+                kind,
+                content.strip(),
+                trigger.strip() if isinstance(trigger, str) else "",
+            )
+        )
         if len(entries) >= limit:
             break
     return entries
 
 
-def _merge(groups: list[list[tuple[str, str]]], limit: int) -> list[tuple[str, str]]:
+def _merge(
+    groups: list[list[tuple[str, str, str]]], limit: int
+) -> list[tuple[str, str, str]]:
     """合并多轮结果并去重，保持先出现的顺序。"""
-    merged: list[tuple[str, str]] = []
+    merged: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for group in groups:
-        for kind, text in group:
+        for kind, text, trigger in group:
             key = text.strip()
             if key in seen:
                 continue
             seen.add(key)
-            merged.append((kind, text))
+            merged.append((kind, text, trigger))
             if len(merged) >= limit:
                 return merged
     return merged
@@ -173,7 +191,7 @@ def _run_once(
     segments: list[tuple[str, str]],
     limit: int,
     max_tokens: int,
-) -> tuple[list[tuple[str, str]], bool, str]:
+) -> tuple[list[tuple[str, str, str]], bool, str]:
     """执行一次提炼，返回（条目，是否被截断，原始输出）。"""
     response = chat_with_escalation(
         gateway, _request(goal, segments, limit, max_tokens)
@@ -189,7 +207,7 @@ def _distill(
     max_tokens: int,
     depth: int,
     stats: dict[str, Any],
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, str]]:
     stats["rounds"] += 1
     entries, truncated, raw = _run_once(gateway, goal, segments, limit, max_tokens)
     if depth == 0:

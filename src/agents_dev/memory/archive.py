@@ -16,6 +16,7 @@ from typing import Sequence
 from agents_dev.agent.state import TaskState
 from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.memory.hot import hot_budget, read_hot, trim_to_budget, write_hot
+from agents_dev.memory.lessons import record_lesson
 from agents_dev.memory.store import add_episode, add_memory
 
 
@@ -42,7 +43,7 @@ def archive_task(
     counter: TokenCounter,
     context_window: int,
     outcome: str = "success",
-    promote: Sequence[tuple[str, str]] = (),
+    promote: Sequence[tuple] = (),
 ) -> ArchiveResult:
     """归档一次已结束的任务。"""
     episode_id = add_episode(
@@ -68,8 +69,16 @@ def archive_task(
     sections.pop("doing", None)
 
     promoted_texts: list[str] = []
-    for kind, text in promote:
+    for entry in promote:
+        kind, text = entry[0], entry[1]
+        trigger = entry[2] if len(entry) > 2 else ""
         if not text.strip():
+            continue
+        if kind == "lesson":
+            # 教训不进热记忆文件：它需要触发词、置信度和统计，那是数据库形状的。
+            # 塞进 Markdown 就再也拿不出来了，也就永远推不到该出现的场景。
+            record_lesson(conn, text, trigger=trigger, source=f"ep#{episode_id}")
+            promoted_texts.append(text.strip())
             continue
         sections.setdefault(kind, []).append(text.strip())
         promoted_texts.append(text.strip())
@@ -90,4 +99,3 @@ def archive_task(
     return ArchiveResult(
         episode_id=episode_id, promoted=promoted_texts, demoted=demoted
     )
-

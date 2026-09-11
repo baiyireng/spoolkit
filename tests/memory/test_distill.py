@@ -20,10 +20,13 @@ def _state() -> TaskState:
     )
 
 
-def _entries(*pairs: tuple[str, str]) -> str:
-    return json.dumps(
-        {"entries": [{"kind": k, "text": t} for k, t in pairs]}, ensure_ascii=False
-    )
+def _entries(*pairs) -> str:
+    items = []
+    for pair in pairs:
+        kind, text = pair[0], pair[1]
+        trigger = pair[2] if len(pair) > 2 else ""
+        items.append({"kind": kind, "text": text, "trigger": trigger})
+    return json.dumps({"entries": items}, ensure_ascii=False)
 
 
 class _SegmentSensitive:
@@ -76,9 +79,19 @@ class _AlwaysTruncating:
 
 
 def test_解析归纳出的条目() -> None:
-    model = _model([_entries(("fact", "测试命令是 pytest -q"), ("lesson", "先上约束"))])
+    model = _model(
+        [
+            _entries(
+                ("fact", "测试命令是 pytest -q"),
+                ("lesson", "先上约束", "解析,正则"),
+            )
+        ]
+    )
     result = distill(model, _state())
-    assert result.entries == [("fact", "测试命令是 pytest -q"), ("lesson", "先上约束")]
+    assert result.entries == [
+        ("fact", "测试命令是 pytest -q", ""),
+        ("lesson", "先上约束", "解析,正则"),
+    ]
     assert result.split is False
     assert result.truncated is False
 
@@ -158,16 +171,23 @@ def test_分治结果会去重() -> None:
     from agents_dev.memory.distill import _merge
 
     merged = _merge(
-        [[("fact", "同一条"), ("fact", "左")], [("fact", "同一条"), ("fact", "右")]],
+        [
+            [("fact", "同一条", ""), ("fact", "左", "")],
+            [("fact", "同一条", ""), ("fact", "右", "")],
+        ],
         10,
     )
-    assert merged == [("fact", "同一条"), ("fact", "左"), ("fact", "右")]
+    assert merged == [
+        ("fact", "同一条", ""),
+        ("fact", "左", ""),
+        ("fact", "右", ""),
+    ]
 
 
 def test_合并结果受上限约束() -> None:
     from agents_dev.memory.distill import _merge
 
-    merged = _merge([[("fact", f"第{i}条") for i in range(5)]], 2)
+    merged = _merge([[("fact", f"第{i}条", "") for i in range(5)]], 2)
     assert len(merged) == 2
 
 

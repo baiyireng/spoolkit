@@ -40,6 +40,7 @@ from agents_dev.llm.providers import (
 from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.memory.distill import distill
 from agents_dev.memory.session import MemorySession
+from agents_dev.memory.lessons import match_lessons, prune_lessons, record_outcome
 from agents_dev.memory.store import init_memory_schema
 from agents_dev.memory.store import check_binding, record_session
 from agents_dev.memory.transcript import (
@@ -164,6 +165,7 @@ def assemble_loop(
     pending=None,
     approver=None,
     grants=None,
+    lessons=None,
 ) -> AgentLoop:
     """用给定网关装配完整循环：注册全部工具、建索引、接上预取。"""
     registry = ToolRegistry()
@@ -193,6 +195,7 @@ def assemble_loop(
         config=config,
         prefetch=_attach_index(project_root, registry, tokenizer),
         memory=memory,
+        lessons=lessons,
         distiller=distiller,
     )
 
@@ -237,6 +240,29 @@ def show_history(memory: MemorySession, session_id: str, limit: int) -> None:
     print("── 会话历史 ──")
     print(render_transcript(rows))
     print("──────────────")
+
+
+def build_lessons(memory: MemorySession):
+    """构造教训推送器。
+
+    在任务开始时推一次：模型不知道自己缺什么，所以不能等它来查；
+    但也不该每轮重推——教训是场景级的，不是步骤级的。
+    """
+
+    def provider(goal: str) -> list[tuple[int, str]]:
+        return [(item.id, item.text) for item in match_lessons(memory._conn, goal)]
+
+    return provider
+
+
+def settle_lessons(memory: MemorySession, pushed, succeeded: bool) -> None:
+    """按任务结果更新被推送教训的置信度，并清理长期无效的。"""
+    if not pushed:
+        return
+    record_outcome(memory._conn, list(pushed), succeeded=succeeded)
+    pruned = prune_lessons(memory._conn)
+    if pruned:
+        print(f"已把 {len(pruned)} 条长期无效的教训移出推送池（仍保留可检索）。")
 
 
 def build_approver(project_root: Path):
@@ -379,6 +405,7 @@ def _run(args: argparse.Namespace) -> int:
         pending=pending,
         approver=approver,
         grants=grants,
+        lessons=build_lessons(memory) if memory is not None else None,
     )
     checkpoint = loop.config.task_path("task")
     if memory is not None:
@@ -392,6 +419,7 @@ def _run(args: argparse.Namespace) -> int:
         )
     result = loop.run(args.goal, resume=args.resume)
     if memory is not None:
+        settle_lessons(memory, result.lessons_pushed, result.finished)
         record_message(
             memory._conn,
             args.session,
@@ -517,8 +545,12 @@ def _execute_step(
         pending=pending,
         approver=approver,
         grants=grants,
+        lessons=build_lessons(memory) if memory is not None else None,
     )
     result = loop.run(render_step_prompt(plan, step))
+
+    if memory is not None:
+        settle_lessons(memory, result.lessons_pushed, result.finished)
 
     for line in result.trace:
         print(line)

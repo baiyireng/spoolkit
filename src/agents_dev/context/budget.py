@@ -28,6 +28,9 @@ FLEX_QUOTAS: dict[str, float] = {
     "task_state": 0.05,
     "retrieval": 0.15,
     "code": 0.35,
+    # 教训是「以前踩过的坑」，在动手前看到它最有用。
+    # 给它一块固定额度，避免它和别的检索内容抢位置而被裁掉。
+    "lessons": 0.10,
 }
 
 SOFT_TRIGGER_RATIO = 0.70

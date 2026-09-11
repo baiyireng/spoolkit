@@ -37,6 +37,19 @@ LOOKUP_TOOLS = ("find_symbol", "file_symbols", "find_callers")
 EDIT_TOOLS = ("replace_lines", "write_file")
 
 
+def _render_lessons(pushed: list[tuple[int, str]]) -> str:
+    """把推送的教训渲染成一段。空的返回空串，不留一个空标题。
+
+    标题里点明来源，是为了让模型知道这是别人踩过的坑、不是当前项目的要求；
+    否则它可能把教训当成任务约束照搬。
+    """
+    if not pushed:
+        return ""
+    lines = ["以下是过去类似任务里踩过的坑，做之前先看一眼："]
+    lines.extend(f"- {text}" for _, text in pushed)
+    return "\n".join(lines)
+
+
 def build_workflow(registry: ToolRegistry) -> str:
     """按实际注册的工具生成工作方式说明。
 
@@ -113,6 +126,7 @@ class LoopResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     model_calls: int = 0
+    lessons_pushed: tuple[int, ...] = ()
 
     def usage(self) -> str:
         """一行用量摘要，用于比较不同配置的实际成本。"""
@@ -134,6 +148,7 @@ class AgentLoop:
         prefetch: Callable[[str], str] | None = None,
         memory: Any | None = None,
         distiller: Callable[[TaskState, str], list[tuple[str, str]]] | None = None,
+        lessons: Callable[[str], list[tuple[int, str]]] | None = None,
         persona: str = "",
     ) -> None:
         self.gateway = gateway
@@ -143,6 +158,7 @@ class AgentLoop:
         self.prefetch = prefetch
         self.memory = memory
         self.distiller = distiller
+        self.lessons = lessons
         self.persona = persona
         self._budget = Budget(window=config.context_window)
         self._schema = build_turn_schema(registry)
@@ -154,6 +170,7 @@ class AgentLoop:
         feedback: str | None,
         prefetched: str = "",
         hot: str = "",
+        lesson_text: str = "",
     ):
         """按当前状态与历史装配本轮上下文。
 
@@ -170,6 +187,8 @@ class AgentLoop:
         ]
         if hot:
             sections.append(Section(name="hot_memory", text=hot, priority=20))
+        if lesson_text:
+            sections.append(Section(name="lessons", text=lesson_text, priority=25))
         sections.append(Section(name="task_state", text=state.render(), priority=30))
         if prefetched:
             sections.append(Section(name="retrieval", text=prefetched, priority=35))
@@ -214,8 +233,17 @@ class AgentLoop:
         prefetched = self.prefetch(goal) if self.prefetch is not None else ""
         hot = self.memory.hot_text() if self.memory is not None else ""
 
+        # 主动推送：进入任务时就把它相关的历史教训放到模型面前，
+        # 而不是等它自己去检索——它不会去检索，因为它不知道自己缺什么。
+        pushed: list[tuple[int, str]] = (
+            list(self.lessons(goal)) if self.lessons is not None else []
+        )
+        lesson_text = _render_lessons(pushed)
+
         while state.step < limit:
-            assembled = self._assemble(state, history, feedback, prefetched, hot)
+            assembled = self._assemble(
+                state, history, feedback, prefetched, hot, lesson_text
+            )
 
             # 预算守卫：软触发整理，硬触发重置。依据需求体积而非装入量。
             if assembled.demand_tokens >= self._budget.hard_limit():
@@ -223,7 +251,9 @@ class AgentLoop:
                 feedback = None
                 resets += 1
                 trace.append(f"step{state.step}: 上下文重置（第 {resets} 次）")
-                assembled = self._assemble(state, history, feedback, prefetched, hot)
+                assembled = self._assemble(
+                    state, history, feedback, prefetched, hot, lesson_text
+                )
             elif assembled.demand_tokens >= self._budget.soft_limit():
                 history = history[-(MAX_RECENT_TURNS // 2):]
                 trace.append(f"step{state.step}: 上下文整理")
@@ -288,6 +318,7 @@ class AgentLoop:
                     prompt_tokens,
                     completion_tokens,
                     model_calls,
+                    tuple(item[0] for item in pushed),
                 )
 
         self._archive(state, "fail", trace, "")
@@ -301,6 +332,7 @@ class AgentLoop:
             prompt_tokens,
             completion_tokens,
             model_calls,
+            tuple(item[0] for item in pushed),
         )
 
     @staticmethod

@@ -141,6 +141,10 @@ def _to_memory(row: sqlite3.Row) -> Memory:
     )
 
 
+# 公开别名：别的模块不该为了拿这个转换函数去碰私有名字。
+to_memory = _to_memory
+
+
 def list_memories(conn: sqlite3.Connection, kind: str | None = None) -> list[Memory]:
     """按写入顺序列出记忆，可按类型过滤。"""
     if kind is None:

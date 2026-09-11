@@ -108,6 +108,74 @@ def test_超出预算的条目下沉到冷记忆(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_教训被路由到教训库而不是热记忆文件(tmp_path: Path) -> None:
+    from agents_dev.memory.lessons import match_lessons
+
+    conn = _conn(tmp_path)
+    archive_task(
+        conn,
+        tmp_path / "memory.md",
+        _state(),
+        session_id="s1",
+        counter=OfflineTokenCounter(),
+        context_window=8000,
+        promote=[("lesson", "解析自定义格式先上语法约束", "解析,正则,格式")],
+    )
+    # 不进热记忆文件
+    assert "lesson" not in read_hot(tmp_path / "memory.md")
+    # 但能被场景触发
+    assert len(match_lessons(conn, "修一下解析逻辑")) == 1
+    conn.close()
+
+
+def test_教训保留来源便于回溯(tmp_path: Path) -> None:
+    from agents_dev.memory.lessons import match_lessons
+
+    conn = _conn(tmp_path)
+    archive_task(
+        conn,
+        tmp_path / "memory.md",
+        _state(),
+        session_id="s1",
+        counter=OfflineTokenCounter(),
+        context_window=8000,
+        promote=[("lesson", "规则", "解析")],
+    )
+    hit = match_lessons(conn, "解析")[0]
+    assert hit.source.startswith("ep#")
+    conn.close()
+
+
+def test_非教训条目仍然进热记忆(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    archive_task(
+        conn,
+        tmp_path / "memory.md",
+        _state(),
+        session_id="s1",
+        counter=OfflineTokenCounter(),
+        context_window=8000,
+        promote=[("fact", "测试命令是 pytest -q")],
+    )
+    assert read_hot(tmp_path / "memory.md")["fact"] == ["测试命令是 pytest -q"]
+    conn.close()
+
+
+def test_兼容不带触发词的两元组(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    result = archive_task(
+        conn,
+        tmp_path / "memory.md",
+        _state(),
+        session_id="s1",
+        counter=OfflineTokenCounter(),
+        context_window=8000,
+        promote=[("fact", "旧格式的条目")],
+    )
+    assert result.promoted == ["旧格式的条目"]
+    conn.close()
+
+
 def test_归档结果报告提升与下沉(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     result = archive_task(
@@ -137,4 +205,3 @@ def test_失败任务的事件outcome为失败(tmp_path: Path) -> None:
     )
     assert conn.execute("SELECT outcome FROM episode").fetchone()["outcome"] == "fail"
     conn.close()
-
