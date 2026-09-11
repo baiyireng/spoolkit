@@ -28,10 +28,12 @@ from agents_dev.cli.runtime import (
     show_history,
 )
 from agents_dev.cli.settle import settle
+from agents_dev.cli.events import EventWriter, settle_with_events
 from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.memory.distill import distill
 from agents_dev.memory.transcript import ASSISTANT, USER, record_message
 from agents_dev.tools.edit import PendingChanges
+from agents_dev.web.protocol import FINAL, START, USAGE
 
 
 def run(args: argparse.Namespace) -> int:
@@ -48,18 +50,83 @@ def run(args: argparse.Namespace) -> int:
         return 2
 
     window = resolve_window(gateway, args.window)
-    print(f"上下文窗口：{window} token")
+    # --events 模式下 stdout 上只能有 JSON 行。散文会被解析器忽略，
+    # 但录下来的文件会变脏，调试时难读——而那正是我们的第一个观察手段。
+    if not args.events:
+        print(f"上下文窗口：{window} token")
 
     if args.plan:
         return advance_plan(args, project_root, gateway)
     if args.autonomous:
         return autonomous(args, project_root, gateway)
 
-    report_policy(resolve_policy(args, project_root), resolve_scope(args))
+    if not args.events:
+        report_policy(resolve_policy(args, project_root), resolve_scope(args))
     pending = PendingChanges(project_root)
+    if args.events:
+        return _events_mode(args, project_root, gateway, window, pending)
     if args.delegate:
         return _delegated(args, project_root, gateway, window, pending)
     return _standard(args, project_root, gateway, window, pending)
+
+
+def _events_mode(args, project_root, gateway, window, pending) -> int:
+    """`--events` 模式：stdout 上只有 JSON 行。
+
+    与散文模式共用同一套装配与同一个主循环，只换了输入输出通道。
+    两条路径的判定必须一致——同一个策略在终端和网页里表现不同，
+    那种差异不会报错，只会让人困惑。
+    """
+    writer = EventWriter()
+    policy = resolve_policy(args, project_root)
+    scope = resolve_scope(args)
+    writer.emit(
+        START, session=args.session, goal=args.goal, policy=policy, window=window
+    )
+
+    memory = (
+        None
+        if args.no_memory
+        else open_memory(
+            project_root,
+            window,
+            args.session,
+            model=f"{args.provider}:{args.model or '默认'}",
+        )
+    )
+    loop = assemble_loop(
+        project_root,
+        gateway,
+        config=Config(
+            project_root=project_root,
+            context_window=window,
+            max_steps=args.max_steps,
+            subagent_steps=args.subagent_steps,
+        ),
+        wiring=LoopWiring(
+            memory=memory,
+            pending=pending,
+            lessons=build_lessons(memory) if memory is not None else None,
+            on_event=writer.handle,
+        ),
+    )
+    result = loop.run(args.goal, resume=args.resume)
+
+    if memory is not None:
+        settle_lessons(memory, result.lessons_pushed, result.finished)
+
+    writer.emit(
+        USAGE,
+        steps=result.steps,
+        calls=result.model_calls,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+    )
+    outcome = settle_with_events(
+        pending, policy, scope, project_root / ".agent" / "last_change.json", writer
+    )
+    writer.emit(FINAL, ok=result.finished, text=result.final or "", settled=outcome)
+    return 0 if result.finished else 1
 
 
 def _standard(args, project_root, gateway, window, pending) -> int:

@@ -53,6 +53,7 @@ class LoopWiring:
     approver: object | None = None
     grants: object | None = None
     lessons: object | None = None
+    on_event: object | None = None
 
 
 def provider_gateway(args, project_root):
@@ -149,6 +150,7 @@ def assemble_loop(
         memory=parts.memory,
         lessons=parts.lessons,
         distiller=parts.distiller,
+        on_event=parts.on_event,
     )
 
 

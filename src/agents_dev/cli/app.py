@@ -16,6 +16,7 @@ from agents_dev.cli.commands.plan import make_plan
 from agents_dev.cli.commands.policy import policy_command
 from agents_dev.cli.commands.revert import revert_command
 from agents_dev.cli.commands.run import run
+from agents_dev.cli.commands.serve import serve_command
 from agents_dev.cli.commands.session import session_command
 from agents_dev.cli.options import (
     DEFAULT_WINDOW,
@@ -119,6 +120,11 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         "--history", type=int, default=6, help="启动时显示最近几轮会话记录"
     )
     parser.add_argument("--no-history", action="store_true", help="不显示会话记录")
+    parser.add_argument(
+        "--events",
+        action="store_true",
+        help="以 JSON 行输出事件，供 Web UI 消费；此模式下不打印散文",
+    )
     parser.set_defaults(func=run)
 
 
@@ -162,6 +168,20 @@ def _add_session_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=session_command)
 
 
+def _add_serve_command(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("serve", help="启动 Web UI 壳")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--session", default="cli")
+    parser.add_argument("--provider", default="")
+    parser.add_argument("--model", default="")
+    parser.add_argument("--proxy", default="")
+    parser.add_argument("--policy", default="")
+    parser.add_argument("--scope", default="")
+    parser.add_argument("--root", default=".")
+    parser.set_defaults(func=serve_command)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agents-dev")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -171,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_revert_command(sub)
     _add_bench_command(sub)
     _add_session_command(sub)
+    _add_serve_command(sub)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

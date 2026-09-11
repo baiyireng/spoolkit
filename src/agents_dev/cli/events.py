@@ -8,9 +8,15 @@
 """
 
 import sys
+from pathlib import Path
+from typing import Callable, Sequence
 from typing import Any, TextIO
 
-from agents_dev.web.protocol import Event
+from agents_dev.agents.plan import out_of_scope
+from agents_dev.cli.approval import apply_with_audit
+from agents_dev.policy import AUTO
+from agents_dev.tools.edit import PendingChanges, save_baseline
+from agents_dev.web.protocol import AWAIT, CONFIRM, DIFF, Event
 
 
 class EventWriter:
@@ -27,3 +33,43 @@ class EventWriter:
         """签名与 AgentLoop 的 on_event 一致，可直接传进去。"""
         self.emit(kind, **data)
 
+
+def settle_with_events(
+    pending: PendingChanges,
+    policy: str,
+    scope: Sequence[str],
+    baseline_path: Path | None,
+    writer: EventWriter,
+    reader: Callable[[], str] | object = None,
+) -> str:
+    """按策略处理待落盘改动，全程以事件表达。
+
+    语义与终端模式完全一致，只是把「打印 diff 并问一句」换成了
+    「发 diff 与 await，再从 stdin 读一行」。**两条路径的判定必须一样**，
+    否则同一个策略在终端和网页里表现不同——那种差异不会报错，
+    只会让人困惑「为什么这里自动、那里不自动」。
+    """
+    changes = pending.items()
+    if not changes:
+        return "none"
+
+    for change in changes:
+        writer.emit(DIFF, path=change.path, text=change.diff)
+
+    if policy == AUTO and not out_of_scope([c.path for c in changes], scope):
+        written = apply_with_audit(pending, baseline_path)
+        writer.emit(CONFIRM, applied=True, auto=True, count=len(written))
+        return "auto"
+
+    writer.emit(AWAIT, count=len(changes))
+    source = reader if reader is not None else sys.stdin
+    answer = (source.readline() or "").strip().lower()
+    apply = answer in ("y", "yes")
+    writer.emit(CONFIRM, applied=apply, count=len(changes))
+    if apply:
+        if baseline_path is not None:
+            save_baseline(baseline_path, pending.baseline())
+        pending.apply()
+        return "confirmed"
+    pending.discard()
+    return "declined"
