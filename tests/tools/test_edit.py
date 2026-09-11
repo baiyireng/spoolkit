@@ -112,3 +112,26 @@ def test_修改已有文件时diff显示原文与改后(tmp_path: Path) -> None:
     assert "-old = 1" in result.content
     assert "+new = 2" in result.content
 
+
+def test_内容没变时不登记改动(tmp_path: Path) -> None:
+    """空的 diff 也拿去问用户，等于教他一律点「应用」。"""
+    (tmp_path / "a.py").write_text("same = 1\n", encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "a.py", "content": "same = 1\n"}
+    )
+    assert result.ok is True
+    assert "没有产生改动" in result.content
+    assert len(pending) == 0
+
+
+def test_新建空文件仍然算改动(tmp_path: Path) -> None:
+    """「内容为空」和「没有改动」是两回事，别把新建空文件吃掉。"""
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "empty.py", "content": ""}
+    )
+    assert result.ok is True
+    assert len(pending) == 1
+    pending.apply()
+    assert (tmp_path / "empty.py").exists()

@@ -30,7 +30,11 @@ def _validate(args: dict[str, Any], schema: dict[str, Any]) -> str | None:
     if schema.get("additionalProperties", True) is False:
         unknown = set(args) - set(properties)
         if unknown:
-            return f"存在未知参数: {', '.join(sorted(unknown))}"
+            # 必须带上可用参数：只说「有个参数不认识」，模型唯一能做的就是
+            # 猜。实测里它会在同一个调用上连续撞四次，把预算烧光——
+            # 小模型的上下文经不起这种消耗。
+            allowed = ", ".join(sorted(properties)) or "（本工具不接受参数）"
+            return f"存在未知参数: {', '.join(sorted(unknown))}；可用参数: {allowed}"
 
     for key in schema.get("required", []):
         if key not in args:

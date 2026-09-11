@@ -189,6 +189,15 @@ def _propose(
     except ValueError as exc:
         return ToolResult(ok=False, content=str(exc))
 
+    if target.exists() and new_text == old_text:
+        # 内容一字未变。照样登记的话，用户会被要求确认一处「什么都没改」的
+        # 改动——diff 是空的，除了一点点养成「不看就点应用」的习惯，
+        # 什么也换不来。同时也要让模型知道：这一写没产生改动，
+        # 别以为自己已经改好了。
+        return ToolResult(
+            ok=True, content=f"{relative} 的内容与现有完全一致，没有产生改动。"
+        )
+
     change = pending.propose(relative, new_text)
     verb = "新建" if change.is_new_file else "修改"
     body = f"已生成{verb}预览（尚未写入，需用户确认）：\n{change.diff}"

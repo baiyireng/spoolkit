@@ -58,6 +58,17 @@ def test_未知参数被拒绝() -> None:
     assert result.ok is False
 
 
+def test_未知参数的报错要带上可用参数() -> None:
+    """只说「不认识 x」，模型只能猜；说了可用参数，它下一轮就能改对。"""
+    result = _registry().invoke(
+        ToolCall(name="read_file", arguments={"path": "a.py", "timeout": 5})
+    )
+    assert result.ok is False
+    assert "timeout" in result.content
+    assert "可用参数" in result.content
+    assert "path" in result.content
+
+
 def test_处理器抛异常被转为失败结果() -> None:
     reg = ToolRegistry()
     reg.register(
