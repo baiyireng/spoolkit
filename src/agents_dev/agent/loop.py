@@ -75,6 +75,10 @@ def build_workflow(registry: ToolRegistry) -> str:
             "- 改完代码后用 run_command 跑测试验证，例如 python -m pytest -q；"
             "看到失败要读报错再改，不要凭猜测下结论。"
         )
+        lines.append(
+            "- 缺依赖时用 run_command 执行 uv add <包名>；不要用 pip——"
+            "它会绕过审核，且改动不留下可复查的痕迹。"
+        )
 
     lines.append("- 信息不足先查，不要猜；确实找不到就直说找不到。")
     return "\n".join(lines)

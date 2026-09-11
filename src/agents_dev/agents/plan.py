@@ -12,9 +12,10 @@
 """
 
 import json
+import fnmatch
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from agents_dev.llm.gateway import ModelGateway
 from agents_dev.llm.types import ChatRequest, Message
@@ -33,8 +34,9 @@ PLAN_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "goal": {"type": "string"},
                     "acceptance": {"type": "string"},
+                    "scope": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["goal", "acceptance"],
+                "required": ["goal", "acceptance", "scope"],
             },
         }
     },
@@ -51,6 +53,8 @@ DECOMPOSE_PROMPT = """你负责把一个较大的目标拆成可逐步执行的�
 要求：
 - 每一步都必须是「一次能在有限上下文里做完」的单元；
 - 每一步都必须给出可执行的验收标准（能跑什么、看什么、判定依据是什么）；
+- 每一步都要声明 scope：这一步允许改动哪些路径（目录前缀或通配符）。
+  范围要尽量窄——它是这一步能自动落盘的边界，写宽了就失去意义；
 - 顺序要正确：后面的步骤可以依赖前面步骤的产物；
 - 步骤数量控制在 {limit} 步以内，宁可少而准，不要凑数；
 - 不要写「调研一下」「优化一下」这类无法验收的步骤。
@@ -65,6 +69,7 @@ class PlanStep:
     index: int
     goal: str
     acceptance: str
+    scope: tuple[str, ...] = ()
     status: str = PENDING
     note: str = ""
 
@@ -125,7 +130,16 @@ def parse_plan(text: str, goal: str, limit: int = 10) -> Plan:
         if not step_goal or not acceptance:
             continue
         steps.append(
-            PlanStep(index=len(steps) + 1, goal=step_goal, acceptance=acceptance)
+            PlanStep(
+                index=len(steps) + 1,
+                goal=step_goal,
+                acceptance=acceptance,
+                scope=tuple(
+                    str(item).strip()
+                    for item in (item.get("scope") or [])
+                    if str(item).strip()
+                ),
+            )
         )
     return Plan(goal=goal, steps=steps)
 
@@ -177,8 +191,31 @@ def load_plan(path: Path) -> Plan | None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     return Plan(
         goal=payload.get("goal", ""),
-        steps=[PlanStep(**item) for item in payload.get("steps", [])],
+        steps=[
+            PlanStep(**{**item, "scope": tuple(item.get("scope") or ())})
+            for item in payload.get("steps", [])
+        ],
     )
+
+
+def path_in_scope(path: str, scope: Sequence[str]) -> bool:
+    """路径是否落在允许范围内。
+
+    scope 里每一项可以是目录前缀（`src/foo`）或通配模式（`tests/**`）。
+    空 scope 表示不允许任何自动改动——宁可退回逐项确认，也不要默认放行。
+    """
+    for pattern in scope:
+        cleaned = pattern.rstrip("/")
+        if path == cleaned or path.startswith(cleaned + "/"):
+            return True
+        if fnmatch.fnmatch(path, pattern):
+            return True
+    return False
+
+
+def out_of_scope(paths: Sequence[str], scope: Sequence[str]) -> list[str]:
+    """列出超出允许范围的路径。"""
+    return [path for path in paths if not path_in_scope(path, scope)]
 
 
 def render_step_prompt(plan: Plan, step: PlanStep) -> str:
@@ -197,4 +234,3 @@ def render_step_prompt(plan: Plan, step: PlanStep) -> str:
         f"验收标准：{step.acceptance}\n"
         "不要顺手做后面步骤的事。"
     )
-

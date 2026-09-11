@@ -17,6 +17,7 @@ from agents_dev.agents.plan import (
     FAILED,
     decompose,
     load_plan,
+    out_of_scope,
     plan_path,
     render_step_prompt,
     save_plan,
@@ -47,7 +48,7 @@ from agents_dev.tools.edit import load_baseline, revert
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.search import search_code_spec
-from agents_dev.cli.approval import review_and_apply
+from agents_dev.cli.approval import apply_with_audit, review_and_apply
 
 PREFETCH_BUDGET = 400
 
@@ -349,9 +350,22 @@ def _advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
     save_plan(path, plan)
 
     if len(pending):
-        review_and_apply(
-            pending, baseline_path=project_root / ".agent" / "last_change.json"
-        )
+        baseline = project_root / ".agent" / "last_change.json"
+        if not args.auto_apply:
+            review_and_apply(pending, baseline_path=baseline)
+        else:
+            blocked = out_of_scope(
+                [change.path for change in pending.items()], step.scope
+            )
+            if blocked:
+                # 越界就退回逐项确认。计划级授权只覆盖它声明的范围，
+                # 不等于「这次运行整体被信任」。
+                print(
+                    "以下改动超出本步声明范围，需要逐项确认：" + "、".join(blocked)
+                )
+                review_and_apply(pending, baseline_path=baseline)
+            else:
+                apply_with_audit(pending, baseline_path=baseline)
     print(plan.render())
     return 0 if result.finished else 1
 
@@ -395,6 +409,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--plan", action="store_true", help="执行计划中的下一个待办步骤"
+    )
+    run_parser.add_argument(
+        "--auto-apply",
+        action="store_true",
+        help="配合 --plan：改动落在该步声明的 scope 内时自动落盘，越界仍会询问",
     )
     run_parser.set_defaults(func=_run)
 

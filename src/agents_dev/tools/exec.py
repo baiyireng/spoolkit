@@ -20,6 +20,7 @@
 import shutil
 import subprocess
 import sys
+import re
 from pathlib import Path
 
 from agents_dev.errors import PathOutsideProjectError
@@ -39,6 +40,48 @@ GIT_READONLY = frozenset(
 
 # python 的任意代码执行入口，一律禁止。
 BLOCKED_PYTHON_FLAGS = ("-c", "-i", "-")
+
+# 依赖安装只放行声明式形式。
+#
+# `pip install <任意包>` 在能力上等价于 `python -c`——安装会执行包里的构建
+# 脚本，等于把特意堵掉的任意代码执行入口又打开。而且它改的是环境，你看不见。
+#
+# `uv add` 改的是 pyproject.toml 与 uv.lock，是一份能走 diff 审核的文件改动。
+# 后果可审阅、可回滚。这就是选它而不选 pip 的全部理由。
+UV_SUBCOMMANDS = frozenset({"add", "remove", "sync", "lock"})
+
+# 会绕过包名校验的参数，一律禁止。
+BLOCKED_UV_FLAGS = (
+    "-e", "--editable", "--index-url", "--extra-index-url",
+    "--find-links", "--trusted-host", "--path", "--url", "-r", "--requirements",
+)
+
+PACKAGE_SPEC = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*"      # 包名
+    r"(\[[A-Za-z0-9,._-]+\])?"           # 可选 extras
+    r"([<>=!~,][^;|&<>]*)?$"             # 可选版本约束
+)
+
+
+def _check_uv(rest: list[str]) -> str | None:
+    if not rest:
+        return "uv 需要子命令"
+
+    sub = rest[0]
+    if sub == "run":
+        return validate_command(rest[1:])
+    if sub not in UV_SUBCOMMANDS:
+        allowed = "、".join(sorted(UV_SUBCOMMANDS | {"run"}))
+        return f"uv 只允许 {allowed}，{sub} 不在其中"
+
+    for arg in rest[1:]:
+        if any(arg == flag or arg.startswith(flag + "=") for flag in BLOCKED_UV_FLAGS):
+            return f"禁止 uv 参数 {arg}：它会绕过包名校验"
+        if arg.startswith("-"):
+            continue
+        if not PACKAGE_SPEC.match(arg):
+            return f"包名不合法: {arg}（只接受包名与版本约束，不接受路径或 URL）"
+    return None
 
 
 def _check_python(args: list[str]) -> str | None:
@@ -60,9 +103,7 @@ def validate_command(argv: list[str]) -> str | None:
 
     # uv run 只是包装一层，真正执行的是后面的命令
     if program == "uv":
-        if not rest or rest[0] != "run":
-            return "只允许 `uv run <命令>`"
-        return validate_command(rest[1:])
+        return _check_uv(rest)
 
     if program == "pytest" or program.endswith("pytest.exe"):
         return None
@@ -166,7 +207,10 @@ def _run(root: Path, args: dict, pending=None) -> ToolResult:
         return ToolResult(ok=False, content=f"timeout 必须在 1 到 {MAX_TIMEOUT} 秒之间")
 
     if argv[0] == "uv" and shutil.which("uv") is None:
-        return ToolResult(ok=False, content="未找到 uv，请改用 python 或 pytest 直接执行")
+        return ToolResult(
+            ok=False,
+            content="未找到 uv，无法执行该命令。可以直接告诉用户需要手动安装依赖。",
+        )
 
     resolved = resolve_argv(argv, root)
     cwd_arg = args.get("cwd", ".")
@@ -184,7 +228,8 @@ def run_command_spec(root: Path, pending=None) -> ToolSpec:
     return ToolSpec(
         name="run_command",
         description=(
-            "在项目内执行命令并返回输出；支持 pytest、python 模块或脚本、只读 git。"
+            "在项目内执行命令并返回输出；支持 pytest、python 模块或脚本、只读 git、"
+            "以及 uv add/remove/sync/lock（依赖安装只走声明式，会改动 pyproject.toml）。"
             "若你刚提出过尚未落盘的改动，会在试跑副本上执行，测到的就是改动后的代码"
         ),
         parameters={
@@ -199,4 +244,3 @@ def run_command_spec(root: Path, pending=None) -> ToolSpec:
         },
         handler=lambda args: _run(root, args, pending),
     )
-

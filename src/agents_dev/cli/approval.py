@@ -38,3 +38,25 @@ def review_and_apply(
         return True, pending.apply()
     pending.discard()
     return False, []
+
+
+def apply_with_audit(
+    pending: PendingChanges,
+    baseline_path: Path | None = None,
+) -> list[str]:
+    """计划级授权下的自动落盘。
+
+    自动不等于无声：diff 照样完整打印，基线照样记录。区别只在于不再等一次确认。
+    授权的边界来自计划里那一步声明的 scope，而不是「这次运行整体被信任」。
+    """
+    changes = pending.items()
+    if not changes:
+        return []
+
+    for change in changes:
+        print(change.diff)
+    if baseline_path is not None:
+        save_baseline(baseline_path, pending.baseline())
+    written = pending.apply()
+    print(f"已自动应用 {len(written)} 处修改（计划级授权，可用 revert 回滚）。")
+    return written
