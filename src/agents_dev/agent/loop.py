@@ -7,6 +7,7 @@
 装配器最多只能装到有效预算，用实际装入量判断触发线永远不会触发。
 """
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -22,11 +23,33 @@ from agents_dev.llm.retry import chat_with_escalation
 from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.llm.types import ChatRequest, Message
 from agents_dev.tools.registry import ToolRegistry
+from agents_dev.tools.types import ToolCall, ToolResult
 
 SYSTEM_PROMPT = T.SYSTEM
 
 LOOKUP_TOOLS = ("find_symbol", "file_symbols", "find_callers")
 EDIT_TOOLS = ("replace_lines", "write_file")
+
+# 同一个调用连续重复到第几次时加提醒（仍然执行），到第几次时不再执行。
+#
+# 阈值来自实测，不是拍的：本地 Qwen2.5-Coder-7B 跑回归集时，连续 10 次
+# 调用同一个 find_callers（参数一字不差），把 12 步预算全烧光。
+# 第二次先给提醒、不阻断——调用有时确实有意义（比如文件刚被改过）；
+# 第三次中间没有任何别的动作，结果不可能变，再执行只是在消耗步数。
+REPEAT_WARN_AT = 2
+REPEAT_BLOCK_AT = 3
+
+
+def call_signature(call: ToolCall) -> str:
+    """工具调用的指纹：名字 + 规范化后的参数。
+
+    参数按 key 排序后再序列化。不排序的话 {"a":1,"b":2} 与 {"b":2,"a":1}
+    会算成两次不同的调用——模型只要换个字段顺序就绕过了检测，
+    而它换顺序几乎不花任何代价。
+    """
+    return call.name + " " + json.dumps(
+        call.arguments, sort_keys=True, ensure_ascii=False
+    )
 
 
 def _render_lessons(pushed: list[tuple[int, str]]) -> str:
@@ -209,6 +232,10 @@ class AgentLoop:
         model_calls = 0
         prefetched = self.prefetch(goal) if self.prefetch is not None else ""
         hot = self.memory.hot_text() if self.memory is not None else ""
+        # 「原地打转」检测：连续相同的调用计数。跨步骤累计，
+        # 中间只要出现一个不同的调用就清零。
+        last_signature = ""
+        repeats = 0
 
         # 主动推送：进入任务时就把它相关的历史教训放到模型面前，
         # 而不是等它自己去检索——它不会去检索，因为它不知道自己缺什么。
@@ -273,8 +300,15 @@ class AgentLoop:
             if turn.tool_calls:
                 outputs = []
                 for call in turn.tool_calls:
-                    result = self.registry.invoke(call)
+                    signature = call_signature(call)
+                    repeats = repeats + 1 if signature == last_signature else 1
+                    last_signature = signature
+                    result = self._invoke_guarded(call, repeats)
                     self._note_progress(state, call, result)
+                    if repeats >= REPEAT_WARN_AT:
+                        trace.append(
+                            f"step{state.step}: 重复调用第 {repeats} 次：{call.name}"
+                        )
                     self._emit(
                         "tool",
                         {
@@ -327,6 +361,34 @@ class AgentLoop:
             model_calls,
             tuple(item[0] for item in pushed),
         )
+
+    def _invoke_guarded(self, call: ToolCall, repeats: int) -> ToolResult:
+        """执行一次工具调用，并对「原地打转」作出反应。
+
+        小模型在短上下文里失去方向时会反复做同一个动作，而且不会自己停：
+        实测本地 7B 在回归集里连续 10 次调用同一个 find_callers、参数一字
+        不差。它不是在试探，是卡住了——这时候只能由循环把它顶回去，
+        等模型自己醒悟是不现实的。
+        """
+        if repeats >= REPEAT_BLOCK_AT:
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"这一步与前面 {repeats - 1} 次完全相同，结果不会改变，"
+                    "因此没有执行。请换一种做法：换一个工具、换一组参数，"
+                    "或者先去看别的地方；如果任务其实已经完成，直接给出结论即可。"
+                ),
+            )
+        result = self.registry.invoke(call)
+        if repeats >= REPEAT_WARN_AT:
+            return ToolResult(
+                ok=result.ok,
+                content=(
+                    "注意：这一步和上一步完全相同，你已经做过一次，结果也一样。"
+                    "如果它没有帮你推进，就换一种做法。\n" + result.content
+                ),
+            )
+        return result
 
     @staticmethod
     def _note_progress(state: TaskState, call, result) -> None:
