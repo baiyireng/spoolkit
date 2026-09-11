@@ -12,6 +12,15 @@ from pathlib import Path
 
 from agents_dev.agent.loop import AgentLoop
 from agents_dev.agents.dispatcher import plan_dispatch, run_delegated
+from agents_dev.agents.plan import (
+    DONE,
+    FAILED,
+    decompose,
+    load_plan,
+    plan_path,
+    render_step_prompt,
+    save_plan,
+)
 from agents_dev.config import Config
 from agents_dev.index.indexer import index_project
 from agents_dev.index.rank import prefetch as prefetch_text
@@ -181,6 +190,9 @@ def _run(args: argparse.Namespace) -> int:
     window = resolve_window(gateway, args.window)
     print(f"上下文窗口：{window} token")
 
+    if args.plan:
+        return _advance_plan(args, project_root, gateway)
+
     memory = None
     distiller = None
     pending = PendingChanges(project_root)
@@ -272,6 +284,78 @@ def _revert(args: argparse.Namespace) -> int:
     return 0
 
 
+def _make_plan(args: argparse.Namespace) -> int:
+    """把一个较大目标拆成可验收的步骤序列并落盘。"""
+    project_root = Path(args.root).resolve()
+    provider_config = ProviderConfig(
+        project_root=project_root,
+        model=args.model,
+        base_url=args.base_url,
+        proxy=args.proxy if args.proxy else system_proxy(),
+        env=dict(os.environ),
+    )
+    try:
+        gateway = load_gateway(args.provider, provider_config)
+    except ProviderError as exc:
+        print(f"无法装载供应商 {args.provider}: {exc}", file=sys.stderr)
+        return 2
+
+    plan = decompose(gateway, args.goal, limit=args.limit)
+    if not plan.steps:
+        print("没有拆出任何带验收标准的步骤。", file=sys.stderr)
+        return 1
+
+    save_plan(plan_path(project_root), plan)
+    print(plan.render())
+    print(f"\n计划已保存到 {plan_path(project_root)}")
+    return 0
+
+
+def _advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
+    """执行计划中下一个待办步骤，并记录结果。"""
+    path = plan_path(project_root)
+    plan = load_plan(path)
+    if plan is None:
+        print("还没有计划，请先用 `plan --goal` 生成。", file=sys.stderr)
+        return 2
+
+    step = plan.next_pending()
+    if step is None:
+        print(plan.render())
+        print("\n计划已全部完成。")
+        return 0
+
+    print(f"执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
+    window = resolve_window(gateway, args.window)
+    pending = PendingChanges(project_root)
+    memory = None if args.no_memory else build_memory(project_root, window)
+    loop = assemble_loop(
+        project_root,
+        gateway,
+        window=window,
+        max_steps=args.max_steps,
+        subagent_steps=args.subagent_steps,
+        memory=memory,
+        pending=pending,
+    )
+    result = loop.run(render_step_prompt(plan, step))
+
+    for line in result.trace:
+        print(line)
+    print(result.usage())
+
+    note = (result.final or "").strip().splitlines()[0][:80] if result.final else ""
+    plan.mark(step.index, DONE if result.finished else FAILED, note=note)
+    save_plan(path, plan)
+
+    if len(pending):
+        review_and_apply(
+            pending, baseline_path=project_root / ".agent" / "last_change.json"
+        )
+    print(plan.render())
+    return 0 if result.finished else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agents-dev")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -309,11 +393,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="先判断是否派发，派发时由实现者做、审查者独立验",
     )
+    run_parser.add_argument(
+        "--plan", action="store_true", help="执行计划中的下一个待办步骤"
+    )
     run_parser.set_defaults(func=_run)
 
     revert_parser = sub.add_parser("revert", help="回滚上一次写入的改动")
     revert_parser.add_argument("--root", default=".")
     revert_parser.set_defaults(func=_revert)
+
+    plan_parser = sub.add_parser("plan", help="把目标拆成可验收的步骤序列")
+    plan_parser.add_argument("--goal", required=True)
+    plan_parser.add_argument("--provider", dest="provider", choices=provider_names(), default="gemini")
+    plan_parser.add_argument("--model", default="")
+    plan_parser.add_argument("--base-url", default="")
+    plan_parser.add_argument("--proxy", default="")
+    plan_parser.add_argument("--root", default=".")
+    plan_parser.add_argument("--limit", type=int, default=10)
+    plan_parser.set_defaults(func=_make_plan)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
