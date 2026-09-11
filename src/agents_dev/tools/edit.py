@@ -14,6 +14,7 @@ from pathlib import Path
 from agents_dev.errors import PathOutsideProjectError
 from agents_dev.paths import resolve_within
 from agents_dev.tools.types import ToolResult, ToolSpec
+from agents_dev.check.constraints import check_source, format_violations
 
 
 def make_diff(path: str, old: str, new: str) -> str:
@@ -111,10 +112,14 @@ def _propose(
 
     change = pending.propose(relative, new_text)
     verb = "新建" if change.is_new_file else "修改"
-    return ToolResult(
-        ok=True,
-        content=f"已生成{verb}预览（尚未写入，需用户确认）：\n{change.diff}",
-    )
+    body = f"已生成{verb}预览（尚未写入，需用户确认）：\n{change.diff}"
+
+    # 写完立刻检查结构约束。这是「软要求变硬反馈」的落点：
+    # 模型不需要记住规则，只需要对具体违反项作出反应。
+    feedback = format_violations(check_source(new_text, relative))
+    if feedback:
+        body = f"{body}\n\n{feedback}"
+    return ToolResult(ok=True, content=body)
 
 
 def write_file_spec(root: Path, pending: PendingChanges) -> ToolSpec:
