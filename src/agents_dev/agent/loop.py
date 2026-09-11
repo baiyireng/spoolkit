@@ -58,6 +58,7 @@ class AgentLoop:
         prefetch: Callable[[str], str] | None = None,
         memory: Any | None = None,
         distiller: Callable[[TaskState, str], list[tuple[str, str]]] | None = None,
+        persona: str = "",
     ) -> None:
         self.gateway = gateway
         self.tokenizer = tokenizer
@@ -66,6 +67,7 @@ class AgentLoop:
         self.prefetch = prefetch
         self.memory = memory
         self.distiller = distiller
+        self.persona = persona
         self._budget = Budget(window=config.context_window)
         self._schema = build_turn_schema(registry)
 
@@ -83,6 +85,8 @@ class AgentLoop:
         """
         assembler = Assembler(tokenizer=self.tokenizer, budget=self._budget)
         system_text = SYSTEM_PROMPT.format(tools=self.registry.describe())
+        if self.persona:
+            system_text = f"{self.persona}\n\n{system_text}"
         sections = [
             Section(name="system", text=system_text, priority=10, mandatory=True),
         ]
