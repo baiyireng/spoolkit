@@ -125,7 +125,7 @@ def run_role(
     tokenizer: TokenCounter,
     registry: ToolRegistry,
     config: Config,
-    max_steps: int = 8,
+    max_steps: int | None = None,
 ) -> LoopResult:
     """在一个独立干净上下文里运行一个角色。
 
@@ -136,6 +136,10 @@ def run_role(
     if problem is not None:
         raise ValueError(problem)
 
+    # 默认用配置里的子智能体预算，而不是主循环的预算：
+    # 它们的成本结构不同，不该共用一个数字。
+    limit = config.subagent_steps if max_steps is None else max_steps
+
     loop = AgentLoop(
         gateway=gateway,
         tokenizer=tokenizer,
@@ -143,7 +147,8 @@ def run_role(
         config=Config(
             project_root=config.project_root,
             context_window=config.context_window,
-            max_steps=max_steps,
+            max_steps=limit,
+            subagent_steps=config.subagent_steps,
         ),
         prefetch=None,
         memory=None,

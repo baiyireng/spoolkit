@@ -86,6 +86,7 @@ def assemble_loop(
     gateway: ModelGateway,
     window: int = 4096,
     max_steps: int = 10,
+    subagent_steps: int = 20,
     memory=None,
     distiller=None,
     pending=None,
@@ -101,7 +102,10 @@ def assemble_loop(
 
     tokenizer = OfflineTokenCounter()
     config = Config(
-        project_root=project_root, context_window=window, max_steps=max_steps
+        project_root=project_root,
+        context_window=window,
+        max_steps=max_steps,
+        subagent_steps=subagent_steps,
     )
     return AgentLoop(
         gateway=gateway,
@@ -196,6 +200,7 @@ def _run(args: argparse.Namespace) -> int:
                 project_root=project_root,
                 context_window=window,
                 max_steps=args.max_steps,
+                subagent_steps=args.subagent_steps,
             ),
         )
         for line in delegated.trace:
@@ -221,6 +226,7 @@ def _run(args: argparse.Namespace) -> int:
         gateway,
         window=window,
         max_steps=args.max_steps,
+        subagent_steps=args.subagent_steps,
         memory=memory,
         distiller=distiller,
         pending=pending,
@@ -278,6 +284,12 @@ def main(argv: list[str] | None = None) -> int:
         "--window", type=int, default=0, help="0 表示自动向供应商查询"
     )
     run_parser.add_argument("--max-steps", type=int, default=10)
+    run_parser.add_argument(
+        "--subagent-steps",
+        type=int,
+        default=20,
+        help="子智能体的步数上限，默认比主循环大（一次性容器，重派成本低）",
+    )
     run_parser.add_argument(
         "--no-memory", action="store_true", help="关闭记忆读写，用于对照实验"
     )
