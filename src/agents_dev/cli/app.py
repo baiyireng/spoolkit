@@ -14,7 +14,7 @@ from agents_dev.agent.loop import AgentLoop
 from agents_dev.config import Config
 from agents_dev.index.indexer import index_project
 from agents_dev.index.rank import prefetch as prefetch_text
-from agents_dev.index.tools import file_symbols_spec, find_symbol_spec
+from agents_dev.index.tools import file_symbols_spec, find_callers_spec, find_symbol_spec
 from agents_dev.llm.fake import FakeModel
 from agents_dev.llm.gateway import ModelGateway
 from agents_dev.llm.providers import (
@@ -52,6 +52,7 @@ def _attach_index(project_root: Path, registry: ToolRegistry, tokenizer):
 
     registry.register(find_symbol_spec(project_root, conn))
     registry.register(file_symbols_spec(conn))
+    registry.register(find_callers_spec(conn))
     return lambda goal: prefetch_text(conn, goal, tokenizer, PREFETCH_BUDGET)
 
 

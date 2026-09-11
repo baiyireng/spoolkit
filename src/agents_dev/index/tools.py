@@ -8,6 +8,8 @@ import sqlite3
 from pathlib import Path
 
 from agents_dev.index.repo_map import load_symbol_source, render_file_symbols
+from agents_dev.index.repo_map import render_neighborhood
+from agents_dev.index.graph import impact
 from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.tools.types import ToolResult, ToolSpec
 
@@ -84,3 +86,64 @@ def file_symbols_spec(conn: sqlite3.Connection) -> ToolSpec:
         handler=lambda args: _file_symbols(conn, args),
     )
 
+
+def _find_callers(
+    conn: sqlite3.Connection, args: dict, counter: OfflineTokenCounter
+) -> ToolResult:
+    name = args["name"]
+    path = args.get("path")
+    sql = (
+        "SELECT s.id AS id, f.path AS path FROM symbol s"
+        " JOIN file f ON f.id = s.file_id WHERE s.name = ?"
+    )
+    params: list = [name]
+    if path:
+        sql += " AND f.path = ?"
+        params.append(path)
+    rows = conn.execute(sql, params).fetchall()
+
+    if not rows:
+        return ToolResult(ok=False, content=f"找不到符号: {name}")
+    if len(rows) > 1:
+        places = "、".join(f"{r['path']}" for r in rows[:MAX_MATCHES])
+        return ToolResult(
+            ok=False,
+            content=f"{name} 有 {len(rows)} 个同名符号（{places}），请用 path 指定",
+        )
+
+    symbol_id = rows[0]["id"]
+    depth = args.get("depth", 2)
+    if depth < 1:
+        return ToolResult(ok=False, content="depth 必须大于等于 1")
+
+    parts = [
+        render_neighborhood(conn, symbol_id, counter, SYMBOL_LIST_BUDGET)
+    ]
+    affected, truncated, _ = impact(conn, symbol_id, depth=depth)
+    if affected:
+        listed = "、".join(f"{item.name}({item.path}:{item.start_line})" for item in affected)
+        parts.append(f"改动它会波及 {len(affected)} 个符号：{listed}")
+        if truncated:
+            parts.append("波及面超出上限，以上只列出一部分。")
+    else:
+        parts.append("没有发现会被它波及的符号。")
+    return ToolResult(ok=True, content="\n".join(parts))
+
+
+def find_callers_spec(conn: sqlite3.Connection) -> ToolSpec:
+    """查看谁引用了某符号，以及改动它会波及什么。"""
+    return ToolSpec(
+        name="find_callers",
+        description="查看谁引用了某符号以及改动波及面；同名多个时需用 path 指定",
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "path": {"type": "string"},
+                "depth": {"type": "integer"},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        handler=lambda args: _find_callers(conn, args, OfflineTokenCounter()),
+    )

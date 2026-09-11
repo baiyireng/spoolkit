@@ -11,6 +11,7 @@ L2 符号源码：按行区间取出单个符号的实现。
 import sqlite3
 from pathlib import Path
 
+from agents_dev.index.graph import callers, callees, unresolved_count
 from agents_dev.llm.tokenizer import TokenCounter
 
 
@@ -123,3 +124,48 @@ def load_symbol_source(
     end = min(len(lines), row["end_line"])
     return "\n".join(lines[start - 1 : end])
 
+
+def render_neighborhood(
+    conn: sqlite3.Connection,
+    symbol_id: int,
+    counter: TokenCounter,
+    max_tokens: int,
+) -> str:
+    """渲染 L3 邻域：准备改动一个符号时，它周围有什么。
+
+    这个层次不参与「省 token」的账：它存在的理由是正确性。
+    不看引用方就动手改，是最容易把别处改坏的方式。
+
+    同时必须报告「够不到的引用」：留空是「有但定不了」，
+    和「确实没有」是两回事，混淆这两者会导致放心地改错。
+    """
+    row = conn.execute(
+        "SELECT s.start_line AS start_line, s.signature AS signature,"
+        " f.path AS path FROM symbol s JOIN file f ON f.id = s.file_id"
+        " WHERE s.id = ?",
+        (symbol_id,),
+    ).fetchone()
+    if row is None:
+        return ""
+
+    lines = [f"{row['path']}:{row['start_line']} {row['signature']}"]
+
+    used_by = callers(conn, symbol_id)
+    if used_by:
+        lines.append(f"被 {len(used_by)} 处引用：")
+        lines.extend(f"  {item.path}:{item.start_line} {item.name}" for item in used_by)
+    else:
+        lines.append("没有静态可解析的引用方。")
+
+    depends_on = callees(conn, symbol_id)
+    if depends_on:
+        names = "、".join(item.name for item in depends_on)
+        lines.append(f"它引用了 {len(depends_on)} 个符号：{names}")
+
+    unresolved = unresolved_count(conn, symbol_id)
+    if unresolved:
+        lines.append(
+            f"另有 {unresolved} 处引用指向同名符号但无法唯一确定，未计入上表。"
+        )
+
+    return _fit_lines(lines, "行省略", counter, max_tokens)

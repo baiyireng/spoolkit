@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agents_dev.index.symbols import PythonAstExtractor, SymbolExtractor
+from agents_dev.index.refs import extract_refs
+from agents_dev.index.graph import resolve_refs, store_refs
 
 SKIP_DIRS = frozenset(
     {
@@ -127,6 +129,20 @@ def index_project(
             file_id = cursor.lastrowid
 
         stats.symbols += _store_symbols(conn, file_id, symbols)
+        id_by_qualified = {
+            (f"{row['parent']}.{row['name']}" if row["parent"] else row["name"]): row["id"]
+            for row in conn.execute(
+                "SELECT s.id AS id, s.name AS name, p.name AS parent"
+                " FROM symbol s LEFT JOIN symbol p ON p.id = s.parent_id"
+                " WHERE s.file_id = ?",
+                (file_id,),
+            ).fetchall()
+        }
+        try:
+            refs = extract_refs(source)
+        except SyntaxError:
+            refs = []
+        store_refs(conn, file_id, refs, id_by_qualified)
         stats.files_indexed += 1
 
     for row in conn.execute("SELECT id, path FROM file").fetchall():
@@ -135,5 +151,5 @@ def index_project(
             stats.files_removed += 1
 
     conn.commit()
+    resolve_refs(conn)
     return stats
-
