@@ -33,6 +33,7 @@ from agents_dev.memory.tools import recall_spec
 from agents_dev.net import system_proxy
 from agents_dev.store.db import init_schema, open_db
 from agents_dev.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
+from agents_dev.tools.exec import run_command_spec
 from agents_dev.tools.edit import load_baseline, revert
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.registry import ToolRegistry
@@ -97,6 +98,7 @@ def assemble_loop(
     registry.register(read_file_spec(project_root))
     registry.register(list_dir_spec(project_root))
     registry.register(search_code_spec(project_root))
+    registry.register(run_command_spec(project_root))
     if pending is not None:
         registry.register(write_file_spec(project_root, pending))
         registry.register(replace_lines_spec(project_root, pending))
@@ -186,6 +188,7 @@ def _run(args: argparse.Namespace) -> int:
     registry.register(read_file_spec(project_root))
     registry.register(list_dir_spec(project_root))
     registry.register(search_code_spec(project_root))
+    registry.register(run_command_spec(project_root))
     registry.register(write_file_spec(project_root, pending))
     registry.register(replace_lines_spec(project_root, pending))
     _attach_index(project_root, registry, OfflineTokenCounter())

@@ -70,6 +70,12 @@ def build_workflow(registry: ToolRegistry) -> str:
     if registry.get("recall") is not None:
         lines.append("- 要回忆过去的结论、决策或失败教训时，用 recall 查历史记忆。")
 
+    if registry.get("run_command") is not None:
+        lines.append(
+            "- 改完代码后用 run_command 跑测试验证，例如 python -m pytest -q；"
+            "看到失败要读报错再改，不要凭猜测下结论。"
+        )
+
     lines.append("- 信息不足先查，不要猜；确实找不到就直说找不到。")
     return "\n".join(lines)
 
@@ -212,7 +218,10 @@ class AgentLoop:
                     result = self.registry.invoke(call)
                     status = "成功" if result.ok else "失败"
                     outputs.append(f"[{call.name}] {status}: {result.content}")
-                    detail = "" if result.ok else f": {result.content.splitlines()[0]}"
+                    # 失败时把输出压成一行摘要。取第一行不行：那里是命令本身，
+                    # 而不是错误原因——调试时会被误导。
+                    flat = " ".join(result.content.split())
+                    detail = "" if result.ok else f": {flat[:160]}"
                     trace.append(f"step{state.step}: 工具 {call.name} -> {status}{detail}")
                 history.append(Message(role="tool", content="\n".join(outputs)))
 

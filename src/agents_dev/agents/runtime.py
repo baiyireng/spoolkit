@@ -46,6 +46,7 @@ IMPLEMENTER = Role(
         "file_symbols",
         "find_symbol",
         "find_callers",
+        "run_command",
         "write_file",
         "replace_lines",
     ),
@@ -60,7 +61,15 @@ REVIEWER = Role(
         "未预期的副作用、是否有更简单的做法。给出明确结论与理由。"
     ),
     # 注意这里没有写权限：审查者不可能通过改代码来掩盖问题。
-    tools=("read_file", "file_symbols", "find_symbol", "find_callers", "search_code"),
+    # 审查者能跑测试但不能写代码：独立验证要靠自己动手跑，而不是附和实现者。
+    tools=(
+        "read_file",
+        "file_symbols",
+        "find_symbol",
+        "find_callers",
+        "search_code",
+        "run_command",
+    ),
     can_write=False,
 )
 
