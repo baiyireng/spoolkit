@@ -222,6 +222,7 @@ def _run(
     pending=None,
     approver=None,
     grants: Grants | None = None,
+    revert: object = (),
 ) -> ToolResult:
     argv = list(args["command"])
     level, reason = classify(argv)
@@ -254,8 +255,31 @@ def _run(
     # 那就让它在试跑环境里确实已经改了。真实工作区全程一动不动。
     if pending is not None and len(pending):
         with trial_workspace(root, pending.items()) as work_root:
+            _restore_originals(work_root, pending, revert)
             return _execute(work_root, resolved, requested, cwd_arg, timeout)
     return _execute(root, resolved, requested, cwd_arg, timeout)
+
+
+def _restore_originals(work_root: Path, pending, paths: object) -> None:
+    """把指定路径在试跑副本里还原成改动之前的样子。
+
+    给自动验证用：模型把测试文件改成 `assert True` 就能骗过验证，
+    然后理直气壮地宣布完成——实测发生过。验证必须按原始测试判定，
+    否则它测的是模型希望看到的结论，而不是代码的真实表现。
+    """
+    wanted = set(paths or ())
+    if not wanted:
+        return
+    for change in pending.items():
+        if change.path not in wanted:
+            continue
+        target = work_root / change.path
+        if change.is_new_file:
+            if target.exists():
+                target.unlink()
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(change.old_text, encoding="utf-8")
 
 
 def run_command_spec(
@@ -291,6 +315,7 @@ def run_once(
     approver=None,
     grants: Grants | None = None,
     timeout: int = DEFAULT_TIMEOUT,
+    revert: object = (),
 ) -> ToolResult:
     """执行一条命令，语义与 run_command 工具完全一致。
 
@@ -303,4 +328,5 @@ def run_once(
         pending,
         approver,
         grants,
+        revert,
     )

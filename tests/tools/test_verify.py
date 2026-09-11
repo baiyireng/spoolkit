@@ -8,7 +8,7 @@
 from pathlib import Path
 
 from agents_dev.tools.edit import PendingChanges
-from agents_dev.tools.verify import detect_test_command, make_verifier
+from agents_dev.tools.verify import detect_test_command, is_test_path, make_verifier
 
 FAILING = "import mod\n\n\ndef test_v():\n    assert mod.VALUE == 2\n"
 
@@ -61,3 +61,43 @@ def test_验证不写真实文件(tmp_path: Path) -> None:
     pending.propose("mod.py", "VALUE = 2\n")
     make_verifier(tmp_path, pending)()
     assert (tmp_path / "mod.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_改测试骗不过验证(tmp_path: Path) -> None:
+    """模型实测会这么干：把断言改成 assert True，验证就「通过」了。
+
+    验证若按模型改过的测试判定，测的就是它希望看到的结论，
+    而不是代码的真实表现。
+    """
+    _project(tmp_path)
+    pending = PendingChanges(tmp_path)
+    pending.propose(
+        "test_mod.py",
+        "import mod\n\n\ndef test_v():\n    assert True\n",
+    )
+    verifier = make_verifier(tmp_path, pending)
+    result = verifier()
+    assert result.ok is False
+
+
+def test_改测试时报告里要说明(tmp_path: Path) -> None:
+    """悄悄按原始测试判定，模型会以为自己改测试生效了。"""
+    _project(tmp_path)
+    pending = PendingChanges(tmp_path)
+    pending.propose("mod.py", "VALUE = 2\n")
+    pending.propose(
+        "test_mod.py",
+        "import mod\n\n\ndef test_v():\n    assert True\n",
+    )
+    result = make_verifier(tmp_path, pending)()
+    assert result.ok is True
+    assert "原来的内容" in result.content
+
+
+def test_测试路径识别() -> None:
+    assert is_test_path("test_mod.py")
+    assert is_test_path("mod_test.py")
+    assert is_test_path("tests/unit/test_x.py")
+    assert is_test_path("test/helpers.py")
+    assert not is_test_path("mod.py")
+    assert not is_test_path("src/testing.py")

@@ -429,7 +429,10 @@ class AgentLoop:
                             "detail": " ".join(report.split())[:200],
                         },
                     )
-                    feedback = report
+                    # 必须紧跟在那次改动后面，不能塞进 system 区段。
+                    # 区段排在整段历史之前，模型会先读到「测试失败」、
+                    # 再读到自己刚才做的事——因果顺序反了，它接不上。
+                    history.append(Message(role="user", content=report))
 
             if any(call.name in EDIT_TOOLS for call in turn.tool_calls):
                 no_edit_steps = 0

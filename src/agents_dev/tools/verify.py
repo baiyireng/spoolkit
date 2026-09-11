@@ -8,7 +8,7 @@
 真实工作区全程不动。系统自己开一条绕开白名单的暗门，比模型乱跑更糟。
 """
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from agents_dev.tools.exec import DEFAULT_TIMEOUT, run_once
@@ -18,6 +18,18 @@ from agents_dev.tools.types import ToolResult
 TEST_COMMAND = ("python", "-m", "pytest", "-q")
 
 _MARKERS = ("pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg")
+
+_TEST_DIRS = ("test", "tests")
+
+
+def is_test_path(path: str) -> bool:
+    """这个路径看起来是不是测试文件。"""
+    pure = PurePosixPath(path)
+    if pure.suffix != ".py":
+        return False
+    if pure.name.startswith("test_") or pure.name.endswith("_test.py"):
+        return True
+    return any(part.lower() in _TEST_DIRS for part in pure.parts[:-1])
 
 
 def detect_test_command(root: Path) -> list[str] | None:
@@ -51,6 +63,21 @@ def make_verifier(
         return None
 
     def verify() -> ToolResult:
-        return run_once(root, command, pending=pending, timeout=timeout)
+        # 按原始测试判定：模型把测试改成 `assert True` 就能骗过一次验证，
+        # 然后宣布完成——实测发生过。验证不能让它自己定标准。
+        revert = [change.path for change in pending.items() if is_test_path(change.path)]
+        result = run_once(
+            root, command, pending=pending, timeout=timeout, revert=revert
+        )
+        if revert and result.ok:
+            return ToolResult(
+                ok=True,
+                content=(
+                    result.content
+                    + f"（注意：你改过 {len(revert)} 个测试文件，"
+                    "验证是按它们原来的内容判定的）"
+                ),
+            )
+        return result
 
     return verify
