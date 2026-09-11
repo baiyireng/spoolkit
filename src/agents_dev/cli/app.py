@@ -334,7 +334,9 @@ def _run(args: argparse.Namespace) -> int:
             )
         return 0
     if not args.no_memory:
-        memory = open_memory(project_root, window, args.session)
+        memory = open_memory(
+            project_root, window, args.session, model=f"{args.provider}:{args.model or '默认'}"
+        )
         registry.register(recall_spec(memory))
         # 假模型没有多余脚本条目可分给归纳调用，因此只在真实供应商下启用。
         if args.provider != "fake":
@@ -460,7 +462,12 @@ def _execute_step(
     memory = (
         None
         if args.no_memory
-        else open_memory(project_root, window, getattr(args, "session", "cli"))
+        else open_memory(
+            project_root,
+            window,
+            getattr(args, "session", "cli"),
+            model=f"{args.provider}:{args.model or '默认'}",
+        )
     )
     loop = assemble_loop(
         project_root,
