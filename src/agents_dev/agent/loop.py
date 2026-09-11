@@ -8,6 +8,7 @@
 """
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from agents_dev.agent.protocol import ParseFailure, parse_turn
 from agents_dev.agent.state import TaskState, save_state
@@ -50,21 +51,34 @@ class AgentLoop:
         tokenizer: TokenCounter,
         registry: ToolRegistry,
         config: Config,
+        prefetch: Callable[[str], str] | None = None,
     ) -> None:
         self.gateway = gateway
         self.tokenizer = tokenizer
         self.registry = registry
         self.config = config
+        self.prefetch = prefetch
         self._budget = Budget(window=config.context_window)
 
-    def _assemble(self, state: TaskState, history: list[Message], feedback: str | None):
-        """按当前状态与历史装配本轮上下文。"""
+    def _assemble(
+        self,
+        state: TaskState,
+        history: list[Message],
+        feedback: str | None,
+        prefetched: str = "",
+    ):
+        """按当前状态与历史装配本轮上下文。
+
+        预取内容与解析反馈共用 retrieval 预算：它们语义相同，都是外部检索来的内容。
+        """
         assembler = Assembler(tokenizer=self.tokenizer, budget=self._budget)
         system_text = SYSTEM_PROMPT.format(tools=self.registry.describe())
         sections = [
             Section(name="system", text=system_text, priority=10, mandatory=True),
             Section(name="task_state", text=state.render(), priority=30),
         ]
+        if prefetched:
+            sections.append(Section(name="retrieval", text=prefetched, priority=35))
         if feedback:
             sections.append(Section(name="retrieval", text=feedback, priority=40))
         return assembler.assemble(sections, recent_turns=history[-MAX_RECENT_TURNS:])
@@ -76,9 +90,10 @@ class AgentLoop:
         feedback: str | None = None
         resets = 0
         trace: list[str] = []
+        prefetched = self.prefetch(goal) if self.prefetch is not None else ""
 
         while state.step < self.config.max_steps:
-            assembled = self._assemble(state, history, feedback)
+            assembled = self._assemble(state, history, feedback, prefetched)
 
             # 预算守卫：软触发整理，硬触发重置。依据需求体积而非装入量。
             if assembled.demand_tokens >= self._budget.hard_limit():
@@ -86,7 +101,7 @@ class AgentLoop:
                 feedback = None
                 resets += 1
                 trace.append(f"step{state.step}: 上下文重置（第 {resets} 次）")
-                assembled = self._assemble(state, history, feedback)
+                assembled = self._assemble(state, history, feedback, prefetched)
             elif assembled.demand_tokens >= self._budget.soft_limit():
                 history = history[-(MAX_RECENT_TURNS // 2):]
                 trace.append(f"step{state.step}: 上下文整理")
