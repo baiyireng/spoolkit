@@ -162,6 +162,11 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
 def _run(args: argparse.Namespace) -> int:
     project_root = Path(args.root).resolve()
 
+    # 走计划时目标来自计划文件，命令行不该再强制要求填一次。
+    if not args.plan and not args.goal.strip():
+        print("需要 --goal，或者用 --plan 推进已有计划。", file=sys.stderr)
+        return 2
+
     script: tuple[str, ...] = ()
     if args.provider == "fake":
         script_path = Path(args.script)
@@ -375,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run_parser = sub.add_parser("run", help="运行一次任务")
-    run_parser.add_argument("--goal", required=True)
+    run_parser.add_argument("--goal", default="")
     run_parser.add_argument(
         "--provider",
         "--engine",
