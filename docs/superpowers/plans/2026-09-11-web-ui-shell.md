@@ -1566,11 +1566,123 @@ def serve_command(args: argparse.Namespace) -> int:
     return 0
 ```
 
-在 `cli/app.py` 中注册 `serve` 子命令（`--host` 默认 `127.0.0.1`、`--port` 默认 `8765`、`--session` 默认 `cli`，以及可选的 `--provider/--model/--proxy/--policy/--scope`），并给 `run` 子命令加 `--events` 开关。
+在 `cli/runtime.py` 的 `LoopWiring` 加一个字段，并在 `assemble_loop` 里透传：
 
-在 `cli/commands/run.py` 中，`--events` 为真时：构造 `EventWriter`，开头 `emit(START, session=..., goal=..., policy=..., window=window)`；把 `writer.handle` 作为 `on_event` 传进 `assemble_loop` 的 `wiring`（新增一个 `on_event` 字段透传给 `AgentLoop`）；结尾 `emit(USAGE, **usage)` 与 `emit(FINAL, ok=..., text=...)`；待落盘改动走 `settle_with_events` 而不再用散文版的 `settle`。
+```python
+@dataclass
+class LoopWiring:
+    ...
+    lessons: object | None = None
+    on_event: object | None = None      # 新增
 
-同时在 `agents_dev/cli/runtime.py` 的 `LoopWiring` 中加一个 `on_event=None` 字段，并在 `assemble_loop` 里透传给 `AgentLoop`。
+
+    return AgentLoop(
+        ...
+        distiller=parts.distiller,
+        on_event=parts.on_event,        # 新增
+    )
+```
+
+在 `cli/app.py` 的 `_add_run_command` 里加开关：
+
+```python
+    parser.add_argument(
+        "--events",
+        action="store_true",
+        help="以 JSON 行输出事件，供 Web UI 消费；此模式下不打印散文",
+    )
+```
+
+并加一条子命令：
+
+```python
+def _add_serve_command(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("serve", help="启动 Web UI 壳")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--session", default="cli")
+    parser.add_argument("--provider", default="")
+    parser.add_argument("--model", default="")
+    parser.add_argument("--proxy", default="")
+    parser.add_argument("--policy", default="")
+    parser.add_argument("--scope", default="")
+    parser.add_argument("--root", default=".")
+    parser.set_defaults(func=serve_command)
+```
+
+在 `main()` 里调用 `_add_serve_command(sub)`，并导入 `serve_command`。
+
+在 `cli/commands/run.py` 的 `run` 里分流：
+
+```python
+    if args.events:
+        return _events_mode(args, project_root, gateway, window, pending)
+```
+
+新增：
+
+```python
+def _events_mode(args, project_root, gateway, window, pending) -> int:
+    """`--events` 模式：stdout 上只有 JSON 行。
+
+    与散文模式共用同一套装配与同一个主循环，只换了输入输出通道。
+    两条路径的判定必须一致——同一个策略在终端和网页里表现不同，
+    那种差异不会报错，只会让人困惑。
+    """
+    writer = EventWriter()
+    policy = resolve_policy(args, project_root)
+    scope = resolve_scope(args)
+    writer.emit(
+        START, session=args.session, goal=args.goal, policy=policy, window=window
+    )
+
+    memory = None if args.no_memory else open_memory(
+        project_root, window, args.session,
+        model=f"{args.provider}:{args.model or '默认'}",
+    )
+    loop = assemble_loop(
+        project_root,
+        gateway,
+        config=Config(
+            project_root=project_root,
+            context_window=window,
+            max_steps=args.max_steps,
+            subagent_steps=args.subagent_steps,
+        ),
+        wiring=LoopWiring(
+            memory=memory,
+            pending=pending,
+            lessons=build_lessons(memory) if memory is not None else None,
+            on_event=writer.handle,
+        ),
+    )
+    result = loop.run(args.goal, resume=args.resume)
+
+    writer.emit(
+        USAGE,
+        steps=result.steps,
+        calls=result.model_calls,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+    )
+    outcome = settle_with_events(
+        pending, policy, scope, project_root / ".agent" / "last_change.json", writer
+    )
+    writer.emit(
+        FINAL,
+        ok=result.finished,
+        text=result.final or "",
+        settled=outcome,
+    )
+    return 0 if result.finished else 1
+```
+
+导入区补上：
+
+```python
+from agents_dev.cli.events import EventWriter, settle_with_events
+from agents_dev.web.protocol import FINAL, START, USAGE
+```
 
 - [ ] **Step 4: 运行测试确认通过**
 
