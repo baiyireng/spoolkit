@@ -117,6 +117,9 @@ class ParseFailure:
     """解析失败，reason 会作为反馈回灌给模型。"""
 
     reason: str
+    # 失败的种类。空回合要单独标出来：它不是「格式写坏了」，而是模型
+    # 在表达一件协议里没有的事（比如「我在等用户确认」），纠正方式完全不同。
+    kind: str = ""
 
 
 def _parse_tool_calls(raw: Any) -> tuple[ToolCall, ...] | str:
@@ -199,7 +202,9 @@ def parse_turn(text: str) -> AgentTurn | ParseFailure:
         if not isinstance(final, str) or not final.strip():
             return ParseFailure(reason="已标记 done，但没有给出 final 答复文本")
     elif not calls:
-        return ParseFailure(reason="既没有调用工具，也没有标记 done")
+        return ParseFailure(
+            reason="既没有调用工具，也没有标记 done", kind="empty_turn"
+        )
 
     return AgentTurn(
         thought=thought,

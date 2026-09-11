@@ -31,7 +31,9 @@ def test_有写工具时给出改动方式(tmp_path: Path) -> None:
     text = build_workflow(_full_registry(tmp_path))
     assert "replace_lines" in text
     assert "write_file" in text
-    assert "不必回避提出改动" in text
+    # 必须说清楚「不用等确认」。实测模型会把它读成「停下来等用户」，
+    # 然后连发十几次空回合，把步数预算烧光。
+    assert "不用停下来等确认" in text
 
 
 def test_有索引工具时给出查符号优先规则(tmp_path: Path) -> None:

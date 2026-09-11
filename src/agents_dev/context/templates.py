@@ -23,6 +23,8 @@ SYSTEM = """你是本地运行的编程助手。每轮只做一件事。
 格式：
 {{"thought":"这一步的打算","tool_calls":[{{"name":"工具名","arguments":{{"参数名":值}}}}],"state":{{"current":"当前在做什么"}},"done":false,"final":null}}
 还要工具就调用工具，此时 done 必须是 false。
+done=false 时 tool_calls 不能为空——不要用「什么都不做」的回合等用户，
+系统看不懂这种回合，只会让你重来。
 已经有答案要交付时，tool_calls 设为 []，done 设为 true，final 设为给用户的完整答复。
 可用工具：
 {tools}
@@ -51,11 +53,33 @@ WORKFLOW_EDIT_WHOLE = (
     "不要只写改动的那几行，要把整个文件写出来——被删掉的内容找不回来。"
 )
 WORKFLOW_EDIT_PRECISE = "- 改动使用 replace_lines 精确替换。"
-WORKFLOW_WRITE_SAFE = "- 写操作只生成 diff 并需用户确认，不必回避提出改动。"
+WORKFLOW_WRITE_SAFE = (
+    "- 改动先记成待确认的 diff，用户在**最后统一确认**——所以你不用停下来等确认："
+    "测试没过就继续改，改好了才用 done=true 收尾。"
+)
+
+# 模型输出空回合时的反馈。写死成命令式：实测它卡在「等用户确认」的
+# 空回合里，连发十几次，把步数预算烧光——而它只是在遵守我们写的
+# 「写操作需用户确认」那条规则。
+EMPTY_TURN_FEEDBACK = (
+    "你这一轮既没有调用工具，也没有标记完成，系统读不懂这种回合。"
+    "二选一：要改就调用写工具、给出完整内容；确实不用再改了，"
+    "就把 done 设为 true 并给出 final。**不要等用户确认**——"
+    "改动会在最后统一确认，你不用停在这里。"
+)
+
+EMPTY_TURN_FINAL = (
+    "模型在提出改动后停住了，连续几轮没有产出可执行的回合，就此中断。"
+    "已经提出的改动保留在待确认清单里，请你判断是否采用。"
+)
 WORKFLOW_RECALL = "- 要回忆过去的结论、决策或失败教训时，用 recall 查历史记忆。"
 WORKFLOW_RUN = (
     "- 改完代码后用 run_command 跑测试验证，例如 python -m pytest -q；"
     "看到失败要读报错再改，不要凭猜测下结论。"
+)
+WORKFLOW_TESTS_ARE_SPEC = (
+    "- 测试文件是验收标准，**不要为了让测试通过而修改它**。"
+    "测试失败说明代码不对，去改代码。"
 )
 WORKFLOW_TEST_SCOPE = (
     "- 跑测试优先只跑相关文件（如 python -m pytest scratch_lab -q），"

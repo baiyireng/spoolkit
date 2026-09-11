@@ -110,3 +110,18 @@ def test_状态块字段被正确传入增量() -> None:
 def test_状态块含未知字段返回失败() -> None:
     assert isinstance(parse_turn(_payload(state={"不存在": 1})), ParseFailure)
 
+
+def test_空回合被单独标记() -> None:
+    """空回合不是「格式写坏了」，是协议里没有模型想说的那件事。
+
+    实测模型想表达「改动提完了，等用户确认」，只能发出一个空回合；
+    如果把它当成普通格式错误去纠正，它会原样再来十几次。
+    """
+    failure = parse_turn(_payload(tool_calls=[], done=False))
+    assert isinstance(failure, ParseFailure)
+    assert failure.kind == "empty_turn"
+
+
+def test_其它解析失败不带空回合标记() -> None:
+    assert parse_turn("不是 JSON").kind == ""
+

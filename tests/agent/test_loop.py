@@ -97,7 +97,13 @@ def test_状态块被应用且完成后清理检查点(tmp_path: Path) -> None:
 
 
 def test_达到步数上限会停止(tmp_path: Path) -> None:
-    loop = _build(tmp_path, [_turn(f"第{i}步") for i in range(20)], max_steps=3)
+    # 必须用真实的工具调用：空回合现在会被当成「卡住」提前收尾，
+    # 那是另一条路径，测不到步数上限。
+    script = [
+        _turn(f"第{i}步", [{"name": "list_dir", "arguments": {"path": "."}}])
+        for i in range(20)
+    ]
+    loop = _build(tmp_path, script, max_steps=3)
     result = loop.run("没完没了")
     assert result.finished is False
     assert result.steps == 3

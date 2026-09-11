@@ -44,6 +44,18 @@ REPEAT_BLOCK_AT = 3
 # 的漫游——实测那条轨迹 12 步里换了 8 种不同的调用，一次都没被拦住。
 NO_EDIT_LIMIT = 4
 
+# 空回合连续出现到这个次数就收尾。
+#
+# 模型想表达「改动提完了、在等你确认」时，只能发出一个空回合；协议里
+# 没有这个表达方式，于是它判为无效、回灌、再发一遍。实测连发 11 次，
+# 把预算全烧在复读上。它不是要再想一会儿，是卡住了——这时候把已经提出
+# 的改动交给用户判断，比继续复读诚实，也便宜。
+#
+# 阈值取 4 而不是 2：实测阈值太小会误伤——有些题只抖动一两轮就自己走出来了，
+# 把它们一起掐掉净亏两道题。真正卡死的那种会一直复读（实测 11 次），
+# 放宽到 4 一样能兜住。
+EMPTY_TURN_LIMIT = 4
+
 
 def call_signature(call: ToolCall) -> str:
     """工具调用的指纹：名字 + 规范化后的参数。
@@ -55,6 +67,18 @@ def call_signature(call: ToolCall) -> str:
     return call.name + " " + json.dumps(
         call.arguments, sort_keys=True, ensure_ascii=False
     )
+
+
+def _parse_feedback(failure: ParseFailure) -> str:
+    """把解析失败翻译成「下一步该做什么」。
+
+    空回合要单独对待：模型不是在写坏格式，而是在表达一件协议里没有的事
+    （最常见的是「改动提完了，等用户确认」）。对它说「请只输出规定的 JSON」
+    没有任何用——它下一轮会原样再来一次，实测连发十几次。
+    """
+    if failure.kind == "empty_turn":
+        return T.EMPTY_TURN_FEEDBACK
+    return f"上一轮输出无法解析：{failure.reason}。请只输出规定的 JSON 对象。"
 
 
 def _render_lessons(pushed: list[tuple[int, str]]) -> str:
@@ -110,6 +134,7 @@ def build_workflow(registry: ToolRegistry) -> str:
 
     if registry.get("run_command") is not None:
         lines.append(T.WORKFLOW_RUN)
+        lines.append(T.WORKFLOW_TESTS_ARE_SPEC)
         lines.append(T.WORKFLOW_TEST_SCOPE)
         lines.append(T.WORKFLOW_PERMISSION)
         lines.append(T.WORKFLOW_DEPENDENCY)
@@ -257,6 +282,7 @@ class AgentLoop:
         last_signature = ""
         repeats = 0
         no_edit_steps = 0
+        empty_turns = 0
 
         # 主动推送：进入任务时就把它相关的历史教训放到模型面前，
         # 而不是等它自己去检索——它不会去检索，因为它不知道自己缺什么。
@@ -314,7 +340,31 @@ class AgentLoop:
             turn = parse_turn(response.text)
 
             if isinstance(turn, ParseFailure):
-                feedback = f"上一轮输出无法解析：{turn.reason}。请只输出规定的 JSON 对象。"
+                if turn.kind == "empty_turn":
+                    empty_turns += 1
+                    if empty_turns >= EMPTY_TURN_LIMIT:
+                        # 它不是在想，是卡住了。继续复读只会把预算烧光，
+                        # 而已提出的改动是真实产出——交给用户判断。
+                        trace.append(
+                            f"step{state.step}: 连续 {empty_turns} 轮空回合，"
+                            "模型卡死，提前收尾"
+                        )
+                        self._archive(state, "fail", trace, "")
+                        return LoopResult(
+                            False,
+                            T.EMPTY_TURN_FINAL,
+                            state,
+                            state.step,
+                            resets,
+                            trace,
+                            prompt_tokens,
+                            completion_tokens,
+                            model_calls,
+                            tuple(item[0] for item in pushed),
+                        )
+                else:
+                    empty_turns = 0
+                feedback = _parse_feedback(turn)
                 history.append(Message(role="assistant", content=response.text))
                 history.append(Message(role="user", content=feedback))
                 state.step_forward()

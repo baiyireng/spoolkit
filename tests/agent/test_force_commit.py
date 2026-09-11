@@ -142,3 +142,48 @@ def test_没有改动就不验证(tmp_path: Path) -> None:
 
 def _text_of(request) -> str:
     return "\n".join(message.content for message in request.messages)
+
+
+def test_空回合的反馈是命令式的(tmp_path: Path) -> None:
+    """模型卡在「等用户确认」的空回合里时，得告诉它下一步做什么。
+
+    实测它收到「请只输出规定的 JSON」之后，会原样再发十几次同一个空回合。
+    """
+    empty = json.dumps(
+        {"thought": "等用户确认", "tool_calls": [], "done": False, "final": None},
+        ensure_ascii=False,
+    )
+    loop = _build(tmp_path, [empty, empty, _turn("算了", final="结束")])
+    loop.run("改一下")
+
+    prompt = _text_of(loop.gateway.requests[1])
+    assert "不要等用户确认" in prompt
+    assert "done 设为 true" in prompt
+
+
+def test_连续空回合会提前收尾(tmp_path: Path) -> None:
+    """它不是在思考，是在复读。实测连发 11 次，把预算全烧在复读上。"""
+    empty = json.dumps(
+        {"thought": "等用户确认", "tool_calls": [], "done": False, "final": None},
+        ensure_ascii=False,
+    )
+    script = [_turn("改", [_edit()])] + [empty] * 6
+    loop = _build(tmp_path, script)
+    result = loop.run("改一下")
+
+    assert result.finished is False
+    assert "停住了" in result.final
+    # 只跑了「一次改动 + 两次空回合」，没有把 12 步预算烧光
+    assert result.steps <= 4
+
+
+def test_偶发空回合不会立刻收尾(tmp_path: Path) -> None:
+    """一次空回合可能只是格式抖动，别一碰就停。"""
+    empty = json.dumps(
+        {"thought": "嗯", "tool_calls": [], "done": False, "final": None},
+        ensure_ascii=False,
+    )
+    script = [empty, _turn("改", [_edit()]), _turn("完成", final="好了")]
+    loop = _build(tmp_path, script)
+    result = loop.run("改一下")
+    assert result.finished is True
