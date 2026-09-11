@@ -76,3 +76,13 @@ def test_推送内容带上来源说明(tmp_path: Path) -> None:
     # 点明这是历史教训而不是当前要求，否则模型会把坑当约束照搬
     assert "过去类似任务里踩过的坑" in text
 
+
+def test_轨迹里记录推送了几条(tmp_path: Path) -> None:
+    loop = _loop(tmp_path, [_turn("完成")], lessons=lambda goal: [(1, "规则甲")])
+    result = loop.run("任务")
+    assert any("推送 1 条历史教训" in line for line in result.trace)
+
+
+def test_没有推送时不产生轨迹噪音(tmp_path: Path) -> None:
+    result = _loop(tmp_path, [_turn("完成")], lessons=lambda goal: []).run("任务")
+    assert not any("历史教训" in line for line in result.trace)

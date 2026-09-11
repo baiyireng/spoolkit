@@ -239,6 +239,11 @@ class AgentLoop:
             list(self.lessons(goal)) if self.lessons is not None else []
         )
         lesson_text = _render_lessons(pushed)
+        if pushed:
+            # 让推送可见：教训推了没推、推了哪几条，是调这块时唯一能看到的信号。
+            trace.append(f"推送 {len(pushed)} 条历史教训：" + "；".join(
+                text[:30] for _, text in pushed
+            ))
 
         while state.step < limit:
             assembled = self._assemble(
