@@ -105,6 +105,7 @@ Agent 内核（一行不改）
 | `tool` | name, ok, detail | 一次工具调用结束 |
 | `diff` | path, text | 待确认的改动 |
 | `await` | count | 等待用户确认，界面在此出按钮 |
+| `confirm` | applied, count, auto 可选 | 用户（或策略）已作出决定 |
 | `usage` | steps, calls, prompt_tokens, completion_tokens | 用量摘要 |
 | `final` | ok, text | 运行结束 |
 | `error` | message | 可恢复的错误说明 |
