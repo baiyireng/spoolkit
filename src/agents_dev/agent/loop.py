@@ -78,12 +78,17 @@ def build_workflow(registry: ToolRegistry) -> str:
     lines = ["工作方式："]
 
     lookup = [name for name in LOOKUP_TOOLS if registry.get(name) is not None]
+    edits = [name for name in EDIT_TOOLS if registry.get(name) is not None]
     if lookup:
         lines.append(T.WORKFLOW_FIND.format(names=" / ".join(lookup)))
     if registry.get("find_callers") is not None:
         lines.append(T.WORKFLOW_IMPACT)
+    if lookup and edits:
+        # 必须紧跟在查询规则后面。实测模型会把「怎么查」那一段当成全部
+        # 工作方式，从头查到尾、一次改动都不提；这条是它的对面。
+        # 只读角色（没有写工具）不得看到这句——那是它做不到的事。
+        lines.append(T.WORKFLOW_ACT)
 
-    edits = [name for name in EDIT_TOOLS if registry.get(name) is not None]
     if edits:
         if set(edits) == set(EDIT_TOOLS):
             lines.append(T.WORKFLOW_EDIT_FULL)

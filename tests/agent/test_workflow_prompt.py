@@ -44,8 +44,23 @@ def test_有索引工具时给出查符号优先规则(tmp_path: Path) -> None:
     registry.register(find_symbol_spec(tmp_path, conn))
     registry.register(find_callers_spec(conn))
     text = build_workflow(registry)
-    assert "不要整份读文件" in text
+    assert "要改的文件必须先看到它的当前内容" in text
     assert "看波及面" in text
+
+
+def test_有写工具时才提动手改(tmp_path: Path) -> None:
+    """只读角色看到「动手改」只会浪费步数去试它没有的工具。"""
+    from agents_dev.store.db import init_schema
+
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path))
+    conn = open_db(tmp_path / "index.db")
+    init_schema(conn)
+    registry.register(find_symbol_spec(tmp_path, conn))
+    assert "信息够了就动手改" not in build_workflow(registry)
+
+    registry.register(replace_lines_spec(tmp_path, PendingChanges(tmp_path)))
+    assert "信息够了就动手改" in build_workflow(registry)
 
 
 def test_只读角色看不到写工具(tmp_path: Path) -> None:

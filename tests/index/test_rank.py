@@ -1,7 +1,12 @@
 from pathlib import Path
 
 from agents_dev.index.indexer import index_project
-from agents_dev.index.rank import extract_keywords, prefetch, rank_files
+from agents_dev.index.rank import (
+    extract_keywords,
+    prefetch,
+    prefetch_contents,
+    rank_files,
+)
 from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.store.db import init_schema, open_db
 
@@ -75,3 +80,41 @@ def test_无关键词时预取返回空串(tmp_path: Path) -> None:
     assert prefetch(conn, "。。。", OfflineTokenCounter(), 300) == ""
     conn.close()
 
+
+def test_内容预取给出文件正文(tmp_path: Path) -> None:
+    """符号表只说「有什么」，正文才说「怎么写的」。
+
+    实测本地 7B 只有符号表时会一直查、始终不读文件；给了正文它一轮就能改对。
+    """
+    conn = _project(tmp_path)
+    text = prefetch_contents(
+        conn, tmp_path, "修复 parse_config", OfflineTokenCounter()
+    )
+    assert "parser.py" in text
+    assert "def parse_config(path):" in text
+    assert "pass" in text
+    conn.close()
+
+
+def test_内容预取跳过过大的文件(tmp_path: Path) -> None:
+    """大文件本来就该用 read_file 按行取，不能整个塞进上下文。"""
+    (tmp_path / "huge.py").write_text(
+        "def target():\n    pass\n" + "# 填充\n" * 4000, encoding="utf-8"
+    )
+    conn = _project(tmp_path)
+    text = prefetch_contents(
+        conn, tmp_path, "修复 target", OfflineTokenCounter(), max_files=1
+    )
+    assert text == ""
+    conn.close()
+
+
+def test_内容预取受总数上限约束(tmp_path: Path) -> None:
+    conn = _project(tmp_path)
+    counter = OfflineTokenCounter()
+    full = prefetch_contents(conn, tmp_path, "parse_config render", counter)
+    tiny = prefetch_contents(
+        conn, tmp_path, "parse_config render", counter, max_tokens=5
+    )
+    assert len(tiny) < len(full)
+    conn.close()

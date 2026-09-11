@@ -7,6 +7,7 @@
 
 import re
 import sqlite3
+from pathlib import Path
 
 from agents_dev.index.repo_map import render_file_symbols
 from agents_dev.llm.tokenizer import TokenCounter
@@ -24,6 +25,12 @@ EXACT_HIT = 10
 PARTIAL_HIT = 4
 PATH_HIT = 3
 DEFAULT_LIMIT = 5
+
+# 内容预取的额度。给得比符号表大方，但仍然是「取最相关的少数几个」，
+# 不是「把项目塞进来」：预算用完就停，大文件依旧留给 read_file 按行取。
+CONTENT_BUDGET = 1000
+CONTENT_MAX_FILES = 2
+CONTENT_FILE_CAP = 600
 
 
 def extract_keywords(text: str) -> list[str]:
@@ -90,3 +97,44 @@ def prefetch(
         remaining -= cost
     return "\n".join(blocks)
 
+
+def prefetch_contents(
+    conn: sqlite3.Connection,
+    root: Path,
+    task_text: str,
+    counter: TokenCounter,
+    max_tokens: int = CONTENT_BUDGET,
+    max_files: int = CONTENT_MAX_FILES,
+) -> str:
+    """把最相关文件的**当前内容**也放进去。
+
+    只给符号表的话，模型知道「有什么」，却看不到「怎么写的」。实测本地
+    7B 在这套提示词下会一直查符号、整条轨迹里一次 read_file 都不调用，
+    12 步烧完也没提出过一次改动；同样的模型、同样的任务，把文件内容直接
+    给它，一轮就能改对（回归集 2/10 与 10/10 的差别就在这里）。
+
+    取用范围是有限的：只取排在最前面的少数几个文件，单个文件超过
+    CONTENT_FILE_CAP 就跳过——那种文件本来就该用 read_file 按行取。
+    """
+    files = rank_files(conn, extract_keywords(task_text), limit=max_files)
+    blocks: list[str] = []
+    remaining = max_tokens
+    for path in files:
+        try:
+            text = (root / path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        body = text.rstrip("\n")
+        if not body:
+            continue
+        block = f"{path}\n{body}"
+        cost = counter.count(block)
+        if cost > min(remaining, CONTENT_FILE_CAP):
+            continue
+        blocks.append(block)
+        remaining -= cost
+        if remaining <= 0:
+            break
+    if not blocks:
+        return ""
+    return "以下是相关文件当前的内容：\n\n" + "\n\n".join(blocks)

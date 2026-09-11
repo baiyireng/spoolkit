@@ -15,6 +15,7 @@ from agents_dev.agent.loop import AgentLoop
 from agents_dev.config import Config
 from agents_dev.index.indexer import index_project
 from agents_dev.index.rank import prefetch as prefetch_text
+from agents_dev.index.rank import prefetch_contents
 from agents_dev.index.tools import file_symbols_spec, find_callers_spec, find_symbol_spec
 from agents_dev.llm.fake import FakeModel
 from agents_dev.llm.gateway import ModelGateway
@@ -32,7 +33,11 @@ from agents_dev.tools.grant import Grants
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.search import search_code_spec
 
+# 符号表给人「有哪些东西」，内容给人「它是怎么写的」。两块都要：
+# 只有符号表时，模型会一直查、始终不下手（实测本地 7B 的整条轨迹里
+# 连一次 read_file 都没有）。
 PREFETCH_BUDGET = 400
+PREFETCH_CONTENT_BUDGET = 1000
 
 
 @dataclass
@@ -109,7 +114,15 @@ def attach_index(project_root: Path, registry: ToolRegistry, tokenizer):
     registry.register(find_symbol_spec(project_root, conn))
     registry.register(file_symbols_spec(conn))
     registry.register(find_callers_spec(conn))
-    return lambda goal: prefetch_text(conn, goal, tokenizer, PREFETCH_BUDGET)
+
+    def prefetch_for(goal: str) -> str:
+        symbols = prefetch_text(conn, goal, tokenizer, PREFETCH_BUDGET)
+        contents = prefetch_contents(
+            conn, project_root, goal, tokenizer, PREFETCH_CONTENT_BUDGET
+        )
+        return "\n\n".join(part for part in (symbols, contents) if part)
+
+    return prefetch_for
 
 
 def assemble_loop(
