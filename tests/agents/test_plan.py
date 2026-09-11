@@ -69,6 +69,28 @@ def test_全部完成后没有待办() -> None:
     assert plan.next_pending() is None
 
 
+def test_失败会阻塞计划而不是被跳过() -> None:
+    plan = parse_plan(_payload(("甲", "a"), ("乙", "b")), "目标")
+    plan.mark(1, FAILED, note="测试没过")
+    blocked = plan.blocked_by()
+    assert blocked is not None
+    assert blocked.index == 1
+
+
+def test_没有失败时不被阻塞() -> None:
+    plan = parse_plan(_payload(("甲", "a")), "目标")
+    plan.mark(1, DONE)
+    assert plan.blocked_by() is None
+
+
+def test_失败发生在中间时后续步骤仍待办但计划被阻塞() -> None:
+    plan = parse_plan(_payload(("甲", "a"), ("乙", "b"), ("丙", "c")), "目标")
+    plan.mark(1, DONE)
+    plan.mark(2, FAILED)
+    assert plan.next_pending().index == 3
+    assert plan.blocked_by().index == 2
+
+
 def test_进度可读() -> None:
     plan = parse_plan(_payload(("甲", "a"), ("乙", "b")), "目标")
     plan.mark(1, DONE)
@@ -136,4 +158,3 @@ def test_计划是可变对象但步骤状态可追踪() -> None:
     step = PlanStep(index=1, goal="甲", acceptance="a")
     assert step.status == PENDING
     assert step.finished is False
-

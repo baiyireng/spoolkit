@@ -9,6 +9,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Sequence
 
 from agents_dev.agent.loop import AgentLoop
 from agents_dev.agents.dispatcher import plan_dispatch, run_delegated
@@ -49,6 +50,15 @@ from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.search import search_code_spec
 from agents_dev.cli.approval import apply_with_audit, review_and_apply
+from agents_dev.cli.settle import settle
+from agents_dev.policy import (
+    DEFAULT_POLICY,
+    POLICIES,
+    describe as describe_policy,
+    load_policy,
+    policy_path,
+    save_policy,
+)
 
 PREFETCH_BUDGET = 400
 
@@ -72,6 +82,39 @@ def resolve_window(gateway: ModelGateway, requested: int) -> int:
     if not detected:
         return DEFAULT_WINDOW
     return min(detected, MAX_AUTO_WINDOW)
+
+
+def resolve_scope(
+    args: argparse.Namespace,
+    step_scope: Sequence[str] = (),
+    default: Sequence[str] = ("**",),
+) -> tuple[str, ...]:
+    """决定本次运行允许自动落盘的范围。
+
+    优先级：命令行的 --scope > 计划步骤声明的 scope > default。
+
+    default 必须按场景给：非计划运行由用户显式开启 auto，全项目是有意选择；
+    而计划步骤**没声明范围**时应当回退成空——空范围意味着不许自动落盘，
+    会走逐项确认。把「没声明」当成「全都允许」是一次危险的默认值。
+    """
+    if args.scope:
+        return tuple(part.strip() for part in args.scope.split(",") if part.strip())
+    if step_scope:
+        return tuple(step_scope)
+    return tuple(default)
+
+
+def resolve_policy(args: argparse.Namespace, project_root: Path) -> str:
+    """命令行指定的策略优先，否则用已保存的。"""
+    if args.policy:
+        return args.policy
+    return load_policy(policy_path(project_root))
+
+
+def report_policy(policy: str, scope: Sequence[str]) -> None:
+    print(f"授权策略：{policy} —— {describe_policy(policy)}")
+    if policy == "auto":
+        print(f"自动落盘范围：{'、'.join(scope)}")
 
 
 def _attach_index(project_root: Path, registry: ToolRegistry, tokenizer):
@@ -198,6 +241,7 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.plan:
         return _advance_plan(args, project_root, gateway)
+    report_policy(resolve_policy(args, project_root), resolve_scope(args))
 
     memory = None
     distiller = None
@@ -237,8 +281,11 @@ def _run(args: argparse.Namespace) -> int:
         print(delegated.reviewer_final)
         if len(pending):
             print("---")
-            review_and_apply(
-                pending, baseline_path=project_root / ".agent" / "last_change.json"
+            settle(
+                pending,
+                resolve_policy(args, project_root),
+                resolve_scope(args),
+                baseline_path=project_root / ".agent" / "last_change.json",
             )
         return 0
     if not args.no_memory:
@@ -269,7 +316,12 @@ def _run(args: argparse.Namespace) -> int:
 
     if len(pending):
         print("---")
-        review_and_apply(pending, baseline_path=project_root / ".agent" / "last_change.json")
+        settle(
+            pending,
+            resolve_policy(args, project_root),
+            resolve_scope(args),
+            baseline_path=project_root / ".agent" / "last_change.json",
+        )
     return 0 if result.finished else 1
 
 
@@ -287,6 +339,26 @@ def _revert(args: argparse.Namespace) -> int:
     for path in touched:
         print(f"已恢复: {path}")
     print(f"共恢复 {len(touched)} 个文件。")
+    return 0
+
+
+def _policy_command(args: argparse.Namespace) -> int:
+    """查看或调整授权策略。调整会持久化，下一轮自动沿用。"""
+    project_root = Path(args.root).resolve()
+    path = policy_path(project_root)
+
+    if args.new_policy:
+        save_policy(path, args.new_policy)
+        print(f"授权策略已设为 {args.new_policy}：{describe_policy(args.new_policy)}")
+        print(f"已保存到 {path}，下一轮起生效。")
+        return 0
+
+    current = load_policy(path)
+    print(f"当前授权策略：{current}")
+    print(f"  {describe_policy(current)}")
+    print("可选：")
+    for name in POLICIES:
+        print(f"  {name}: {describe_policy(name)}")
     return 0
 
 
@@ -331,7 +403,24 @@ def _advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
         print("\n计划已全部完成。")
         return 0
 
+    blocked = plan.blocked_by()
+    if blocked is not None:
+        print(plan.render())
+        print(
+            f"\n计划被第 {blocked.index} 步阻塞：{blocked.goal}\n"
+            f"原因：{blocked.note or '未记录'}\n"
+            "先处理它，或者用 `plan --goal` 重新生成计划。",
+            file=sys.stderr,
+        )
+        return 1
+
     print(f"执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
+    # 打印的是**这一步实际生效**的范围，不是运行级默认值：
+    # 安全边界的输出报错比不输出更糟——看到「**」会以为整个项目都放行了。
+    report_policy(
+        resolve_policy(args, project_root),
+        resolve_scope(args, step.scope, default=()),
+    )
     window = resolve_window(gateway, args.window)
     pending = PendingChanges(project_root)
     memory = None if args.no_memory else build_memory(project_root, window)
@@ -356,21 +445,12 @@ def _advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
 
     if len(pending):
         baseline = project_root / ".agent" / "last_change.json"
-        if not args.auto_apply:
-            review_and_apply(pending, baseline_path=baseline)
-        else:
-            blocked = out_of_scope(
-                [change.path for change in pending.items()], step.scope
-            )
-            if blocked:
-                # 越界就退回逐项确认。计划级授权只覆盖它声明的范围，
-                # 不等于「这次运行整体被信任」。
-                print(
-                    "以下改动超出本步声明范围，需要逐项确认：" + "、".join(blocked)
-                )
-                review_and_apply(pending, baseline_path=baseline)
-            else:
-                apply_with_audit(pending, baseline_path=baseline)
+        settle(
+            pending,
+            resolve_policy(args, project_root),
+            resolve_scope(args, step.scope, default=()),
+            baseline_path=baseline,
+        )
     print(plan.render())
     return 0 if result.finished else 1
 
@@ -416,9 +496,15 @@ def main(argv: list[str] | None = None) -> int:
         "--plan", action="store_true", help="执行计划中的下一个待办步骤"
     )
     run_parser.add_argument(
-        "--auto-apply",
-        action="store_true",
-        help="配合 --plan：改动落在该步声明的 scope 内时自动落盘，越界仍会询问",
+        "--policy",
+        choices=POLICIES,
+        default="",
+        help="本次运行的授权策略；留空则用已保存的设置",
+    )
+    run_parser.add_argument(
+        "--scope",
+        default="",
+        help="auto 策略下允许自动落盘的路径，逗号分隔；留空则用计划声明的范围",
     )
     run_parser.set_defaults(func=_run)
 
@@ -435,6 +521,11 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--root", default=".")
     plan_parser.add_argument("--limit", type=int, default=10)
     plan_parser.set_defaults(func=_make_plan)
+
+    policy_parser = sub.add_parser("policy", help="查看或调整授权策略")
+    policy_parser.add_argument("--set", dest="new_policy", choices=POLICIES, default="")
+    policy_parser.add_argument("--root", default=".")
+    policy_parser.set_defaults(func=_policy_command)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

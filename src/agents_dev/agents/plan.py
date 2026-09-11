@@ -88,6 +88,14 @@ class Plan:
     def next_pending(self) -> PlanStep | None:
         return next((step for step in self.steps if step.status == PENDING), None)
 
+    def blocked_by(self) -> PlanStep | None:
+        """找出第一处失败。计划必须在失败处停住。
+
+        把失败当成「已处理」直接跳过，后面的步骤就是在坏地基上继续盖——
+        而且表面上进度还在涨，看起来一切正常。
+        """
+        return next((step for step in self.steps if step.status == FAILED), None)
+
     def progress(self) -> str:
         done = sum(1 for step in self.steps if step.status == DONE)
         return f"{done}/{len(self.steps)} 步已完成"
