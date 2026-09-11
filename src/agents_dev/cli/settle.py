@@ -27,6 +27,7 @@ def settle(
     scope: Sequence[str],
     baseline_path: Path | None = None,
     ask: Callable[[str], str] = input,
+    non_interactive: bool = False,
 ) -> tuple[str, list[str]]:
     """按策略处理待落盘改动，返回（结果动作，已写入路径）。"""
     if len(pending) == 0:
@@ -46,6 +47,14 @@ def settle(
         # 不等于「这次运行整体被信任」。
         print("以下改动超出允许范围，需要逐项确认：" + "、".join(blocked))
 
+    # 无人值守时不能弹问题——没有人会回答。此时越界一律拒绝，
+    # 并把原因说清楚，而不是静默丢弃。
+    if non_interactive:
+        _show(pending)
+        pending.discard()
+        print("无人值守运行，且改动不在授权范围内，已拒绝。")
+        return DENIED, []
+
     applied, written = review_and_apply(
         pending, ask=ask, baseline_path=baseline_path
     )
@@ -55,4 +64,3 @@ def settle(
 def _show(pending: PendingChanges) -> None:
     for change in pending.items():
         print(change.diff)
-

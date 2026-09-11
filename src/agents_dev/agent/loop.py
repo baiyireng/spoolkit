@@ -76,6 +76,10 @@ def build_workflow(registry: ToolRegistry) -> str:
             "看到失败要读报错再改，不要凭猜测下结论。"
         )
         lines.append(
+            "- 跑测试优先只跑相关文件（如 python -m pytest scratch_lab -q），"
+            "全量套件慢；命令超时时调大 timeout 再试，不要用同样的超时反复重试。"
+        )
+        lines.append(
             "- 缺依赖时用 run_command 执行 uv add <包名>；不要用 pip——"
             "它会绕过审核，且改动不留下可复查的痕迹。"
         )

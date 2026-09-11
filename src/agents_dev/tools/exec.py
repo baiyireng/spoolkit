@@ -28,7 +28,10 @@ from agents_dev.paths import resolve_within
 from agents_dev.tools.trial import trial_workspace
 from agents_dev.tools.types import ToolResult, ToolSpec
 
-DEFAULT_TIMEOUT = 60
+# 60 秒对真实测试套件是不够的：这个项目自己的套件跑一次就要十几秒，
+# 加上试跑副本的开销很容易翻倍。超时太小会逼着模型去瞎摸索，
+# 把步数预算浪费在恢复上，而不是任务本身。
+DEFAULT_TIMEOUT = 180
 MAX_TIMEOUT = 600
 MAX_OUTPUT_CHARS = 4000
 
@@ -230,7 +233,8 @@ def run_command_spec(root: Path, pending=None) -> ToolSpec:
         description=(
             "在项目内执行命令并返回输出；支持 pytest、python 模块或脚本、只读 git、"
             "以及 uv add/remove/sync/lock（依赖安装只走声明式，会改动 pyproject.toml）。"
-            "若你刚提出过尚未落盘的改动，会在试跑副本上执行，测到的就是改动后的代码"
+            "若你刚提出过尚未落盘的改动，会在试跑副本上执行，测到的就是改动后的代码。"
+            "跑测试优先只跑相关文件，全量套件慢且容易超时；确需更长时间就调大 timeout"
         ),
         parameters={
             "type": "object",

@@ -77,3 +77,24 @@ def test_询问策略被拒时丢弃(tmp_path: Path) -> None:
     pending = _stage(tmp_path)
     assert settle(pending, ASK, (), ask=lambda _: "n")[0] == DECLINED
 
+
+def test_无人值守时越界直接拒绝而不是询问(tmp_path: Path) -> None:
+    pending = _stage(tmp_path, "docs/b.md")
+    action, written = settle(
+        pending,
+        AUTO,
+        ("src",),
+        ask=lambda _: "y",
+        non_interactive=True,
+    )
+    assert action == DENIED
+    assert written == []
+    assert not (tmp_path / "docs" / "b.md").exists()
+
+
+def test_无人值守但范围内仍然自动落盘(tmp_path: Path) -> None:
+    pending = _stage(tmp_path)
+    action, _ = settle(
+        pending, AUTO, ("src",), ask=lambda _: "n", non_interactive=True
+    )
+    assert action == AUTO_APPLIED

@@ -226,6 +226,43 @@ def out_of_scope(paths: Sequence[str], scope: Sequence[str]) -> list[str]:
     return [path for path in paths if not path_in_scope(path, scope)]
 
 
+def _literal_prefix(pattern: str) -> str:
+    """取模式里第一个通配符之前的字面前缀。"""
+    for index, char in enumerate(pattern):
+        if char in "*?[":
+            return pattern[:index]
+    return pattern
+
+
+def narrow_scope(
+    granted: Sequence[str], proposed: Sequence[str]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """把模型提出的范围收窄到你授予的范围之内。
+
+    返回（生效范围，被拒绝的范围）。
+
+    授权必须来自外部：**如果模型既能提范围又能批范围，它就自己给自己发了许可证。**
+    所以这里只做「收窄」，不做「扩权」——模型可以把一步限制在
+    `scratch_lab/parser.py`，但不能把一步放宽到整个项目。
+
+    判定用字面前缀比较，保守但可解释：前缀不在你授予的范围内就拒绝。
+    这不是完整的 glob 包含判定（那在一般情况下不可判定），但方向是安全的——
+    拿不准就拒绝，而不是拿不准就放行。
+    """
+    allowed: list[str] = []
+    rejected: list[str] = []
+    for pattern in proposed:
+        if not granted:
+            rejected.append(pattern)
+            continue
+        prefix = _literal_prefix(pattern)
+        if any(prefix.startswith(_literal_prefix(item)) for item in granted):
+            allowed.append(pattern)
+        else:
+            rejected.append(pattern)
+    return tuple(allowed), tuple(rejected)
+
+
 def render_step_prompt(plan: Plan, step: PlanStep) -> str:
     """把某一步渲染成交给主循环的任务，并带上它在整体里的位置。
 
