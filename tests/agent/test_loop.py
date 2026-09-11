@@ -76,7 +76,7 @@ def test_解析失败时把原因回灌并继续(tmp_path: Path) -> None:
     assert any("JSON" in m.content for m in second.messages)
 
 
-def test_状态块被应用并落盘(tmp_path: Path) -> None:
+def test_状态块被应用且完成后清理检查点(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("x\n", encoding="utf-8")
     loop = _build(
         tmp_path,
@@ -91,7 +91,9 @@ def test_状态块被应用并落盘(tmp_path: Path) -> None:
     )
     result = loop.run("分析一下")
     assert result.state.current == "正在分析"
-    assert (tmp_path / ".agent" / "tasks" / "task.json").exists()
+    # 检查点只在任务进行中保留；成功后它属于过程状态，应当被清掉，
+    # 否则下一次运行会误以为还有活没干完。
+    assert not (tmp_path / ".agent" / "tasks" / "task.json").exists()
 
 
 def test_达到步数上限会停止(tmp_path: Path) -> None:

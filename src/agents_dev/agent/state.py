@@ -83,3 +83,12 @@ def load_state(path: Path) -> TaskState | None:
         return None
     return TaskState(**json.loads(path.read_text(encoding="utf-8")))
 
+
+def clear_state(path: Path) -> None:
+    """任务成功结束后清掉检查点。
+
+    留着它会让下一次运行误以为「有活没干完」。检查点是过程状态，不是结果——
+    结果已经沉淀成事件和记忆了。
+    """
+    path.unlink(missing_ok=True)
+

@@ -12,7 +12,7 @@ from agents_dev.agent.state import TaskState
 from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.memory.archive import ArchiveResult, archive_task
 from agents_dev.memory.hot import hot_budget, read_hot, render_hot, trim_to_budget
-from agents_dev.memory.store import search_memories
+from agents_dev.memory.store import search_episodes, search_memories
 
 
 class MemorySession:
@@ -45,14 +45,20 @@ class MemorySession:
         return render_hot(kept).strip()
 
     def recall(self, query: str, limit: int = 5) -> str:
-        """按关键词从冷记忆里召回，附来源编号便于追溯。"""
-        hits = search_memories(self._conn, query)[:limit]
-        if not hits:
-            return ""
-        return "\n".join(
+        """按关键词从冷记忆与历史事件里召回，附来源便于追溯。"""
+        lines = [
             f"[{item.kind}] {item.text}（来源 {item.source or '未标注'}）"
-            for item in hits
+            for item in search_memories(self._conn, query)[:limit]
+        ]
+
+        # 事件表以前只写不读，等于几百条历史躺在库里没人用。
+        # 它回答的是「上次这类事做到哪、结果如何」，和记忆是互补的。
+        events = search_episodes(self._conn, query, limit=limit)
+        lines.extend(
+            f"[事件] {row['task']} —— {row['summary']}（结果 {row['outcome']}）"
+            for row in events
         )
+        return "\n".join(lines)
 
     def archive(
         self,
@@ -71,4 +77,3 @@ class MemorySession:
             outcome=outcome,
             promote=promote,
         )
-

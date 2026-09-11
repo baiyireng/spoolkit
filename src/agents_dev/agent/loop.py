@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from agents_dev.agent.protocol import ParseFailure, build_turn_schema, parse_turn
-from agents_dev.agent.state import TaskState, save_state
+from agents_dev.agent.state import TaskState, clear_state, load_state, save_state
 from agents_dev.config import Config
 from agents_dev.context.assembler import Assembler
 from agents_dev.context.budget import Budget
@@ -172,10 +172,34 @@ class AgentLoop:
             sections.append(Section(name="retrieval", text=feedback, priority=40))
         return assembler.assemble(sections, recent_turns=history[-MAX_RECENT_TURNS:])
 
-    def run(self, goal: str, task_id: str = "task") -> LoopResult:
+    def run(
+        self, goal: str, task_id: str = "task", resume: bool = False
+    ) -> LoopResult:
         """运行任务直到给出最终答复或达到步数上限。"""
-        state = TaskState(task_id=task_id, goal=goal)
-        history: list[Message] = [Message(role="user", content=goal)]
+        checkpoint = self.config.task_path(task_id)
+
+        # 恢复未完成的检查点。之前这里只写不读，等于「崩溃可恢复」这句
+        # 承诺从未兑现——跑到一半中断，下次只能从零开始。
+        state = load_state(checkpoint) if resume else None
+        resumed = state is not None
+        if state is None:
+            state = TaskState(task_id=task_id, goal=goal)
+        goal = state.goal
+
+        # 续跑给的是**新增**预算，不是沿用已经耗尽的那份。
+        # 否则一个撞过上限的任务永远续不动——检查点里的步数已经等于上限了。
+        limit = state.step + self.config.max_steps if resumed else self.config.max_steps
+
+        history: list[Message] = [
+            Message(
+                role="user",
+                content=(
+                    f"继续之前未完成的任务（已进行 {state.step} 步）。"
+                    if resumed
+                    else goal
+                ),
+            )
+        ]
         feedback: str | None = None
         resets = 0
         trace: list[str] = []
@@ -185,7 +209,7 @@ class AgentLoop:
         prefetched = self.prefetch(goal) if self.prefetch is not None else ""
         hot = self.memory.hot_text() if self.memory is not None else ""
 
-        while state.step < self.config.max_steps:
+        while state.step < limit:
             assembled = self._assemble(state, history, feedback, prefetched, hot)
 
             # 预算守卫：软触发整理，硬触发重置。依据需求体积而非装入量。
@@ -217,6 +241,9 @@ class AgentLoop:
                 history.append(Message(role="assistant", content=response.text))
                 history.append(Message(role="user", content=feedback))
                 state.step_forward()
+                # 解析失败也要落盘：步数确实推进了，不写的话这类失败
+                # 会连一个可续跑的检查点都不留下。
+                save_state(state, checkpoint)
                 snippet = response.text.strip().replace("\n", " ")[:160]
                 trace.append(f"step{state.step}: 解析失败 - {turn.reason} | 原始: {snippet}")
                 continue
@@ -239,11 +266,12 @@ class AgentLoop:
                 history.append(Message(role="tool", content="\n".join(outputs)))
 
             state.step_forward()
-            save_state(state, self.config.task_path(task_id))
+            save_state(state, checkpoint)
 
             if turn.done:
                 trace.append(f"step{state.step}: 完成")
                 self._archive(state, "success", trace, turn.final or "")
+                clear_state(checkpoint)
                 return LoopResult(
                     True,
                     turn.final or "",

@@ -12,6 +12,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 MEMORY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS memory (
@@ -39,6 +40,15 @@ CREATE TABLE IF NOT EXISTS episode (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text);
+
+CREATE TABLE IF NOT EXISTS session (
+    id            TEXT PRIMARY KEY,
+    project_root  TEXT NOT NULL,
+    model         TEXT NOT NULL DEFAULT '',
+    context_limit INTEGER NOT NULL DEFAULT 0,
+    created_at    REAL NOT NULL,
+    last_active   REAL NOT NULL
+);
 
 CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory(kind, scope);
 """
@@ -171,3 +181,81 @@ def add_episode(
     conn.commit()
     return cursor.lastrowid
 
+
+def search_episodes(
+    conn: sqlite3.Connection, query: str, limit: int = 5
+) -> list[sqlite3.Row]:
+    """按关键词检索历史事件。
+
+    这里用 LIKE 而不是 FTS5：事件表规模小，而且 LIKE 对中文天然是子串匹配，
+    不需要像 FTS5 那样先把中文逐字拆开。简单方案在这个规模上更可靠。
+    """
+    if not query.strip():
+        return []
+    needle = f"%{query.strip()}%"
+    return conn.execute(
+        "SELECT task, summary, outcome, created_at FROM episode"
+        " WHERE task LIKE ? OR summary LIKE ?"
+        " ORDER BY id DESC LIMIT ?",
+        (needle, needle, limit),
+    ).fetchall()
+
+
+def record_session(
+    conn: sqlite3.Connection,
+    session_id: str,
+    project_root: str,
+    model: str = "",
+    context_limit: int = 0,
+) -> None:
+    """登记会话，并在首次创建时记下它绑定到哪个工作区。
+
+    绑定要显式记录，不能只靠「数据碰巧放在这个目录下」。一旦以后把记忆
+    挪到共享存储，路径约定就失效了，而那时才发现没有任何东西知道
+    某个会话属于哪个工作区。
+    """
+    now = time.time()
+    row = conn.execute(
+        "SELECT project_root FROM session WHERE id = ?", (session_id,)
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO session"
+            "(id, project_root, model, context_limit, created_at, last_active)"
+            " VALUES (?,?,?,?,?,?)",
+            (session_id, project_root, model, context_limit, now, now),
+        )
+    else:
+        conn.execute(
+            "UPDATE session SET model = ?, context_limit = ?, last_active = ?"
+            " WHERE id = ?",
+            (model, context_limit, now, session_id),
+        )
+    conn.commit()
+
+
+def get_session(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row | None:
+    """读取会话记录。"""
+    return conn.execute(
+        "SELECT * FROM session WHERE id = ?", (session_id,)
+    ).fetchone()
+
+
+def check_binding(
+    conn: sqlite3.Connection, session_id: str, project_root: str
+) -> str | None:
+    """会话绑定的工作区与当前工作区不一致时给出警告说明。
+
+    这不是安全问题（记忆本来就按工作区分开存），而是防止搞混：
+    同一个会话名在两个工作区里跑，事件会混进同一条 session 记录，
+    「上次做到哪」就不可信了。
+    """
+    row = get_session(conn, session_id)
+    if row is None:
+        return None
+    if Path(row["project_root"]) == Path(project_root):
+        return None
+    return (
+        f"会话 {session_id} 之前绑定在 {row['project_root']}，"
+        f"当前工作区是 {project_root}。建议换个会话名，否则事件会混在一起。"
+    )

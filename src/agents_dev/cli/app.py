@@ -41,6 +41,7 @@ from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.memory.distill import distill
 from agents_dev.memory.session import MemorySession
 from agents_dev.memory.store import init_memory_schema
+from agents_dev.memory.store import check_binding, record_session
 from agents_dev.memory.tools import recall_spec
 from agents_dev.net import system_proxy
 from agents_dev.store.db import init_schema, open_db
@@ -196,6 +197,22 @@ def build_memory(project_root: Path, window: int, session_id: str = "cli"):
     )
 
 
+def open_memory(
+    project_root: Path, window: int, session_id: str, model: str = ""
+) -> MemorySession:
+    """建立记忆会话，并在登记前检查工作区绑定。
+
+    检查必须在登记之前：登记会写入当前工作区，先登记就把
+    「上次绑定在哪」这个信息当场覆盖掉了，检查也就永远查不出问题。
+    """
+    memory = build_memory(project_root, window, session_id)
+    warning = check_binding(memory._conn, session_id, str(project_root))
+    if warning:
+        print(f"提示：{warning}")
+    record_session(memory._conn, session_id, str(project_root), model, window)
+    return memory
+
+
 def build_approver(project_root: Path):
     """构造命令授权询问器。返回 (approver, grants)。
 
@@ -317,7 +334,7 @@ def _run(args: argparse.Namespace) -> int:
             )
         return 0
     if not args.no_memory:
-        memory = build_memory(project_root, window)
+        memory = open_memory(project_root, window, args.session)
         registry.register(recall_spec(memory))
         # 假模型没有多余脚本条目可分给归纳调用，因此只在真实供应商下启用。
         if args.provider != "fake":
@@ -335,7 +352,13 @@ def _run(args: argparse.Namespace) -> int:
         approver=approver,
         grants=grants,
     )
-    result = loop.run(args.goal)
+    checkpoint = loop.config.task_path("task")
+    if checkpoint.exists() and not args.resume:
+        print(
+            f"发现未完成的检查点（{checkpoint}）。"
+            "加 --resume 可以接着做，不加则从零开始。"
+        )
+    result = loop.run(args.goal, resume=args.resume)
 
     for line in result.trace:
         print(line)
@@ -434,7 +457,11 @@ def _execute_step(
     report_policy(resolve_policy(args, project_root), scope)
     window = resolve_window(gateway, args.window)
     pending = PendingChanges(project_root)
-    memory = None if args.no_memory else build_memory(project_root, window)
+    memory = (
+        None
+        if args.no_memory
+        else open_memory(project_root, window, getattr(args, "session", "cli"))
+    )
     loop = assemble_loop(
         project_root,
         gateway,
@@ -653,6 +680,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--plan", action="store_true", help="执行计划中的下一个待办步骤"
+    )
+    run_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="接着上次未完成的检查点继续，而不是从零开始",
+    )
+    run_parser.add_argument(
+        "--session",
+        default="cli",
+        help="会话名。不同时段/不同目的的活可以用不同会话，记忆分开记",
     )
     run_parser.add_argument(
         "--autonomous",

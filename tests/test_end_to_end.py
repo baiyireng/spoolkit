@@ -31,7 +31,8 @@ def test_端到端完成一次读文件并回答(tmp_path: Path) -> None:
     result = build_loop(tmp_path, script=script, window=4096).run("config.py 里的超时是多少")
     assert result.finished is True
     assert "30" in result.final
-    assert (tmp_path / ".agent" / "tasks" / "task.json").exists()
+    # 检查点只在任务进行中保留；成功后清掉，避免下次误以为还有活没干完
+    assert not (tmp_path / ".agent" / "tasks" / "task.json").exists()
 
 
 def test_命令行读取脚本文件并运行(tmp_path: Path) -> None:
