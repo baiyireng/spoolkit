@@ -19,7 +19,9 @@ def test_计划范围优先于默认值() -> None:
 
 
 def test_非计划运行默认覆盖全项目() -> None:
-    assert resolve_scope(_args()) == ("**",)
+    # 默认回退成空：策略是持久化的，把某一次的 auto 放大成
+    # 「此后每一次都免确认改整个项目」不是用户的持续选择。
+    assert resolve_scope(_args()) == ()
 
 
 def test_计划步骤未声明范围时回退成空() -> None:
@@ -47,4 +49,3 @@ def test_策略命令行优先于已保存(tmp_path: Path) -> None:
 def test_未指定策略时用已保存的(tmp_path: Path) -> None:
     save_policy(policy_path(tmp_path), AUTO)
     assert resolve_policy(_args(), tmp_path) == AUTO
-

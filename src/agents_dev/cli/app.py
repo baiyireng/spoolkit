@@ -42,6 +42,13 @@ from agents_dev.memory.distill import distill
 from agents_dev.memory.session import MemorySession
 from agents_dev.memory.store import init_memory_schema
 from agents_dev.memory.store import check_binding, record_session
+from agents_dev.memory.transcript import (
+    ASSISTANT,
+    USER,
+    recent_messages,
+    record_message,
+    render_transcript,
+)
 from agents_dev.memory.tools import recall_spec
 from agents_dev.net import system_proxy
 from agents_dev.store.db import init_schema, open_db
@@ -90,15 +97,18 @@ def resolve_window(gateway: ModelGateway, requested: int) -> int:
 def resolve_scope(
     args: argparse.Namespace,
     step_scope: Sequence[str] = (),
-    default: Sequence[str] = ("**",),
+    default: Sequence[str] = (),
 ) -> tuple[str, ...]:
     """决定本次运行允许自动落盘的范围。
 
     优先级：命令行的 --scope > 计划步骤声明的 scope > default。
 
-    default 必须按场景给：非计划运行由用户显式开启 auto，全项目是有意选择；
-    而计划步骤**没声明范围**时应当回退成空——空范围意味着不许自动落盘，
-    会走逐项确认。把「没声明」当成「全都允许」是一次危险的默认值。
+    默认回退成空而不是全项目。「没声明范围」应该意味着「不许自动落盘」，
+    会走逐项确认；把「没声明」当成「全都允许」是危险的默认值。
+
+    更实际的原因是：策略是持久化的。一旦把 auto 存下来，之后每一次
+    非计划运行都会变成**整个项目免确认**——那不是用户的持续选择，
+    只是他某一次的选择被默默放大了。要走自动就显式给 --scope。
     """
     if args.scope:
         return tuple(part.strip() for part in args.scope.split(",") if part.strip())
@@ -117,7 +127,11 @@ def resolve_policy(args: argparse.Namespace, project_root: Path) -> str:
 def report_policy(policy: str, scope: Sequence[str]) -> None:
     print(f"授权策略：{policy} —— {describe_policy(policy)}")
     if policy == "auto":
-        print(f"自动落盘范围：{'、'.join(scope)}")
+        print(
+            f"自动落盘范围：{'、'.join(scope)}"
+            if scope
+            else "自动落盘范围：（未指定 --scope，改动仍会逐项确认）"
+        )
 
 
 def _attach_index(project_root: Path, registry: ToolRegistry, tokenizer):
@@ -211,6 +225,18 @@ def open_memory(
         print(f"提示：{warning}")
     record_session(memory._conn, session_id, str(project_root), model, window)
     return memory
+
+
+def show_history(memory: MemorySession, session_id: str, limit: int) -> None:
+    """把最近几轮显示到聊天区域。
+
+    这是**给人看**的，不进入模型的上下文。两者混为一谈会得出错误结论
+    （「那就把历史塞回上下文」），而短上下文正是靠不塞历史才成立的。
+    """
+    rows = recent_messages(memory._conn, session_id, limit)
+    print("── 会话历史 ──")
+    print(render_transcript(rows))
+    print("──────────────")
 
 
 def build_approver(project_root: Path):
@@ -355,12 +381,24 @@ def _run(args: argparse.Namespace) -> int:
         grants=grants,
     )
     checkpoint = loop.config.task_path("task")
+    if memory is not None:
+        if not args.no_history:
+            show_history(memory, args.session, args.history)
+        record_message(memory._conn, args.session, USER, args.goal)
     if checkpoint.exists() and not args.resume:
         print(
             f"发现未完成的检查点（{checkpoint}）。"
             "加 --resume 可以接着做，不加则从零开始。"
         )
     result = loop.run(args.goal, resume=args.resume)
+    if memory is not None:
+        record_message(
+            memory._conn,
+            args.session,
+            ASSISTANT,
+            result.final or "（没有产出）",
+            meta=f"{result.usage()}，{'完成' if result.finished else '未完成'}",
+        )
 
     for line in result.trace:
         print(line)
@@ -697,6 +735,12 @@ def main(argv: list[str] | None = None) -> int:
         "--session",
         default="cli",
         help="会话名。不同时段/不同目的的活可以用不同会话，记忆分开记",
+    )
+    run_parser.add_argument(
+        "--history", type=int, default=6, help="启动时显示最近几轮会话记录"
+    )
+    run_parser.add_argument(
+        "--no-history", action="store_true", help="不显示会话记录"
     )
     run_parser.add_argument(
         "--autonomous",

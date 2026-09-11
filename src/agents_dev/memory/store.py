@@ -50,6 +50,17 @@ CREATE TABLE IF NOT EXISTS session (
     last_active   REAL NOT NULL
 );
 
+-- 给人看的聊天记录。和上下文是两件事：
+-- 上下文不加载历史（状态外置），但你要能回头看之前聊过什么。
+CREATE TABLE IF NOT EXISTS transcript (
+    id         INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    meta       TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory(kind, scope);
 """
 

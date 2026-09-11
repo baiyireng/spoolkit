@@ -94,6 +94,11 @@ def build_workflow(registry: ToolRegistry) -> str:
 
 MAX_RECENT_TURNS = 6
 
+# 只有这几类工具的结果算「进度」。读文件和搜索不算：它们是手段，
+# 不是产出，记进去只会把状态撑满噪声。
+PROGRESS_TOOLS = ("write_file", "replace_lines", "run_command")
+MAX_DONE_NOTES = 8
+
 
 @dataclass
 class LoopResult:
@@ -256,6 +261,7 @@ class AgentLoop:
                 outputs = []
                 for call in turn.tool_calls:
                     result = self.registry.invoke(call)
+                    self._note_progress(state, call, result)
                     status = "成功" if result.ok else "失败"
                     outputs.append(f"[{call.name}] {status}: {result.content}")
                     # 失败时把输出压成一行摘要。取第一行不行：那里是命令本身，
@@ -296,6 +302,28 @@ class AgentLoop:
             completion_tokens,
             model_calls,
         )
+
+    @staticmethod
+    def _note_progress(state: TaskState, call, result) -> None:
+        """把「确实做了的事」记进状态，而不是等模型自己填。
+
+        之前 done 一直空着——模型只填 current，从不记进度。指望它每次都
+        不忘是不现实的，而**实际发生了什么，系统自己看得见**。
+        所以由循环记录事实，模型只管判断（current / hypothesis / 已排除）。
+
+        只记有产出的动作：读文件和搜索是手段而非结果，记进去只会把
+        每轮都要注入的状态撑满噪声。
+        """
+        if call.name not in PROGRESS_TOOLS or not result.ok:
+            return
+        target = call.arguments.get("path") or " ".join(
+            call.arguments.get("command", [])[:2]
+        )
+        entry = f"{call.name} {target}".strip()
+        if entry not in state.done:
+            state.done.append(entry)
+        # 状态每轮都要注入，必须封顶；留最近的，早的先让位。
+        del state.done[:-MAX_DONE_NOTES]
 
     def _archive(
         self, state: TaskState, outcome: str, trace: list[str], final: str
