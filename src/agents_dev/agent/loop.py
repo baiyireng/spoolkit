@@ -125,6 +125,7 @@ class AgentLoop:
         distiller: Callable[[TaskState, str], list[tuple[str, str]]] | None = None,
         lessons: Callable[[str], list[tuple[int, str]]] | None = None,
         persona: str = "",
+        on_event: Callable[[str, dict], None] | None = None,
     ) -> None:
         self.gateway = gateway
         self.tokenizer = tokenizer
@@ -135,6 +136,7 @@ class AgentLoop:
         self.distiller = distiller
         self.lessons = lessons
         self.persona = persona
+        self.on_event = on_event
         self._budget = Budget(window=config.context_window)
         self._schema = build_turn_schema(registry)
 
@@ -224,6 +226,7 @@ class AgentLoop:
             assembled = self._assemble(
                 state, history, feedback, prefetched, hot, lesson_text
             )
+            self._emit("step", {"n": state.step})
 
             # 预算守卫：软触发整理，硬触发重置。依据需求体积而非装入量。
             if assembled.demand_tokens >= self._budget.hard_limit():
@@ -272,6 +275,14 @@ class AgentLoop:
                 for call in turn.tool_calls:
                     result = self.registry.invoke(call)
                     self._note_progress(state, call, result)
+                    self._emit(
+                        "tool",
+                        {
+                            "name": call.name,
+                            "ok": result.ok,
+                            "detail": " ".join(result.content.split())[:200],
+                        },
+                    )
                     status = "成功" if result.ok else "失败"
                     outputs.append(f"[{call.name}] {status}: {result.content}")
                     # 失败时把输出压成一行摘要。取第一行不行：那里是命令本身，
@@ -338,6 +349,18 @@ class AgentLoop:
             state.done.append(entry)
         # 状态每轮都要注入，必须封顶；留最近的，早的先让位。
         del state.done[:-MAX_DONE_NOTES]
+
+    def _emit(self, kind: str, data: dict) -> None:
+        """向外部观察者发一条事件。
+
+        回调异常一律吞掉：它是壳挂上来的，壳的问题不该毁掉内核的工作。
+        """
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(kind, data)
+        except Exception:
+            pass
 
     def _archive(
         self, state: TaskState, outcome: str, trace: list[str], final: str
