@@ -1,0 +1,8 @@
+{
+  "goal": "store.py 的 find_by_name 用字符串拼接拼 SQL，名字里带单引号就会出错，也留下了注入的口子。改成参数化查询。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

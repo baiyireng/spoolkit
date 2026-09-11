@@ -1,0 +1,8 @@
+{
+  "goal": "range_util.py 的 inclusive_range 文档说包含两端，实际行为不一致。让行为和文档对齐。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

@@ -1,0 +1,8 @@
+{
+  "goal": "describe 输出的顺序反了，应该是「名字=值」。label 本身没问题，要改的是调用它的地方。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

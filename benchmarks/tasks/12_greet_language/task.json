@@ -1,0 +1,8 @@
+{
+  "goal": "greet 需要支持可选的语言参数：不传时保持现在的英文输出，传 \"zh\" 时输出中文。原有的调用方式不能变。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

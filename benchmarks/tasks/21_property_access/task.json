@@ -1,0 +1,8 @@
+{
+  "goal": "User.full_name 现在是个方法，调用方必须写成 user.full_name()。改成属性，写成 user.full_name 就能拿到值。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

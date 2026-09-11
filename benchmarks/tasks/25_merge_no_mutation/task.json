@@ -1,0 +1,8 @@
+{
+  "goal": "conf.py 的 merge 会把传进来的 defaults 改掉，调用方之后再读 defaults 就拿到被污染的值。让它返回新字典，不要动入参。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

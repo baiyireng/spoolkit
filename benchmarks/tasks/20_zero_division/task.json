@@ -1,0 +1,8 @@
+{
+  "goal": "rate.py 的 ratio 在 whole 为 0 时会抛 ZeroDivisionError，导致上层整条链路挂掉。改成返回 0.0。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

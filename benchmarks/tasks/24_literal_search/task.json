@@ -1,0 +1,8 @@
+{
+  "goal": "textsearch.py 的 find_all 把用户给的关键词直接当正则用了，关键词里的 . 会匹配到任意字符。改成按字面量查找。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

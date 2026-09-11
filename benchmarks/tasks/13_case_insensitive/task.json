@@ -1,0 +1,8 @@
+{
+  "goal": "search.py 的 contains 现在区分大小写，改成不区分大小写。返回值仍然要是布尔值。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

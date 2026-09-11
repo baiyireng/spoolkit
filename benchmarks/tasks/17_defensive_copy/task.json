@@ -1,0 +1,8 @@
+{
+  "goal": "Registry.items() 返回的是内部列表本身，外部一改就把内部状态弄脏了。让它返回一份副本。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

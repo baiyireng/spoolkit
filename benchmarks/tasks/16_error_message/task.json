@@ -1,0 +1,8 @@
+{
+  "goal": "validate.py 的 positive 报错时只说了「必须是正数」，没说是哪个值。把出问题的值写进错误信息里。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

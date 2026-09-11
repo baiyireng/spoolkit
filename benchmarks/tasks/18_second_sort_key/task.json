@@ -1,0 +1,8 @@
+{
+  "goal": "sortutil.py 的 by_score 文档说 score 相同时按 name 升序，实际没做。让行为和文档一致。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

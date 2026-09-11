@@ -1,0 +1,8 @@
+{
+  "goal": "listutil.py 的 first_three 应该返回前三个元素，现在少了一个。修好它。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

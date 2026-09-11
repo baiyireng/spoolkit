@@ -1,0 +1,8 @@
+{
+  "goal": "greeter.py 的 welcome 有一个 greeting 参数，函数体根本没用到它。删掉这个参数，app.py 里的调用也要跟着改。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

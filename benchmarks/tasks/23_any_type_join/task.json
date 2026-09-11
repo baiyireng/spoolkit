@@ -1,0 +1,8 @@
+{
+  "goal": "joinutil.py 的 join 收到数字列表就报 TypeError。让它能拼接任意类型的元素，字符串列表的结果不能变。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}
