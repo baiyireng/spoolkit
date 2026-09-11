@@ -56,12 +56,10 @@ PROMPT = """你在整理一个编程任务结束后值得长期记住的结论�
 本次要看的材料：
 {body}
 
-只提取具备跨任务复用价值的条目，宁可少也不要凑数：
-- fact：项目的客观事实（如构建命令、目录约定）
-- preference：用户表现出的稳定偏好
-- decision：做过的选择，必须连带理由
-- lesson：从失败中提炼出的可复用规则
+可用分类：fact（项目客观事实，如构建命令、目录约定）、preference（稳定偏好）、
+decision（做过的选择及其理由）、lesson（从失败提炼的规则）。
 
+只提取具备跨任务复用价值的条目，宁可少也不要凑数。
 过程细节、一次性步骤、显而易见的内容都不要提取。
 最多 {limit} 条，没有就返回空数组。
 只输出 JSON。"""
@@ -77,25 +75,38 @@ class DistillResult:
     truncated: bool
 
 
-def segments_of(state: TaskState, final: str) -> list[str]:
+def segments_of(state: TaskState, final: str) -> list[tuple[str, str]]:
     """把任务留下的材料切成可独立处理的片段。
 
     切分依据是「材料本身」而不是「要求的条目数」：只有这样，
     分批处理才是覆盖全部内容，而不是每批都只看一部分。
+
+    每段都带来源标签，渲染时按标签分组。曾经为了图省事压成无标签的
+    扁平列表，模型就分不清哪条是过程、哪条是结论——切分不能以丢掉
+    语义为代价，而语义和可切分本来也不冲突。
     """
-    parts: list[str] = list(state.done)
-    parts.extend(f"已排除：{item}" for item in state.excluded)
-    parts.extend(line.strip() for line in final.splitlines() if line.strip())
-    return parts or [NO_CONTENT]
+    parts: list[tuple[str, str]] = [("过程", item) for item in state.done]
+    parts.extend(("已排除", item) for item in state.excluded)
+    parts.extend(
+        ("结论", line.strip()) for line in final.splitlines() if line.strip()
+    )
+    return parts or [("材料", NO_CONTENT)]
 
 
-def _prompt(goal: str, segments: list[str], limit: int) -> str:
-    body = "\n".join(f"- {segment}" for segment in segments)
+def _prompt(goal: str, segments: list[tuple[str, str]], limit: int) -> str:
+    grouped: dict[str, list[str]] = {}
+    for label, text in segments:
+        grouped.setdefault(label, []).append(text)
+    lines: list[str] = []
+    for label, items in grouped.items():
+        lines.append(f"【{label}】")
+        lines.extend(f"- {item}" for item in items)
+    body = "\n".join(lines)
     return PROMPT.format(goal=goal, body=body, limit=limit)
 
 
 def _request(
-    goal: str, segments: list[str], limit: int, max_tokens: int
+    goal: str, segments: list[tuple[str, str]], limit: int, max_tokens: int
 ) -> ChatRequest:
     return ChatRequest(
         messages=(Message(role="user", content=_prompt(goal, segments, limit)),),
@@ -146,7 +157,7 @@ def _merge(groups: list[list[tuple[str, str]]], limit: int) -> list[tuple[str, s
 def _run_once(
     gateway: ModelGateway,
     goal: str,
-    segments: list[str],
+    segments: list[tuple[str, str]],
     limit: int,
     max_tokens: int,
 ) -> tuple[list[tuple[str, str]], bool]:
@@ -160,7 +171,7 @@ def _run_once(
 def _distill(
     gateway: ModelGateway,
     goal: str,
-    segments: list[str],
+    segments: list[tuple[str, str]],
     limit: int,
     max_tokens: int,
     depth: int,
@@ -227,4 +238,3 @@ def distill(
         split=stats["split"],
         truncated=stats["truncated"],
     )
-
