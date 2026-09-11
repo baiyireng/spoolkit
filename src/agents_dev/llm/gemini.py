@@ -200,5 +200,16 @@ class GeminiGateway:
             truncated=candidates[0].get("finishReason") == "MAX_TOKENS",
         )
 
+    def context_window(self) -> int | None:
+        """向模型信息接口询问输入长度上限。"""
+        try:
+            response = self._client.get(f"models/{self.model}")
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        limit = response.json().get("inputTokenLimit")
+        return limit if isinstance(limit, int) and limit > 0 else None
+
     def close(self) -> None:
         self._client.close()

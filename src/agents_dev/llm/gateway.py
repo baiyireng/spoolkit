@@ -16,3 +16,11 @@ class ModelGateway(Protocol):
         """发送请求并返回完整响应。"""
         ...
 
+    def context_window(self) -> int | None:
+        """查询该模型实际可用的上下文长度。
+
+        这个值不该由使用者猜：同一个配置文件下，换模型或换 KV cache 量化，
+        窗口大小都会变。查不到时返回 None，由上层退回默认值。
+        """
+        ...
+

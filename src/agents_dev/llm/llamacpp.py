@@ -93,6 +93,24 @@ class LlamaCppGateway:
             truncated=choices[0].get("finish_reason") in ("length", "max_tokens"),
         )
 
+    def context_window(self) -> int | None:
+        """向 /props 询问实际上下文长度。
+
+        这是唯一可靠的来源：窗口由服务端启动参数决定，客户端无从推断。
+        """
+        try:
+            response = self._client.get("/props")
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        settings = data.get("default_generation_settings") or {}
+        for candidate in (settings.get("n_ctx"), data.get("n_ctx")):
+            if isinstance(candidate, int) and candidate > 0:
+                return candidate
+        return None
+
     def close(self) -> None:
         self._client.close()
 

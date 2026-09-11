@@ -14,11 +14,20 @@ from agents_dev.llm.types import ChatRequest, ChatResponse
 class FakeModel:
     """按脚本应答的假模型。"""
 
-    def __init__(self, script: Sequence[str], tokenizer: TokenCounter) -> None:
+    def __init__(
+        self,
+        script: Sequence[str],
+        tokenizer: TokenCounter,
+        window: int | None = None,
+    ) -> None:
         self._script = list(script)
         self._tokenizer = tokenizer
+        self._window = window
         self.requests: list[ChatRequest] = []
         self._cursor = 0
+
+    def context_window(self) -> int | None:
+        return self._window
 
     @property
     def remaining(self) -> int:

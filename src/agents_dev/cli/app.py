@@ -40,6 +40,27 @@ from agents_dev.cli.approval import review_and_apply
 
 PREFETCH_BUDGET = 400
 
+# 云端模型的窗口动辄上百万 token。直接采用会让整套「短上下文特化」的设计
+# 失去意义——配额永远用不完，截断逻辑永远不触发，也就永远测不出问题。
+# 所以给自动探测加一个上限，保留设计前提，同时仍远大于原来写死的 8192。
+MAX_AUTO_WINDOW = 32768
+DEFAULT_WINDOW = 8192
+
+
+def resolve_window(gateway: ModelGateway, requested: int) -> int:
+    """决定本次运行使用多大的上下文窗口。
+
+    显式指定优先；否则问供应商；问不到才退回默认值。
+    这个值不该由使用者猜：同一个配置文件下换模型或换 KV cache 量化，
+    窗口都会变，只有服务端知道真实值。
+    """
+    if requested > 0:
+        return requested
+    detected = gateway.context_window()
+    if not detected:
+        return DEFAULT_WINDOW
+    return min(detected, MAX_AUTO_WINDOW)
+
 
 def _attach_index(project_root: Path, registry: ToolRegistry, tokenizer):
     """建立（或复用）代码索引，注册索引工具并返回预取函数。
@@ -146,6 +167,9 @@ def _run(args: argparse.Namespace) -> int:
         print(f"无法装载供应商 {args.provider}: {exc}", file=sys.stderr)
         return 2
 
+    window = resolve_window(gateway, args.window)
+    print(f"上下文窗口：{window} token")
+
     memory = None
     distiller = None
     pending = PendingChanges(project_root)
@@ -170,7 +194,7 @@ def _run(args: argparse.Namespace) -> int:
             registry,
             Config(
                 project_root=project_root,
-                context_window=args.window,
+                context_window=window,
                 max_steps=args.max_steps,
             ),
         )
@@ -187,7 +211,7 @@ def _run(args: argparse.Namespace) -> int:
             )
         return 0
     if not args.no_memory:
-        memory = build_memory(project_root, args.window)
+        memory = build_memory(project_root, window)
         # 假模型没有多余脚本条目可分给归纳调用，因此只在真实供应商下启用。
         if args.provider != "fake":
             distiller = lambda state, final: distill(gateway, state, final=final)
@@ -195,7 +219,7 @@ def _run(args: argparse.Namespace) -> int:
     loop = assemble_loop(
         project_root,
         gateway,
-        window=args.window,
+        window=window,
         max_steps=args.max_steps,
         memory=memory,
         distiller=distiller,
@@ -250,7 +274,9 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
     run_parser.add_argument("--proxy", default="", help="留空则使用系统代理")
     run_parser.add_argument("--root", default=".")
-    run_parser.add_argument("--window", type=int, default=4096)
+    run_parser.add_argument(
+        "--window", type=int, default=0, help="0 表示自动向供应商查询"
+    )
     run_parser.add_argument("--max-steps", type=int, default=10)
     run_parser.add_argument(
         "--no-memory", action="store_true", help="关闭记忆读写，用于对照实验"
