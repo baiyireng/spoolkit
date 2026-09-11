@@ -1,16 +1,23 @@
 """独立归纳会话。
 
-把「这次任务里有什么值得长期记住」交给一个独立上下文判断，而不是让
-主循环自己总结。两个好处：主循环的上下文不被总结过程污染；归纳可以
-在更宽松的预算与更聚焦的提示下进行。
+把「这次任务里有什么值得长期记住」交给独立上下文判断，而不是让主循环
+自己总结。好处是主循环的上下文不被总结过程污染，归纳可以在更聚焦的
+提示下进行。这是同一个模型的另一次调用，不额外占用显存。
 
-这是同一个模型的另一次调用，不额外占用显存。
+关于「输出放不下」的处理顺序，这里刻意把「分治」放在「缩减要求」之前：
 
-归纳产物一律只作为候选——真正决定它进不进热记忆的是归档逻辑的
-置信度与容量规则，不是归纳会话自己。
+1. 先放大输出预算重试；
+2. 仍然放不下，就把输入切块、每块交给一个独立会话分别处理，再合并去重。
+   每块都是一个干净上下文——这正是子智能体在提炼场景下的形态；
+3. 只有在无法再切分（或达到切分深度上限）时，才退到「只保留最重要的一条」。
+
+把「缩减要求」放在最后是有原因的：它对用户是隐形的遗忘。如果这次任务
+确实有五条值得记的东西，降到一条就等于悄悄丢掉四条，而没人会知道。
+分治的代价是多几次调用，换回的是内容完整。
 """
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from agents_dev.agent.state import TaskState
@@ -19,6 +26,10 @@ from agents_dev.llm.retry import chat_with_escalation
 from agents_dev.llm.types import ChatRequest, Message
 
 KINDS = ("fact", "preference", "decision", "lesson")
+
+# 切分深度上限。每加一层调用次数翻倍，收益递减，必须封顶。
+MAX_SPLIT_DEPTH = 2
+NO_CONTENT = "（无额外内容）"
 
 DISTILL_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -41,11 +52,9 @@ DISTILL_SCHEMA: dict[str, Any] = {
 PROMPT = """你在整理一个编程任务结束后值得长期记住的结论。
 
 任务目标：{goal}
-已完成：{done}
-已排除（试过但不通的方案）：{excluded}
 
-交付给用户的答复：
-{final}
+本次要看的材料：
+{body}
 
 只提取具备跨任务复用价值的条目，宁可少也不要凑数：
 - fact：项目的客观事实（如构建命令、目录约定）
@@ -58,42 +67,45 @@ PROMPT = """你在整理一个编程任务结束后值得长期记住的结论�
 只输出 JSON。"""
 
 
-def distill(
-    gateway: ModelGateway,
-    state: TaskState,
-    final: str = "",
-    limit: int = 5,
-    max_tokens: int = 2048,
-) -> list[tuple[str, str]]:
-    """让独立上下文归纳出值得长期记住的条目。
+@dataclass(frozen=True)
+class DistillResult:
+    """归纳结果，同时说明它是怎么产出的。"""
 
-    max_tokens 给得比直觉大：推理类模型的思考 token 也从这个预算里扣，
-    预算太小会导致结构化输出被拦腰截断，而截断后的 JSON 解析必然失败，
-    表现为「归纳不出任何东西」这类很难查的静默失败。
+    entries: list[tuple[str, str]]
+    rounds: int
+    split: bool
+    truncated: bool
+
+
+def segments_of(state: TaskState, final: str) -> list[str]:
+    """把任务留下的材料切成可独立处理的片段。
+
+    切分依据是「材料本身」而不是「要求的条目数」：只有这样，
+    分批处理才是覆盖全部内容，而不是每批都只看一部分。
     """
-    prompt = PROMPT.format(
-        goal=state.goal,
-        done="、".join(state.done) or "无",
-        excluded="、".join(state.excluded) or "无",
-        final=final.strip() or "无",
-        limit=limit,
-    )
-    request = ChatRequest(
-        messages=(Message(role="user", content=prompt),),
+    parts: list[str] = list(state.done)
+    parts.extend(f"已排除：{item}" for item in state.excluded)
+    parts.extend(line.strip() for line in final.splitlines() if line.strip())
+    return parts or [NO_CONTENT]
+
+
+def _prompt(goal: str, segments: list[str], limit: int) -> str:
+    body = "\n".join(f"- {segment}" for segment in segments)
+    return PROMPT.format(goal=goal, body=body, limit=limit)
+
+
+def _request(
+    goal: str, segments: list[str], limit: int, max_tokens: int
+) -> ChatRequest:
+    return ChatRequest(
+        messages=(Message(role="user", content=_prompt(goal, segments, limit)),),
         max_tokens=max_tokens,
         response_schema=DISTILL_SCHEMA,
     )
-    response = chat_with_escalation(gateway, request)
-    entries = _parse_entries(response.text, limit)
-
-    # 预算翻倍后仍然截断：退而求其次，只要最重要的一条，而不是一条都不要。
-    if not entries and response.truncated and limit > 1:
-        return distill(gateway, state, final=final, limit=1, max_tokens=max_tokens * 2)
-    return entries
 
 
 def _parse_entries(text: str, limit: int) -> list[tuple[str, str]]:
-    """解析归纳结果。任何异常都退化为「没有可提炼内容」，不中断任务收尾。"""
+    """解析归纳结果。解析不出来就当作没有，由调用方决定是否重试。"""
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
@@ -113,3 +125,106 @@ def _parse_entries(text: str, limit: int) -> list[tuple[str, str]]:
         if len(entries) >= limit:
             break
     return entries
+
+
+def _merge(groups: list[list[tuple[str, str]]], limit: int) -> list[tuple[str, str]]:
+    """合并多轮结果并去重，保持先出现的顺序。"""
+    merged: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for kind, text in group:
+            key = text.strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append((kind, text))
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
+def _run_once(
+    gateway: ModelGateway,
+    goal: str,
+    segments: list[str],
+    limit: int,
+    max_tokens: int,
+) -> tuple[list[tuple[str, str]], bool]:
+    """执行一次提炼，返回（条目，是否被截断）。"""
+    response = chat_with_escalation(
+        gateway, _request(goal, segments, limit, max_tokens)
+    )
+    return _parse_entries(response.text, limit), response.truncated
+
+
+def _distill(
+    gateway: ModelGateway,
+    goal: str,
+    segments: list[str],
+    limit: int,
+    max_tokens: int,
+    depth: int,
+    stats: dict[str, Any],
+) -> list[tuple[str, str]]:
+    stats["rounds"] += 1
+    entries, truncated = _run_once(gateway, goal, segments, limit, max_tokens)
+    if entries or not truncated:
+        return entries
+
+    stats["truncated"] = True
+
+    # 放不下就切开来做，而不是把要求降低。
+    if len(segments) >= 2 and depth < MAX_SPLIT_DEPTH:
+        stats["split"] = True
+        middle = len(segments) // 2
+        half = max(1, limit // 2)
+        left = _distill(
+            gateway, goal, segments[:middle], half, max_tokens, depth + 1, stats
+        )
+        right = _distill(
+            gateway, goal, segments[middle:], half, max_tokens, depth + 1, stats
+        )
+        return _merge([left, right], limit)
+
+    # 无法再分：只能退而求其次，保住最重要的一条，而不是一条都没有。
+    stats["degraded"] = True
+    if limit > 1:
+        return _distill(gateway, goal, segments, 1, max_tokens * 2, depth + 1, stats)
+    return []
+
+
+def distill(
+    gateway: ModelGateway,
+    state: TaskState,
+    final: str = "",
+    limit: int = 5,
+    max_tokens: int = 2048,
+) -> DistillResult:
+    """归纳出值得长期记住的条目。
+
+    max_tokens 给得比直觉大：推理类模型的思考 token 也从输出预算里扣，
+    预算太小会让结构化输出被拦腰截断，而截断后的 JSON 必然解析失败，
+    表现为「什么都提炼不出来」这种没有报错的静默失败。
+    """
+    stats: dict[str, Any] = {
+        "rounds": 0,
+        "split": False,
+        "truncated": False,
+        "degraded": False,
+    }
+    entries = _distill(
+        gateway,
+        state.goal,
+        segments_of(state, final),
+        limit,
+        max_tokens,
+        0,
+        stats,
+    )
+    return DistillResult(
+        entries=entries,
+        rounds=stats["rounds"],
+        split=stats["split"],
+        truncated=stats["truncated"],
+    )
+

@@ -1,10 +1,10 @@
 import json
-from pathlib import Path
 
 from agents_dev.agent.state import TaskState
 from agents_dev.llm.fake import FakeModel
 from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.memory.distill import distill
+from agents_dev.llm.types import ChatResponse
+from agents_dev.memory.distill import MAX_SPLIT_DEPTH, distill, segments_of
 
 
 def _model(script: list[str]) -> FakeModel:
@@ -20,92 +20,162 @@ def _state() -> TaskState:
     )
 
 
-def test_解析归纳出的条目() -> None:
-    payload = json.dumps(
-        {
-            "entries": [
-                {"kind": "fact", "text": "测试命令是 pytest -q"},
-                {"kind": "lesson", "text": "先上语法约束再谈正则"},
-            ]
-        },
-        ensure_ascii=False,
+def _entries(*pairs: tuple[str, str]) -> str:
+    return json.dumps(
+        {"entries": [{"kind": k, "text": t} for k, t in pairs]}, ensure_ascii=False
     )
-    assert distill(_model([payload]), _state()) == [
-        ("fact", "测试命令是 pytest -q"),
-        ("lesson", "先上语法约束再谈正则"),
-    ]
 
 
-def test_非法JSON退化为空列表() -> None:
-    assert distill(_model(["不是 JSON"]), _state()) == []
+class _SegmentSensitive:
+    """材料条目越多越容易放不下，用来验证「分治优先于缩减要求」。
 
+    刻意不按提示长度判定：长度依赖提示模板的具体字数，改一个字测试就飘了；
+    按材料条目数判定才稳定地表达「这一批太多」。
+    """
 
-def test_未知类型被丢弃() -> None:
-    payload = json.dumps(
-        {"entries": [{"kind": "胡乱类型", "text": "内容"}]}, ensure_ascii=False
-    )
-    assert distill(_model([payload]), _state()) == []
-
-
-def test_空文本条目被丢弃() -> None:
-    payload = json.dumps(
-        {"entries": [{"kind": "fact", "text": "   "}]}, ensure_ascii=False
-    )
-    assert distill(_model([payload]), _state()) == []
-
-
-def test_条目数量受上限约束() -> None:
-    payload = json.dumps(
-        {"entries": [{"kind": "fact", "text": f"事实{i}"} for i in range(10)]},
-        ensure_ascii=False,
-    )
-    assert len(distill(_model([payload]), _state(), limit=3)) == 3
-
-
-def test_提示里带上排除过的方案() -> None:
-    model = _model([json.dumps({"entries": []}, ensure_ascii=False)])
-    distill(model, _state(), final="测试命令是 pytest -q")
-    prompt = model.requests[0].messages[0].content
-    assert "整文件重解析" in prompt
-    assert "给 parser 加增量更新" in prompt
-    assert "测试命令是 pytest -q" in prompt
-
-
-def test_归纳请求带结构约束() -> None:
-    model = _model([json.dumps({"entries": []}, ensure_ascii=False)])
-    distill(model, _state())
-    assert model.requests[0].response_schema is not None
-
-
-class _TruncatingModel:
-    """前两次调用都截断，第三次才正常返回，用于验证降级路径。"""
-
-    def __init__(self) -> None:
+    def __init__(self, max_segments: int) -> None:
         self.requests: list = []
+        self.max_segments = max_segments
 
     def chat(self, request):
-        from agents_dev.llm.types import ChatResponse
-
         self.requests.append(request)
-        if len(self.requests) <= 2:
+        prompt = request.messages[0].content
+        # 只统计材料区那一段连续的 "- " 条目：
+        # 提示模板在材料区前后各有一批同样以 "- " 开头的说明行。
+        _, _, after = prompt.partition("本次要看的材料：")
+        material: list[str] = []
+        for line in after.splitlines():
+            if line.startswith("- "):
+                material.append(line)
+            elif material:
+                break
+        if len(material) > self.max_segments:
             return ChatResponse(
-                text='{"entries":[{"kind":"fact","text":"被截断的内容"',
+                text='{"entries":[',
                 prompt_tokens=1,
                 completion_tokens=1,
                 truncated=True,
             )
+        text = material[0][2:][:30] if material else "无"
         return ChatResponse(
-            text=json.dumps(
-                {"entries": [{"kind": "fact", "text": "最重要的一条"}]},
-                ensure_ascii=False,
-            ),
-            prompt_tokens=1,
-            completion_tokens=1,
+            text=_entries(("fact", text)), prompt_tokens=1, completion_tokens=1
         )
 
+    def close(self) -> None:
+        pass
 
-def test_截断时先放大预算再降级条目数() -> None:
-    model = _TruncatingModel()
-    result = distill(model, _state(), limit=5)
-    assert result == [("fact", "最重要的一条")]
-    assert [r.max_tokens for r in model.requests[:3]] == [2048, 4096, 4096]
+
+class _AlwaysTruncating:
+    def __init__(self) -> None:
+        self.requests: list = []
+
+    def chat(self, request):
+        self.requests.append(request)
+        return ChatResponse(
+            text='{"entries":[',
+            prompt_tokens=1,
+            completion_tokens=1,
+            truncated=True,
+        )
+
+    def close(self) -> None:
+        pass
+
+
+def test_解析归纳出的条目() -> None:
+    model = _model([_entries(("fact", "测试命令是 pytest -q"), ("lesson", "先上约束"))])
+    result = distill(model, _state())
+    assert result.entries == [("fact", "测试命令是 pytest -q"), ("lesson", "先上约束")]
+    assert result.split is False
+    assert result.truncated is False
+
+
+def test_非法JSON退化为空列表() -> None:
+    assert distill(_model(["不是 JSON"]), _state()).entries == []
+
+
+def test_未知类型被丢弃() -> None:
+    raw = json.dumps({"entries": [{"kind": "胡乱类型", "text": "内容"}]}, ensure_ascii=False)
+    assert distill(_model([raw]), _state()).entries == []
+
+
+def test_空文本条目被丢弃() -> None:
+    assert distill(_model([_entries(("fact", "   "))]), _state()).entries == []
+
+
+def test_条目数量受上限约束() -> None:
+    raw = _entries(*[(("fact"), f"事实{i}") for i in range(10)])  # type: ignore[arg-type]
+    assert len(distill(_model([raw]), _state(), limit=3).entries) == 3
+
+
+def test_材料里包含排除过的方案() -> None:
+    model = _model([_entries(("fact", "事实"))])
+    distill(model, _state(), final="这是一段答复")
+    prompt = model.requests[0].messages[0].content
+    assert "整文件重解析" in prompt
+    assert "给 parser 加增量更新" in prompt
+    assert "这是一段答复" in prompt
+
+
+def test_归纳请求带结构约束() -> None:
+    model = _model([_entries(("fact", "事实"))])
+    distill(model, _state())
+    assert model.requests[0].response_schema is not None
+
+
+def test_材料被切成片段() -> None:
+    state = TaskState(task_id="t", goal="g", done=["甲", "乙"], excluded=["丙"])
+    segments = segments_of(state, "第一行\n第二行")
+    assert segments == ["甲", "乙", "已排除：丙", "第一行", "第二行"]
+
+
+def test_没有材料时也有兜底片段() -> None:
+    assert segments_of(TaskState(task_id="t", goal="g"), "") == ["（无额外内容）"]
+
+
+def test_截断时优先分治而不是缩减要求() -> None:
+    # 整批 8 段放不下，半批 4 段放得下。
+    model = _SegmentSensitive(max_segments=4)
+    state = TaskState(
+        task_id="t",
+        goal="目标",
+        done=[f"步骤{i}" for i in range(4)],
+    )
+    result = distill(model, state, final="\n".join(f"结论{i}" for i in range(4)))
+    assert result.truncated is True
+    assert result.split is True
+    assert len(result.entries) >= 2
+
+
+def test_分治结果会去重() -> None:
+    from agents_dev.memory.distill import _merge
+
+    merged = _merge(
+        [[("fact", "同一条"), ("fact", "左")], [("fact", "同一条"), ("fact", "右")]],
+        10,
+    )
+    assert merged == [("fact", "同一条"), ("fact", "左"), ("fact", "右")]
+
+
+def test_合并结果受上限约束() -> None:
+    from agents_dev.memory.distill import _merge
+
+    merged = _merge([[("fact", f"第{i}条") for i in range(5)]], 2)
+    assert len(merged) == 2
+
+
+def test_无法切分时才降级到一条() -> None:
+    model = _AlwaysTruncating()
+    state = TaskState(task_id="t", goal="目标")
+    result = distill(model, state)
+    assert result.entries == []
+    assert result.split is False
+
+
+def test_切分深度有上限() -> None:
+    assert MAX_SPLIT_DEPTH == 2
+    model = _AlwaysTruncating()
+    state = TaskState(task_id="t", goal="目标", done=[f"步骤{i}" for i in range(8)])
+    distill(model, state)
+    # 深度 2 时最多 4 个叶节点，加上重试不应失控。
+    assert len(model.requests) <= 16

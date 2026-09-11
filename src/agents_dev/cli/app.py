@@ -143,7 +143,9 @@ def _run(args: argparse.Namespace) -> int:
         memory = build_memory(project_root, args.window)
         # 假模型没有多余脚本条目可分给归纳调用，因此只在真实供应商下启用。
         if args.provider != "fake":
-            distiller = lambda state, final: distill(gateway, state, final=final)
+            distiller = lambda state, final: distill(
+                gateway, state, final=final
+            ).entries
 
     loop = assemble_loop(
         project_root,
