@@ -90,6 +90,7 @@ class LlamaCppGateway:
             text=text,
             prompt_tokens=int(usage.get("prompt_tokens", 0)),
             completion_tokens=int(usage.get("completion_tokens", 0)),
+            truncated=choices[0].get("finish_reason") in ("length", "max_tokens"),
         )
 
     def close(self) -> None:
@@ -123,4 +124,3 @@ class LlamaCppTokenCounter:
 
     def close(self) -> None:
         self._client.close()
-

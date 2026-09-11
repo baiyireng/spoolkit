@@ -197,6 +197,7 @@ class GeminiGateway:
             text=text,
             prompt_tokens=int(usage.get("promptTokenCount", 0)),
             completion_tokens=int(usage.get("candidatesTokenCount", 0)),
+            truncated=candidates[0].get("finishReason") == "MAX_TOKENS",
         )
 
     def close(self) -> None:

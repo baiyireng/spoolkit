@@ -160,7 +160,12 @@ def parse_turn(text: str) -> AgentTurn | ParseFailure:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        return ParseFailure(reason=f"输出不是合法 JSON: {exc.msg}")
+        # 截断与「模型写错格式」是两种完全不同的故障：前者要加预算，
+        # 后者要纠正写法。这里把可能性指出来，避免修错地方。
+        hint = ""
+        if "Unterminated" in exc.msg or exc.pos >= len(text) - 1:
+            hint = "（内容疑似被输出预算截断）"
+        return ParseFailure(reason=f"输出不是合法 JSON{hint}: {exc.msg}")
 
     if not isinstance(payload, dict):
         return ParseFailure(reason="输出必须是 JSON 对象")

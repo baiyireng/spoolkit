@@ -92,6 +92,12 @@ def test_失败信息说明原因() -> None:
     assert failure.reason
 
 
+def test_输出被截断时提示出来() -> None:
+    failure = parse_turn('{"thought":"正在想","tool_calls":[{"name":"read_file"')
+    assert isinstance(failure, ParseFailure)
+    assert "截断" in failure.reason
+
+
 def test_状态块字段被正确传入增量() -> None:
     raw = _payload(state={"done_added": ["第一步"], "excluded_added": ["方案A"]})
     turn = parse_turn(raw)

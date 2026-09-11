@@ -15,6 +15,7 @@ from typing import Any
 
 from agents_dev.agent.state import TaskState
 from agents_dev.llm.gateway import ModelGateway
+from agents_dev.llm.retry import chat_with_escalation
 from agents_dev.llm.types import ChatRequest, Message
 
 KINDS = ("fact", "preference", "decision", "lesson")
@@ -77,14 +78,18 @@ def distill(
         final=final.strip() or "无",
         limit=limit,
     )
-    response = gateway.chat(
-        ChatRequest(
-            messages=(Message(role="user", content=prompt),),
-            max_tokens=max_tokens,
-            response_schema=DISTILL_SCHEMA,
-        )
+    request = ChatRequest(
+        messages=(Message(role="user", content=prompt),),
+        max_tokens=max_tokens,
+        response_schema=DISTILL_SCHEMA,
     )
-    return _parse_entries(response.text, limit)
+    response = chat_with_escalation(gateway, request)
+    entries = _parse_entries(response.text, limit)
+
+    # 预算翻倍后仍然截断：退而求其次，只要最重要的一条，而不是一条都不要。
+    if not entries and response.truncated and limit > 1:
+        return distill(gateway, state, final=final, limit=1, max_tokens=max_tokens * 2)
+    return entries
 
 
 def _parse_entries(text: str, limit: int) -> list[tuple[str, str]]:

@@ -75,3 +75,37 @@ def test_归纳请求带结构约束() -> None:
     model = _model([json.dumps({"entries": []}, ensure_ascii=False)])
     distill(model, _state())
     assert model.requests[0].response_schema is not None
+
+
+class _TruncatingModel:
+    """前两次调用都截断，第三次才正常返回，用于验证降级路径。"""
+
+    def __init__(self) -> None:
+        self.requests: list = []
+
+    def chat(self, request):
+        from agents_dev.llm.types import ChatResponse
+
+        self.requests.append(request)
+        if len(self.requests) <= 2:
+            return ChatResponse(
+                text='{"entries":[{"kind":"fact","text":"被截断的内容"',
+                prompt_tokens=1,
+                completion_tokens=1,
+                truncated=True,
+            )
+        return ChatResponse(
+            text=json.dumps(
+                {"entries": [{"kind": "fact", "text": "最重要的一条"}]},
+                ensure_ascii=False,
+            ),
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+
+def test_截断时先放大预算再降级条目数() -> None:
+    model = _TruncatingModel()
+    result = distill(model, _state(), limit=5)
+    assert result == [("fact", "最重要的一条")]
+    assert [r.max_tokens for r in model.requests[:3]] == [2048, 4096, 4096]

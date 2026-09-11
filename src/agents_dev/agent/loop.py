@@ -17,6 +17,7 @@ from agents_dev.context.assembler import Assembler
 from agents_dev.context.budget import Budget
 from agents_dev.context.sections import Section
 from agents_dev.llm.gateway import ModelGateway
+from agents_dev.llm.retry import chat_with_escalation
 from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.llm.types import ChatRequest, Message
 from agents_dev.tools.registry import ToolRegistry
@@ -118,12 +119,13 @@ class AgentLoop:
                 history = history[-(MAX_RECENT_TURNS // 2):]
                 trace.append(f"step{state.step}: 上下文整理")
 
-            response = self.gateway.chat(
+            response = chat_with_escalation(
+                self.gateway,
                 ChatRequest(
                     messages=assembled.messages,
                     max_tokens=self._budget.output_reserve(),
                     response_schema=self._schema,
-                )
+                ),
             )
             turn = parse_turn(response.text)
 
