@@ -8,7 +8,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from agents_dev.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from agents_dev.agent.state import TaskState, save_state
@@ -55,12 +55,16 @@ class AgentLoop:
         registry: ToolRegistry,
         config: Config,
         prefetch: Callable[[str], str] | None = None,
+        memory: Any | None = None,
+        distiller: Callable[[TaskState, str], list[tuple[str, str]]] | None = None,
     ) -> None:
         self.gateway = gateway
         self.tokenizer = tokenizer
         self.registry = registry
         self.config = config
         self.prefetch = prefetch
+        self.memory = memory
+        self.distiller = distiller
         self._budget = Budget(window=config.context_window)
         self._schema = build_turn_schema(registry)
 
@@ -70,6 +74,7 @@ class AgentLoop:
         history: list[Message],
         feedback: str | None,
         prefetched: str = "",
+        hot: str = "",
     ):
         """按当前状态与历史装配本轮上下文。
 
@@ -79,8 +84,10 @@ class AgentLoop:
         system_text = SYSTEM_PROMPT.format(tools=self.registry.describe())
         sections = [
             Section(name="system", text=system_text, priority=10, mandatory=True),
-            Section(name="task_state", text=state.render(), priority=30),
         ]
+        if hot:
+            sections.append(Section(name="hot_memory", text=hot, priority=20))
+        sections.append(Section(name="task_state", text=state.render(), priority=30))
         if prefetched:
             sections.append(Section(name="retrieval", text=prefetched, priority=35))
         if feedback:
@@ -95,9 +102,10 @@ class AgentLoop:
         resets = 0
         trace: list[str] = []
         prefetched = self.prefetch(goal) if self.prefetch is not None else ""
+        hot = self.memory.hot_text() if self.memory is not None else ""
 
         while state.step < self.config.max_steps:
-            assembled = self._assemble(state, history, feedback, prefetched)
+            assembled = self._assemble(state, history, feedback, prefetched, hot)
 
             # 预算守卫：软触发整理，硬触发重置。依据需求体积而非装入量。
             if assembled.demand_tokens >= self._budget.hard_limit():
@@ -105,7 +113,7 @@ class AgentLoop:
                 feedback = None
                 resets += 1
                 trace.append(f"step{state.step}: 上下文重置（第 {resets} 次）")
-                assembled = self._assemble(state, history, feedback, prefetched)
+                assembled = self._assemble(state, history, feedback, prefetched, hot)
             elif assembled.demand_tokens >= self._budget.soft_limit():
                 history = history[-(MAX_RECENT_TURNS // 2):]
                 trace.append(f"step{state.step}: 上下文整理")
@@ -147,11 +155,36 @@ class AgentLoop:
 
             if turn.done:
                 trace.append(f"step{state.step}: 完成")
+                self._archive(state, "success", trace, turn.final or "")
                 return LoopResult(
                     True, turn.final or "", state, state.step, resets, trace
                 )
 
+        self._archive(state, "fail", trace, "")
         return LoopResult(
             False, "已达步数上限，任务未完成", state, state.step, resets, trace
+        )
+
+    def _archive(
+        self, state: TaskState, outcome: str, trace: list[str], final: str
+    ) -> None:
+        """任务收尾时归档。
+
+        归纳失败不能让用户拿不到结果——任务产出是主要价值，记忆是次要收益，
+        因此这里刻意吞掉归纳异常，只保留确定性的归档动作。
+        """
+        if self.memory is None:
+            return
+        promote: list[tuple[str, str]] = []
+        if self.distiller is not None:
+            try:
+                promote = list(self.distiller(state, final))
+            except Exception as exc:
+                promote = []
+                trace.append(f"归纳失败（已忽略）: {type(exc).__name__}: {exc}")
+        result = self.memory.archive(state, outcome=outcome, promote=promote)
+        trace.append(
+            f"归档: 事件#{result.episode_id}，提升 {len(result.promoted)} 条，"
+            f"下沉 {len(result.demoted)} 条"
         )
 

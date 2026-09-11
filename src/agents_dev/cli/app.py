@@ -25,6 +25,9 @@ from agents_dev.llm.providers import (
     provider_names,
 )
 from agents_dev.llm.tokenizer import OfflineTokenCounter
+from agents_dev.memory.distill import distill
+from agents_dev.memory.session import MemorySession
+from agents_dev.memory.store import init_memory_schema
 from agents_dev.net import system_proxy
 from agents_dev.store.db import init_schema, open_db
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
@@ -57,6 +60,8 @@ def assemble_loop(
     gateway: ModelGateway,
     window: int = 4096,
     max_steps: int = 10,
+    memory=None,
+    distiller=None,
 ) -> AgentLoop:
     """用给定网关装配完整循环：注册全部工具、建索引、接上预取。"""
     registry = ToolRegistry()
@@ -74,6 +79,22 @@ def assemble_loop(
         registry=registry,
         config=config,
         prefetch=_attach_index(project_root, registry, tokenizer),
+        memory=memory,
+        distiller=distiller,
+    )
+
+
+def build_memory(project_root: Path, window: int, session_id: str = "cli"):
+    """在 .agent 下建立记忆库与热记忆文件。"""
+    state_dir = project_root / ".agent"
+    conn = open_db(state_dir / "memory.db")
+    init_memory_schema(conn)
+    return MemorySession(
+        conn=conn,
+        hot_path=state_dir / "memory.md",
+        counter=OfflineTokenCounter(),
+        context_window=window,
+        session_id=session_id,
     )
 
 
@@ -116,8 +137,21 @@ def _run(args: argparse.Namespace) -> int:
         print(f"无法装载供应商 {args.provider}: {exc}", file=sys.stderr)
         return 2
 
+    memory = None
+    distiller = None
+    if not args.no_memory:
+        memory = build_memory(project_root, args.window)
+        # 假模型没有多余脚本条目可分给归纳调用，因此只在真实供应商下启用。
+        if args.provider != "fake":
+            distiller = lambda state, final: distill(gateway, state, final=final)
+
     loop = assemble_loop(
-        project_root, gateway, window=args.window, max_steps=args.max_steps
+        project_root,
+        gateway,
+        window=args.window,
+        max_steps=args.max_steps,
+        memory=memory,
+        distiller=distiller,
     )
     result = loop.run(args.goal)
 
@@ -149,6 +183,9 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--root", default=".")
     run_parser.add_argument("--window", type=int, default=4096)
     run_parser.add_argument("--max-steps", type=int, default=10)
+    run_parser.add_argument(
+        "--no-memory", action="store_true", help="关闭记忆读写，用于对照实验"
+    )
     run_parser.set_defaults(func=_run)
 
     args = parser.parse_args(argv)
