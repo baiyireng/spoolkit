@@ -50,7 +50,7 @@ STATE_SCHEMA: dict[str, Any] = {
 }
 
 
-def build_turn_schema(registry: Any) -> dict[str, Any]:
+def build_turn_schema(registry: Any, only: list[str] | None = None) -> dict[str, Any]:
     """按当前注册的工具生成回合输出的约束 schema。
 
     这是本项目最关键的一处细节。回合输出里的 arguments 是「自由键值对象」，
@@ -60,8 +60,11 @@ def build_turn_schema(registry: Any) -> dict[str, Any]:
     所以 arguments 必须被约束成「本次可用工具参数的并集」：模型由此获得
     一个能放下所有合法参数的空间；而具体某个工具该带哪些参数，仍由工具
     注册表在调用时校验。语法约束负责形状，注册表负责语义。
+
+    only 给定时只允许这几个工具。这不是裁剪提示词，是改采样本身——
+    实测里文字提醒推不动小模型，把选项从语法里拿掉才推得动。
     """
-    tool_names = registry.names()
+    tool_names = tuple(only) if only is not None else registry.names()
     merged: dict[str, Any] = {}
     for name in tool_names:
         spec = registry.get(name)

@@ -39,6 +39,11 @@ EDIT_TOOLS = ("replace_lines", "write_file")
 REPEAT_WARN_AT = 2
 REPEAT_BLOCK_AT = 3
 
+# 连续多少步没有提出任何改动，就收窄输出通道。
+# 重复调用检测只盖得住「参数完全相同」的打转，盖不住「每次都换一个查询」
+# 的漫游——实测那条轨迹 12 步里换了 8 种不同的调用，一次都没被拦住。
+NO_EDIT_LIMIT = 4
+
 
 def call_signature(call: ToolCall) -> str:
     """工具调用的指纹：名字 + 规范化后的参数。
@@ -167,6 +172,10 @@ class AgentLoop:
         self.on_event = on_event
         self._budget = Budget(window=config.context_window)
         self._schema = build_turn_schema(registry)
+        # 强制收敛用的收窄 schema：只留写工具。没有写工具（只读角色）
+        # 就没有这回事，None 表示这条路不适用。
+        edits = [name for name in EDIT_TOOLS if registry.get(name) is not None]
+        self._commit_schema = build_turn_schema(registry, only=edits) if edits else None
 
     def _assemble(
         self,
@@ -241,6 +250,7 @@ class AgentLoop:
         # 中间只要出现一个不同的调用就清零。
         last_signature = ""
         repeats = 0
+        no_edit_steps = 0
 
         # 主动推送：进入任务时就把它相关的历史教训放到模型面前，
         # 而不是等它自己去检索——它不会去检索，因为它不知道自己缺什么。
@@ -255,6 +265,15 @@ class AgentLoop:
             ))
 
         while state.step < limit:
+            # 强制收敛：连续若干步只查看不修改时，把「继续查」这个选项从
+            # 语法里拿掉。实测这个模型对文字提醒完全免疫（重复提醒、拦截
+            # 说明都照发不误），能推得动它的只有「这一轮物理上只能选什么」。
+            forcing = (
+                self._commit_schema is not None
+                and no_edit_steps >= NO_EDIT_LIMIT
+            )
+            if forcing:
+                feedback = T.FORCE_COMMIT
             assembled = self._assemble(
                 state, history, feedback, prefetched, hot, lesson_text
             )
@@ -278,7 +297,9 @@ class AgentLoop:
                 ChatRequest(
                     messages=assembled.messages,
                     max_tokens=self._budget.output_reserve(),
-                    response_schema=self._schema,
+                    response_schema=(
+                        self._commit_schema if forcing else self._schema
+                    ),
                 ),
             )
             model_calls += 1
@@ -332,6 +353,16 @@ class AgentLoop:
                     detail = "" if result.ok else f": {flat[:400]}"
                     trace.append(f"step{state.step}: 工具 {call.name} -> {status}{detail}")
                 history.append(Message(role="tool", content="\n".join(outputs)))
+
+            if any(call.name in EDIT_TOOLS for call in turn.tool_calls):
+                no_edit_steps = 0
+            elif turn.tool_calls:
+                no_edit_steps += 1
+                if no_edit_steps == NO_EDIT_LIMIT:
+                    trace.append(
+                        f"step{state.step}: 连续 {NO_EDIT_LIMIT} 步没有提出改动，"
+                        "下一轮收窄为只能写"
+                    )
 
             state.step_forward()
             save_state(state, checkpoint)

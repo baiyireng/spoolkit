@@ -42,7 +42,9 @@ WORKFLOW_ACT = (
     "说明该换做法了；改动先提出来，用户会看到 diff。"
 )
 WORKFLOW_EDIT_FULL = (
-    "- 改动优先用 replace_lines 精确替换；write_file 只用于新文件或整份重写。"
+    "- 改动方式二选一：文件不大（几十行以内）就整份重写，用 write_file "
+    "直接给出完整新内容，不必先算行号；只动一两行、或者文件很大时才用 "
+    "replace_lines 精确替换。"
 )
 WORKFLOW_EDIT_PARTIAL = "- 改动使用 {names} 精确替换。"
 WORKFLOW_WRITE_SAFE = "- 写操作只生成 diff 并需用户确认，不必回避提出改动。"
@@ -67,6 +69,12 @@ WORKFLOW_PERMISSION = (
 WORKFLOW_NO_GUESS = "- 信息不足先查，不要猜；确实找不到就直说找不到。"
 
 LESSONS_HEADER = "以下是过去类似任务里踩过的坑，做之前先看一眼："
+
+FORCE_COMMIT = (
+    "你已经连续若干步只查看、没有提出任何改动，信息够了。"
+    "这一轮不要再查询：直接用写工具提出改动。"
+    "如果确认不需要改动，把 done 设为 true，并在 final 里说明为什么。"
+)
 
 DECOMPOSE = """你负责把一个较大的目标拆成可逐步执行的任务序列。
 
