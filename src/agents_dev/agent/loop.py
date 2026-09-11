@@ -29,7 +29,49 @@ SYSTEM_PROMPT = """你是本地运行的编程助手。每轮只做一件事。
 还要工具就调用工具，此时 done 必须是 false。
 已经有答案要交付时，tool_calls 设为 []，done 设为 true，final 设为给用户的完整答复。
 可用工具：
-{tools}"""
+{tools}
+
+{workflow}"""
+
+LOOKUP_TOOLS = ("find_symbol", "file_symbols", "find_callers")
+EDIT_TOOLS = ("replace_lines", "write_file")
+
+
+def build_workflow(registry: ToolRegistry) -> str:
+    """按实际注册的工具生成工作方式说明。
+
+    只写「什么时候用哪个」，不写工具内部怎么实现——模型不需要知道索引是树
+    还是图，那是纯浪费。
+
+    关键在于每一句都从注册表推导。提到一个没注册的工具，就是给模型一条它
+    做不到的指令，比不写更糟：它会浪费步数去尝试。审查者没有写权限，
+    所以它看到的说明里就不该出现写工具。
+    """
+    lines = ["工作方式："]
+
+    lookup = [name for name in LOOKUP_TOOLS if registry.get(name) is not None]
+    if lookup:
+        lines.append(
+            "- 查符号优先用 " + " / ".join(lookup) + "，不要整份读文件；索引已经建好。"
+        )
+    if registry.get("find_callers") is not None:
+        lines.append("- 改代码前先用 find_callers 看波及面，避免改坏调用方。")
+
+    edits = [name for name in EDIT_TOOLS if registry.get(name) is not None]
+    if edits:
+        if set(edits) == set(EDIT_TOOLS):
+            lines.append(
+                "- 改动优先用 replace_lines 精确替换；write_file 只用于新文件或整份重写。"
+            )
+        else:
+            lines.append("- 改动使用 " + "、".join(edits) + " 精确替换。")
+        lines.append("- 写操作只生成 diff 并需用户确认，不必回避提出改动。")
+
+    if registry.get("recall") is not None:
+        lines.append("- 要回忆过去的结论、决策或失败教训时，用 recall 查历史记忆。")
+
+    lines.append("- 信息不足先查，不要猜；确实找不到就直说找不到。")
+    return "\n".join(lines)
 
 MAX_RECENT_TURNS = 6
 
@@ -44,6 +86,16 @@ class LoopResult:
     steps: int
     resets: int
     trace: list[str] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    model_calls: int = 0
+
+    def usage(self) -> str:
+        """一行用量摘要，用于比较不同配置的实际成本。"""
+        return (
+            f"步数 {self.steps}，模型调用 {self.model_calls}，"
+            f"输入 {self.prompt_tokens} token，输出 {self.completion_tokens} token"
+        )
 
 
 class AgentLoop:
@@ -84,7 +136,9 @@ class AgentLoop:
         预取内容与解析反馈共用 retrieval 预算：它们语义相同，都是外部检索来的内容。
         """
         assembler = Assembler(tokenizer=self.tokenizer, budget=self._budget)
-        system_text = SYSTEM_PROMPT.format(tools=self.registry.describe())
+        system_text = SYSTEM_PROMPT.format(
+            tools=self.registry.describe(), workflow=build_workflow(self.registry)
+        )
         if self.persona:
             system_text = f"{self.persona}\n\n{system_text}"
         sections = [
@@ -106,6 +160,9 @@ class AgentLoop:
         feedback: str | None = None
         resets = 0
         trace: list[str] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        model_calls = 0
         prefetched = self.prefetch(goal) if self.prefetch is not None else ""
         hot = self.memory.hot_text() if self.memory is not None else ""
 
@@ -131,6 +188,9 @@ class AgentLoop:
                     response_schema=self._schema,
                 ),
             )
+            model_calls += 1
+            prompt_tokens += response.prompt_tokens
+            completion_tokens += response.completion_tokens
             turn = parse_turn(response.text)
 
             if isinstance(turn, ParseFailure):
@@ -163,12 +223,28 @@ class AgentLoop:
                 trace.append(f"step{state.step}: 完成")
                 self._archive(state, "success", trace, turn.final or "")
                 return LoopResult(
-                    True, turn.final or "", state, state.step, resets, trace
+                    True,
+                    turn.final or "",
+                    state,
+                    state.step,
+                    resets,
+                    trace,
+                    prompt_tokens,
+                    completion_tokens,
+                    model_calls,
                 )
 
         self._archive(state, "fail", trace, "")
         return LoopResult(
-            False, "已达步数上限，任务未完成", state, state.step, resets, trace
+            False,
+            "已达步数上限，任务未完成",
+            state,
+            state.step,
+            resets,
+            trace,
+            prompt_tokens,
+            completion_tokens,
+            model_calls,
         )
 
     def _archive(

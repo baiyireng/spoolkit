@@ -29,6 +29,7 @@ from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.memory.distill import distill
 from agents_dev.memory.session import MemorySession
 from agents_dev.memory.store import init_memory_schema
+from agents_dev.memory.tools import recall_spec
 from agents_dev.net import system_proxy
 from agents_dev.store.db import init_schema, open_db
 from agents_dev.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
@@ -99,6 +100,10 @@ def assemble_loop(
     if pending is not None:
         registry.register(write_file_spec(project_root, pending))
         registry.register(replace_lines_spec(project_root, pending))
+    if memory is not None:
+        # 主循环用的注册表在这里构造，所以 recall 也必须在这里注册，
+        # 否则提示词会提到一个只有派发路径才有的工具。
+        registry.register(recall_spec(memory))
 
     tokenizer = OfflineTokenCounter()
     config = Config(
@@ -217,6 +222,7 @@ def _run(args: argparse.Namespace) -> int:
         return 0
     if not args.no_memory:
         memory = build_memory(project_root, window)
+        registry.register(recall_spec(memory))
         # 假模型没有多余脚本条目可分给归纳调用，因此只在真实供应商下启用。
         if args.provider != "fake":
             distiller = lambda state, final: distill(gateway, state, final=final)
@@ -235,6 +241,8 @@ def _run(args: argparse.Namespace) -> int:
 
     for line in result.trace:
         print(line)
+    print("---")
+    print(result.usage())
     print("---")
     print(result.final)
 

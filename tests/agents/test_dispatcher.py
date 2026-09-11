@@ -152,4 +152,6 @@ def test_审查者拿不到写工具(tmp_path: Path) -> None:
         _registry(tmp_path),
         Config(project_root=tmp_path, context_window=4096),
     )
-    assert "write_file" not in gateway.requests[1].messages[0].content
+    reviewer_prompt = gateway.requests[1].messages[0].content
+    assert "write_file" not in reviewer_prompt
+    assert "replace_lines" not in reviewer_prompt
