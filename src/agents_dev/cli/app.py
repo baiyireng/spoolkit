@@ -98,7 +98,7 @@ def assemble_loop(
     registry.register(read_file_spec(project_root))
     registry.register(list_dir_spec(project_root))
     registry.register(search_code_spec(project_root))
-    registry.register(run_command_spec(project_root))
+    registry.register(run_command_spec(project_root, pending))
     if pending is not None:
         registry.register(write_file_spec(project_root, pending))
         registry.register(replace_lines_spec(project_root, pending))

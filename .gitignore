@@ -17,6 +17,9 @@ __pycache__/
 .env.*
 !.env.example
 
+# 临时试验目录
+scratch_lab/
+
 # 编辑器
 .vscode/
 .idea/
