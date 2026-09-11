@@ -30,9 +30,11 @@ from agents_dev.memory.session import MemorySession
 from agents_dev.memory.store import init_memory_schema
 from agents_dev.net import system_proxy
 from agents_dev.store.db import init_schema, open_db
+from agents_dev.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.search import search_code_spec
+from agents_dev.cli.approval import review_and_apply
 
 PREFETCH_BUDGET = 400
 
@@ -63,12 +65,16 @@ def assemble_loop(
     max_steps: int = 10,
     memory=None,
     distiller=None,
+    pending=None,
 ) -> AgentLoop:
     """用给定网关装配完整循环：注册全部工具、建索引、接上预取。"""
     registry = ToolRegistry()
     registry.register(read_file_spec(project_root))
     registry.register(list_dir_spec(project_root))
     registry.register(search_code_spec(project_root))
+    if pending is not None:
+        registry.register(write_file_spec(project_root, pending))
+        registry.register(replace_lines_spec(project_root, pending))
 
     tokenizer = OfflineTokenCounter()
     config = Config(
@@ -140,6 +146,7 @@ def _run(args: argparse.Namespace) -> int:
 
     memory = None
     distiller = None
+    pending = PendingChanges(project_root)
     if not args.no_memory:
         memory = build_memory(project_root, args.window)
         # 假模型没有多余脚本条目可分给归纳调用，因此只在真实供应商下启用。
@@ -153,6 +160,7 @@ def _run(args: argparse.Namespace) -> int:
         max_steps=args.max_steps,
         memory=memory,
         distiller=distiller,
+        pending=pending,
     )
     result = loop.run(args.goal)
 
@@ -160,6 +168,10 @@ def _run(args: argparse.Namespace) -> int:
         print(line)
     print("---")
     print(result.final)
+
+    if len(pending):
+        print("---")
+        review_and_apply(pending)
     return 0 if result.finished else 1
 
 

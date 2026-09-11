@@ -1,0 +1,175 @@
+"""写操作与 diff 预览。
+
+写操作默认**不落盘**，只产生 diff。理由很直接：小模型出错率高，如果错误
+直接污染真实代码，用户会丧失信任并最终弃用；而「先看 diff 再应用」几乎
+零成本，既能在出错时一眼识破，又不打断思路。
+
+所以全部写操作先进入 PendingChanges，由用户确认后才真正落盘。
+"""
+
+import difflib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from agents_dev.errors import PathOutsideProjectError
+from agents_dev.paths import resolve_within
+from agents_dev.tools.types import ToolResult, ToolSpec
+
+
+def make_diff(path: str, old: str, new: str) -> str:
+    """生成统一格式的差异文本。"""
+    return "".join(
+        difflib.unified_diff(
+            old.splitlines(keepends=True),
+            new.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
+
+
+@dataclass
+class PendingChange:
+    """一处待授权的修改。"""
+
+    path: str
+    old_text: str
+    new_text: str
+
+    @property
+    def is_new_file(self) -> bool:
+        return not self.old_text
+
+    @property
+    def diff(self) -> str:
+        if self.is_new_file:
+            body = "".join(f"+{line}" for line in self.new_text.splitlines(True))
+            return f"--- /dev/null\n+++ b/{self.path}\n{body}"
+        return make_diff(self.path, self.old_text, self.new_text)
+
+
+class PendingChanges:
+    """本次运行中提出、尚未落盘的修改集合。"""
+
+    def __init__(self, root: Path) -> None:
+        self._root = root.resolve()
+        self._changes: dict[str, PendingChange] = {}
+
+    def __len__(self) -> int:
+        return len(self._changes)
+
+    def items(self) -> list[PendingChange]:
+        return list(self._changes.values())
+
+    def path_of(self, candidate: str) -> str:
+        """把用户给的路径解析成项目内相对路径。"""
+        target = resolve_within(self._root, candidate)
+        return target.relative_to(self._root).as_posix()
+
+    def propose(self, path: str, new_text: str) -> PendingChange:
+        """登记一处修改。同一路径重复提出时以最后一次为准。"""
+        target = self._root / path
+        old_text = target.read_text(encoding="utf-8") if target.exists() else ""
+        change = PendingChange(path=path, old_text=old_text, new_text=new_text)
+        self._changes[path] = change
+        return change
+
+    def apply(self) -> list[str]:
+        """把全部待授权修改写入磁盘，返回已写入的路径。"""
+        written: list[str] = []
+        for change in self._changes.values():
+            target = self._root / change.path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(change.new_text, encoding="utf-8")
+            written.append(change.path)
+        self._changes.clear()
+        return written
+
+    def discard(self) -> None:
+        self._changes.clear()
+
+
+def _propose(
+    root: Path, pending: PendingChanges, args: dict, transform
+) -> ToolResult:
+    """共用的提交流程：解析路径、读取原文、变换、登记、返回 diff。
+
+    变换失败用异常表达。曾经让变换函数「成功返回新内容、失败返回错误说明」，
+    两者都是字符串，结果成功路径被误判成失败——用异常区分才不会有歧义。
+    """
+    try:
+        relative = pending.path_of(args["path"])
+    except PathOutsideProjectError as exc:
+        return ToolResult(ok=False, content=str(exc))
+
+    target = root / relative
+    old_text = target.read_text(encoding="utf-8") if target.exists() else ""
+    try:
+        new_text = transform(old_text)
+    except ValueError as exc:
+        return ToolResult(ok=False, content=str(exc))
+
+    change = pending.propose(relative, new_text)
+    verb = "新建" if change.is_new_file else "修改"
+    return ToolResult(
+        ok=True,
+        content=f"已生成{verb}预览（尚未写入，需用户确认）：\n{change.diff}",
+    )
+
+
+def write_file_spec(root: Path, pending: PendingChanges) -> ToolSpec:
+    """整文件写入。对已存在的文件是整体替换，改动量大时慎用。"""
+
+    def handler(args: dict) -> ToolResult:
+        return _propose(root, pending, args, lambda _old: args["content"])
+
+    return ToolSpec(
+        name="write_file",
+        description="新建或整体覆盖一个文件；只生成 diff，需用户确认后才写入",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+        handler=handler,
+    )
+
+
+def replace_lines_spec(root: Path, pending: PendingChanges) -> ToolSpec:
+    """按行区间替换。比整文件写入精确得多，是改动的首选方式。"""
+
+    def transform(old_text: str, args: dict) -> str:
+        if not old_text:
+            raise ValueError("文件不存在，无法按行替换；请先确认路径")
+        lines = old_text.splitlines()
+        start = args["start_line"]
+        end = args["end_line"]
+        if start < 1 or end < start or end > len(lines):
+            raise ValueError(f"行号区间非法：文件共 {len(lines)} 行")
+        replacement = args["content"].splitlines()
+        merged = lines[: start - 1] + replacement + lines[end:]
+        return "\n".join(merged) + ("\n" if old_text.endswith("\n") else "")
+
+    def handler(args: dict) -> ToolResult:
+        return _propose(root, pending, args, lambda old: transform(old, args))
+
+    return ToolSpec(
+        name="replace_lines",
+        description="替换文件的指定行区间；只生成 diff，需用户确认后才写入",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "start_line": {"type": "integer"},
+                "end_line": {"type": "integer"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "start_line", "end_line", "content"],
+            "additionalProperties": False,
+        },
+        handler=handler,
+    )
