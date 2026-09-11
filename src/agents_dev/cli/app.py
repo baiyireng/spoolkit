@@ -6,11 +6,14 @@
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from agents_dev.agent.loop import AgentLoop
 from agents_dev.config import Config
+from agents_dev.llm.gateway import ModelGateway
+from agents_dev.llm.gemini import GeminiGateway, load_env_file
 from agents_dev.index.indexer import index_project
 from agents_dev.index.rank import prefetch as prefetch_text
 from agents_dev.index.tools import file_symbols_spec, find_symbol_spec
@@ -42,17 +45,24 @@ def _attach_index(project_root: Path, registry: ToolRegistry, tokenizer):
     return lambda goal: prefetch_text(conn, goal, tokenizer, PREFETCH_BUDGET)
 
 
-def build_loop(project_root: Path, script: list[str], window: int = 4096) -> AgentLoop:
-    """装配一个由假模型驱动的完整循环。"""
+def assemble_loop(
+    project_root: Path,
+    gateway: ModelGateway,
+    window: int = 4096,
+    max_steps: int = 10,
+) -> AgentLoop:
+    """用给定网关装配完整循环：注册全部工具、建索引、接上预取。"""
     registry = ToolRegistry()
     registry.register(read_file_spec(project_root))
     registry.register(list_dir_spec(project_root))
     registry.register(search_code_spec(project_root))
 
     tokenizer = OfflineTokenCounter()
-    config = Config(project_root=project_root, context_window=window)
+    config = Config(
+        project_root=project_root, context_window=window, max_steps=max_steps
+    )
     return AgentLoop(
-        gateway=FakeModel(script=script, tokenizer=tokenizer),
+        gateway=gateway,
         tokenizer=tokenizer,
         registry=registry,
         config=config,
@@ -60,19 +70,48 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
     )
 
 
+def build_loop(project_root: Path, script: list[str], window: int = 4096) -> AgentLoop:
+    """装配一个由脚本化假模型驱动的循环（离线可用）。"""
+    tokenizer = OfflineTokenCounter()
+    return assemble_loop(
+        project_root,
+        FakeModel(script=script, tokenizer=tokenizer),
+        window=window,
+    )
+
+
+def _gemini_gateway(project_root: Path, model: str) -> GeminiGateway:
+    """从环境变量或项目根的 .env 读取密钥，构造网关。"""
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        api_key = load_env_file(project_root / ".env").get("GEMINI_API_KEY", "")
+    return GeminiGateway(api_key, model=model)
+
+
 def _run(args: argparse.Namespace) -> int:
-    script_path = Path(args.script)
-    if not script_path.exists():
-        print(f"脚本文件不存在: {script_path}", file=sys.stderr)
-        return 2
+    project_root = Path(args.root).resolve()
 
-    raw = json.loads(script_path.read_text(encoding="utf-8"))
-    script = [
-        item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
-        for item in raw
-    ]
+    if args.engine == "gemini":
+        try:
+            gateway: ModelGateway = _gemini_gateway(project_root, args.model)
+        except Exception as exc:
+            print(f"无法初始化 Gemini 网关: {exc}", file=sys.stderr)
+            return 2
+    else:
+        script_path = Path(args.script)
+        if not script_path.exists():
+            print(f"脚本文件不存在: {script_path}", file=sys.stderr)
+            return 2
+        raw = json.loads(script_path.read_text(encoding="utf-8"))
+        script = [
+            item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+            for item in raw
+        ]
+        gateway = FakeModel(script=script, tokenizer=OfflineTokenCounter())
 
-    loop = build_loop(Path(args.root).resolve(), script=script, window=args.window)
+    loop = assemble_loop(
+        project_root, gateway, window=args.window, max_steps=args.max_steps
+    )
     result = loop.run(args.goal)
 
     for line in result.trace:
@@ -88,9 +127,12 @@ def main(argv: list[str] | None = None) -> int:
 
     run_parser = sub.add_parser("run", help="运行一次任务")
     run_parser.add_argument("--goal", required=True)
-    run_parser.add_argument("--script", required=True, help="假模型脚本 JSON")
+    run_parser.add_argument("--engine", choices=("fake", "gemini"), default="fake")
+    run_parser.add_argument("--script", default="", help="假模型脚本 JSON")
+    run_parser.add_argument("--model", default="gemini-3.6-flash")
     run_parser.add_argument("--root", default=".")
     run_parser.add_argument("--window", type=int, default=4096)
+    run_parser.add_argument("--max-steps", type=int, default=10)
     run_parser.set_defaults(func=_run)
 
     args = parser.parse_args(argv)

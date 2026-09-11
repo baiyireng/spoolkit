@@ -12,7 +12,11 @@ __pycache__/
 *.db-wal
 *.db-shm
 
+# 密钥与本机配置
+.env
+.env.*
+!.env.example
+
 # 编辑器
 .vscode/
 .idea/
-

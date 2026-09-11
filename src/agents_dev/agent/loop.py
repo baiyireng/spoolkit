@@ -22,8 +22,10 @@ from agents_dev.llm.types import ChatRequest, Message
 from agents_dev.tools.registry import ToolRegistry
 
 SYSTEM_PROMPT = """你是本地运行的编程助手。每轮只做一件事。
-必须输出一个 JSON 对象，字段为 thought、tool_calls、state、final。
-不要输出 JSON 以外的任何内容。
+必须只输出一个 JSON 对象，不要有任何其他文字。
+格式：
+{{"thought":"这一步的打算","tool_calls":[{{"name":"工具名","arguments":{{"参数名":值}}}}],"state":{{"current":"当前在做什么"}},"final":null}}
+调用工具时把 final 设为 null；任务完成时 tool_calls 设为 [] 并把 final 设为给用户的答复。
 可用工具：
 {tools}"""
 
@@ -132,7 +134,8 @@ class AgentLoop:
                     result = self.registry.invoke(call)
                     status = "成功" if result.ok else "失败"
                     outputs.append(f"[{call.name}] {status}: {result.content}")
-                    trace.append(f"step{state.step}: 工具 {call.name} -> {status}")
+                    detail = "" if result.ok else f": {result.content.splitlines()[0]}"
+                    trace.append(f"step{state.step}: 工具 {call.name} -> {status}{detail}")
                 history.append(Message(role="tool", content="\n".join(outputs)))
 
             state.step_forward()
