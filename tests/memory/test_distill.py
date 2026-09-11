@@ -40,9 +40,8 @@ class _SegmentSensitive:
     def chat(self, request):
         self.requests.append(request)
         prompt = request.messages[0].content
-        # 材料区之后模板不再使用 "- " 列表，因此可以直接统计。
-        _, _, after = prompt.partition("本次要看的材料：")
-        material = [ln for ln in after.splitlines() if ln.startswith("- ")]
+        # 提示模板里只有材料使用 "- " 列表，因此可以直接统计。
+        material = [ln for ln in prompt.splitlines() if ln.startswith("- ")]
         if len(material) > self.max_segments:
             return ChatResponse(
                 text='{"entries":[',
@@ -119,14 +118,20 @@ def test_归纳请求带结构约束() -> None:
 
 def test_材料被切成片段() -> None:
     state = TaskState(task_id="t", goal="g", done=["甲", "乙"], excluded=["丙"])
-    segments = segments_of(state, "第一行\n第二行")
+    segments = segments_of(state, "第一段\n\n第二段")
     assert segments == [
         ("过程", "甲"),
         ("过程", "乙"),
         ("已排除", "丙"),
-        ("结论", "第一行"),
-        ("结论", "第二行"),
+        ("结论", "第一段"),
+        ("结论", "第二段"),
     ]
+
+
+def test_答复按段落切而不是按行切() -> None:
+    state = TaskState(task_id="t", goal="g")
+    segments = segments_of(state, "第一行\n第二行\n第三行")
+    assert segments == [("结论", "第一行\n第二行\n第三行")]
 
 
 def test_没有材料时也有兜底片段() -> None:
@@ -136,14 +141,14 @@ def test_没有材料时也有兜底片段() -> None:
 
 
 def test_截断时优先分治而不是缩减要求() -> None:
-    # 整批 8 段放不下，半批 4 段放得下。
+    # 整批 6 段过程放不下，半批 3 段放得下（提示里只有过程用 "- " 列表）。
     model = _SegmentSensitive(max_segments=4)
     state = TaskState(
         task_id="t",
         goal="目标",
-        done=[f"步骤{i}" for i in range(4)],
+        done=[f"步骤{i}" for i in range(6)],
     )
-    result = distill(model, state, final="\n".join(f"结论{i}" for i in range(4)))
+    result = distill(model, state, final="这是交给用户的答复。")
     assert result.truncated is True
     assert result.split is True
     assert len(result.entries) >= 2

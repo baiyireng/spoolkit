@@ -180,7 +180,15 @@ class AgentLoop:
         promote: list[tuple[str, str]] = []
         if self.distiller is not None:
             try:
-                promote = list(self.distiller(state, final))
+                produced = self.distiller(state, final)
+                if hasattr(produced, "entries"):
+                    promote = list(produced.entries)
+                    trace.append(
+                        f"归纳: {produced.rounds} 轮，分治={produced.split}，"
+                        f"截断={produced.truncated}，原始输出={produced.raw[:120]!r}"
+                    )
+                else:
+                    promote = list(produced)
             except Exception as exc:
                 promote = []
                 trace.append(f"归纳失败（已忽略）: {type(exc).__name__}: {exc}")

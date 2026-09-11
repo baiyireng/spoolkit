@@ -17,6 +17,7 @@
 """
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -51,9 +52,6 @@ DISTILL_SCHEMA: dict[str, Any] = {
 
 PROMPT = """你在整理一个编程任务结束后值得长期记住的结论。
 
-任务目标：{goal}
-
-本次要看的材料：
 {body}
 
 可用分类：fact（项目客观事实，如构建命令、目录约定）、preference（稳定偏好）、
@@ -73,22 +71,32 @@ class DistillResult:
     rounds: int
     split: bool
     truncated: bool
+    raw: str = ""
+
+
+GROUP_TITLES = {
+    "过程": "已完成的过程",
+    "已排除": "已排除的方案",
+    "结论": "交付给用户的答复",
+    "材料": "材料",
+}
 
 
 def segments_of(state: TaskState, final: str) -> list[tuple[str, str]]:
     """把任务留下的材料切成可独立处理的片段。
 
-    切分依据是「材料本身」而不是「要求的条目数」：只有这样，
-    分批处理才是覆盖全部内容，而不是每批都只看一部分。
+    切分单位必须是语义完整的单元，所以答复按**段落**切而不是按行切。
+    曾经按行拆过，结果跨行的事实被拆成互不相干的碎片，模型一条都提炼
+    不出来——切分把语义切碎了，比不切更糟。
 
-    每段都带来源标签，渲染时按标签分组。曾经为了图省事压成无标签的
-    扁平列表，模型就分不清哪条是过程、哪条是结论——切分不能以丢掉
-    语义为代价，而语义和可切分本来也不冲突。
+    每段带来源标签，渲染时按标签分组呈现。
     """
     parts: list[tuple[str, str]] = [("过程", item) for item in state.done]
     parts.extend(("已排除", item) for item in state.excluded)
     parts.extend(
-        ("结论", line.strip()) for line in final.splitlines() if line.strip()
+        ("结论", block.strip())
+        for block in re.split(r"\n\s*\n", final)
+        if block.strip()
     )
     return parts or [("材料", NO_CONTENT)]
 
@@ -97,11 +105,16 @@ def _prompt(goal: str, segments: list[tuple[str, str]], limit: int) -> str:
     grouped: dict[str, list[str]] = {}
     for label, text in segments:
         grouped.setdefault(label, []).append(text)
-    lines: list[str] = []
+    lines: list[str] = [f"任务目标：{goal}", ""]
     for label, items in grouped.items():
-        lines.append(f"【{label}】")
-        lines.extend(f"- {item}" for item in items)
-    body = "\n".join(lines)
+        lines.append(f"{GROUP_TITLES.get(label, label)}：")
+        if label == "结论":
+            # 答复保持成块，不拆成列表项，否则跨行的事实会被切碎。
+            lines.append("\n".join(items))
+        else:
+            lines.extend(f"- {item}" for item in items)
+        lines.append("")
+    body = "\n".join(lines).rstrip()
     return PROMPT.format(goal=goal, body=body, limit=limit)
 
 
@@ -160,12 +173,12 @@ def _run_once(
     segments: list[tuple[str, str]],
     limit: int,
     max_tokens: int,
-) -> tuple[list[tuple[str, str]], bool]:
-    """执行一次提炼，返回（条目，是否被截断）。"""
+) -> tuple[list[tuple[str, str]], bool, str]:
+    """执行一次提炼，返回（条目，是否被截断，原始输出）。"""
     response = chat_with_escalation(
         gateway, _request(goal, segments, limit, max_tokens)
     )
-    return _parse_entries(response.text, limit), response.truncated
+    return _parse_entries(response.text, limit), response.truncated, response.text
 
 
 def _distill(
@@ -178,7 +191,9 @@ def _distill(
     stats: dict[str, Any],
 ) -> list[tuple[str, str]]:
     stats["rounds"] += 1
-    entries, truncated = _run_once(gateway, goal, segments, limit, max_tokens)
+    entries, truncated, raw = _run_once(gateway, goal, segments, limit, max_tokens)
+    if depth == 0:
+        stats["raw"] = raw
     if entries or not truncated:
         return entries
 
@@ -237,4 +252,5 @@ def distill(
         rounds=stats["rounds"],
         split=stats["split"],
         truncated=stats["truncated"],
+        raw=stats.get("raw", ""),
     )
