@@ -25,6 +25,7 @@ from agents_dev.cli.options import (
     resolve_window,
 )
 from agents_dev.cli.runtime import (
+    LoopWiring,
     PREFETCH_BUDGET,
     assemble_loop,
     build_approver,
@@ -42,6 +43,7 @@ from agents_dev.policy import POLICIES
 # 拆文件之后在这里重新导出，避免留下断裂的导入路径。
 __all__ = [
     "DEFAULT_WINDOW",
+    "LoopWiring",
     "MAX_AUTO_WINDOW",
     "PREFETCH_BUDGET",
     "assemble_loop",
@@ -168,4 +170,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

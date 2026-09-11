@@ -6,6 +6,7 @@
 
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from agents_dev.llm.providers import ProviderConfig, ProviderError, load_gateway
@@ -32,6 +33,26 @@ from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.search import search_code_spec
 
 PREFETCH_BUDGET = 400
+
+
+@dataclass
+class LoopWiring:
+    """一次装配里挂上的可选协作者。
+
+    收成一个对象而不是一串关键字参数，理由是：这些协作者各自控制一条能力
+    （记忆、教训、写操作、命令授权），散在参数表里时，调用方看不出自己
+    漏传了什么——而漏传的表现是**那条能力静默失效**，不是报错。
+
+    早先这套参数有十一个，改一处要数一遍；现在默认值集中在这里，
+    调用方只写自己真正要接的那几个。
+    """
+
+    memory: object | None = None
+    distiller: object | None = None
+    pending: object | None = None
+    approver: object | None = None
+    grants: object | None = None
+    lessons: object | None = None
 
 
 def provider_gateway(args, project_root):
@@ -93,46 +114,41 @@ def attach_index(project_root: Path, registry: ToolRegistry, tokenizer):
 def assemble_loop(
     project_root: Path,
     gateway: ModelGateway,
-    window: int = 4096,
-    max_steps: int = 10,
-    subagent_steps: int = 20,
-    memory=None,
-    distiller=None,
-    pending=None,
-    approver=None,
-    grants=None,
-    lessons=None,
+    config: Config | None = None,
+    wiring: LoopWiring | None = None,
 ) -> AgentLoop:
-    """用给定网关装配完整循环：注册全部工具、建索引、接上预取。"""
+    """用给定网关装配完整循环：注册全部工具、建索引、接上预取。
+
+    预算（窗口、步数）走 Config，可选的协作者走 LoopWiring。
+    两者分开是因为性质不同：前者是「这次跑多大」，后者是「挂上哪些能力」。
+    """
+    settings = config or Config(project_root=project_root)
+    parts = wiring or LoopWiring()
     registry = ToolRegistry()
     registry.register(read_file_spec(project_root))
     registry.register(list_dir_spec(project_root))
     registry.register(search_code_spec(project_root))
-    registry.register(run_command_spec(project_root, pending, approver, grants))
-    if pending is not None:
-        registry.register(write_file_spec(project_root, pending))
-        registry.register(replace_lines_spec(project_root, pending))
-    if memory is not None:
+    registry.register(
+        run_command_spec(project_root, parts.pending, parts.approver, parts.grants)
+    )
+    if parts.pending is not None:
+        registry.register(write_file_spec(project_root, parts.pending))
+        registry.register(replace_lines_spec(project_root, parts.pending))
+    if parts.memory is not None:
         # 主循环用的注册表在这里构造，所以 recall 也必须在这里注册，
         # 否则提示词会提到一个只有派发路径才有的工具。
-        registry.register(recall_spec(memory))
+        registry.register(recall_spec(parts.memory))
 
     tokenizer = OfflineTokenCounter()
-    config = Config(
-        project_root=project_root,
-        context_window=window,
-        max_steps=max_steps,
-        subagent_steps=subagent_steps,
-    )
     return AgentLoop(
         gateway=gateway,
         tokenizer=tokenizer,
         registry=registry,
-        config=config,
+        config=settings,
         prefetch=attach_index(project_root, registry, tokenizer),
-        memory=memory,
-        lessons=lessons,
-        distiller=distiller,
+        memory=parts.memory,
+        lessons=parts.lessons,
+        distiller=parts.distiller,
     )
 
 
@@ -142,7 +158,7 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
     return assemble_loop(
         project_root,
         FakeModel(script=script, tokenizer=tokenizer),
-        window=window,
+        config=Config(project_root=project_root, context_window=window),
     )
 
 

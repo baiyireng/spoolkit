@@ -7,6 +7,7 @@
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -27,6 +28,7 @@ from agents_dev.cli.options import (
     resolve_window,
 )
 from agents_dev.cli.runtime import (
+    LoopWiring,
     assemble_loop,
     build_approver,
     build_lessons,
@@ -57,18 +59,26 @@ def make_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def execute_step(
-    args: argparse.Namespace,
-    project_root: Path,
-    gateway,
-    plan,
-    step,
-    scope: Sequence[str],
-    non_interactive: bool,
-    approver=None,
-    grants=None,
-):
+@dataclass
+class StepRun:
+    """一次步骤运行的上下文。
+
+    这些参数在一次运行里全程不变，打包在一起的理由和 LoopWiring 一样：
+    散成位置参数时，调用方看不出自己漏传了什么，而漏传的表现是
+    「策略静默失效」，不是报错。
+    """
+
+    args: argparse.Namespace
+    project_root: Path
+    gateway: object
+    plan: object
+    non_interactive: bool
+
+
+def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants=None):
     """执行一个计划步骤，返回（结果，待落盘改动）。"""
+    args, project_root, gateway = ctx.args, ctx.project_root, ctx.gateway
+    plan = ctx.plan
     report_policy(resolve_policy(args, project_root), scope)
     window = resolve_window(gateway, args.window)
     pending = PendingChanges(project_root)
@@ -85,14 +95,19 @@ def execute_step(
     loop = assemble_loop(
         project_root,
         gateway,
-        window=window,
-        max_steps=args.max_steps,
-        subagent_steps=args.subagent_steps,
-        memory=memory,
-        pending=pending,
-        approver=approver,
-        grants=grants,
-        lessons=build_lessons(memory) if memory is not None else None,
+        config=Config(
+            project_root=project_root,
+            context_window=window,
+            max_steps=args.max_steps,
+            subagent_steps=args.subagent_steps,
+        ),
+        wiring=LoopWiring(
+            memory=memory,
+            pending=pending,
+            approver=approver,
+            grants=grants,
+            lessons=build_lessons(memory) if memory is not None else None,
+        ),
     )
     result = loop.run(render_step_prompt(plan, step))
 
@@ -105,17 +120,9 @@ def execute_step(
     return result, pending
 
 
-def record_step(
-    project_root: Path,
-    plan,
-    step,
-    result,
-    pending,
-    scope: Sequence[str],
-    policy: str,
-    non_interactive: bool,
-) -> None:
+def record_step(ctx: StepRun, step, result, pending, scope: Sequence[str]) -> None:
     """记录步骤结果并按策略处理待落盘改动。"""
+    project_root, plan = ctx.project_root, ctx.plan
     note = (result.final or "").strip().splitlines()[0][:80] if result.final else ""
     plan.mark(step.index, DONE if result.finished else FAILED, note=note)
     save_plan(plan_path(project_root), plan)
@@ -123,10 +130,10 @@ def record_step(
     if len(pending):
         settle(
             pending,
-            policy,
+            resolve_policy(ctx.args, project_root),
             scope,
             baseline_path=project_root / ".agent" / "last_change.json",
-            non_interactive=non_interactive,
+            non_interactive=ctx.non_interactive,
         )
 
 
@@ -159,27 +166,21 @@ def advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
     # 安全边界的输出报错比不输出更糟——看到「**」会以为整个项目都放行了。
     scope = resolve_scope(args, step.scope, default=())
     approver, grants = build_approver(project_root)
+    ctx = StepRun(
+        args=args,
+        project_root=project_root,
+        gateway=gateway,
+        plan=plan,
+        non_interactive=False,
+    )
     result, pending = execute_step(
-        args,
-        project_root,
-        gateway,
-        plan,
+        ctx,
         step,
         scope,
-        non_interactive=False,
         approver=approver,
         grants=grants,
     )
-    record_step(
-        project_root,
-        plan,
-        step,
-        result,
-        pending,
-        scope,
-        resolve_policy(args, project_root),
-        non_interactive=False,
-    )
+    record_step(ctx, step, result, pending, scope)
     print(plan.render())
     return 0 if result.finished else 1
 
@@ -209,8 +210,14 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
     print(f"授权范围：{'、'.join(granted)}")
     print(plan.render())
 
-    policy = resolve_policy(args, project_root)
     completed = 0
+    ctx = StepRun(
+        args=args,
+        project_root=project_root,
+        gateway=gateway,
+        plan=plan,
+        non_interactive=True,
+    )
     for step in plan.steps:
         blocked = plan.blocked_by()
         if blocked is not None:
@@ -225,26 +232,13 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
 
         print(f"\n执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
         result, pending = execute_step(
-            args,
-            project_root,
-            gateway,
-            plan,
+            ctx,
             step,
             effective,
-            non_interactive=True,
             approver=None,
             grants=Grants(path=project_root / ".agent" / "grants.json"),
         )
-        record_step(
-            project_root,
-            plan,
-            step,
-            result,
-            pending,
-            effective,
-            policy,
-            non_interactive=True,
-        )
+        record_step(ctx, step, result, pending, effective)
         if not result.finished:
             print(plan.render())
             return 1

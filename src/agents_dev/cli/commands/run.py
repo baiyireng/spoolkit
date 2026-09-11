@@ -18,6 +18,7 @@ from agents_dev.cli.options import (
     resolve_window,
 )
 from agents_dev.cli.runtime import (
+    LoopWiring,
     assemble_loop,
     build_approver,
     build_lessons,
@@ -80,15 +81,20 @@ def _standard(args, project_root, gateway, window, pending) -> int:
     loop = assemble_loop(
         project_root,
         gateway,
-        window=window,
-        max_steps=args.max_steps,
-        subagent_steps=args.subagent_steps,
-        memory=memory,
-        distiller=distiller,
-        pending=pending,
-        approver=approver,
-        grants=grants,
-        lessons=build_lessons(memory) if memory is not None else None,
+        config=Config(
+            project_root=project_root,
+            context_window=window,
+            max_steps=args.max_steps,
+            subagent_steps=args.subagent_steps,
+        ),
+        wiring=LoopWiring(
+            memory=memory,
+            distiller=distiller,
+            pending=pending,
+            approver=approver,
+            grants=grants,
+            lessons=build_lessons(memory) if memory is not None else None,
+        ),
     )
     checkpoint = loop.config.task_path("task")
     if memory is not None:

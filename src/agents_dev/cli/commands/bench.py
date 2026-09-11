@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 from agents_dev.bench import load_tasks, render_report, run_task
-from agents_dev.cli.runtime import assemble_loop
+from agents_dev.config import Config
+from agents_dev.cli.runtime import LoopWiring, assemble_loop
 from agents_dev.cli.settle import settle
 from agents_dev.llm.providers import ProviderConfig, load_gateway
 from agents_dev.net import system_proxy
@@ -50,9 +51,12 @@ def bench(args: argparse.Namespace) -> int:
             return assemble_loop(
                 workspace,
                 gateway,
-                window=args.window or 8192,
-                max_steps=args.max_steps,
-                pending=pending,
+                config=Config(
+                    project_root=workspace,
+                    context_window=args.window or 8192,
+                    max_steps=args.max_steps,
+                ),
+                wiring=LoopWiring(pending=pending),
             )
 
         def settle_now(task=task):
@@ -70,4 +74,3 @@ def bench(args: argparse.Namespace) -> int:
     print()
     print(render_report(results))
     return 0 if all(item.passed for item in results) else 1
-
