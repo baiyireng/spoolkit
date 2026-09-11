@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from agents_dev.agent.loop import AgentLoop
+from agents_dev.agents.dispatcher import plan_dispatch, run_delegated
 from agents_dev.config import Config
 from agents_dev.index.indexer import index_project
 from agents_dev.index.rank import prefetch as prefetch_text
@@ -148,6 +149,43 @@ def _run(args: argparse.Namespace) -> int:
     memory = None
     distiller = None
     pending = PendingChanges(project_root)
+    registry = ToolRegistry()
+    registry.register(read_file_spec(project_root))
+    registry.register(list_dir_spec(project_root))
+    registry.register(search_code_spec(project_root))
+    registry.register(write_file_spec(project_root, pending))
+    registry.register(replace_lines_spec(project_root, pending))
+    _attach_index(project_root, registry, OfflineTokenCounter())
+
+    if args.delegate:
+        plan = plan_dispatch(gateway, args.goal)
+        print(f"分派判断：{'派发' if plan.delegate else '自己完成'} —— {plan.reason}")
+        if not plan.delegate:
+            print("未派发，请去掉 --delegate 让主循环自己完成。")
+            return 0
+        delegated = run_delegated(
+            plan,
+            gateway,
+            OfflineTokenCounter(),
+            registry,
+            Config(
+                project_root=project_root,
+                context_window=args.window,
+                max_steps=args.max_steps,
+            ),
+        )
+        for line in delegated.trace:
+            print(line)
+        print("--- 实现 ---")
+        print(delegated.implementer_final)
+        print("--- 独立审查 ---")
+        print(delegated.reviewer_final)
+        if len(pending):
+            print("---")
+            review_and_apply(
+                pending, baseline_path=project_root / ".agent" / "last_change.json"
+            )
+        return 0
     if not args.no_memory:
         memory = build_memory(project_root, args.window)
         # 假模型没有多余脚本条目可分给归纳调用，因此只在真实供应商下启用。
@@ -216,6 +254,11 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--max-steps", type=int, default=10)
     run_parser.add_argument(
         "--no-memory", action="store_true", help="关闭记忆读写，用于对照实验"
+    )
+    run_parser.add_argument(
+        "--delegate",
+        action="store_true",
+        help="先判断是否派发，派发时由实现者做、审查者独立验",
     )
     run_parser.set_defaults(func=_run)
 

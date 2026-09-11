@@ -80,6 +80,7 @@ class TaskSpec:
     constraints: tuple[str, ...] = ()
     acceptance: str = ""
     out_of_scope: tuple[str, ...] = ()
+    artifact: str = ""
 
     def validate(self) -> str | None:
         """派发前的硬闸门：没有验收标准就不允许派发。
@@ -102,6 +103,8 @@ class TaskSpec:
         sections.append(f"验收标准：{self.acceptance}")
         if self.out_of_scope:
             sections.append("明确不要做的事：" + "；".join(self.out_of_scope))
+        if self.artifact:
+            sections.append(f"待审查的改动：\n{self.artifact}")
         return "\n".join(sections)
 
 

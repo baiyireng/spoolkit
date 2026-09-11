@@ -44,6 +44,11 @@ def _search_code(root: Path, args: dict) -> ToolResult:
         ],
         capture_output=True,
         text=True,
+        # 必须显式指定 UTF-8。默认走 Windows 本地编码（GBK），
+        # 源码里一旦出现超出 GBK 的字符，解码失败会让 stdout 变成 None，
+        # 报错信息却是 "NoneType has no attribute splitlines"——离真正原因很远。
+        encoding="utf-8",
+        errors="replace",
         timeout=TIMEOUT_SECONDS,
         cwd=str(root),
     )
