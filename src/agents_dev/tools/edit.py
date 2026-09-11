@@ -8,6 +8,7 @@
 """
 
 import difflib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,7 +77,11 @@ class PendingChanges:
         return change
 
     def apply(self) -> list[str]:
-        """把全部待授权修改写入磁盘，返回已写入的路径。"""
+        """把全部待授权修改写入磁盘，返回已写入的路径。
+
+        落盘之前先构造基线。没有基线的写操作等于没有退路，
+        而「确认错了」是必然会发生的——diff 看得再仔细也挡不住走神。
+        """
         written: list[str] = []
         for change in self._changes.values():
             target = self._root / change.path
@@ -86,8 +91,82 @@ class PendingChanges:
         self._changes.clear()
         return written
 
+    def baseline(self) -> "Baseline":
+        """把当前待写入的修改转成可持久化的基线。"""
+        return Baseline(
+            entries=tuple(
+                BaselineEntry(
+                    path=change.path,
+                    old_text=None if change.is_new_file else change.old_text,
+                )
+                for change in self._changes.values()
+            )
+        )
+
     def discard(self) -> None:
         self._changes.clear()
+
+
+@dataclass(frozen=True)
+class BaselineEntry:
+    """一个文件的改动前状态。old_text 为 None 表示这个文件是新建的。"""
+
+    path: str
+    old_text: str | None
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """一次写操作的改动前快照。"""
+
+    entries: tuple[BaselineEntry, ...]
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {"entries": [{"path": e.path, "old_text": e.old_text} for e in self.entries]},
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    @classmethod
+    def from_json(cls, text: str) -> "Baseline":
+        payload = json.loads(text)
+        return cls(
+            entries=tuple(
+                BaselineEntry(path=item["path"], old_text=item.get("old_text"))
+                for item in payload.get("entries", [])
+            )
+        )
+
+
+def save_baseline(path: Path, baseline: Baseline) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(baseline.to_json(), encoding="utf-8")
+
+
+def load_baseline(path: Path) -> Baseline | None:
+    if not path.exists():
+        return None
+    return Baseline.from_json(path.read_text(encoding="utf-8"))
+
+
+def revert(root: Path, baseline: Baseline) -> list[str]:
+    """把文件恢复到基线状态，返回被处理过的路径。
+
+    新建的文件在回滚时删除——恢复到「它不存在」才算真的恢复。
+    """
+    touched: list[str] = []
+    for entry in baseline.entries:
+        target = root / entry.path
+        if entry.old_text is None:
+            if target.exists():
+                target.unlink()
+            touched.append(entry.path)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(entry.old_text, encoding="utf-8")
+        touched.append(entry.path)
+    return touched
 
 
 def _propose(

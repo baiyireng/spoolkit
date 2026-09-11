@@ -31,6 +31,7 @@ from agents_dev.memory.store import init_memory_schema
 from agents_dev.net import system_proxy
 from agents_dev.store.db import init_schema, open_db
 from agents_dev.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
+from agents_dev.tools.edit import load_baseline, revert
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.search import search_code_spec
@@ -171,8 +172,25 @@ def _run(args: argparse.Namespace) -> int:
 
     if len(pending):
         print("---")
-        review_and_apply(pending)
+        review_and_apply(pending, baseline_path=project_root / ".agent" / "last_change.json")
     return 0 if result.finished else 1
+
+
+def _revert(args: argparse.Namespace) -> int:
+    """把上一次写入的文件恢复到改动前。"""
+    project_root = Path(args.root).resolve()
+    baseline_path = project_root / ".agent" / "last_change.json"
+    baseline = load_baseline(baseline_path)
+    if baseline is None:
+        print("没有可回滚的记录。", file=sys.stderr)
+        return 2
+
+    touched = revert(project_root, baseline)
+    baseline_path.unlink()
+    for path in touched:
+        print(f"已恢复: {path}")
+    print(f"共恢复 {len(touched)} 个文件。")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -200,6 +218,10 @@ def main(argv: list[str] | None = None) -> int:
         "--no-memory", action="store_true", help="关闭记忆读写，用于对照实验"
     )
     run_parser.set_defaults(func=_run)
+
+    revert_parser = sub.add_parser("revert", help="回滚上一次写入的改动")
+    revert_parser.add_argument("--root", default=".")
+    revert_parser.set_defaults(func=_revert)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

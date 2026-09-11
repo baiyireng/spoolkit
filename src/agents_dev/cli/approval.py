@@ -8,14 +8,21 @@ ask 做成可注入的，测试才能覆盖两种分支而不需要真的等待�
 
 from typing import Callable
 
-from agents_dev.tools.edit import PendingChanges
+from pathlib import Path
+
+from agents_dev.tools.edit import PendingChanges, save_baseline
 
 
 def review_and_apply(
     pending: PendingChanges,
     ask: Callable[[str], str] = input,
+    baseline_path: Path | None = None,
 ) -> tuple[bool, list[str]]:
-    """展示全部 diff 并询问是否应用。返回（是否应用，已写入的路径）。"""
+    """展示全部 diff 并询问是否应用。返回（是否应用，已写入的路径）。
+
+    应用前先把改动前快照写进基线文件：退路必须在动手之前就准备好，
+    事后补是补不出来的。
+    """
     changes = pending.items()
     if not changes:
         return False, []
@@ -26,7 +33,8 @@ def review_and_apply(
 
     answer = ask("应用这些修改吗？[y/N] ").strip().lower()
     if answer in ("y", "yes"):
+        if baseline_path is not None:
+            save_baseline(baseline_path, pending.baseline())
         return True, pending.apply()
     pending.discard()
     return False, []
-
