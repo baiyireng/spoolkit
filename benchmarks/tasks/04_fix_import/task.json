@@ -1,0 +1,8 @@
+{
+  "goal": "main.py 引用了不存在的模块名，导致无法导入。找出正确的模块并修好。不要改测试。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

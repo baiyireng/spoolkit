@@ -1,0 +1,8 @@
+{
+  "goal": "calc.py 里的 sum_to(n) 本意是返回 1 到 n 的和（包含 n），但现在少算了一个。修好它，不要改测试。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

@@ -1,0 +1,8 @@
+{
+  "goal": "parse.py 里的 to_int 遇到非数字会直接抛 ValueError，调用方无法区分。改成遇到非法输入返回 None。不要改测试。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

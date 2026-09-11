@@ -301,8 +301,10 @@ class AgentLoop:
                     outputs.append(f"[{call.name}] {status}: {result.content}")
                     # 失败时把输出压成一行摘要。取第一行不行：那里是命令本身，
                     # 而不是错误原因——调试时会被误导。
+                    # 失败信息给足长度：160 字刚好够看到命令本身，
+                    # 而真正的原因在后面——调试时会被自己的截断挡住。
                     flat = " ".join(result.content.split())
-                    detail = "" if result.ok else f": {flat[:160]}"
+                    detail = "" if result.ok else f": {flat[:400]}"
                     trace.append(f"step{state.step}: 工具 {call.name} -> {status}{detail}")
                 history.append(Message(role="tool", content="\n".join(outputs)))
 

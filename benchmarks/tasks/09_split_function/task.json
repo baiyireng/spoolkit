@@ -1,0 +1,8 @@
+{
+  "goal": "report.py 里的 render_report 有 40 多行，把「计算总分」和「格式化一行」抽成独立函数，让 render_report 本身短于 20 行，输出结果保持不变。不要改测试。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

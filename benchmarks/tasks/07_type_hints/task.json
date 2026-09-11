@@ -1,0 +1,8 @@
+{
+  "goal": "geometry.py 里的函数缺少类型注解。给参数和返回值补上 int 注解。不要改测试。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

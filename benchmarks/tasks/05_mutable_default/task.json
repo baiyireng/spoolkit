@@ -1,0 +1,8 @@
+{
+  "goal": "bucket.py 里的 add_item 用了可变默认参数，导致多次调用之间会互相污染。修好它，保持调用方式不变。不要改测试。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

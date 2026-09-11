@@ -25,6 +25,7 @@ from agents_dev.agents.plan import (
     save_plan,
 )
 from agents_dev.config import Config
+from agents_dev.bench import DEFAULT_BENCH_ROOT, load_tasks, render_report, run_task
 from agents_dev.index.indexer import index_project
 from agents_dev.index.rank import prefetch as prefetch_text
 from agents_dev.index.tools import file_symbols_spec, find_callers_spec, find_symbol_spec
@@ -63,6 +64,7 @@ from agents_dev.tools.search import search_code_spec
 from agents_dev.cli.approval import apply_with_audit, review_and_apply
 from agents_dev.cli.settle import settle
 from agents_dev.policy import (
+    AUTO,
     DEFAULT_POLICY,
     POLICIES,
     describe as describe_policy,
@@ -483,6 +485,69 @@ def _policy_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bench(args: argparse.Namespace) -> int:
+    """跑回归任务集，用客观验收结果衡量改动效果。"""
+    project_root = Path(args.root).resolve()
+    tasks = load_tasks(project_root / args.tasks)
+    if args.filter:
+        tasks = [task for task in tasks if args.filter in task.name]
+    if not tasks:
+        print("没有匹配的任务。", file=sys.stderr)
+        return 2
+
+    print(f"共 {len(tasks)} 个任务，供应商 {args.provider}")
+    results = []
+    for task in tasks:
+        # 用容器而不是默认参数传 pending：默认参数在函数定义时就绑定，
+        # build 里重新赋值影响不到它，结算的就会是一个空集合——
+        # 表现是「改动没落盘，验收全失败」，而原因跟模型毫无关系。
+        holder: dict = {}
+
+        def build(workspace: Path, task=task):
+            pending = PendingChanges(workspace)
+            holder["pending"] = pending
+            # 凭据与供应商设置来自真实项目根，工作区只是临时的任务目录——
+            # 拿临时目录去找 .env 当然找不到。
+            provider_config = ProviderConfig(
+                project_root=project_root,
+                model=args.model,
+                base_url=args.base_url,
+                proxy=args.proxy if args.proxy else system_proxy(),
+                env=dict(os.environ),
+            )
+            gateway = load_gateway(args.provider, provider_config)
+            return assemble_loop(
+                workspace,
+                gateway,
+                window=args.window or 8192,
+                max_steps=args.max_steps,
+                pending=pending,
+            )
+
+        def settle_now(task=task):
+            # 无人工确认，改动直接落盘并记录基线，方便事后回看
+            pending = holder.get("pending")
+            if pending is None:
+                return
+            settle(
+                pending,
+                AUTO,
+                task.scope or ("**",),
+                non_interactive=True,
+            )
+
+        print(f"  → {task.name}")
+        results.append(
+            run_task(
+                task, build, settle_changes=settle_now, verbose=args.verbose
+            )
+        )
+
+    print()
+    print(render_report(results))
+    return 0 if all(item.passed for item in results) else 1
+
+
 def _make_plan(args: argparse.Namespace) -> int:
     """把一个较大目标拆成可验收的步骤序列并落盘。"""
     project_root = Path(args.root).resolve()
@@ -811,6 +876,23 @@ def main(argv: list[str] | None = None) -> int:
     policy_parser.add_argument("--set", dest="new_policy", choices=POLICIES, default="")
     policy_parser.add_argument("--root", default=".")
     policy_parser.set_defaults(func=_policy_command)
+
+    bench_parser = sub.add_parser("bench", help="跑回归任务集")
+    bench_parser.add_argument(
+        "--provider", dest="provider", choices=provider_names(), default="gemini"
+    )
+    bench_parser.add_argument("--model", default="")
+    bench_parser.add_argument("--base-url", default="")
+    bench_parser.add_argument("--proxy", default="")
+    bench_parser.add_argument("--root", default=".")
+    bench_parser.add_argument("--tasks", default=DEFAULT_BENCH_ROOT)
+    bench_parser.add_argument("--filter", default="", help="只跑名字含该片段的任务")
+    bench_parser.add_argument("--window", type=int, default=0)
+    bench_parser.add_argument("--max-steps", type=int, default=12)
+    bench_parser.add_argument(
+        "--verbose", action="store_true", help="打印每个任务的轨迹与验收输出"
+    )
+    bench_parser.set_defaults(func=_bench)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

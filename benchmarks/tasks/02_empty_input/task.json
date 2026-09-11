@@ -1,0 +1,8 @@
+{
+  "goal": "stats.py 里的 average(values) 在空列表上会抛异常。让它在空列表时返回 0，其它情况行为不变。不要改测试。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

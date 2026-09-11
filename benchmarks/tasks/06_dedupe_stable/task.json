@@ -1,0 +1,8 @@
+{
+  "goal": "lists.py 里的 dedupe 用了 set，导致结果顺序被打乱。改成去重同时保持原有顺序。不要改测试。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

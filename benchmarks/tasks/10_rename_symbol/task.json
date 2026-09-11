@@ -1,0 +1,8 @@
+{
+  "goal": "把 util.py 里的函数名 normalize 改成 clean_text，并同步更新所有调用点，保证没有遗留旧名字。不要改测试。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}

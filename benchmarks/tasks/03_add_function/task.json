@@ -1,0 +1,8 @@
+{
+  "goal": "text.py 里只有 upper_first，请新增一个 lower_first(s)：把首字母变小写、其余不变。不要改测试。",
+  "acceptance": {
+    "command": ["python", "-m", "pytest", "-q"],
+    "tests": ["test_acceptance.py"]
+  },
+  "scope": ["**"]
+}
