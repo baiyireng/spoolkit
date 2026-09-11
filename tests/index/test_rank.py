@@ -7,8 +7,10 @@ from agents_dev.index.rank import (
     prefetch_contents,
     rank_files,
 )
+from agents_dev.index.tools import find_symbol_spec
 from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.store.db import init_schema, open_db
+from agents_dev.tools.types import ToolCall
 
 
 def _project(tmp_path: Path):
@@ -117,4 +119,23 @@ def test_内容预取受总数上限约束(tmp_path: Path) -> None:
         conn, tmp_path, "parse_config render", counter, max_tokens=5
     )
     assert len(tiny) < len(full)
+    conn.close()
+
+
+def test_拿文件名当符号名查时给出改道提示(tmp_path: Path) -> None:
+    """实测模型会这么做，然后收到「找不到符号」就卡住，连着三次。"""
+    conn = _project(tmp_path)
+    spec = find_symbol_spec(tmp_path, conn)
+    result = spec.handler({"name": "parser.py"})
+    assert result.ok is False
+    assert "file_symbols" in result.content
+    conn.close()
+
+
+def test_普通符号找不到时不误导(tmp_path: Path) -> None:
+    conn = _project(tmp_path)
+    spec = find_symbol_spec(tmp_path, conn)
+    result = spec.handler({"name": "not_a_symbol"})
+    assert result.ok is False
+    assert "file_symbols" not in result.content
     conn.close()

@@ -69,6 +69,34 @@ def test_未知参数的报错要带上可用参数() -> None:
     assert "path" in result.content
 
 
+def test_报错要说清每个参数是干什么的() -> None:
+    """工具之间参数名有重叠，只报名字模型仍然对不上号。
+
+    实测它把 search_code 的 pattern 搬到 find_symbol 上，连撞两次。
+    """
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="t",
+            description="测试用",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "符号名，不是文件名"},
+                    "path": {"type": "string", "description": "限定在哪个文件里找"},
+                },
+                "additionalProperties": False,
+            },
+            handler=lambda args: ToolResult(ok=True, content=""),
+        )
+    )
+    result = reg.invoke(ToolCall(name="t", arguments={"name": "x", "pattern": "a.py"}))
+    assert result.ok is False
+    assert "pattern" in result.content
+    assert "符号名，不是文件名" in result.content
+    assert "限定在哪个文件里找" in result.content
+
+
 def test_处理器抛异常被转为失败结果() -> None:
     reg = ToolRegistry()
     reg.register(

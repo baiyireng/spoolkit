@@ -11,7 +11,7 @@ import difflib
 import json
 from typing import Any
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from agents_dev.errors import PathOutsideProjectError
 from agents_dev.paths import resolve_within
@@ -27,6 +27,29 @@ from agents_dev.check.constraints import check_source, format_violations
 WHOLE_FILE_LINE_LIMIT = 150
 
 _SKIP_DIRS = frozenset({".agent", ".git", ".venv", "__pycache__", "node_modules"})
+
+_TEST_DIRS = frozenset({"test", "tests"})
+
+
+def is_test_path(path: str) -> bool:
+    """这个路径看起来是不是测试文件。
+
+    放在这里而不是验证模块：写工具和验证器都要用它，而反过来引会形成
+    循环导入。
+    """
+    pure = PurePosixPath(path)
+    if pure.suffix != ".py":
+        return False
+    if pure.name.startswith("test_") or pure.name.endswith("_test.py"):
+        return True
+    return any(part.lower() in _TEST_DIRS for part in pure.parts[:-1])
+
+
+def looks_like_path(text: str) -> bool:
+    """这个字符串看起来是不是路径，而不是符号名。"""
+    return "/" in text or "\\" in text or text.endswith(
+        (".py", ".md", ".json", ".toml", ".txt")
+    )
 
 
 def is_small_project(root: Path, limit: int = WHOLE_FILE_LINE_LIMIT) -> bool:
@@ -241,6 +264,15 @@ def _propose(
     change = pending.propose(relative, new_text)
     verb = "新建" if change.is_new_file else "修改"
     body = f"已生成{verb}预览（尚未写入，需用户确认）：\n{change.diff}"
+
+    # 测试文件是验收标准。改它不会让验证通过（验证按原始内容判定），
+    # 但模型不知道这件事——实测它会把测试改成 assert True 然后宣布完成，
+    # 白烧四步。与其事后拦，不如在它动手时说清楚。
+    if is_test_path(relative):
+        body = (
+            "注意：这是测试文件。验证按测试的原始内容判定，"
+            "改它不会让验证通过——测试失败说明代码不对。\n\n" + body
+        )
 
     # 写完立刻检查结构约束。这是「软要求变硬反馈」的落点：
     # 模型不需要记住规则，只需要对具体违反项作出反应。

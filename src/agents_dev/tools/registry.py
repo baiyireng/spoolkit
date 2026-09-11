@@ -20,6 +20,12 @@ _TYPE_MAP: dict[str, type | tuple[type, ...]] = {
 }
 
 
+def _describe(key: str, rule: dict[str, Any]) -> str:
+    """渲染一个参数：名字带上用途。用途来自 schema 里的 description。"""
+    purpose = rule.get("description")
+    return f"{key}（{purpose}）" if purpose else key
+
+
 def _validate(args: dict[str, Any], schema: dict[str, Any]) -> str | None:
     """校验通过返回 None，否则返回中文错误说明。"""
     if not isinstance(args, dict):
@@ -33,7 +39,12 @@ def _validate(args: dict[str, Any], schema: dict[str, Any]) -> str | None:
             # 必须带上可用参数：只说「有个参数不认识」，模型唯一能做的就是
             # 猜。实测里它会在同一个调用上连续撞四次，把预算烧光——
             # 小模型的上下文经不起这种消耗。
-            allowed = ", ".join(sorted(properties)) or "（本工具不接受参数）"
+            #
+            # 带上每个参数是干什么的：工具之间的参数名有重叠（path / pattern），
+            # 实测模型会把 A 工具的写法搬到 B 工具上，只报名字它仍然对不上号。
+            allowed = "、".join(_describe(key, rule) for key, rule in sorted(properties.items()))
+            if not allowed:
+                allowed = "（本工具不接受参数）"
             return f"存在未知参数: {', '.join(sorted(unknown))}；可用参数: {allowed}"
 
     for key in schema.get("required", []):

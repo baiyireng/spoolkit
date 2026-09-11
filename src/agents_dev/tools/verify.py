@@ -8,9 +8,10 @@
 真实工作区全程不动。系统自己开一条绕开白名单的暗门，比模型乱跑更糟。
 """
 
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Callable
 
+from agents_dev.tools.edit import is_test_path
 from agents_dev.tools.exec import DEFAULT_TIMEOUT, run_once
 from agents_dev.tools.grant import ALLOWED, classify
 from agents_dev.tools.types import ToolResult
@@ -18,19 +19,6 @@ from agents_dev.tools.types import ToolResult
 TEST_COMMAND = ("python", "-m", "pytest", "-q")
 
 _MARKERS = ("pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg")
-
-_TEST_DIRS = ("test", "tests")
-
-
-def is_test_path(path: str) -> bool:
-    """这个路径看起来是不是测试文件。"""
-    pure = PurePosixPath(path)
-    if pure.suffix != ".py":
-        return False
-    if pure.name.startswith("test_") or pure.name.endswith("_test.py"):
-        return True
-    return any(part.lower() in _TEST_DIRS for part in pure.parts[:-1])
-
 
 def detect_test_command(root: Path) -> list[str] | None:
     """项目里看起来有测试就返回跑测试的命令，否则返回 None。

@@ -135,3 +135,21 @@ def test_新建空文件仍然算改动(tmp_path: Path) -> None:
     assert len(pending) == 1
     pending.apply()
     assert (tmp_path / "empty.py").exists()
+
+
+def test_改测试文件时会提醒(tmp_path: Path) -> None:
+    """实测模型会把测试改成 assert True 然后宣布完成，白烧四步。"""
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "test_thing.py", "content": "def test_a():\n    assert True\n"}
+    )
+    assert result.ok is True
+    assert "这是测试文件" in result.content
+
+
+def test_改普通文件不提醒(tmp_path: Path) -> None:
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "thing.py", "content": "x = 1\n"}
+    )
+    assert "这是测试文件" not in result.content

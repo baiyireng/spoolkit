@@ -73,9 +73,9 @@ def search_code_spec(root: Path) -> ToolSpec:
         parameters={
             "type": "object",
             "properties": {
-                "pattern": {"type": "string"},
-                "path": {"type": "string"},
-                "max_results": {"type": "integer"},
+                "pattern": {"type": "string", "description": "正则表达式"},
+                "path": {"type": "string", "description": "在哪个目录或文件里搜"},
+                "max_results": {"type": "integer", "description": "最多返回几条"},
             },
             "required": ["pattern"],
             "additionalProperties": False,

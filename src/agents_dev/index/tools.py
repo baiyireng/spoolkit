@@ -11,6 +11,7 @@ from agents_dev.index.repo_map import load_symbol_source, render_file_symbols
 from agents_dev.index.repo_map import render_neighborhood
 from agents_dev.index.graph import impact
 from agents_dev.llm.tokenizer import OfflineTokenCounter
+from agents_dev.tools.edit import looks_like_path
 from agents_dev.tools.types import ToolResult, ToolSpec
 
 SYMBOL_LIST_BUDGET = 600
@@ -35,6 +36,16 @@ def _find_symbol(root: Path, conn: sqlite3.Connection, args: dict) -> ToolResult
         (name, MAX_MATCHES),
     ).fetchall()
     if not rows:
+        # 实测模型会拿文件名当符号名来查，然后收到一句「找不到符号」就卡住，
+        # 连着三次。它想要的是「这个文件里有什么」，那是另一个工具。
+        if looks_like_path(name):
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"没有叫 {name} 的符号——这看起来是文件路径。"
+                    "要看某个文件里有哪些符号，用 file_symbols(path)。"
+                ),
+            )
         return ToolResult(ok=False, content=f"找不到符号: {name}")
 
     lines = [
@@ -62,8 +73,8 @@ def find_symbol_spec(root: Path, conn: sqlite3.Connection) -> ToolSpec:
         parameters={
             "type": "object",
             "properties": {
-                "name": {"type": "string"},
-                "path": {"type": "string"},
+                "name": {"type": "string", "description": "符号名，不是文件名"},
+                "path": {"type": "string", "description": "限定在哪个文件里找"},
             },
             "required": ["name"],
             "additionalProperties": False,
@@ -79,7 +90,9 @@ def file_symbols_spec(conn: sqlite3.Connection) -> ToolSpec:
         description="列出某文件里全部符号的签名与行号，不含函数体",
         parameters={
             "type": "object",
-            "properties": {"path": {"type": "string"}},
+            "properties": {
+                "path": {"type": "string", "description": "文件路径"}
+            },
             "required": ["path"],
             "additionalProperties": False,
         },
@@ -138,9 +151,9 @@ def find_callers_spec(conn: sqlite3.Connection) -> ToolSpec:
         parameters={
             "type": "object",
             "properties": {
-                "name": {"type": "string"},
-                "path": {"type": "string"},
-                "depth": {"type": "integer"},
+                "name": {"type": "string", "description": "符号名，不是文件名"},
+                "path": {"type": "string", "description": "同名多个时用它指定"},
+                "depth": {"type": "integer", "description": "波及面看几层，默认 2"},
             },
             "required": ["name"],
             "additionalProperties": False,
