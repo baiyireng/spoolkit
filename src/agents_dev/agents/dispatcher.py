@@ -328,15 +328,17 @@ def run_delegated(
         if reviewed.finished:
             review = judge_review(gateway, spec.acceptance, reviewed.final)
         else:
-            # 审查者自己没跑完，它的 final 是「已达步数上限」之类的话。
-            # 把这句话当成「审查判定不合格」会把一处正确的实现判死——
-            # 实测第一次跑就是这样：三个文件都改对了，却被打回重做一轮。
+            # 审查者自己没跑完：把它的 final 当成「审查判定不合格」会把一处
+            # 正确的实现判死——实测第一次跑就是这样，三个文件都改对了却被打回。
+            #
+            # 原因那半句用**它自己的话**，不要替它猜：没跑完可能是撞步数上限、
+            # 也可能是督导让它收手、或者卡在空回合里。实测记下来的就是一句
+            # 错归因——「审查者自己撞上了步数上限（8 步）」，而它的上限是 20 步，
+            # 真实原因是督导判断该收手了。
             review = Review(
                 False,
-                (
-                    "审查没有得出结论：审查者自己撞上了步数上限"
-                    f"（{reviewed.steps} 步），不是判定改动不合格",
-                ),
+                "审查没有得出结论（它自己没跑完，不是判定改动不合格）："
+                + _flatten(reviewed.final, 160),
                 inconclusive=True,
             )
         result.review = review

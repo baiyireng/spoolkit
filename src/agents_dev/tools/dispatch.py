@@ -58,7 +58,9 @@ def record_dispatch(
     """
     path = _log_path(root)
     stamp = time.strftime("%m-%d %H:%M")
-    line = f"- {stamp} [{kind}] {calls} 次调用 / {rounds} 轮 / 目标 {targets} 件"
+    # 目标件数是模型自己声明的；它常常不填，那写「0 件」不如说清是没声明。
+    size = f"目标 {targets} 件" if targets else "目标未声明"
+    line = f"- {stamp} [{kind}] {calls} 次调用 / {rounds} 轮 / {size}"
     if note:
         line += f" — {' '.join(note.split())[:80]}"
     try:
