@@ -47,6 +47,22 @@ PREFETCH_BUDGET = 400
 PREFETCH_CONTENT_BUDGET = 1000
 
 
+def counter_for(gateway: ModelGateway) -> object:
+    """挑一个 token 计数器：供应商能给真实的就用真实的。
+
+    预算是整套架构的支点，而它原先无条件建立在**估算**分词上。实测偏差够大：
+    估算放行、服务端拒绝（提示词 9772 token vs 上限 8192），而且那条拒绝
+    会直接打断整个运行。llama.cpp 有 /tokenize，没理由不用。
+    """
+    factory = getattr(gateway, "token_counter", None)
+    if callable(factory):
+        try:
+            return factory()
+        except Exception:
+            pass  # 拿不到就退回估算：计数不准不该让 agent 起不来
+    return OfflineTokenCounter()
+
+
 @dataclass
 class LoopWiring:
     """一次装配里挂上的可选协作者。
@@ -204,7 +220,9 @@ def assemble_loop(
         # 否则提示词会提到一个只有派发路径才有的工具。
         registry.register(recall_spec(parts.memory))
 
-    tokenizer = OfflineTokenCounter()
+    # 供应商能给出真实分词时就用真实的：预算建立在估算上，中文/代码混排时
+    # 偏差足以让本地判定放行、服务端拒绝（实测提示词 9772 > 上限 8192）。
+    tokenizer = counter_for(gateway)
     verifier = parts.verify
     if verifier is None and parts.auto_verify and parts.pending is not None:
         verifier = make_verifier(project_root, parts.pending)

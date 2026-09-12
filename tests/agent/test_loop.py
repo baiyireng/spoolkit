@@ -109,6 +109,54 @@ def test_达到步数上限会停止(tmp_path: Path) -> None:
     assert result.steps == 3
 
 
+def test_服务端说提示词超长时丢掉历史重发(tmp_path: Path) -> None:
+    """本地用估算分词判定放行、服务端用真实分词拒绝，这会发生。
+
+    实测那条拒绝曾经变成未捕获异常，直接把整个运行打断——一次上下文
+    估算偏差不该让任务崩掉。
+    """
+    from agents_dev.errors import ContextOverflowError
+    from agents_dev.llm.gateway import ModelGateway
+    from agents_dev.llm.types import ChatResponse
+
+    class OverflowOnce:
+        """第一次说超长，第二次正常。"""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, request) -> ChatResponse:
+            self.calls += 1
+            if self.calls == 1:
+                raise ContextOverflowError("提示词超过服务端上下文上限")
+            return ChatResponse(
+                text=json.dumps(
+                    {
+                        "thought": "重发之后正常了",
+                        "tool_calls": [],
+                        "state": None,
+                        "done": True,
+                        "final": "好",
+                    },
+                    ensure_ascii=False,
+                ),
+                prompt_tokens=10,
+                completion_tokens=5,
+            )
+
+    gateway = OverflowOnce()
+    loop = AgentLoop(
+        gateway=gateway,  # type: ignore[arg-type]
+        tokenizer=OfflineTokenCounter(),
+        registry=ToolRegistry(),
+        config=Config(project_root=tmp_path, context_window=4096, max_steps=5),
+    )
+    result = loop.run("做点事")
+    assert result.finished is True, "超长只该让它重发一次，不该让运行崩掉"
+    assert gateway.calls == 2
+    assert any("提示词超长" in line for line in result.trace)
+
+
 def test_上下文需求过大时触发重置(tmp_path: Path) -> None:
     long_state = {"current": "很长的当前状态" * 200}
     script = [

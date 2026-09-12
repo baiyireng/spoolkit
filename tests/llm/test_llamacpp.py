@@ -9,6 +9,7 @@ from agents_dev.llm.llamacpp import (
     LlamaCppTokenCounter,
     proxy_for,
 )
+from agents_dev.errors import ContextOverflowError
 from agents_dev.llm.types import ChatRequest, Message
 
 
@@ -159,3 +160,48 @@ def test_非本机地址仍按系统代理走() -> None:
         assert proxy_for("http://192.168.1.9:8080") == "http://127.0.0.1:7890"
     finally:
         module.system_proxy = original
+
+
+def test_上下文超长单独成类() -> None:
+    """它和「测试没通过」那种失败不是一回事：请求根本没进去。
+
+    实测这条曾经直接把整个运行打断——本地用估算分词判定放行，
+    服务端用真实分词拒绝（提示词 9772 > 上限 8192）。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": 400,
+                    "message": "request (9772 tokens) exceeds the available "
+                    "context size (8192 tokens), try increasing it",
+                    "type": "exceed_context_size_error",
+                }
+            },
+        )
+
+    gateway = _gateway(handler)
+    with pytest.raises(ContextOverflowError):
+        gateway.chat(ChatRequest(messages=(Message("user", "任务"),), max_tokens=64))
+
+
+def test_其它400带上服务端的说明() -> None:
+    """只报一句「服务返回 400」等于把唯一的线索扔掉。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "schema 不支持某个字段"}})
+
+    gateway = _gateway(handler)
+    with pytest.raises(LlamaCppError) as caught:
+        gateway.chat(ChatRequest(messages=(Message("user", "任务"),), max_tokens=64))
+    assert "schema 不支持某个字段" in str(caught.value)
+
+
+def test_网关提供真实分词计数器() -> None:
+    """预算是支点，不能建立在估算上。"""
+    gateway = _gateway(lambda request: httpx.Response(200, json=_completion()))
+    counter = gateway.token_counter()
+    assert counter is not None
+    counter.close()

@@ -14,6 +14,7 @@ import httpx
 
 from agents_dev.llm.types import ChatRequest, ChatResponse, Message
 from agents_dev.net import system_proxy
+from agents_dev.errors import ContextOverflowError
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_MODEL = "local"
@@ -70,8 +71,10 @@ class LlamaCppGateway:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
+        self._proxy = proxy
+        self._base_url = base_url.rstrip("/")
         self._client = httpx.Client(
-            base_url=base_url.rstrip("/"),
+            base_url=self._base_url,
             timeout=timeout,
             transport=transport,
             # 显式给了 transport（测试用的 MockTransport）就别再套代理：
@@ -95,7 +98,16 @@ class LlamaCppGateway:
             ) from exc
 
         if response.status_code != 200:
-            raise LlamaCppError(f"服务返回 {response.status_code}")
+            # 必须把服务端说的话带上。只报一句「服务返回 400」，等于把唯一的
+            # 线索扔掉——是超长、是语法不支持、还是参数写错，全在 body 里。
+            body = " ".join((response.text or "").split())[:300]
+            if "exceed_context_size" in body or "exceeds the available context" in body:
+                raise ContextOverflowError(
+                    f"提示词超过服务端上下文上限：{body}"
+                )
+            raise LlamaCppError(
+                f"服务返回 {response.status_code}：{body or '（没有说明）'}"
+            )
 
         data = response.json()
         choices = data.get("choices") or []
@@ -135,6 +147,17 @@ class LlamaCppGateway:
             if isinstance(candidate, int) and candidate > 0:
                 return candidate
         return None
+
+    def token_counter(self):
+        """这个供应商能给出**真实**分词结果的计数器。
+
+        预算必须建立在真实计数上：估算分词器和服务端的偏差在中文/代码混排时
+        可以大到让本地判定放行、服务端直接拒绝（实测提示词 9772 > 上限 8192）。
+        """
+        return LlamaCppTokenCounter(
+            base_url=self._base_url,
+            proxy=self._proxy,
+        )
 
     def close(self) -> None:
         self._client.close()

@@ -25,6 +25,7 @@ from agents_dev.llm.types import ChatRequest, Message
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.types import ToolCall, ToolResult
 from agents_dev.tools.verify import ENVIRONMENT_MARKER
+from agents_dev.errors import ContextOverflowError
 
 SYSTEM_PROMPT = T.SYSTEM
 
@@ -322,6 +323,7 @@ class AgentLoop:
         recent: list[str] = []
         no_edit_steps = 0
         empty_turns = 0
+        overflow_retried = False
 
         # 主动推送：进入任务时就把它相关的历史教训放到模型面前，
         # 而不是等它自己去检索——它不会去检索，因为它不知道自己缺什么。
@@ -370,16 +372,31 @@ class AgentLoop:
                 history = history[-(MAX_RECENT_TURNS // 2):]
                 trace.append(f"step{state.step}: 上下文整理")
 
-            response = chat_with_escalation(
-                self.gateway,
-                ChatRequest(
-                    messages=assembled.messages,
-                    max_tokens=self._budget.output_reserve(),
-                    response_schema=(
-                        self._commit_schema if forcing else self._schema
+            try:
+                response = chat_with_escalation(
+                    self.gateway,
+                    ChatRequest(
+                        messages=assembled.messages,
+                        max_tokens=self._budget.output_reserve(),
+                        response_schema=(
+                            self._commit_schema if forcing else self._schema
+                        ),
                     ),
-                ),
-            )
+                )
+            except ContextOverflowError:
+                # 预算用的是**估算**分词器，服务端用的是真实分词；两者偏差大时
+                # （中文/代码混排尤其明显）本地判定会放行、服务端拒绝。
+                # 这不能让它把整个运行打断——丢掉历史重发一次，只重试一次。
+                if overflow_retried:
+                    raise
+                overflow_retried = True
+                history = [Message(role="user", content=goal)]
+                feedback = None
+                resets += 1
+                trace.append(
+                    f"step{state.step}: 服务端说提示词超长，丢掉历史重发（第 {resets} 次）"
+                )
+                continue
             model_calls += 1
             prompt_tokens += response.prompt_tokens
             completion_tokens += response.completion_tokens
