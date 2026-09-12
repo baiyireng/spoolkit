@@ -151,6 +151,7 @@ def _together(args, project_root: Path, tasks) -> int:
                 "steps": result.steps,
                 "calls": result.model_calls,
                 "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
                 "seconds": round(time.time() - started, 1),
                 "workspace": workspace,
             },

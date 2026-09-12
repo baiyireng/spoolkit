@@ -349,7 +349,10 @@ def render_together(results: list[TaskResult], meta: dict) -> str:
     lines = [
         f"整批一条会话：验收通过 {len(passed)}/{len(results)}",
         f"这条会话：{meta['steps']} 步 / {meta['calls']} 次调用 / "
-        f"{meta['prompt_tokens']} 输入 token / {meta['seconds']}s",
+        # 输出 token 也要记：光有输入看不出「时间花在生成上还是工具上」，
+        # 而这两者的优化方向完全不同。
+        f"{meta['prompt_tokens']} 输入 + {meta.get('completion_tokens', 0)} 输出 token / "
+        f"{meta['seconds']}s",
         f"工作区留在 {meta['workspace']}（可以进去看它实际改成了什么样）",
     ]
     if failed:
