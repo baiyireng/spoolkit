@@ -107,10 +107,10 @@ def dispatch_spec(
     汇成一份 diff，用户只确认一次，也不会出现两套互相矛盾的视图。
     """
 
-    # 这两个数是**能力标定**，从本次运行的配置来，而不是写死在工具里：
-    # 本地 20 步预算的小模型和远程强模型不是一回事。
-    max_targets = int(getattr(config, "max_targets", 10) or 10)
-    review_limit = int(getattr(config, "review_limit", 5) or 5)
+    # 这两个数是**能力标定**，从登记表 + 本次运行的覆盖来，而不是写死在
+    # 工具里：本地 20 步预算的小模型和远程强模型不是一回事。
+    max_targets = int(config.limit("max_targets"))
+    review_limit = int(config.limit("review_limit"))
 
     def handler(args: dict) -> ToolResult:
         spec = TaskSpec(

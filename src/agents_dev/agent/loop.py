@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from agents_dev.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from agents_dev.agent.state import TaskState, clear_state, load_state, save_state
+from agents_dev import limits as _limits
 from agents_dev.agents.supervisor import EXTEND, STOP, Evidence, Verdict, supervise
 from agents_dev.config import Config
 from agents_dev.context.assembler import Assembler
@@ -40,8 +41,8 @@ EDIT_TOOLS = ("replace_lines", "replace_text", "write_file")
 # 调用同一个 find_callers（参数一字不差），把 12 步预算全烧光。
 # 第二次先给提醒、不阻断——调用有时确实有意义（比如文件刚被改过）；
 # 第三次中间没有任何别的动作，结果不可能变，再执行只是在消耗步数。
-REPEAT_WARN_AT = 2
-REPEAT_BLOCK_AT = 3
+REPEAT_WARN_AT = int(_limits.knob("repeat_warn_at").default)
+REPEAT_BLOCK_AT = int(_limits.knob("repeat_block_at").default)
 
 # 重复到这个次数还停不下来，就升级给督导。
 #
@@ -49,11 +50,11 @@ REPEAT_BLOCK_AT = 3
 # 挡不住的剩下两种情况：一是它换着花样绕（每次都不同，机械计数器永远归零），
 # 二是它明知道在重复也停不下来。这两种都得看它到底在干什么才知道怎么办——
 # 交给督导判断，而不是继续加规则。
-REPEAT_INTERVENE_AT = 4
+REPEAT_INTERVENE_AT = int(_limits.knob("repeat_intervene_at").default)
 
 # 督导给的续期加起来最多到这里（基础预算的倍数）。
 # 这不是任务预算，是安全线：没有它，一个卡住的任务能把 GPU 烧一整夜。
-STEP_CEILING_FACTOR = 8
+STEP_CEILING_FACTOR = int(_limits.knob("step_ceiling_factor").default)
 
 # 只看「连续相同」会漏掉交替打转：A、B、A、B…每一步都和上一步不同，
 # 计数每次都被重置。实测审查者用 git status / git diff 交替复读了 11 步，
@@ -64,14 +65,14 @@ RECENT_WINDOW = 6
 # 连续多少步没有提出任何改动，就收窄输出通道。
 # 重复调用检测只盖得住「参数完全相同」的打转，盖不住「每次都换一个查询」
 # 的漫游——实测那条轨迹 12 步里换了 8 种不同的调用，一次都没被拦住。
-NO_EDIT_LIMIT = 4
+NO_EDIT_LIMIT = int(_limits.knob("no_edit_limit").default)
 
 # 漫游到这个步数还没产出，就升级给督导。
 #
 # NO_EDIT_LIMIT 那一步做的是**收窄输出通道**（只能写），它盖得住「它还想查」
 # 这一种。盖不住的是「收窄之后它去翻别的文件」——每一步换一个查询，
 # 机械计数器永远归零。到这一步该有人看看它到底在干什么，而不是继续加规则。
-NO_EDIT_INTERVENE_AT = 8
+NO_EDIT_INTERVENE_AT = int(_limits.knob("no_edit_intervene_at").default)
 
 # 空回合连续出现到这个次数就收尾。
 #
@@ -83,7 +84,7 @@ NO_EDIT_INTERVENE_AT = 8
 # 阈值取 4 而不是 2：实测阈值太小会误伤——有些题只抖动一两轮就自己走出来了，
 # 把它们一起掐掉净亏两道题。真正卡死的那种会一直复读（实测 11 次），
 # 放宽到 4 一样能兜住。
-EMPTY_TURN_LIMIT = 4
+EMPTY_TURN_LIMIT = int(_limits.knob("empty_turn_limit").default)
 
 
 def call_signature(call: ToolCall) -> str:
@@ -331,7 +332,9 @@ class AgentLoop:
         limit = state.step + self.config.max_steps if resumed else self.config.max_steps
         # 总步数上限：督导的续期从这里扣。基础预算只是**起点**，
         # 一次跑多久由督导按「有没有进展」决定，这个数是它的天花板。
-        ceiling = self.config.step_ceiling or self.config.max_steps * STEP_CEILING_FACTOR
+        ceiling = self.config.step_ceiling or int(
+            self.config.max_steps * self.config.limit("step_ceiling_factor")
+        )
         ceiling = max(ceiling, limit)
 
         history: list[Message] = [
@@ -372,8 +375,8 @@ class AgentLoop:
         # 督导连续问几次就该退避：同一个打转状态每步问一遍，问出来的话是一样的，
         # 只是把成本翻倍。所以每次介入之后把门槛翻倍（4 → 8 → 16），
         # 而不是设一个「隔几步问一次」的定时器。
-        intervene_at = REPEAT_INTERVENE_AT
-        roam_intervene_at = NO_EDIT_INTERVENE_AT
+        intervene_at = int(self.config.limit("repeat_intervene_at"))
+        roam_intervene_at = int(self.config.limit("no_edit_intervene_at"))
         edits_made = 0
         tool_calls_made = 0
         stopped_by = ""
@@ -479,12 +482,13 @@ class AgentLoop:
             # 说明都照发不误），能推得动它的只有「这一轮物理上只能选什么」。
             forcing = (
                 self._commit_schema is not None
-                and no_edit_steps >= NO_EDIT_LIMIT
+                and no_edit_steps >= self.config.limit("no_edit_limit")
             )
             # 只读角色没有写工具，收窄无从谈起——对它来说唯一的「推进」
             # 就是给结论。没有这股压力，它会一路翻文件翻到步数上限。
             concluding = (
-                self._commit_schema is None and no_edit_steps >= NO_EDIT_LIMIT
+                self._commit_schema is None
+                and no_edit_steps >= self.config.limit("no_edit_limit")
             )
             if forcing:
                 feedback = T.FORCE_COMMIT
@@ -546,7 +550,7 @@ class AgentLoop:
             if isinstance(turn, ParseFailure):
                 if turn.kind == "empty_turn":
                     empty_turns += 1
-                    if empty_turns >= EMPTY_TURN_LIMIT:
+                    if empty_turns >= self.config.limit("empty_turn_limit"):
                         # 它不是在想，是卡住了。继续复读只会把预算烧光，
                         # 而已提出的改动是真实产出——交给用户判断。
                         trace.append(
@@ -633,7 +637,7 @@ class AgentLoop:
                         path = call.arguments.get("path")
                         if isinstance(path, str) and path:
                             changed.append(path)
-                    if level >= REPEAT_WARN_AT:
+                    if level >= self.config.limit("repeat_warn_at"):
                         trace.append(
                             f"step{state.step}: 重复调用第 {level} 次：{call.name}"
                         )
@@ -689,7 +693,10 @@ class AgentLoop:
                 no_edit_steps += 1
                 # 只读角色没有写工具，收窄无从谈起——日志说「收窄为只能写」
                 # 而实际什么都没发生，那是最难查的一类假日志。
-                if no_edit_steps == NO_EDIT_LIMIT and self._commit_schema is not None:
+                if (
+                    no_edit_steps == self.config.limit("no_edit_limit")
+                    and self._commit_schema is not None
+                ):
                     trace.append(
                         f"step{state.step}: 连续 {NO_EDIT_LIMIT} 步没有提出改动，"
                         "下一轮收窄为只能写"
@@ -803,7 +810,7 @@ class AgentLoop:
         后者管交替打转（A、B、A、B…），前者管原地复读。
         """
         level = max(repeats, seen)
-        if level >= REPEAT_BLOCK_AT:
+        if level >= self.config.limit("repeat_block_at"):
             return ToolResult(
                 ok=False,
                 content=(
@@ -813,8 +820,8 @@ class AgentLoop:
                 ),
             )
         result = self.registry.invoke(call)
-        if level >= REPEAT_WARN_AT:
-            if repeats >= REPEAT_WARN_AT:
+        if level >= self.config.limit("repeat_warn_at"):
+            if repeats >= self.config.limit("repeat_warn_at"):
                 note = "注意：这一步和上一步完全相同，你已经做过一次，结果也一样。"
             else:
                 note = "注意：这个调用你在最近几步里已经做过了，结果不会变。"

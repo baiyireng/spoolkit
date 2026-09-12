@@ -19,6 +19,7 @@ from agents_dev.cli.commands.run import run
 from agents_dev.cli.commands.serve import serve_command
 from agents_dev.cli.commands.diagnose import diagnose_command
 from agents_dev.cli.commands.session import session_command
+from agents_dev.cli.commands.limits import limits_command
 from agents_dev.cli.options import (
     DEFAULT_WINDOW,
     report_policy,
@@ -257,6 +258,21 @@ def _add_diagnose_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=diagnose_command)
 
 
+def _add_limits_command(sub: argparse._SubParsersAction) -> None:
+    """能力标定值：看现在是多少、从哪来；按工作区覆盖。"""
+    parser = sub.add_parser("limits", help="查看/覆盖能力标定值")
+    parser.add_argument("--root", default=".")
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="名字=值",
+        help="覆盖一项（写进 .agent/limits.json，可重复）",
+    )
+    parser.add_argument(
+        "--reset", action="append", default=[], metavar="名字",
+        help="恢复某项的默认值（可重复）",
+    )
+    parser.set_defaults(func=limits_command)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agents-dev")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -268,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_session_command(sub)
     _add_serve_command(sub)
     _add_diagnose_command(sub)
+    _add_limits_command(sub)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

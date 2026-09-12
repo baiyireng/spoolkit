@@ -322,8 +322,7 @@ def test_两个上限是配置而不是写死的常量(tmp_path: Path) -> None:
         Config(
             project_root=tmp_path,
             context_window=8192,
-            max_targets=20,
-            review_limit=15,
+            overrides={"max_targets": 20, "review_limit": 15},
         ),
         OfflineTokenCounter(),
     )

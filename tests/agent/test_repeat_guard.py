@@ -175,3 +175,31 @@ def test_交替打转也会被拦住(tmp_path: Path) -> None:
     # 12 轮里每个文件最多真正读 2 次，第三次起被拦
     assert executed.count("a.txt") <= 2
     assert any("重复调用" in line for line in result.trace)
+
+
+def test_阈值可以按工作区覆盖(tmp_path: Path) -> None:
+    """默认阈值是按本机小模型实测的，不是普适真理。
+
+    强模型上「连续两次同一调用」很可能是合理的（它一次读不完就再看一遍），
+    所以这些数必须能改——而且改完要真的生效，不能只是打印出来好看。
+    """
+    calls = [{"name": "read_file", "arguments": {"path": "a.txt"}}]
+    loop = _build(tmp_path, [_turn("看", calls), _turn("再看", calls), _turn("好了", final="好")])
+    loop.config = Config(
+        project_root=tmp_path,
+        context_window=4096,
+        max_steps=6,
+        supervise=False,
+        overrides={"repeat_block_at": 10, "repeat_warn_at": 9},
+    )
+    executed: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        executed.append(call.arguments.get("path", ""))
+        return real(call)
+
+    loop.registry.invoke = counting
+    loop.run("看同一个文件两遍")
+    # 阈值放宽到 10：两次相同的调用都该真的执行
+    assert executed.count("a.txt") == 2

@@ -1,7 +1,9 @@
 """运行配置。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from agents_dev import limits
 
 
 @dataclass(frozen=True)
@@ -29,14 +31,15 @@ class Config:
     # 总步数上限（含督导给的续期）。0 表示按基础预算自动算——它是一条
     # 安全线，不是任务预算：真正的预算由督导按进展给。
     step_ceiling: int = 0
-    # 一次派发最多带几件，以及「超过多少件就提醒审查会吃力」。
-    #
-    # 这两个数**是能力标定，不是安全边界**：本地 20 步预算的小模型和远程
-    # 强模型不是一回事，写死在工具里等于替强模型砍掉能力。所以放在配置里，
-    # 随运行给定（默认值是按本机 27B + 20 步预算实测出来的）。
-    max_targets: int = 10
-    review_limit: int = 5
+    # 能力标定值的按工作区覆盖（`.agent/limits.json`）。空表示全用默认。
+    # 取用一律走 `limit()`，不要在别处再读这个字典——那样来源就说不清了。
+    overrides: dict[str, float] = field(default_factory=dict)
     state_dir_name: str = ".agent"
+
+    def limit(self, name: str) -> float:
+        """取一个标定值。默认值来自 `limits.KNOBS`，可被本次运行的覆盖改写。"""
+        value, _ = limits.resolve(name, self.overrides)
+        return value
 
     @property
     def state_dir(self) -> Path:

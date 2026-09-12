@@ -39,9 +39,27 @@ from agents_dev.tools.edit import PendingChanges
 from agents_dev.web.protocol import FINAL, NOTE, START, USAGE
 
 
+def _overrides(args: argparse.Namespace, project_root: Path) -> dict[str, float]:
+    """本次运行生效的能力标定覆盖。
+
+    来源两层，从弱到强：工作区保存的（`.agent/limits.json`）→ 命令行显式给的。
+    默认值在 `limits.KNOBS` 里（按本机 27B 实测的那一套，不是普适真理）。
+    取用时一律走 `Config.limit()`，这样「现在是多少、从哪来」永远答得出来。
+    """
+    from agents_dev import limits
+
+    merged = limits.load_overrides(project_root)
+    if getattr(args, "max_targets", 0):
+        merged["max_targets"] = float(args.max_targets)
+    if getattr(args, "review_limit", 0):
+        merged["review_limit"] = float(args.review_limit)
+    return merged
+
+
 def run(args: argparse.Namespace) -> int:
     """执行一次任务。"""
     project_root = Path(args.root).resolve()
+    overrides = _overrides(args, project_root)
     read_roots, bad_roots = _resolve_read_roots(args, project_root)
     if bad_roots:
         for item in bad_roots:
@@ -113,17 +131,8 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             subagent_steps=args.subagent_steps,
             supervise=not args.no_supervise,
             step_ceiling=args.step_ceiling,
-            # 能力标定：只在使用者显式给了值时才覆盖默认
-            **(
-                {"max_targets": args.max_targets}
-                if getattr(args, "max_targets", 0)
-                else {}
-            ),
-            **(
-                {"review_limit": args.review_limit}
-                if getattr(args, "review_limit", 0)
-                else {}
-            ),
+            # 能力标定：工作区的覆盖 + 命令行显式给的那两个
+            overrides=_overrides(args, project_root),
         ),
         wiring=LoopWiring(
             memory=memory,
@@ -182,17 +191,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             subagent_steps=args.subagent_steps,
             supervise=not args.no_supervise,
             step_ceiling=args.step_ceiling,
-            # 能力标定：只在使用者显式给了值时才覆盖默认
-            **(
-                {"max_targets": args.max_targets}
-                if getattr(args, "max_targets", 0)
-                else {}
-            ),
-            **(
-                {"review_limit": args.review_limit}
-                if getattr(args, "review_limit", 0)
-                else {}
-            ),
+            overrides=_overrides(args, project_root),
         ),
         wiring=LoopWiring(
             memory=memory,
