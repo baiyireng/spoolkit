@@ -43,13 +43,23 @@ def load_key() -> bytes | None:
 
 
 def ensure_key() -> bytes:
-    """确保密钥存在。只在「有真实环境权限」的那一侧调用。"""
+    """确保密钥存在。只在「有真实环境权限」的那一侧调用。
+
+    **返回值和 `load_key()` 必须一致**——这一条是踩出来的：早先这里写回
+    32 字节的随机串之后直接把原样返回，而读取走的是 `.strip()`。于是只要
+    随机密钥的首字节或末字节恰好落在空白上（约 4.6% 的概率），就会出现
+    「签的时候一把钥匙、验的时候另一把」：签名永远对不上，而两侧都没有报错
+    ——表现为偶发失败，查起来极难。
+
+    现在密钥用 hex 生成：纯 ASCII、不含空白，`.strip()` 是幂等的；
+    老格式（原始字节）仍然读得出来，因为两条路径都会 strip。
+    """
     existing = load_key()
     if existing:
         return existing
     path = key_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    key = secrets.token_bytes(32)
+    key = secrets.token_bytes(32).hex().encode("ascii")
     path.write_bytes(key)
     return key
 

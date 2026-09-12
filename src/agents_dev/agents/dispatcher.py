@@ -337,8 +337,12 @@ def run_delegated(
             # 真实原因是督导判断该收手了。
             review = Review(
                 False,
-                "审查没有得出结论（它自己没跑完，不是判定改动不合格）："
-                + _flatten(reviewed.final, 160),
+                # reasons 是**元组**，传字符串会被 "；".join 按字符拆开
+                # （实测日志里就出现了「审；查；没；有；得；出；结；论」）。
+                (
+                    "审查没有得出结论（它自己没跑完，不是判定改动不合格）："
+                    + _flatten(reviewed.final, 160),
+                ),
                 inconclusive=True,
             )
         result.review = review

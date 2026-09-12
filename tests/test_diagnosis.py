@@ -8,6 +8,7 @@
 import argparse
 import json
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -28,9 +29,13 @@ from agents_dev.tools.fs import read_file_spec
 @pytest.fixture
 def key_outside(tmp_path: Path, monkeypatch) -> Path:
     """密钥放在项目目录之外——Agent 的文件工具够不到它。"""
-    # 文件名带上 tmp_path：basetemp 根是多个测试共用的，共用一个密钥文件
-    # 会让某个测试的签名状态泄漏到另一个测试（实测出现过一次偶发失败）。
-    key_file = tmp_path.parent / f"diagnosis-{tmp_path.name}.key"
+    # 密钥**不进 pytest 的 basetemp**：那里的一切（保留策略、清理时机）
+    # 都由 pytest 掌控，而这里的东西必须活着跨越「写报告 → 读报告」。
+    #
+    # 症状是「写的时候验得过、读的时候验不过」，也就是密钥在两次调用之间
+    # 不见了——basetemp 是唯一会动它的东西。挪到自己的临时目录之后，
+    # 这个交互面就不存在了。
+    key_file = Path(tempfile.mkdtemp(prefix="agents-diag-key-")) / f"{tmp_path.name}.key"
     monkeypatch.setenv("AGENTS_DEV_DIAGNOSIS_KEY_PATH", str(key_file))
     return key_file
 
@@ -206,6 +211,14 @@ def test_报告回流会自动注入并标记已读(tmp_path: Path, key_outside:
     diagnosis.write_report(root, item.id, verdict="是环境坏了", findings="临时目录权限损坏")
 
     text = diagnosis.render_incoming(root)
+    if "来源已验证" not in text:
+        key = diagnosis.load_key()
+        pytest.fail(
+            "回流时报告没验过。"
+            f" 密钥文件={os.environ.get('AGENTS_DEV_DIAGNOSIS_KEY_PATH')}"
+            f" 存在={key_outside.exists()} 长度={len(key) if key else 0}"
+            f"；回流文本={text[:120]!r}"
+        )
     assert "是环境坏了" in text
     assert "来源已验证" in text
     # 只注入一次
@@ -304,3 +317,48 @@ def test_事件模式下登记也能走通(tmp_path: Path, key_outside: Path) ->
     filed = _maybe_file_diagnosis(root, 0, _result(False, True), EventWriter(buffer))
     assert filed
     assert "诊断登记" in buffer.getvalue()
+
+
+def test_密钥的首尾空白不会让签名对不上(tmp_path: Path, key_outside: Path) -> None:
+    """这条是那个偶发失败的根因，必须钉住。
+
+    原先 ensure_key 写回 32 字节随机串后把**原样**返回，而读取走 strip。
+    随机密钥的首字节或末字节落在空白上（约 4.6%）时，「签」和「验」用的
+    就不是同一把钥匙——两侧都不报错，只表现为偶发失败。
+    """
+    # 造一个首尾都是空白的密钥文件：老实现下这会必然失败
+    key_outside.parent.mkdir(parents=True, exist_ok=True)
+    key_outside.write_bytes(b"  " + b"k" * 30 + b"\n")
+
+    root = _root(tmp_path)
+    request_diagnosis_spec(root).handler({"question": "环境是不是坏了"})
+    item = diagnosis.load_requests(root)[0]
+    diagnosis.write_report(root, item.id, verdict="是环境坏了", findings="权限损坏")
+
+    report, verified = diagnosis.read_report(root, item.id)
+    assert verified is True, "同一把密钥写、读必须对得上"
+    assert report["verdict"] == "是环境坏了"
+
+
+def test_新生成的密钥不含空白(tmp_path: Path, key_outside: Path) -> None:
+    """hex 生成：纯 ASCII，strip 幂等，签与验永远一致。"""
+    key = diagnosis.ensure_key()
+    assert key == diagnosis.load_key()
+    assert key.decode("ascii").strip() == key.decode("ascii")
+
+
+def test_随机源给出带空白的密钥也不会错位(
+    tmp_path: Path, key_outside: Path, monkeypatch
+) -> None:
+    """把随机源钉成一个「首尾带空白」的密钥——**这条才真正钉住那个 bug**。
+
+    上面那条（文件已存在）在旧实现下也会过：旧实现的问题只在**新生成**
+    的那一刻——`write_bytes` 之后返回原样，而读取走 strip。
+    """
+    monkeypatch.setattr(
+        diagnosis.secrets,
+        "token_bytes",
+        lambda n: b" " + b"k" * max(0, n - 2) + b"\n",
+    )
+    key = diagnosis.ensure_key()
+    assert key == diagnosis.load_key(), "签与验必须是同一把钥匙"
