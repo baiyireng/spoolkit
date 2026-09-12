@@ -34,6 +34,12 @@ from agents_dev.tools.types import ToolResult, ToolSpec
 # 审查——审查者审的是个半成品。规模问题该在派之前拦。
 MAX_TARGETS = 10
 
+# 但**审查**的瓶颈比「做」低得多：8 件那次的实测是「活干成了（8/8 通过），
+# 审查没能给出结论」——8 处改动要在审查者自己那一个上下文里核对。
+# 所以 5 件以上不拦，但要在结果里明说风险：那是它下一次决定「派多少」的
+# 唯一时机。光写在描述里没用——描述已经证明是软的。
+REVIEW_LIMIT = 5
+
 # 派发战绩的行数与条数上限：它只在「正好要判断」的时候被取用（见下面
 # dispatch_history），所以留着比丢掉划算——但也别无限长。
 LOG_LIMIT = 20
@@ -135,6 +141,8 @@ def dispatch_spec(
                     f"（{MAX_TARGETS} 件）。子智能体的步数预算是一轮 "
                     f"{config.subagent_steps} 步，而一件活平均要 2～3 步——"
                     "派大了它只会烧光预算、交回一个半成品。"
+                    f"而且超过 {REVIEW_LIMIT} 件时**审查那一步就容易给不出结论**"
+                    "（实测 8 件那次：活全做对了，审查没结论）。"
                     "拆成几批再派，或者自己先做掉一部分。"
                 ),
             )
@@ -175,7 +183,17 @@ def dispatch_spec(
                 ),
                 usage=outcome.usage,
             )
-        return ToolResult(ok=True, content=_render(outcome), usage=outcome.usage)
+        content = _render(outcome)
+        if len(spec.targets) > REVIEW_LIMIT:
+            # 结果里说，而不是只在描述里说：这一刻它刚看到「这批能不能被审出
+            # 结论」，而这是它决定下一批派多少的唯一时机。
+            content += (
+                f"\n\n⚠ 这批带了 {len(spec.targets)} 件，超过 {REVIEW_LIMIT} 件："
+                "审查者要在一个上下文里核对这么多处，很容易给不出结论"
+                "（实测 8 件那次就是：活全做对了，审查没结论）。"
+                f"下一批拆到 {REVIEW_LIMIT} 件以内。"
+            )
+        return ToolResult(ok=True, content=content, usage=outcome.usage)
 
     # 战绩附录进「怎么用这个工具」的说明里：模型调 tool_help("dispatch")
     # 的那一刻，正是它准备做派发决定的那一刻——钱花在这里最值。
@@ -189,8 +207,10 @@ def dispatch_spec(
             "适合「要读很多文件、但你不想把这些细节留在自己上下文里」的改动。"
             "**一次派发可以带一批活**：一批同类的小活合成一次，摊薄固定的那几次"
             "调用之后才划算——单看一道小题，派发是亏的，所以别一道一道派。"
-            "批次别太大：子智能体的上下文和你一样是有限的，一次交 3～5 件"
-            "（或者一批彼此相像、验收方式相同的活）比较稳；上限见参数校验的报错。"
+            f"批次别太大：子智能体的上下文和你一样有限，一次交 3～5 件比较稳。"
+            f"超过 {REVIEW_LIMIT} 件时**审查那一步容易给不出结论**（实测 8 件那次："
+            "活全做对了，审查没结论）——审查者要在一个上下文里核对所有改动。"
+            f"绝对上限 {MAX_TARGETS} 件，硬拦。"
             "**它做得完做不完会如实告诉你**：如果这块对它太大，它会在结论里直接说"
             "「太大」并给出拆法，那时把任务拆小再派，不要硬塞——硬塞的代价是"
             "烧掉它的整轮预算，换回一个半成品。"
@@ -223,7 +243,10 @@ def dispatch_spec(
                     "description": "明确不要动的地方",
                 },
             },
-            "required": ["goal", "acceptance"],
+            # targets 必填：它是「这次要动哪些东西」的声明。没有它，
+            # 批次大小就无从判断（实测那次 8 件的派发没声明目标，
+            # 于是所有跟件数有关的约束都落不了地）。
+            "required": ["goal", "acceptance", "targets"],
             "additionalProperties": False,
         },
         handler=handler,

@@ -18,6 +18,7 @@ from agents_dev.tools.dispatch import dispatch_spec
 from agents_dev.tools.edit import PendingChanges, register_edit_tools
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.registry import ToolRegistry
+from agents_dev.tools.types import ToolCall
 
 
 def _turn(thought: str, calls=None, final=None) -> str:
@@ -42,6 +43,9 @@ def _dispatch_turn(acceptance: str = "a.py 里 x 的值是 1") -> str:
                 "arguments": {
                     "goal": "把 a.py 里的 x 改成 1",
                     "acceptance": acceptance,
+                    # targets 是必填的：没有它，批次大小无从判断，
+                    # 所有跟件数有关的约束都落不了地。
+                    "targets": ["a.py"],
                 },
             }
         ],
@@ -234,6 +238,74 @@ def test_一次派太多当场被拦(tmp_path: Path) -> None:
     assert result.ok is False
     assert "超出一次能派的上限" in result.content
     assert "拆成几批" in result.content
+
+
+def test_不说清目标就派不了(tmp_path: Path) -> None:
+    """件数是所有跟「批次大小」有关的约束的前提。
+
+    实测那次 8 件的派发**没声明 targets**，于是「别超过 5 件」这类约束
+    根本落不了地——日志里只留下「目标未声明」。
+    """
+    registry = ToolRegistry()
+    registry.register(list_dir_spec(tmp_path))
+    spec = dispatch_spec(
+        None,
+        registry,
+        Config(project_root=tmp_path, context_window=8192, subagent_steps=20),
+        OfflineTokenCounter(),
+    )
+    # 走注册表：必填参数是**schema 层**拦的（模型真正走的就是这一层）
+    registry.register(spec)
+    result = registry.invoke(
+        ToolCall("dispatch", {"goal": "改点什么", "acceptance": "跑通"})
+    )
+    assert result.ok is False
+    assert "targets" in result.content
+
+
+def test_超过五件不拦但要看得到风险(tmp_path: Path) -> None:
+    """审查的瓶颈比「做」低：8 件那次活全做对了，审查却没结论。
+
+    拦死太硬（n=1 的证据），但必须在**结果里**说——那一刻是它决定
+    下一批派多少的唯一时机；只写在描述里没用（描述已经证明是软的）。
+    """
+    loop, _ = _build(
+        tmp_path,
+        [
+            _turn(
+                "派一批",
+                [
+                    {
+                        "name": "dispatch",
+                        "arguments": {
+                            "goal": "把这 8 处都改对",
+                            "acceptance": "逐个跑 pytest 通过",
+                            "targets": [f"{i:02d}_x.py" for i in range(1, 9)],
+                        },
+                    }
+                ],
+            ),
+            _turn(
+                "写文件",
+                [
+                    {
+                        "name": "write_file",
+                        "arguments": {"path": "a.py", "content": "x = 1\n"},
+                    }
+                ],
+            ),
+            _turn("写完了", [], final="改好了"),
+            _turn("看过了", [], final="没问题"),
+            json.dumps({"verdict": "pass", "reasons": ["符合验收标准"]}),
+            _turn("收到", [], final="派发完成"),
+        ],
+    )
+    loop.run("改 8 处")
+    fed_back = "\n".join(
+        message.content for message in loop.gateway.requests[-1].messages
+    )
+    assert "超过 5 件" in fed_back
+    assert "审查" in fed_back
 
 
 def test_太大时给主循环的话是可行动的(tmp_path: Path) -> None:
