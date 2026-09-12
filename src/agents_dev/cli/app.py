@@ -179,6 +179,17 @@ def _add_bench_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--window", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=12)
     parser.add_argument(
+        "--step-ceiling",
+        type=int,
+        default=0,
+        help="总步数上限（含督导给的续期）；0 表示按基础预算自动算",
+    )
+    parser.add_argument(
+        "--together",
+        action="store_true",
+        help="第二条仪器：整批题铺进一个工作区，全部交给一条会话（量长任务与派发）",
+    )
+    parser.add_argument(
         "--verbose", action="store_true", help="打印每个任务的轨迹与验收输出"
     )
     parser.set_defaults(func=bench)

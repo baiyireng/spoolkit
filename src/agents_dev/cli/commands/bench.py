@@ -3,9 +3,18 @@
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
-from agents_dev.bench import load_tasks, render_report, run_task
+from agents_dev.bench import (
+    TOGETHER_GOAL,
+    load_tasks,
+    prepare_together,
+    render_report,
+    render_together,
+    run_task,
+    verify_together,
+)
 from agents_dev.config import Config
 from agents_dev.cli.runtime import LoopWiring, assemble_loop
 from agents_dev.cli.settle import settle
@@ -26,6 +35,9 @@ def bench(args: argparse.Namespace) -> int:
         return 2
 
     print(f"共 {len(tasks)} 个任务，供应商 {args.provider}")
+    if args.together:
+        return _together(args, project_root, tasks)
+
     results = []
     for task in tasks:
         # 用容器而不是默认参数传 pending：默认参数在函数定义时就绑定，
@@ -73,4 +85,71 @@ def bench(args: argparse.Namespace) -> int:
 
     print()
     print(render_report(results))
+    return 0 if all(item.passed for item in results) else 1
+
+
+def _together(args, project_root: Path, tasks) -> int:
+    """把整批题铺进一个工作区，全部交给**一条会话**。
+
+    与一题一会话的差别不是省事，是量的东西不一样：这里量的是任务发现、
+    自我排序、长程记忆（上下文重置之后还记不记得做到哪儿）以及督导与派发
+    在长任务里第一次真正被用上。
+    """
+    workspace = (
+        project_root
+        / ".agent"
+        / "bench-together"
+        / time.strftime("%Y%m%d-%H%M%S")
+    )
+    prepare_together(tasks, workspace)
+    print(f"整批一条会话：{len(tasks)} 道题铺在 {workspace}")
+
+    pending = PendingChanges(workspace)
+    gateway = load_gateway(
+        args.provider,
+        ProviderConfig(
+            project_root=project_root,
+            model=args.model,
+            base_url=args.base_url,
+            proxy=args.proxy if args.proxy else system_proxy(),
+            env=dict(os.environ),
+        ),
+    )
+    loop = assemble_loop(
+        workspace,
+        gateway,
+        config=Config(
+            project_root=workspace,
+            context_window=args.window or 8192,
+            max_steps=args.max_steps,
+            step_ceiling=args.step_ceiling,
+        ),
+        wiring=LoopWiring(pending=pending),
+    )
+
+    started = time.time()
+    result = loop.run(TOGETHER_GOAL.format(count=len(tasks)))
+    # 长任务里未落盘的改动会一直攒着，最后统一落盘——这是真实使用的形状。
+    settle(pending, AUTO, ("**",), non_interactive=True)
+
+    if args.verbose:
+        print("轨迹：")
+        for line in result.trace:
+            print(f"  {line}")
+        print(f"它自己的收尾报告：\n{result.final}")
+
+    results = verify_together(tasks, workspace)
+    print()
+    print(
+        render_together(
+            results,
+            {
+                "steps": result.steps,
+                "calls": result.model_calls,
+                "prompt_tokens": result.prompt_tokens,
+                "seconds": round(time.time() - started, 1),
+                "workspace": workspace,
+            },
+        )
+    )
     return 0 if all(item.passed for item in results) else 1

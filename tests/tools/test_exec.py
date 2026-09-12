@@ -52,6 +52,27 @@ def test_python模块形式被允许() -> None:
     assert validate_command(["python", "-m", "pytest", "-q"]) is None
 
 
+def test_整条命令塞进一个元素时说形状而不是权限(tmp_path: Path) -> None:
+    """实测踩过：模型把 `python -m pytest a/b.py -q` 当成一个元素传进来。
+
+    白名单于是把它当成一个叫「python -m pytest a/b.py -q」的程序，报
+    「不在白名单内，需要用户批准」——**理由指错了方向**。它据此去申请权限，
+    无人值守时没人可问，就卡住了（实测烧掉三步，转而自己写脚本，
+    最后撞上输出预算收尾）。形状问题就该说形状。
+    """
+    result = _run(tmp_path, command=["python -m pytest a/b.py -q"])
+    assert result.ok is False
+    assert "拆成数组" in result.content
+    # 不能再说成权限问题：那会让它去申请授权，而这条路走不通
+    assert "需要用户批准" not in result.content
+
+
+def test_后面几个参数带空格是合法的(tmp_path: Path) -> None:
+    """pytest 的 `-k "a and b"` 这类参数本来就带空格，不能一起误伤。"""
+    result = _run(tmp_path, command=["python", "-m", "pytest", "-k", "a and b"])
+    assert "拆成数组" not in result.content
+
+
 def test_运行项目内脚本(tmp_path: Path) -> None:
     script = _script(tmp_path, "hello.py", "print('来自脚本的输出')\n")
     result = _run(tmp_path, command=[sys.executable, script])

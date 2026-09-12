@@ -224,6 +224,28 @@ def _request_approval(
     return False, f"用户拒绝了执行：{' '.join(argv)}"
 
 
+def _shape_problem(argv: list[str]) -> str | None:
+    """命令是不是被整条塞进了第一个元素里。
+
+    实测这是一类很贵的错误：模型把 `python -m pytest a/b.py -q` 当成**一个**
+    字符串放进数组，白名单于是把它当成一个叫「python -m pytest a/b.py -q」的
+    程序，报「不在白名单内，需要用户批准」。**理由完全指错了方向**——它据此
+    去申请权限，无人值守时没人可问，于是卡死（实测烧掉三步，转而自己写脚本，
+    最后撞上输出预算收尾）。
+
+    形状问题就该说形状。只查第一个元素：程序名里不可能有空格，而后面几项
+    有空格是合法的（比如 pytest 的 `-k "a and b"`）。
+    """
+    program = argv[0].strip()
+    if " " not in program:
+        return None
+    return (
+        "command 要**拆成数组**，每个参数一个元素——现在整条命令是一个元素"
+        f"（{program!r}），它被当成了一个可执行文件名。\n"
+        '正确写法：["python", "-m", "pytest", "a/b.py", "-q"]'
+    )
+
+
 def _run(
     root: Path,
     args: dict,
@@ -233,6 +255,9 @@ def _run(
     revert: object = (),
 ) -> ToolResult:
     argv = list(args["command"])
+    shape = _shape_problem(argv)
+    if shape is not None:
+        return ToolResult(ok=False, content=shape)
     level, reason = classify(argv)
     if level == DENIED:
         return ToolResult(ok=False, content=reason)

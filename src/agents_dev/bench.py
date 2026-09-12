@@ -241,3 +241,88 @@ def render_report(results: list[TaskResult]) -> str:
 def resolve_config(workdir: Path, window: int, max_steps: int) -> Config:
     """回归任务用的配置。步数给得比日常宽一些，因为要量的不是省钱。"""
     return Config(project_root=workdir, context_window=window, max_steps=max_steps)
+
+
+# --- 第二条仪器：整批铺成一个工作区，全部交给一条会话 ---------------------
+#
+# 上面那条（一题一会话）量的是**单题能力**，而它有个结构性盲区：
+# 真实使用里没有「一道题一个新上下文」这回事。真实长这样——一个工作区、
+# 一堆没做完的事、一个必须自己记住做到哪儿了的会话。
+#
+# 所以这里再铺一条：把全部题放进一个工作区，告诉它题目在哪儿，让它自己
+# 去读、自己排序、自己验、自己收尾。量的是另外几件事：
+#   - 任务发现：能不能自己从目录里读出「这题要干什么」；
+#   - 自我排序：做完一道能不能接着开下一道，而不是原地绕；
+#   - 长程：上下文重置之后还记不记得做到哪儿（状态块扛不扛得住）；
+#   - 派发与督导：长任务里这两个机制第一次真正被用上。
+#
+# **两条都要留着**：一条掉了分，另一条未必动。只看一条会得出相反的结论。
+
+TOGETHER_GOAL = """这个工作区里放着 {count} 道编程题，每道题一个子目录。
+
+每道题目录里有：
+- TASK.md：这道题要做什么、怎么算做完；
+- 起始代码；
+- test_acceptance.py：验收测试。**不要改它**——验收时会用原始副本覆盖回来，
+  改了不算数。
+
+要求：
+- 一道一道做：读 TASK.md 看懂要求 → 改代码 → 自己跑一次 pytest 确认通过 →
+  再开下一道；
+- 不要来回跳着做，也不要重做已经做完的；
+- 做不完没关系，做到你确实做完的那一道为止；
+- 收尾时用 final 报告：做完了哪几道、剩下的为什么没做。
+"""
+
+
+def prepare_together(tasks: list[Task], workspace: Path) -> None:
+    """把全部任务铺成一个工作区。
+
+    刻意**不给题目清单**：目录里有什么，让它自己去列、自己去读。
+    那正是这条仪器要量的东西，替它列出来就把要量的东西量没了。
+    """
+    workspace.mkdir(parents=True, exist_ok=True)
+    for task in tasks:
+        home = workspace / task.name
+        prepare(task, home)
+        command = " ".join(task.command) or "（这道题没声明验收命令）"
+        (home / "TASK.md").write_text(
+            f"# {task.name}\n\n{task.goal}\n\n"
+            f"做完的判定：在这个目录里执行 `{command}`，全部通过。\n"
+            "test_acceptance.py 是验收标准，不要改它。\n",
+            encoding="utf-8",
+        )
+
+
+def verify_together(tasks: list[Task], workspace: Path) -> list[TaskResult]:
+    """逐题验收。用的是同一条路径：原始验收测试覆盖回去，只看退出码。"""
+    results: list[TaskResult] = []
+    for task in tasks:
+        passed, detail = verify(task, workspace / task.name)
+        results.append(
+            TaskResult(
+                name=task.name,
+                passed=passed,
+                agent_finished=False,
+                steps=0,
+                prompt_tokens=0,
+                model_calls=0,
+                seconds=0.0,
+                detail=detail,
+            )
+        )
+    return results
+
+
+def render_together(results: list[TaskResult], meta: dict) -> str:
+    passed = [item for item in results if item.passed]
+    failed = [item for item in results if not item.passed]
+    lines = [
+        f"整批一条会话：验收通过 {len(passed)}/{len(results)}",
+        f"这条会话：{meta['steps']} 步 / {meta['calls']} 次调用 / "
+        f"{meta['prompt_tokens']} 输入 token / {meta['seconds']}s",
+        f"工作区留在 {meta['workspace']}（可以进去看它实际改成了什么样）",
+    ]
+    if failed:
+        lines.append("没过的：" + "、".join(item.name for item in failed))
+    return "\n".join(lines)
