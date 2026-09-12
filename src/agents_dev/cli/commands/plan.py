@@ -27,11 +27,13 @@ from agents_dev.cli.options import (
     resolve_scope,
     resolve_window,
 )
+from agents_dev.config import Config
 from agents_dev.cli.runtime import (
     LoopWiring,
     assemble_loop,
     build_approver,
     build_lessons,
+    counter_for,
     open_memory,
     provider_gateway,
     settle_lessons,
@@ -41,6 +43,39 @@ from agents_dev.tools.edit import PendingChanges
 from agents_dev.tools.grant import Grants
 
 
+def _survey(project_root: Path, goal: str, tokenizer) -> str:
+    """拆解**之前**先看一眼环境。
+
+    这一步不是可选的。实测：不看的拆解产出的是**形状完美、内容全错**的计划
+    ——20 步、每步都有验收标准和范围，而范围写的是 `task_1/`…`task_20/`
+    （真实目录是 `01_off_by_one`…）。那些目录根本不存在，于是每一步的
+    范围闸门都会把改动挡在外面，整份计划等于没有。
+
+    收集什么由目标决定：先给目录结构（名字对了，范围才可能对），
+    再给检索到的相关代码片段——都不多，够它对齐名字即可。
+    """
+    lines: list[str] = []
+    try:
+        entries = sorted(
+            item.name + ("/" if item.is_dir() else "")
+            for item in project_root.iterdir()
+            if item.name != ".agent"
+        )
+        if entries:
+            lines.append("工作区根目录下的条目：" + "、".join(entries[:60]))
+    except OSError:
+        pass
+    from agents_dev.index.rank import prefetch as prefetch_text
+
+    try:
+        snippet = prefetch_text(project_root, goal, tokenizer)
+    except Exception:
+        snippet = ""
+    if snippet:
+        lines.append("检索到的相关片段：\n" + snippet)
+    return "\n\n".join(lines)
+
+
 def make_plan(args: argparse.Namespace) -> int:
     """把一个较大目标拆成可验收的步骤序列并落盘。"""
     project_root = Path(args.root).resolve()
@@ -48,7 +83,12 @@ def make_plan(args: argparse.Namespace) -> int:
     if gateway is None:
         return 2
 
-    plan = decompose(gateway, args.goal, limit=args.limit)
+    plan = decompose(
+        gateway,
+        args.goal,
+        context=_survey(project_root, args.goal, counter_for(gateway)),
+        limit=args.limit,
+    )
     if not plan.steps:
         print("没有拆出任何带验收标准的步骤。", file=sys.stderr)
         return 1
@@ -202,7 +242,12 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         )
         return 2
 
-    plan = decompose(gateway, args.goal, limit=args.limit)
+    plan = decompose(
+        gateway,
+        args.goal,
+        context=_survey(project_root, args.goal, counter_for(gateway)),
+        limit=args.limit,
+    )
     if not plan.steps:
         print("没能拆出任何带验收标准的步骤。", file=sys.stderr)
         return 1
