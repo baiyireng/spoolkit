@@ -594,6 +594,9 @@ class AgentLoop:
             if turn.tool_calls:
                 outputs = []
                 edited = False
+                # 这一轮改过哪些文件。自动验证靠它判断「该在哪儿验」——
+                # 一个工作区里有很多件事时，范围跟着改动走才对得上因果。
+                changed: list[str] = []
                 for call in turn.tool_calls:
                     signature = call_signature(call)
                     repeats = repeats + 1 if signature == last_signature else 1
@@ -620,6 +623,9 @@ class AgentLoop:
                     if result.ok and call.name in EDIT_TOOLS:
                         edited = True
                         edits_made += 1
+                        path = call.arguments.get("path")
+                        if isinstance(path, str) and path:
+                            changed.append(path)
                     if level >= REPEAT_WARN_AT:
                         trace.append(
                             f"step{state.step}: 重复调用第 {level} 次：{call.name}"
@@ -648,7 +654,7 @@ class AgentLoop:
                 # 一条 run_command 都没有——所以这件事由循环来做，把结果
                 # 当场顶回去，它才有机会发现自己改错了。
                 if edited and self.verify is not None:
-                    report, passed = self._run_verification()
+                    report, passed = self._run_verification(changed)
                     trace.append(
                         f"step{state.step}: 自动验证 -> {'通过' if passed else '失败'}"
                     )
@@ -809,15 +815,18 @@ class AgentLoop:
             )
         return result
 
-    def _run_verification(self) -> tuple[str, bool]:
+    def _run_verification(self, changed: list[str] | None = None) -> tuple[str, bool]:
         """替模型跑一遍项目测试，把结果整理成它看得懂的一段话。
 
         验证本身出问题（命令跑不起来、超时）不算任务失败，只作为一条
         诚实的反馈告诉模型——把工具故障说成「你的代码错了」，
         会把它引到完全错误的方向上去。
+
+        `changed` 是这一轮改过的文件：验证器据此决定**在哪个范围里验**。
+        一个工作区里有很多件事时，在根上跑整条测试命令会把别人的失败报给它。
         """
         try:
-            result = self.verify()
+            result = self.verify(changed or [])
         except Exception as exc:
             return (f"自动验证没能跑起来（{type(exc).__name__}）：{exc}", False)
         body = " ".join(result.content.split())[:400]

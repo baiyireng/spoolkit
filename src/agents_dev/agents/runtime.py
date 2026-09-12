@@ -187,4 +187,8 @@ def run_role(
         persona=role.system_prompt,
         verify=verify,
     )
-    return loop.run(spec.render())
+    # 检查点用**角色自己的 id**：主循环和子智能体跑在同一个工作区里，
+    # 共用 task.json 会让子智能体的状态盖掉主循环的进度——实测长任务里
+    # 派发一次，主循环的检查点就变成了子智能体的状态。崩溃或续跑时，
+    # 读到的是别人的进度。
+    return loop.run(spec.render(), task_id=f"role-{role.name}")

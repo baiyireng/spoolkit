@@ -280,7 +280,7 @@ def test_子智能体拿到自动验证(tmp_path: Path) -> None:
     plan = plan_dispatch(_gateway([_plan()]), "修复解析")
     seen = []
 
-    def verify():
+    def verify(changed=()):
         seen.append(1)
         from agents_dev.tools.types import ToolResult
 
@@ -339,3 +339,26 @@ def test_审查者没跑完不算判不通过(tmp_path: Path) -> None:
     assert result.rejected is False, "没结论不等于判不通过"
     assert result.rounds == 1, "审查没结论就不该再派修复"
     assert any("审查无结论" in line for line in result.trace)
+
+
+def test_子角色不覆盖主循环的检查点(tmp_path: Path) -> None:
+    """主循环和子智能体跑在同一个工作区，共用 task.json 会让进度互相覆盖。
+
+    实测：长任务里派发一次，主循环的检查点就变成了子智能体的状态——
+    崩溃或续跑时读到的会是别人的进度。
+    """
+    from agents_dev.agents.runtime import IMPLEMENTER, TaskSpec, run_role
+
+    checkpoint = tmp_path / ".agent" / "tasks" / "task.json"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text('{"marker": "主循环的进度"}', encoding="utf-8")
+
+    run_role(
+        IMPLEMENTER,
+        TaskSpec(goal="改一处", acceptance="跑通"),
+        _gateway([_turn("改完了")]),
+        OfflineTokenCounter(),
+        _registry(tmp_path),
+        Config(project_root=tmp_path, context_window=4096, supervise=False),
+    )
+    assert "主循环的进度" in checkpoint.read_text(encoding="utf-8")

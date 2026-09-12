@@ -125,7 +125,7 @@ def test_自动验证的结果会回灌给模型(tmp_path: Path) -> None:
     loop = _build(tmp_path, script)
     calls = []
 
-    def verify() -> ToolResult:
+    def verify(changed=()) -> ToolResult:
         calls.append(1)
         return ToolResult(ok=False, content="test_v 失败：assert 1 == 2")
 

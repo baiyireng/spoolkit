@@ -360,6 +360,7 @@ def run_once(
     grants: Grants | None = None,
     timeout: int = DEFAULT_TIMEOUT,
     revert: object = (),
+    cwd: str = ".",
 ) -> ToolResult:
     """执行一条命令，语义与 run_command 工具完全一致。
 
@@ -368,7 +369,7 @@ def run_once(
     """
     return _run(
         root,
-        {"command": list(argv), "cwd": ".", "timeout": timeout},
+        {"command": list(argv), "cwd": cwd, "timeout": timeout},
         pending,
         approver,
         grants,

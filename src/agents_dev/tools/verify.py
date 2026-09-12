@@ -10,7 +10,7 @@
 
 import re
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 from agents_dev.tools.edit import is_test_path
 from agents_dev.tools.exec import DEFAULT_TIMEOUT, run_once
@@ -24,6 +24,54 @@ TEST_COMMAND = ("python", "-m", "pytest", "-q")
 ENVIRONMENT_MARKER = "【环境问题】"
 
 _MARKERS = ("pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg")
+
+# 一次改了多少处之后就不再逐处验：每处都要起一个解释器，改动太散时
+# 验证本身比任务还贵。超出的部分会明说「没验」。
+MAX_SCOPES = 5
+
+
+def _relative(root: Path, target: Path) -> str:
+    try:
+        text = str(target.relative_to(root)).replace("\\", "/")
+    except ValueError:
+        return "."
+    return "." if text in ("", ".") else text
+
+
+def scope_for_change(root: Path, changed: str) -> str:
+    """这次改动该在哪个目录里验。
+
+    一个工作区里放着很多件事时（长任务里最常见的形状），在根上跑整条测试
+    命令等于把**别人的失败**报给它——实测它就拿着那些无关的报错去改自己的
+    代码。所以范围跟着**改动**走：从被改文件所在目录往上找，最近的、自己
+    就带测试的那一层，就是它该看的范围；找不到就退回根（单项目工作区的
+    情形，那里本来就只有一套测试）。
+    """
+    target = (root / changed).parent
+    while True:
+        try:
+            if any(target.glob("test_*.py")) or any(target.glob("*_test.py")):
+                return _relative(root, target)
+            if target == root or target.parent == target:
+                return "."
+        except OSError:
+            return "."
+        target = target.parent
+
+
+def scopes_for_changes(
+    root: Path, changed: Sequence[str]
+) -> tuple[list[str], int]:
+    """改动落在哪些范围上，以及有几个范围没来得及验。"""
+    scopes: list[str] = []
+    for path in changed:
+        scope = scope_for_change(root, path)
+        if scope not in scopes:
+            scopes.append(scope)
+    if not scopes:
+        return ["."], 0
+    dropped = max(0, len(scopes) - MAX_SCOPES)
+    return scopes[:MAX_SCOPES], dropped
 
 
 def condense_test_output(text: str, limit: int = 360) -> str:
@@ -160,7 +208,7 @@ def make_verifier(
     # 上下文里再灌一遍同样的报错。实测一次运行里它被重报了 7 次。
     broken = False
 
-    def verify() -> ToolResult:
+    def verify(changed: Sequence[str] = ()) -> ToolResult:
         nonlocal broken
         if broken:
             return ToolResult(
@@ -173,9 +221,35 @@ def make_verifier(
         # 按原始测试判定：模型把测试改成 `assert True` 就能骗过一次验证，
         # 然后宣布完成——实测发生过。验证不能让它自己定标准。
         revert = [change.path for change in pending.items() if is_test_path(change.path)]
-        result = run_once(
-            root, command, pending=pending, timeout=timeout, revert=revert
-        )
+        # 没给改动路径时，退回「这次会话改过的全部文件」。
+        #
+        # 审查者的证据包就是这么调的（它不经过某一轮的改动记录）。而在多任务
+        # 工作区里盲目跑根目录的整条命令，回灌的是一屏**别人的**报错——
+        # 实测给审查者灌了 50 个 ERROR，它据此写下的结论自然没有意义。
+        if not changed:
+            changed = [change.path for change in pending.items()]
+        scopes, dropped = scopes_for_changes(root, changed)
+        outcomes = [
+            (
+                scope,
+                run_once(
+                    root,
+                    command,
+                    pending=pending,
+                    timeout=timeout,
+                    revert=revert,
+                    cwd=scope,
+                ),
+            )
+            for scope in scopes
+        ]
+        if len(outcomes) > 1:
+            # 一次改了好几处：逐处验、逐处报。汇总成一句「测试失败」，
+            # 等于把「哪一处猜错了」这份信息扔掉。
+            return _report_many(outcomes, dropped, root)
+
+        result = outcomes[0][1]
+        where = "" if scopes[0] == "." else f"，范围 {scopes[0]}"
         if not result.ok:
             # 失败时只留「错在哪」。整段 pytest 输出会把真正的原因淹掉。
             detail = condense_test_output(result.content)
@@ -195,11 +269,10 @@ def make_verifier(
             return ToolResult(
                 ok=False,
                 content=(
-                    # 说清跑的是哪条命令：工作区里有多件事时（比如「把这一批
-                    # TODO 都修了」），自动验证跑的是**整条**测试命令，报错里的
-                    # 文件名未必是它刚改的那个。不给这个信息，它会拿别人的失败
-                    # 去查自己的改动——实测一条会话里连撞了两次。
-                    f"测试没有通过（跑的是 {' '.join(command)}）：{detail}。"
+                    # 说清跑的是哪条命令、**在哪个范围**：工作区里有多件事时，
+                    # 报错里的文件名未必是它刚改的那个。不给这个信息，
+                    # 它会拿别人的失败去查自己的改动——实测连撞了两次。
+                    f"测试没有通过（{' '.join(command)}{where}）：{detail}。"
                     "按这个报错改代码——不要改测试文件。"
                 ),
             )
@@ -212,6 +285,36 @@ def make_verifier(
                     "验证是按它们原来的内容判定的）"
                 ),
             )
+        if where:
+            return ToolResult(
+                ok=True, content=f"这一处的测试通过（{scopes[0]}）：{result.content}"
+            )
         return result
 
     return verify
+
+
+def _report_many(
+    outcomes: list[tuple[str, ToolResult]], dropped: int, root: Path
+) -> ToolResult:
+    """一次改了好几处，就逐处报。"""
+    failed = [(scope, item) for scope, item in outcomes if not item.ok]
+    head = f"你这次改了 {len(outcomes)} 处，逐处跑了各自的测试："
+    head += (
+        f"{len(outcomes) - len(failed)} 处通过、**{len(failed)} 处没过**。"
+        if failed
+        else "全部通过。"
+    )
+    if dropped:
+        head += f"（还有 {dropped} 处没验——一次改得太散，验证会比任务本身还贵。）"
+    if not failed:
+        return ToolResult(ok=True, content=head)
+
+    lines = [head, "没过的："]
+    for scope, item in failed:
+        if looks_environmental(item.content, root):
+            lines.append(f"- {scope}：测试没能跑起来（环境问题，不是你的代码）")
+            continue
+        lines.append(f"- {scope}：{condense_test_output(item.content, limit=200)}")
+    lines.append("逐处按报错改——不要改测试文件。")
+    return ToolResult(ok=False, content="\n".join(lines))

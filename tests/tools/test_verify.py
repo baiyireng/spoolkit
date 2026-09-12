@@ -16,6 +16,7 @@ from agents_dev.tools.verify import (
     looks_environmental,
     make_verifier,
     mentions_workspace,
+    scope_for_change,
 )
 from agents_dev.tools.types import ToolResult
 
@@ -42,6 +43,70 @@ def test_有测试才给验证器(tmp_path: Path) -> None:
 def test_tests目录也算有测试(tmp_path: Path) -> None:
     (tmp_path / "tests").mkdir()
     assert detect_test_command(tmp_path) is not None
+
+
+# --- 验证范围跟着改动走 -----------------------------------------------
+
+
+def _two_tasks(tmp_path: Path) -> None:
+    """一个工作区里两件事，各有各的测试：一件会过、一件没过。"""
+    for name, value in (("13_case_insensitive", 2), ("14_inclusive_range", 1)):
+        home = tmp_path / name
+        home.mkdir()
+        (home / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (home / "test_acceptance.py").write_text(
+            f"import mod\n\n\ndef test_v():\n    assert mod.VALUE == {value}\n",
+            encoding="utf-8",
+        )
+
+
+def test_范围取最近的带测试的那一层(tmp_path: Path) -> None:
+    _two_tasks(tmp_path)
+    assert scope_for_change(tmp_path, "13_case_insensitive/mod.py") == "13_case_insensitive"
+    # 单项目工作区：根目录自己有测试 → 还是根
+    (tmp_path / "test_root.py").write_text("def test_ok():\n    assert True\n")
+    assert scope_for_change(tmp_path, "anything/deep/mod.py") == "."
+
+
+def test_只验改动那一处_别人的失败不报给它(tmp_path: Path) -> None:
+    """这条是这次改动的全部意义：改 A 时不该收到 B 的失败。
+
+    实测在 50 题的铺盘里，自动验证跑的是整条命令，于是每改完一道就报
+    「失败」（另外 41 道还没做），反馈与它刚做的事无关。
+    """
+    _two_tasks(tmp_path)
+    pending = PendingChanges(tmp_path)
+    verifier = make_verifier(tmp_path, pending)
+
+    # 只改会过的那一件
+    pending.propose("13_case_insensitive/mod.py", "VALUE = 2\n")
+    result = verifier(["13_case_insensitive/mod.py"])
+    assert result.ok is True, result.content
+    assert "13_case_insensitive" in result.content
+
+    # 只改不会过的那一件：报的是它自己的失败，而且指明范围
+    pending.propose("14_inclusive_range/mod.py", "VALUE = 9\n")
+    result = verifier(["14_inclusive_range/mod.py"])
+    assert result.ok is False
+    assert "14_inclusive_range" in result.content
+    assert "13_case_insensitive" not in result.content
+
+
+def test_一次改多处就逐处报(tmp_path: Path) -> None:
+    """对得上因果：哪一处通过、哪一处没过，一眼看得出是哪一个猜错了。"""
+    _two_tasks(tmp_path)
+    pending = PendingChanges(tmp_path)
+    verifier = make_verifier(tmp_path, pending)
+    pending.propose("13_case_insensitive/mod.py", "VALUE = 2\n")
+    pending.propose("14_inclusive_range/mod.py", "VALUE = 9\n")
+
+    result = verifier(
+        ["13_case_insensitive/mod.py", "14_inclusive_range/mod.py"]
+    )
+    assert result.ok is False
+    assert "改了 2 处" in result.content
+    assert "1 处通过" in result.content
+    assert "14_inclusive_range" in result.content
 
 
 def test_未改动时验证报告失败(tmp_path: Path) -> None:
