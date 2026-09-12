@@ -26,6 +26,7 @@ def _plan(goal: str) -> str:
                     "goal": "改 01_off_by_one/calc.py",
                     "acceptance": "在 01_off_by_one/ 下跑 pytest 通过",
                     "scope": ["01_off_by_one/"],
+                    "executor": "self",
                     "note": "",
                 }
             ]
@@ -81,3 +82,35 @@ def test_自主模式把环境信息喂给拆解(tmp_path: Path) -> None:
     prompt = gateway.requests[0].messages[0].content
     # 拆解那一次调用里带着真实目录名（不看环境的版本这里是「无」）
     assert "01_off_by_one" in prompt
+
+
+def test_拆解要问清这一步谁来做() -> None:
+    """「按步注入」的每一步都是一份派发契约（goal + 验收 + 范围）。
+
+    不写「谁来做」这一维，harness 就等于替所有步骤决定「都自己做」——
+    派发的决定权与**独立审查**就都丢了。实测那条路里 `dispatch` 用了 0 次。
+    """
+    from agents_dev.agents.plan import SELF, SUBAGENT, parse_plan
+    from agents_dev.context import templates as T
+
+    assert "executor" in T.DECOMPOSE
+    plan = parse_plan(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "goal": "A",
+                        "acceptance": "a",
+                        "scope": ["x/"],
+                        "executor": "subagent",
+                    },
+                    {"goal": "B", "acceptance": "b", "scope": ["y/"]},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        "目标",
+    )
+    assert plan.steps[0].executor == SUBAGENT
+    # 没写的按「自己做」——派发要付固定成本，不该由缺省打开
+    assert plan.steps[1].executor == SELF

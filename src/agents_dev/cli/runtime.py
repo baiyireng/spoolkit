@@ -40,6 +40,7 @@ from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.verify import make_verifier
 from agents_dev.tools.search import search_code_spec
 from agents_dev.tools.stats import dir_stats_spec
+from agents_dev.tools.survey import survey_spec
 from agents_dev.tools.calc import calc_spec
 from agents_dev.tools.dispatch import dispatch_spec
 from agents_dev.tools.sources import SourceLog, check_numbers_spec
@@ -242,6 +243,12 @@ def assemble_loop(
     # 而子智能体拿的是按角色裁剪后的那一份（里面没有 dispatch，不会递归）。
     registry.register(
         dispatch_spec(gateway, registry, settings, tokenizer, verify=verifier)
+    )
+    # 「收齐这一处该看的」是一个**动作**，不是一个必经阶段：模型自己决定
+    # 何时用、看哪一处。它省的是步数——原先要「列目录 → 猜文件名 → 读 →
+    # 猜错了再换」，实测模型猜错过文件名，那一步就白花了。
+    registry.register(
+        survey_spec(project_root, tokenizer, parts.pending, parts.read_roots)
     )
 
     def incoming_reports() -> str:

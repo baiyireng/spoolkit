@@ -14,6 +14,7 @@ from typing import Sequence
 from agents_dev.agents.plan import (
     DONE,
     FAILED,
+    SUBAGENT,
     decompose,
     load_plan,
     narrow_scope,
@@ -149,7 +150,10 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
             lessons=build_lessons(memory) if memory is not None else None,
         ),
     )
-    result = loop.run(render_step_prompt(plan, step))
+    if step.executor == SUBAGENT:
+        result = _delegate_step(ctx, step, loop, pending)
+    else:
+        result = loop.run(render_step_prompt(plan, step))
 
     if memory is not None:
         settle_lessons(memory, result.lessons_pushed, result.finished)
@@ -158,6 +162,67 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
         print(line)
     print(result.usage())
     return result, pending
+
+
+def _delegate_step(ctx: StepRun, step, loop, pending) -> object:
+    """把这一步交给子智能体：独立上下文实现 + 另一个独立上下文审查。
+
+    为什么要有这一支：`render_step_prompt` 那条路**也是**按「派发契约」的形状
+    在喂——goal + 验收标准 + 范围——但由 harness 直接跑，于是派发的决定权与
+    **独立审查**都不见了（实测那条路里 `dispatch` 用了 0 次，而验收只剩
+    「跑测试」这一种机械判断，它看不出「这处改得是不是偷懒了」）。
+
+    成了哪一步由**审查结论**定，不是由「测试过了」定；改动仍然落在同一份
+    待确认里，用户只确认一次。
+    """
+    from agents_dev.agent.loop import LoopResult
+    from agents_dev.agent.state import TaskState
+    from agents_dev.agents.dispatcher import DispatchPlan, run_delegated
+    from agents_dev.agents.runtime import TaskSpec
+
+    spec = TaskSpec(
+        goal=step.goal,
+        targets=step.scope,
+        acceptance=step.acceptance,
+        constraints=("只做这一步，不要顺手做后面步骤的事",),
+    )
+    plan = ctx.plan
+    outcome = run_delegated(
+        DispatchPlan(True, "计划里声明了由子智能体执行", spec=spec),
+        ctx.gateway,
+        loop.tokenizer,
+        loop.registry,
+        loop.config,
+        verify=loop.verify,
+    )
+
+    review = outcome.review
+    if outcome.too_big:
+        finished = False
+        final = f"【太大】{outcome.too_big}"
+    elif review is None:
+        finished = False
+        final = outcome.implementer_final
+    else:
+        finished = review.passed
+        verdict = "通过" if review.passed else ("没有结论" if review.inconclusive else "未通过")
+        reasons = "；".join(review.reasons)
+        final = f"独立审查{verdict}：{reasons}" if reasons else f"独立审查{verdict}"
+
+    trace = [f"[派发] {line}" for line in outcome.trace]
+    if len(pending):
+        trace.append(f"[派发] 这次改动涉及 {len(pending)} 个文件，仍在待确认里")
+    return LoopResult(
+        finished=finished,
+        final=final,
+        state=TaskState(task_id=f"step-{step.index}", goal=step.goal),
+        steps=0,
+        resets=0,
+        trace=trace,
+        prompt_tokens=outcome.prompt_tokens,
+        completion_tokens=outcome.completion_tokens,
+        model_calls=outcome.model_calls,
+    )
 
 
 def record_step(ctx: StepRun, step, result, pending, scope: Sequence[str]) -> None:

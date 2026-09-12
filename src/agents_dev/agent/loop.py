@@ -137,6 +137,9 @@ def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
 
     lookup = [name for name in LOOKUP_TOOLS if registry.get(name) is not None]
     edits = [name for name in EDIT_TOOLS if registry.get(name) is not None]
+    if registry.get("survey") is not None:
+        # 放在查询规则**前面**：它管的是「动手前那一趟」，比单个查询更靠前。
+        lines.append(T.WORKFLOW_SURVEY)
     if lookup:
         lines.append(T.WORKFLOW_FIND.format(names=" / ".join(lookup)))
     if registry.get("find_callers") is not None:

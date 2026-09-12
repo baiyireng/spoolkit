@@ -25,6 +25,10 @@ PENDING = "pending"
 DONE = "done"
 FAILED = "failed"
 
+# 这一步由谁执行。见 PlanStep.executor。
+SELF = "self"
+SUBAGENT = "subagent"
+
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -36,8 +40,9 @@ PLAN_SCHEMA: dict[str, Any] = {
                     "goal": {"type": "string"},
                     "acceptance": {"type": "string"},
                     "scope": {"type": "array", "items": {"type": "string"}},
+                    "executor": {"type": "string", "enum": ["self", "subagent"]},
                 },
-                "required": ["goal", "acceptance", "scope"],
+                "required": ["goal", "acceptance", "scope", "executor"],
             },
         }
     },
@@ -55,6 +60,14 @@ class PlanStep:
     goal: str
     acceptance: str
     scope: tuple[str, ...] = ()
+    # 这一步**谁来做**。拆解时就要定：不写这一维，harness 就等于替所有步骤
+    # 决定「都自己做」——那正是「按步注入」被诟病的地方：每一步都按派发契约
+    # 的形状喂给一个全新上下文，但派发的决定权与独立审查都不见了。
+    #
+    #   self     —— 主循环自己做：小改动、改一处、有明确验收标准的活。
+    #   subagent —— 交给实现者做、另一独立上下文审查：要读很多文件、
+    #               但验收标准清楚的活（细节不该占着主循环的上下文）。
+    executor: str = SELF
     status: str = PENDING
     note: str = ""
 
@@ -131,6 +144,12 @@ def parse_plan(text: str, goal: str, limit: int = 10) -> Plan:
                     str(item).strip()
                     for item in (item.get("scope") or [])
                     if str(item).strip()
+                ),
+                # 缺省按「自己做」：派发是要付固定成本的选择，不该由缺省打开。
+                executor=(
+                    SUBAGENT
+                    if str(item.get("executor") or "").strip().lower() == SUBAGENT
+                    else SELF
                 ),
             )
         )

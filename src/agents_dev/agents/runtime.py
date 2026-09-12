@@ -60,6 +60,7 @@ IMPLEMENTER = Role(
         "read_file",
         "list_dir",
         "search_code",
+        "survey",
         "request_diagnosis",
         "read_diagnosis",
         "file_symbols",
@@ -95,6 +96,7 @@ REVIEWER = Role(
     # 审查者能跑测试但不能写代码：独立验证要靠自己动手跑，而不是附和实现者。
     tools=(
         "read_file",
+        "survey",
         "file_symbols",
         "find_symbol",
         "find_callers",
