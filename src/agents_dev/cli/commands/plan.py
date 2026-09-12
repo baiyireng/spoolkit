@@ -67,6 +67,7 @@ def _survey(project_root: Path, goal: str, tokenizer) -> str:
     except OSError:
         pass
     from agents_dev.index.rank import prefetch as prefetch_text
+    from agents_dev.tools.dispatch import dispatch_history
 
     try:
         snippet = prefetch_text(project_root, goal, tokenizer)
@@ -74,6 +75,10 @@ def _survey(project_root: Path, goal: str, tokenizer) -> str:
         snippet = ""
     if snippet:
         lines.append("检索到的相关片段：\n" + snippet)
+    # 拆解那一步正是决定「谁来做」的时刻，把本工作区的派发战绩摆出来
+    history = dispatch_history(project_root)
+    if history:
+        lines.append(history)
     return "\n\n".join(lines)
 
 

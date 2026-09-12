@@ -253,3 +253,55 @@ def test_太大时给主循环的话是可行动的(tmp_path: Path) -> None:
     )
     assert "太大" in fed_back
     assert "拆小" in fed_back
+
+
+def test_派发战绩会记下来并在下次判断时看得见(tmp_path: Path) -> None:
+    """主循环对子智能体的认知原本是静态的两句话：不知道在这个工作区里派出去
+    是赚是亏。教训记的是任务级成败，不是派发级——所以单独记一笔。
+
+    而且只在「正好要判断」的两个时刻取用：问 `tool_help("dispatch")` 时、
+    拆解前收集环境时。常驻提示词里一个字都不放（那是每个请求的税）。
+    """
+    loop, _ = _build(
+        tmp_path,
+        [
+            _dispatch_turn(),
+            _turn(
+                "写文件",
+                [
+                    {
+                        "name": "write_file",
+                        "arguments": {"path": "a.py", "content": "x = 1\n"},
+                    }
+                ],
+            ),
+            _turn("写完了", [], final="改好了"),
+            _turn("看过了", [], final="没问题"),
+            json.dumps({"verdict": "pass", "reasons": ["符合验收标准"]}),
+            _turn("收到", [], final="派发完成"),
+        ],
+    )
+    loop.run("改 a.py")
+
+    log = (tmp_path / ".agent" / "dispatch-log.md").read_text(encoding="utf-8")
+    assert "[通过]" in log
+    assert "次调用" in log
+
+    # 下一次**运行**要派时看得见：说明在装定时带上战绩
+    # （同一次运行里不必刷新——它刚亲眼看过结果）
+    fresh = dispatch_spec(
+        loop.gateway,
+        loop.registry,
+        loop.config,
+        OfflineTokenCounter(),
+    )
+    assert "本工作区记过的派发" in fresh.description
+    assert "通过 1 次" in fresh.description
+
+
+def test_没有战绩时不加那段废话(tmp_path: Path) -> None:
+    loop, _ = _build(tmp_path, [_turn("好", [], final="好")])
+    spec = dispatch_spec(
+        loop.gateway, loop.registry, loop.config, OfflineTokenCounter()
+    )
+    assert "本工作区记过的派发" not in spec.description

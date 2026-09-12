@@ -14,7 +14,9 @@
 **子智能体拿不到这个工具**（角色工具表里没有它），所以不存在自我派发的递归。
 """
 
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from agents_dev.agents.dispatcher import DispatchPlan, run_delegated
 from agents_dev.agents.runtime import TaskSpec
@@ -31,6 +33,70 @@ from agents_dev.tools.types import ToolResult, ToolSpec
 # 实现者把预算烧光后撞上重复保护，回来只剩一句无从行动的话，然后还被送去
 # 审查——审查者审的是个半成品。规模问题该在派之前拦。
 MAX_TARGETS = 10
+
+# 派发战绩的行数与条数上限：它只在「正好要判断」的时候被取用（见下面
+# dispatch_history），所以留着比丢掉划算——但也别无限长。
+LOG_LIMIT = 20
+HISTORY_LIMIT = 5
+
+
+def _log_path(root: Path) -> Path:
+    return root / ".agent" / "dispatch-log.md"
+
+
+def record_dispatch(
+    root: Path, *, kind: str, calls: int, rounds: int, targets: int, note: str = ""
+) -> None:
+    """把一次派发的结果记在工作区里。
+
+    为什么要有这份记录：主循环对子智能体的认知原本是**静态的两句话**——
+    知道有个 dispatch 工具、知道什么活适合派，但**不知道在这个工作区里
+    派出去是赚是亏**。而教训机制记的是任务级成败，不是派发级的；一次派发
+    失败（审查没过、或者「太大」）不会回流到下次判断里。
+
+    记录失败不影响任务本身：它是给人看的旁证。
+    """
+    path = _log_path(root)
+    stamp = time.strftime("%m-%d %H:%M")
+    line = f"- {stamp} [{kind}] {calls} 次调用 / {rounds} 轮 / 目标 {targets} 件"
+    if note:
+        line += f" — {' '.join(note.split())[:80]}"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        body = [ln for ln in old if ln.strip()][-LOG_LIMIT:]
+        body.append(line)
+        path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def dispatch_history(root: Path, limit: int = HISTORY_LIMIT) -> str:
+    """派发战绩的一小段，给「要不要派」当依据。
+
+    只在两个时刻取用：模型问 `tool_help("dispatch")` 时（那正是它准备派的
+    时刻），以及拆解前收集环境时（那正是它决定「谁来做」的时刻）。
+    常驻提示词里一个字都不放——那是每个请求的税。
+    """
+    path = _log_path(root)
+    try:
+        lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return ""
+    if not lines:
+        return ""
+    recent = lines[-limit:]
+    counts: dict[str, int] = {}
+    for line in lines:
+        for kind in ("通过", "未通过", "没结论", "太大", "失败"):
+            if f"[{kind}]" in line:
+                counts[kind] = counts.get(kind, 0) + 1
+                break
+    tally = "、".join(f"{k} {v} 次" for k, v in counts.items()) or "（没法归类）"
+    return (
+        f"本工作区记过的派发（共 {len(lines)} 次：{tally}）。最近几次：\n"
+        + "\n".join(recent)
+    )
 
 
 def dispatch_spec(
@@ -77,6 +143,14 @@ def dispatch_spec(
                 plan, gateway, tokenizer, registry, config, verify=verify
             )
         except Exception as exc:
+            record_dispatch(
+                config.project_root,
+                kind="失败",
+                calls=0,
+                rounds=0,
+                targets=len(spec.targets),
+                note=f"{type(exc).__name__}: {exc}",
+            )
             # 派发失败不该把主循环一起带走——它还能自己做。
             return ToolResult(
                 ok=False,
@@ -101,6 +175,10 @@ def dispatch_spec(
             )
         return ToolResult(ok=True, content=_render(outcome), usage=outcome.usage)
 
+    # 战绩附录进「怎么用这个工具」的说明里：模型调 tool_help("dispatch")
+    # 的那一刻，正是它准备做派发决定的那一刻——钱花在这里最值。
+    history = dispatch_history(config.project_root)
+    notes = ("\n\n" + history) if history else ""
     return ToolSpec(
         name="dispatch",
         description=(
@@ -117,6 +195,7 @@ def dispatch_spec(
             "acceptance 必须写清怎么算做完——没有它不允许派发；带一批活时，"
             "验收方式要能覆盖整批（例如「这些目录里逐个跑 pytest 都通过」）。"
             "注意：它会真的改文件（进待确认的 diff），所以目标要具体到能验收"
+            + notes
         ),
         parameters={
             "type": "object",

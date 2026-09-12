@@ -364,6 +364,29 @@ def run_delegated(
     result.prompt_tokens = gateway.prompt_tokens
     result.completion_tokens = gateway.completion_tokens
     result.model_calls = gateway.calls
+    # 记一笔派发战绩。放在这里而不是放在 dispatch 工具里：派发有**两条路**
+    # （会话内的 dispatch 工具、计划里 executor=subagent 的步骤），
+    # 记在其中一条上，另一条就永远是空的——实测就是这么漏掉的。
+    from agents_dev.tools.dispatch import record_dispatch
+
+    record_dispatch(
+        config.project_root,
+        kind=(
+            "太大"
+            if result.too_big
+            else (
+                "没结论"
+                if (result.review and result.review.inconclusive)
+                else ("通过" if (result.review and result.review.passed) else "未通过")
+            )
+        ),
+        calls=result.model_calls,
+        rounds=result.rounds,
+        targets=len(spec.targets),
+        note=result.too_big or (
+            "；".join(result.review.reasons) if result.review else ""
+        ),
+    )
     return result
 
 

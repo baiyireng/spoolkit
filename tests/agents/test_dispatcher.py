@@ -418,3 +418,22 @@ def test_实现者撞上限也不送审(tmp_path: Path) -> None:
     assert result.too_big
     assert "步预算" in result.too_big
     assert result.review is None
+
+
+def test_派发战绩记在共用内核里(tmp_path: Path) -> None:
+    """派发有两条路（会话内的 dispatch 工具、计划里 executor=subagent 的步骤）。
+
+    记账写在工具那一层，另一条路就永远是空的——实测就是这么漏掉的
+    （计划路径跑完一步，日志文件根本没生成）。所以记在 run_delegated 里。
+    """
+    plan = plan_dispatch(_gateway([_plan()]), "修复解析")
+    run_delegated(
+        plan,
+        _gateway(_review_script("审查通过", passed=True)),
+        OfflineTokenCounter(),
+        _registry(tmp_path),
+        Config(project_root=tmp_path, context_window=4096, supervise=False),
+    )
+    log = tmp_path / ".agent" / "dispatch-log.md"
+    assert log.exists(), "直接调 run_delegated 也要记上"
+    assert "[通过]" in log.read_text(encoding="utf-8")
