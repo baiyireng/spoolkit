@@ -1,4 +1,12 @@
-from agents_dev.web.protocol import AWAIT, CONFIRM, DIFF, FINAL, Event, parse_line
+from agents_dev.web.protocol import (
+    AWAIT,
+    CONFIRM,
+    DIFF,
+    FINAL,
+    NOTE,
+    Event,
+    parse_line,
+)
 
 
 def test_序列化成一行JSON() -> None:
@@ -51,4 +59,12 @@ def test_type不进入data() -> None:
 
 def test_确定事件类型被接受() -> None:
     assert parse_line(Event(CONFIRM, {"applied": True}).to_line()) is not None
+
+
+def test_note事件被接受() -> None:
+    """系统说给用户听的一句话。未知类型会被丢掉，所以必须登记。"""
+    parsed = parse_line(Event(NOTE, {"text": "数字核对：…"}).to_line())
+    assert parsed is not None
+    assert parsed.type == NOTE
+    assert parsed.data["text"] == "数字核对：…"
 

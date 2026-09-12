@@ -153,6 +153,12 @@ function onEvent(event) {
         data.ok ? 'ok' : 'bad');
     return;
   }
+  // 系统说给用户听的一句话（比如数字核对的结果）。工具那行只有「成功/失败」，
+  // 而这类事件的理由才是全部内容——不显示出来，页面上就只剩一个没有理由的红字。
+  if (data.type === 'note') {
+    add(data.text, data.ok ? 'dim' : 'bad');
+    return;
+  }
   if (data.type === 'diff') {
     pendings.push({path: data.path, text: data.text});
     showPending(pendings);

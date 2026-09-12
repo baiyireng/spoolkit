@@ -13,7 +13,7 @@ from agents_dev.config import Config
 from agents_dev.cli.commands.plan import advance_plan, autonomous
 from agents_dev import diagnosis
 from agents_dev.check.numbers import render as render_numbers
-from agents_dev.check.numbers import untraceable
+from agents_dev.check.numbers import actionable, mismatched, summarize, untraceable
 from agents_dev.cli.options import (
     report_policy,
     resolve_policy,
@@ -36,7 +36,7 @@ from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.memory.distill import distill
 from agents_dev.memory.transcript import ASSISTANT, USER, record_message
 from agents_dev.tools.edit import PendingChanges
-from agents_dev.web.protocol import FINAL, START, USAGE
+from agents_dev.web.protocol import FINAL, NOTE, START, USAGE
 
 
 def run(args: argparse.Namespace) -> int:
@@ -370,19 +370,17 @@ def _report_numbers(loop, result, writer: EventWriter | None = None) -> None:
     log = getattr(loop, "sources", None)
     if log is None or not result.final:
         return
-    claims = untraceable(result.final, log.items())
-    if not claims:
+    claims = untraceable(result.final, log.items(), log.facts())
+    wrong = mismatched(result.final, log.facts())
+    if not claims and not wrong:
         return
     if writer is not None:
         writer.emit(
-            "tool",
-            name="数字核对",
-            ok=False,
-            detail=" ".join(claim.text for claim in claims),
+            NOTE, text=summarize(claims, wrong), ok=not actionable(claims, wrong)
         )
         return
     print("---")
-    print(render_numbers(claims))
+    print(render_numbers(claims, wrong))
 
 
 def _settle_pending(args, project_root, pending) -> None:

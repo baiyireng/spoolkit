@@ -465,7 +465,7 @@ class AgentLoop:
                     level = max(repeats, seen)
                     result = self._invoke_guarded(call, repeats, seen)
                     if self.sources is not None:
-                        self.sources.add(result.content)
+                        self.sources.add(result.content, result.facts)
                     self._note_progress(state, call, result)
                     if result.ok and call.name in EDIT_TOOLS:
                         edited = True

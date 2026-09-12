@@ -6,7 +6,7 @@
 模型侧只提供读：拿自己的草稿来核对，看哪些数字找不到出处。
 """
 
-from agents_dev.check.numbers import render, untraceable
+from agents_dev.check.numbers import mismatched, render, untraceable
 from agents_dev.tools.types import ToolResult, ToolSpec
 
 
@@ -15,16 +15,23 @@ class SourceLog:
 
     def __init__(self) -> None:
         self._items: list[str] = []
+        self._facts: list = []
 
-    def add(self, text: str) -> None:
+    def add(self, text: str, facts=()) -> None:
         if text:
             self._items.append(text)
+        for fact in facts or ():
+            self._facts.append(fact)
 
     def items(self) -> tuple[str, ...]:
         return tuple(self._items)
 
+    def facts(self) -> tuple:
+        return tuple(self._facts)
+
     def clear(self) -> None:
         self._items.clear()
+        self._facts.clear()
 
 
 def check_numbers_spec(log: SourceLog) -> ToolSpec:
@@ -34,8 +41,9 @@ def check_numbers_spec(log: SourceLog) -> ToolSpec:
         text = str(args.get("text") or "")
         if not text.strip():
             return ToolResult(ok=False, content="text 不能为空：把要核对的草稿放进来")
-        claims = untraceable(text, log.items())
-        return ToolResult(ok=True, content=render(claims))
+        claims = untraceable(text, log.items(), log.facts())
+        wrong = mismatched(text, log.facts())
+        return ToolResult(ok=True, content=render(claims, wrong))
 
     return ToolSpec(
         name="check_numbers",

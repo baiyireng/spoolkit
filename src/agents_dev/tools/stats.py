@@ -19,7 +19,7 @@ from pathlib import Path
 
 from agents_dev.errors import PathOutsideProjectError
 from agents_dev.paths import resolve_readable
-from agents_dev.tools.types import ToolResult, ToolSpec
+from agents_dev.tools.types import Fact, ToolResult, ToolSpec
 
 DEFAULT_SECONDS = 12.0
 # 条目上限只作安全网（防病态目录树），不该比时间预算先触发——
@@ -149,6 +149,26 @@ def _render(root: Path, data: dict, top: int) -> str:
     return "\n".join(lines)
 
 
+def _facts(data: dict, top: int) -> tuple[Fact, ...]:
+    """把「谁是多少」结构性地交出来，供数字核对判断有没有配错对象。
+
+    渲染出来的文本是给模型读的；这一份是给核对器用的。
+    """
+    found: list[Fact] = [
+        Fact("合计", float(data["files"]), "个文件"),
+        Fact("合计", float(data["bytes"]), "B"),
+    ]
+    for name, (count, size) in data["by_child"].items():
+        found.append(Fact(name, float(size), "B"))
+        found.append(Fact(name, float(count), "个文件"))
+    for suffix, count in data["by_suffix"].items():
+        found.append(Fact(suffix, float(data["suffix_bytes"][suffix]), "B"))
+        found.append(Fact(suffix, float(count), "个"))
+    for size, path in data["largest"]:
+        found.append(Fact(Path(path).name, float(size), "B"))
+    return tuple(found)
+
+
 def _dir_stats(root: Path, args: dict, read_roots=()) -> ToolResult:
     try:
         base = resolve_readable(root, args["path"], read_roots)
@@ -164,7 +184,12 @@ def _dir_stats(root: Path, args: dict, read_roots=()) -> ToolResult:
     if not 1 <= top <= 30:
         return ToolResult(ok=False, content="top 必须在 1 到 30 之间")
 
-    return ToolResult(ok=True, content=_render(base, _collect(base, seconds), top))
+    data = _collect(base, seconds)
+    return ToolResult(
+        ok=True,
+        content=_render(base, data, top),
+        facts=_facts(data, top),
+    )
 
 
 def dir_stats_spec(root: Path, read_roots=()) -> ToolSpec:
