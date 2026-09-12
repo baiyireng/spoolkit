@@ -11,9 +11,11 @@ from agents_dev.tools.edit import PendingChanges
 from agents_dev.tools.verify import (
     condense_test_output,
     detect_test_command,
+    exit_code,
     is_test_path,
     make_verifier,
 )
+from agents_dev.tools.types import ToolResult
 
 FAILING = "import mod\n\n\ndef test_v():\n    assert mod.VALUE == 2\n"
 
@@ -144,3 +146,46 @@ def test_没有短摘要时退回报错行() -> None:
 def test_崩溃输出也能给出点东西() -> None:
     raw = "退出码 2（失败）\n$ python -m pytest -q\npython: can't open file 'x'\n"
     assert "can't open file" in condense_test_output(raw)
+
+
+def test_退出码能被取出来() -> None:
+    assert exit_code("退出码 1（失败）\n$ pytest\n") == 1
+    assert exit_code("退出码 0（成功）\n$ pytest\n") == 0
+    assert exit_code("没有退出码的一行") is None
+
+
+def test_测试没跑成与测试没通过要分开(tmp_path: Path) -> None:
+    """退出码 1 是测试没过（去改代码），其它是压根没跑成（改代码没用）。
+
+    实测踩过：环境坏了导致 pytest 收集失败，反馈却说「测试失败」，
+    模型于是拿着 PermissionError 去查自己的改动，白烧好几步。
+    """
+    (tmp_path / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "test_mod.py").write_text(
+        "import mod\n\n\ndef test_v():\n    assert mod.VALUE == 2\n", encoding="utf-8"
+    )
+
+    import agents_dev.tools.verify as module
+
+    original = module.run_once
+    pending = PendingChanges(tmp_path)
+
+    module.run_once = lambda *a, **k: ToolResult(
+        ok=False, content="退出码 1（失败）\n$ pytest\nFAILED test_mod.py::test_v - AssertionError\n"
+    )
+    try:
+        result = make_verifier(tmp_path, pending)()
+        assert "测试没有通过" in result.content
+        assert "不要改测试" in result.content
+    finally:
+        module.run_once = original
+
+    module.run_once = lambda *a, **k: ToolResult(
+        ok=False, content="退出码 2（失败）\n$ pytest\nINTERNALERROR> PermissionError\n"
+    )
+    try:
+        result = make_verifier(tmp_path, pending)()
+        assert "没能跑起来" in result.content
+        assert "和你的改动无关" in result.content
+    finally:
+        module.run_once = original

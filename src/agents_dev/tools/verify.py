@@ -8,6 +8,7 @@
 真实工作区全程不动。系统自己开一条绕开白名单的暗门，比模型乱跑更糟。
 """
 
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -63,6 +64,20 @@ def condense_test_output(text: str, limit: int = 360) -> str:
             break
     return " ｜ ".join(fallback)[:limit]
 
+
+def exit_code(text: str) -> int | None:
+    """从「退出码 N（失败）」那一行里取出退出码。
+
+    pytest 用退出码区分两件完全不同的事：1 是**测试没通过**（该去改代码），
+    2 是**收集中断、压根没跑成**（多半是环境问题，改代码没用）。
+    把后者当成前者，模型会拿着 PermissionError 去查自己的改动——
+    实测它为此烧掉好几步，最后也没查出任何东西。
+    """
+    first = text.splitlines()[0] if text else ""
+    # 格式是「退出码 1（失败）」——数字和括号连着，别按空格切。
+    match = re.match(r"退出码\s*(-?\d+)", first)
+    return int(match.group(1)) if match else None
+
 def detect_test_command(root: Path) -> list[str] | None:
     """项目里看起来有测试就返回跑测试的命令，否则返回 None。
 
@@ -102,8 +117,24 @@ def make_verifier(
         )
         if not result.ok:
             # 失败时只留「错在哪」。整段 pytest 输出会把真正的原因淹掉。
+            code = exit_code(result.content)
+            detail = condense_test_output(result.content)
+            if code is not None and code not in (1,):
+                # 1 之外的退出码不是「你的测试挂了」，而是「测试没跑成」。
+                return ToolResult(
+                    ok=False,
+                    content=(
+                        f"测试没能跑起来（退出码 {code}，属于环境问题，"
+                        f"不是你的代码失败）：{detail}。"
+                        "先不要改代码——这个失败和你的改动无关。"
+                    ),
+                )
             return ToolResult(
-                ok=False, content=condense_test_output(result.content)
+                ok=False,
+                content=(
+                    f"测试没有通过：{detail}。"
+                    "按这个报错改代码——不要改测试文件。"
+                ),
             )
         if revert:
             return ToolResult(

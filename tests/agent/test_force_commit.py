@@ -126,7 +126,7 @@ def test_自动验证的结果会回灌给模型(tmp_path: Path) -> None:
 
     assert len(calls) == 1
     prompt = _text_of(loop.gateway.requests[-1])
-    assert "自动跑了一遍项目里的测试" in prompt
+    assert "自动验证的结果" in prompt
     assert "assert 1 == 2" in prompt
 
 

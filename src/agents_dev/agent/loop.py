@@ -526,11 +526,9 @@ class AgentLoop:
                 "如果没有别的要改，直接给出结论收尾。",
                 True,
             )
-        return (
-            f"系统自动跑了一遍项目里的测试：**失败**。输出：{body}。"
-            "按这个报错改正，不要凭猜测下结论。",
-            False,
-        )
+        # 失败到底是什么性质，由验证器说——它才知道退出码的含义。
+        # 循环这边再加一句「测试失败」会盖掉那个区别。
+        return (f"自动验证的结果：{body}", False)
 
     @staticmethod
     def _note_progress(state: TaskState, call, result) -> None:
