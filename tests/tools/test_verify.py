@@ -8,7 +8,12 @@
 from pathlib import Path
 
 from agents_dev.tools.edit import PendingChanges
-from agents_dev.tools.verify import detect_test_command, is_test_path, make_verifier
+from agents_dev.tools.verify import (
+    condense_test_output,
+    detect_test_command,
+    is_test_path,
+    make_verifier,
+)
 
 FAILING = "import mod\n\n\ndef test_v():\n    assert mod.VALUE == 2\n"
 
@@ -101,3 +106,41 @@ def test_测试路径识别() -> None:
     assert is_test_path("test/helpers.py")
     assert not is_test_path("mod.py")
     assert not is_test_path("src/testing.py")
+
+
+def test_短摘要优先() -> None:
+    """一行摘要里同时有文件、用例名和差异，是最能行动的形态。"""
+    raw = (
+        "退出码 1（失败）\n$ python -m pytest -q\n"
+        ".F                                                                       [100%]\n"
+        "=================================== FAILURES ===================================\n"
+        "_________________________________ test_chinese _________________________________\n"
+        "\n"
+        "    def test_chinese():\n"
+        '>       assert greet("Ann", "zh") == "你好，Ann！"\n'
+        "E       AssertionError: assert '你好, Ann!' == '你好，Ann！'\n"
+        "\n"
+        "test_acceptance.py:9: AssertionError\n"
+        "=========================== short test summary info ============================\n"
+        "FAILED test_acceptance.py::test_chinese - AssertionError: assert '你好, Ann!' ==\n"
+        "============================== 1 failed in 0.05s ==============================\n"
+    )
+    condensed = condense_test_output(raw)
+    assert condensed.startswith("FAILED test_acceptance.py::test_chinese")
+    assert "你好, Ann!" in condensed
+    # 分隔线和进度点不该混进来
+    assert "=====" not in condensed
+
+
+def test_没有短摘要时退回报错行() -> None:
+    raw = (
+        "退出码 1（失败）\n$ python -m pytest -q\n"
+        "==== ERRORS ====\n"
+        "E   ModuleNotFoundError: No module named 'helpers'\n"
+    )
+    assert "ModuleNotFoundError" in condense_test_output(raw)
+
+
+def test_崩溃输出也能给出点东西() -> None:
+    raw = "退出码 2（失败）\n$ python -m pytest -q\npython: can't open file 'x'\n"
+    assert "can't open file" in condense_test_output(raw)

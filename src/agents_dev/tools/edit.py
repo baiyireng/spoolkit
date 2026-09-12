@@ -75,10 +75,76 @@ def register_edit_tools(registry: Any, root: Path, pending: PendingChanges) -> N
 
     集中在一处：主循环和子智能体各注册一遍的话，两边的判定迟早会分叉，
     而那种分叉只会表现为「同一个项目里子智能体做得到、主循环做不到」。
+
+    **注意 replace_text 不在这里注册**，这是量出来的结论，不是漏了。
+    实测：给 6 道本来全过的题加上它之后，6 道全挂（0/6，连 token 数都一致），
+    而且两次跑完全复现。它确实会被调用——问题出在拼出来的片段本身是坏的
+    （比如 `try:` 下面少一个 `except`、缩进也不对）。这个模型擅长的是
+    「交出一份完整文件」（单发 50/50 就是那个形态），不擅长拼片段。
+    工具实现留着（有单元测试），换模型时可以再量一次。
     """
     registry.register(write_file_spec(root, pending))
     if not is_small_project(root):
         registry.register(replace_lines_spec(root, pending))
+
+
+def replace_text_spec(root: Path, pending: PendingChanges) -> ToolSpec:
+    """按唯一片段替换。改一处最省事的做法。
+
+    另两把工具各有死穴，实测都撞过：replace_lines 要算行号，模型会算错区间、
+    留下重复行和悬空语句（5 条失败死在它手上）；write_file 要复现整份，
+    风险是丢掉原有内容，而且内容要经过 JSON 转义，出错面更大。
+
+    片段替换两头都躲开了：只给出被替换的那一小段和新内容，既不需要行号，
+    也不需要重写整个文件。代价是要求那段在文件里唯一——不唯一就报错，
+    让它多带几行上下文，比猜一处改错强。
+    """
+
+    def transform(old_text: str, args: dict) -> str:
+        old = args["old"]
+        new = args["new"]
+        if not old:
+            raise ValueError("old 不能为空；要新增内容请用 write_file")
+        if old not in old_text:
+            raise ValueError(
+                "文件里找不到这段内容。先 read_file 确认原文——"
+                "缩进、空格、引号都要和文件里完全一致"
+            )
+        count = old_text.count(old)
+        if count > 1:
+            raise ValueError(
+                f"这段内容在文件里出现了 {count} 次，无法确定改哪一处。"
+                "请多带几行上下文（比如把上一行也包含进来），"
+                "让它在文件里只出现一次"
+            )
+        return old_text.replace(old, new, 1)
+
+    return ToolSpec(
+        name="replace_text",
+        description=(
+            "把文件里某段唯一的内容替换成新内容；只生成 diff，需用户确认后才写入。"
+            "改一处就用它：不必算行号，也不必把整个文件重写一遍"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "要改的文件"},
+                "old": {
+                    "type": "string",
+                    "description": "被替换的原内容，必须在文件里唯一出现",
+                },
+                "new": {
+                    "type": "string",
+                    "description": "替换成什么；要删掉这段就传空字符串",
+                },
+            },
+            "required": ["path", "old", "new"],
+            "additionalProperties": False,
+        },
+        handler=lambda args: _propose(
+            root, pending, args, lambda old_text: transform(old_text, args)
+        ),
+    )
 
 
 def make_diff(path: str, old: str, new: str) -> str:

@@ -25,6 +25,8 @@ def _registry(tmp_path: Path) -> ToolRegistry:
 def test_小项目只给整份重写(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     assert is_small_project(tmp_path) is True
+    # 行号手术和片段替换都不给：实测这两把都比整份重写更容易把模型带偏，
+    # 而整份重写是它最有把握的形态。
     assert _registry(tmp_path).names() == ("write_file",)
 
 
@@ -34,7 +36,7 @@ def test_有文件超过阈值就两把都给(tmp_path: Path) -> None:
         "y = 1\n" * (WHOLE_FILE_LINE_LIMIT + 10), encoding="utf-8"
     )
     assert is_small_project(tmp_path) is False
-    assert set(_registry(tmp_path).names()) == {"write_file", "replace_lines"}
+    assert set(_registry(tmp_path).names()) == {"replace_lines", "write_file"}
 
 
 def test_空项目算小项目(tmp_path: Path) -> None:

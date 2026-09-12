@@ -44,15 +44,18 @@ WORKFLOW_ACT = (
     "说明该换做法了；改动先提出来，用户会看到 diff。"
 )
 WORKFLOW_EDIT_FULL = (
-    "- 改动方式二选一：文件不大（几十行以内）就整份重写，用 write_file "
-    "直接给出完整新内容，不必先算行号；只动一两行、或者文件很大时才用 "
-    "replace_lines 精确替换。"
+    "- 改动方式二选一：只动一处就用 replace_text——给出被替换的那一小段和"
+    "新内容，不必算行号；用 write_file 时必须写出**整个文件**，"
+    "不要只写改动的那几行，被删掉的内容找不回来。"
 )
 WORKFLOW_EDIT_WHOLE = (
     "- 这个项目的文件都不大：改动一律用 write_file 交出**完整**的新内容。"
     "不要只写改动的那几行，要把整个文件写出来——被删掉的内容找不回来。"
 )
 WORKFLOW_EDIT_PRECISE = "- 改动使用 replace_lines 精确替换。"
+WORKFLOW_EDIT_LINES = (
+    "- replace_lines 要算行号区间，只在整份重写不划算时才用它。"
+)
 WORKFLOW_WRITE_SAFE = (
     "- 改动先记成待确认的 diff，用户在**最后统一确认**——所以你不用停下来等确认："
     "测试没过就继续改，改好了才用 done=true 收尾。"

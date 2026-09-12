@@ -28,7 +28,7 @@ from agents_dev.tools.types import ToolCall, ToolResult
 SYSTEM_PROMPT = T.SYSTEM
 
 LOOKUP_TOOLS = ("find_symbol", "file_symbols", "find_callers")
-EDIT_TOOLS = ("replace_lines", "write_file")
+EDIT_TOOLS = ("replace_lines", "replace_text", "write_file")
 
 # 同一个调用连续重复到第几次时加提醒（仍然执行），到第几次时不再执行。
 #
@@ -119,7 +119,7 @@ def build_workflow(registry: ToolRegistry) -> str:
         lines.append(T.WORKFLOW_ACT)
 
     if edits:
-        if "write_file" in edits and "replace_lines" in edits:
+        if "write_file" in edits and "replace_text" in edits:
             lines.append(T.WORKFLOW_EDIT_FULL)
         elif "write_file" in edits:
             # 小项目只给整份重写：这时候再说「精确替换」就是在提一个
@@ -127,6 +127,8 @@ def build_workflow(registry: ToolRegistry) -> str:
             lines.append(T.WORKFLOW_EDIT_WHOLE)
         else:
             lines.append(T.WORKFLOW_EDIT_PRECISE)
+        if "replace_lines" in edits:
+            lines.append(T.WORKFLOW_EDIT_LINES)
         lines.append(T.WORKFLOW_WRITE_SAFE)
 
     if registry.get("recall") is not None:

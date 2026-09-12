@@ -1,7 +1,12 @@
 from pathlib import Path
 
-from agents_dev.tools.edit import PendingChanges, make_diff, replace_lines_spec
-from agents_dev.tools.edit import write_file_spec
+from agents_dev.tools.edit import (
+    PendingChanges,
+    make_diff,
+    replace_lines_spec,
+    replace_text_spec,
+    write_file_spec,
+)
 
 
 def _pending(tmp_path: Path) -> PendingChanges:
@@ -153,3 +158,52 @@ def test_改普通文件不提醒(tmp_path: Path) -> None:
         {"path": "thing.py", "content": "x = 1\n"}
     )
     assert "这是测试文件" not in result.content
+
+
+def test_片段替换只改那一处(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text(
+        "def old_name(x):\n    return x\n", encoding="utf-8"
+    )
+    pending = _pending(tmp_path)
+    result = replace_text_spec(tmp_path, pending).handler(
+        {"path": "a.py", "old": "def old_name(x):", "new": "def new_name(x):"}
+    )
+    assert result.ok is True
+    pending.apply()
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == (
+        "def new_name(x):\n    return x\n"
+    )
+
+
+def test_片段找不到时拒绝(tmp_path: Path) -> None:
+    """找不到多半是缩进或空格没对上，要让它回去看原文，而不是猜。"""
+    (tmp_path / "a.py").write_text("value = 1\n", encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = replace_text_spec(tmp_path, pending).handler(
+        {"path": "a.py", "old": "value = 2", "new": "value = 3"}
+    )
+    assert result.ok is False
+    assert "找不到这段内容" in result.content
+    assert len(pending) == 0
+
+
+def test_片段不唯一时拒绝(tmp_path: Path) -> None:
+    """不唯一就必须让它多带上下文——猜一处改错的代价比多问一句大得多。"""
+    (tmp_path / "a.py").write_text("x = 1\nx = 1\n", encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = replace_text_spec(tmp_path, pending).handler(
+        {"path": "a.py", "old": "x = 1", "new": "x = 2"}
+    )
+    assert result.ok is False
+    assert "出现了 2 次" in result.content
+    assert len(pending) == 0
+
+
+def test_片段替换能删内容(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("keep\nremove\n", encoding="utf-8")
+    pending = _pending(tmp_path)
+    replace_text_spec(tmp_path, pending).handler(
+        {"path": "a.py", "old": "remove\n", "new": ""}
+    )
+    pending.apply()
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "keep\n"

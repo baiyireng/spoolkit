@@ -18,6 +18,21 @@ from agents_dev.net import system_proxy
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_MODEL = "local"
 
+# 本机地址不走代理。llama-server 按定义就跑在本机，把它的请求交给系统代理
+# 只会绕远路——实测（Clash 开着时）直接被代理拒成 502。
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+def proxy_for(base_url: str) -> str | None:
+    """按服务地址决定用不用系统代理。"""
+    try:
+        host = httpx.URL(base_url).host
+    except (httpx.InvalidURL, ValueError):
+        return system_proxy()
+    if host in _LOCAL_HOSTS:
+        return None
+    return system_proxy()
+
 
 class LlamaCppError(RuntimeError):
     """调用 llama.cpp 服务失败。"""
@@ -59,7 +74,13 @@ class LlamaCppGateway:
             base_url=base_url.rstrip("/"),
             timeout=timeout,
             transport=transport,
-            proxy=proxy if proxy is not None else system_proxy(),
+            # 显式给了 transport（测试用的 MockTransport）就别再套代理：
+            # 两者同时给的时候请求不走 transport，测试会去真的打网络。
+            proxy=(
+                None
+                if transport is not None
+                else (proxy if proxy is not None else proxy_for(base_url))
+            ),
         )
 
     def chat(self, request: ChatRequest) -> ChatResponse:
@@ -129,7 +150,7 @@ class LlamaCppTokenCounter:
             base_url=base_url.rstrip("/"),
             timeout=timeout,
             transport=transport,
-            proxy=proxy if proxy is not None else system_proxy(),
+            proxy=proxy if proxy is not None else proxy_for(base_url),
         )
 
     def count(self, text: str) -> int:

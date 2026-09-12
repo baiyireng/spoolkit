@@ -3,7 +3,12 @@ import json
 import httpx
 import pytest
 
-from agents_dev.llm.llamacpp import LlamaCppError, LlamaCppGateway, LlamaCppTokenCounter
+from agents_dev.llm.llamacpp import (
+    LlamaCppError,
+    LlamaCppGateway,
+    LlamaCppTokenCounter,
+    proxy_for,
+)
 from agents_dev.llm.types import ChatRequest, Message
 
 
@@ -132,3 +137,25 @@ def test_空文本不请求服务端() -> None:
     assert counter.count("") == 0
     counter.close()
 
+
+def test_本机地址不走代理() -> None:
+    """llama-server 就在本机，把它的请求交给系统代理只会绕远路。
+
+    实测踩过：系统代理开着时，发往 127.0.0.1 的请求被代理拒成 502——
+    而这只在「用户的代理是开着的」时候才出现，最容易漏掉。
+    """
+    assert proxy_for("http://127.0.0.1:8080") is None
+    assert proxy_for("http://localhost:8080") is None
+    assert proxy_for("http://[::1]:8080") is None
+
+
+def test_非本机地址仍按系统代理走() -> None:
+    """不写死「永远不用代理」——远程的 llama-server 该走代理还是走。"""
+    import agents_dev.llm.llamacpp as module
+
+    original = module.system_proxy
+    module.system_proxy = lambda: "http://127.0.0.1:7890"
+    try:
+        assert proxy_for("http://192.168.1.9:8080") == "http://127.0.0.1:7890"
+    finally:
+        module.system_proxy = original

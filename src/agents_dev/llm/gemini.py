@@ -132,7 +132,13 @@ class GeminiGateway:
             base_url=BASE_URL,
             timeout=timeout,
             transport=transport,
-            proxy=proxy if proxy is not None else system_proxy(),
+            # 显式给了 transport（测试用的 MockTransport）就别再套代理：
+            # 两者同时给的时候请求不走 transport，测试会去真的打网络。
+            proxy=(
+                None
+                if transport is not None
+                else (proxy if proxy is not None else system_proxy())
+            ),
             headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
         )
 
