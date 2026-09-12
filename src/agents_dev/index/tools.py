@@ -10,6 +10,7 @@ from pathlib import Path
 from agents_dev.index.repo_map import load_symbol_source, render_file_symbols
 from agents_dev.index.repo_map import render_neighborhood
 from agents_dev.index.graph import impact
+from agents_dev.index.refs import extract_refs
 from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.tools.edit import looks_like_path
 from agents_dev.tools.types import ToolResult, ToolSpec
@@ -179,10 +180,15 @@ def file_symbols_spec(conn: sqlite3.Connection, pending=None) -> ToolSpec:
 
 
 def _find_callers(
-    conn: sqlite3.Connection, args: dict, counter: OfflineTokenCounter
+    conn: sqlite3.Connection, args: dict, counter: OfflineTokenCounter, view=None
 ) -> ToolResult:
     name = args["name"]
     path = args.get("path")
+
+    # 索引是按磁盘内容建的。改动没落盘时，新符号查不到、旧引用还在，
+    # 所以先用改动后的文本补一份定义与引用。
+    defs, pending_refs = _pending_mentions(view, name)
+
     sql = (
         "SELECT s.id AS id, f.path AS path FROM symbol s"
         " JOIN file f ON f.id = s.file_id WHERE s.name = ?"
@@ -194,6 +200,11 @@ def _find_callers(
     rows = conn.execute(sql, params).fetchall()
 
     if not rows:
+        if defs:
+            return ToolResult(
+                ok=True,
+                content=_pending_only_report(name, defs, pending_refs),
+            )
         return ToolResult(ok=False, content=f"找不到符号: {name}")
     if len(rows) > 1:
         places = "、".join(f"{r['path']}" for r in rows[:MAX_MATCHES])
@@ -218,11 +229,61 @@ def _find_callers(
             parts.append("波及面超出上限，以上只列出一部分。")
     else:
         parts.append("没有发现会被它波及的符号。")
+    if pending_refs:
+        parts.append(
+            "尚未落盘的改动里还引用了它：" + "、".join(pending_refs)
+        )
     return ToolResult(ok=True, content="\n".join(parts))
 
 
-def find_callers_spec(conn: sqlite3.Connection) -> ToolSpec:
+def _pending_only_report(name: str, defs: list[str], refs: list[str]) -> str:
+    lines = [f"{name} 只出现在尚未落盘的改动里："]
+    lines.extend(f"  {item}" for item in defs)
+    if refs:
+        lines.append("改动里引用它的地方：" + "、".join(refs))
+    else:
+        lines.append("改动里还没有地方引用它。")
+    lines.append("（这些改动还没写入磁盘，索引里当然查不到。）")
+    return "\n".join(lines)
+
+
+def _pending_mentions(view, name: str) -> tuple[list[str], list[str]]:
+    """在待确认改动里找这个符号的定义与引用。
+
+    find_callers 原先只查索引，于是「刚改完名去查新名字」必然报
+    「找不到符号」——而调用方其实已经在改动里跟着改了。
+    """
+    if view is None:
+        return [], []
+    engine = PythonAstExtractor()
+    defs: list[str] = []
+    refs: list[str] = []
+    for path in view.overridden:
+        if not path.endswith(".py"):
+            continue
+        text = view.overridden_text(path)
+        if not text:
+            continue
+        try:
+            symbols = engine.extract(text, path)
+        except SyntaxError:
+            continue
+        for sym in symbols:
+            if sym.name == name:
+                defs.append(f"{path}:{sym.start_line} {sym.signature}")
+        try:
+            extracted = extract_refs(text)
+        except SyntaxError:
+            continue
+        for ref in extracted:
+            if ref.dst_name == name:
+                refs.append(f"{path} 的 {ref.src_qualified}（{ref.kind}）")
+    return defs, refs
+
+
+def find_callers_spec(conn: sqlite3.Connection, pending=None, root: Path | None = None) -> ToolSpec:
     """查看谁引用了某符号，以及改动它会波及什么。"""
+    view = WorkspaceView(root or Path("."), pending)
     return ToolSpec(
         name="find_callers",
         description="查看谁引用了某符号以及改动波及面；同名多个时需用 path 指定",
@@ -236,5 +297,7 @@ def find_callers_spec(conn: sqlite3.Connection) -> ToolSpec:
             "required": ["name"],
             "additionalProperties": False,
         },
-        handler=lambda args: _find_callers(conn, args, OfflineTokenCounter()),
+        handler=lambda args: _find_callers(
+            conn, args, OfflineTokenCounter(), view
+        ),
     )

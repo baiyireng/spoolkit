@@ -118,7 +118,7 @@ def attach_index(project_root: Path, registry: ToolRegistry, tokenizer, pending=
 
     registry.register(find_symbol_spec(project_root, conn, pending))
     registry.register(file_symbols_spec(conn, pending))
-    registry.register(find_callers_spec(conn))
+    registry.register(find_callers_spec(conn, pending))
 
     def prefetch_for(goal: str) -> str:
         symbols = prefetch_text(conn, goal, tokenizer, PREFETCH_BUDGET)

@@ -8,7 +8,11 @@ run_command 在试跑副本里给新内容。实测审查者据此判定「改�
 from pathlib import Path
 
 from agents_dev.index.indexer import index_project
-from agents_dev.index.tools import file_symbols_spec, find_symbol_spec
+from agents_dev.index.tools import (
+    file_symbols_spec,
+    find_callers_spec,
+    find_symbol_spec,
+)
 from agents_dev.store.db import init_schema, open_db
 from agents_dev.tools.edit import PendingChanges
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
@@ -96,3 +100,31 @@ def test_没有改动时行为与以前一致(tmp_path: Path) -> None:
     """没接 pending 或没有改动时，读工具就该老老实实读磁盘。"""
     _project(tmp_path)
     assert "old_name" in read_file_spec(tmp_path).handler({"path": "mod.py"}).content
+
+
+def test_查调用方能看到改动里改好的调用(tmp_path: Path) -> None:
+    """刚改完名就去查新名字，索引里必然没有——但改动里已经有了。
+
+    实测审查者在这一步收到「找不到符号: clean_text」，差点据此认定改动没做。
+    """
+    (tmp_path / "util.py").write_text("def old_name():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "user.py").write_text(
+        "from util import old_name\n\n\ndef go():\n    return old_name()\n",
+        encoding="utf-8",
+    )
+    pending = PendingChanges(tmp_path)
+    conn = open_db(tmp_path / "index.db")
+    init_schema(conn)
+    index_project(tmp_path, conn)
+    spec = find_callers_spec(conn, pending, tmp_path)
+
+    pending.propose("util.py", "def new_name():\n    return 1\n")
+    pending.propose(
+        "user.py",
+        "from util import new_name\n\n\ndef go():\n    return new_name()\n",
+    )
+    result = spec.handler({"name": "new_name"})
+    assert result.ok is True
+    assert "util.py" in result.content
+    assert "user.py" in result.content
+    conn.close()
