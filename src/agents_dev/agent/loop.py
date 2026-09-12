@@ -101,7 +101,7 @@ def _render_lessons(pushed: list[tuple[int, str]]) -> str:
     return "\n".join(lines)
 
 
-def build_workflow(registry: ToolRegistry) -> str:
+def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
     """按实际注册的工具生成工作方式说明。
 
     只写「什么时候用哪个」，不写工具内部怎么实现——模型不需要知道索引是树
@@ -149,6 +149,13 @@ def build_workflow(registry: ToolRegistry) -> str:
     if registry.get("request_diagnosis") is not None:
         # 紧跟在「怎么验证」后面：它处理的正是验证本身出问题的那种情况。
         lines.append(T.WORKFLOW_DIAGNOSIS)
+
+    if read_roots:
+        lines.append(
+            T.WORKFLOW_READ_ROOTS.format(
+                roots="、".join(str(item) for item in read_roots)
+            )
+        )
         lines.append(T.WORKFLOW_PERMISSION)
         lines.append(T.WORKFLOW_DEPENDENCY)
 
@@ -204,6 +211,7 @@ class AgentLoop:
         lessons: Callable[[str], list[tuple[int, str]]] | None = None,
         verify: Callable[[], ToolResult] | None = None,
         incoming: Callable[[], str] | None = None,
+        read_roots: tuple = (),
         persona: str = "",
         on_event: Callable[[str, dict], None] | None = None,
     ) -> None:
@@ -217,6 +225,7 @@ class AgentLoop:
         self.lessons = lessons
         self.verify = verify
         self.incoming = incoming
+        self.read_roots = tuple(read_roots)
         self.environment_blocked = False
         self.persona = persona
         self.on_event = on_event
@@ -242,7 +251,8 @@ class AgentLoop:
         """
         assembler = Assembler(tokenizer=self.tokenizer, budget=self._budget)
         system_text = SYSTEM_PROMPT.format(
-            tools=self.registry.describe(), workflow=build_workflow(self.registry)
+            tools=self.registry.describe(),
+            workflow=build_workflow(self.registry, self.read_roots),
         )
         if self.persona:
             system_text = f"{self.persona}\n\n{system_text}"

@@ -37,8 +37,15 @@ class WorkspaceView:
     # --- 查询 ---
 
     def relative(self, target: Path) -> str:
-        """绝对路径 → 项目内相对路径（POSIX 形式）。"""
-        return target.relative_to(self.root).as_posix()
+        """绝对路径 → 项目内相对路径（POSIX 形式）。
+
+        工作区之外的路径（额外可读根）返回空串：那种路径本来就不可能有
+        待确认的改动，调用方按「没被改过」处理即可——而不是抛异常。
+        """
+        try:
+            return target.relative_to(self.root).as_posix()
+        except ValueError:
+            return ""
 
     def is_overridden(self, relative: str) -> bool:
         return relative in self._overlay()
@@ -69,6 +76,8 @@ class WorkspaceView:
     def overlay_children(self, directory: Path) -> list[str]:
         """这个目录下有哪些文件只存在于待确认改动里（磁盘上还没有）。"""
         relative = self.relative(directory)
+        if relative == "":
+            return []  # 工作区之外的目录，谈不上有本项目的待确认改动
         prefix = "" if relative == "." else relative + "/"
         names = set()
         for path in self._overlay():

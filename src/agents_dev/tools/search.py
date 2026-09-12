@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from agents_dev.errors import PathOutsideProjectError
-from agents_dev.paths import resolve_within
+from agents_dev.paths import resolve_readable
 from agents_dev.tools.types import ToolResult, ToolSpec
 from agents_dev.tools.view import WorkspaceView
 
@@ -17,7 +17,7 @@ DEFAULT_MAX_RESULTS = 50
 TIMEOUT_SECONDS = 20
 
 
-def _search_code(root: Path, args: dict, pending=None) -> ToolResult:
+def _search_code(root: Path, args: dict, pending=None, read_roots=()) -> ToolResult:
     pattern = args["pattern"]
     max_results = args.get("max_results", DEFAULT_MAX_RESULTS)
     if max_results < 1:
@@ -27,7 +27,7 @@ def _search_code(root: Path, args: dict, pending=None) -> ToolResult:
         return ToolResult(ok=False, content="未找到 rg（ripgrep），无法执行搜索")
 
     try:
-        base = resolve_within(root, args.get("path", "."))
+        base = resolve_readable(root, args.get("path", "."), read_roots)
     except PathOutsideProjectError as exc:
         return ToolResult(ok=False, content=str(exc))
 
@@ -112,7 +112,7 @@ def _search_overlay(
     return hits
 
 
-def search_code_spec(root: Path, pending=None) -> ToolSpec:
+def search_code_spec(root: Path, pending=None, read_roots=()) -> ToolSpec:
     """构造代码搜索工具的规格。"""
     return ToolSpec(
         name="search_code",
@@ -127,6 +127,6 @@ def search_code_spec(root: Path, pending=None) -> ToolSpec:
             "required": ["pattern"],
             "additionalProperties": False,
         },
-        handler=lambda args: _search_code(root, args, pending),
+        handler=lambda args: _search_code(root, args, pending, read_roots),
     )
 

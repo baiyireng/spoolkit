@@ -106,6 +106,12 @@ WORKFLOW_DIAGNOSIS = (
     "它只产出报告，不改变你的权限；也不要拿它当绕过限制的手段。"
 )
 
+WORKFLOW_READ_ROOTS = (
+    "- 除当前工作区外，你还被授权**读取**这些目录（只读，不能写入）：{roots}。"
+    "需要时直接对它们用 read_file / list_dir / search_code，不必先请示。"
+    "写入仍然只允许在工作区内。"
+)
+
 LESSONS_HEADER = "以下是过去类似任务里踩过的坑，做之前先看一眼："
 
 FORCE_COMMIT = (

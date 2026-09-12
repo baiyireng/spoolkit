@@ -40,6 +40,11 @@ from agents_dev.web.protocol import FINAL, START, USAGE
 def run(args: argparse.Namespace) -> int:
     """执行一次任务。"""
     project_root = Path(args.root).resolve()
+    read_roots, bad_roots = _resolve_read_roots(args, project_root)
+    if bad_roots:
+        for item in bad_roots:
+            print(f"--allow-read 指向的目录不存在: {item}", file=sys.stderr)
+        return 2
 
     # 走计划时目标来自计划文件，命令行不该再强制要求填一次。
     if not args.plan and not args.goal.strip():
@@ -110,11 +115,11 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             pending=pending,
             lessons=build_lessons(memory) if memory is not None else None,
             on_event=writer.handle,
+            read_roots=_resolve_read_roots(args, project_root)[0],
         ),
     )
     result = loop.run(args.goal, resume=args.resume)
     _maybe_file_diagnosis(project_root, before, result, writer)
-    _maybe_file_diagnosis(project_root, before, result)
 
     if memory is not None:
         settle_lessons(memory, result.lessons_pushed, result.finished)
@@ -137,6 +142,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
     """普通路径：主循环自己完成。"""
     approver, grants = build_approver(project_root)
     before = len(diagnosis.load_requests(project_root))
+    read_roots, _ = _resolve_read_roots(args, project_root)
     memory = None
     distiller = None
     if not args.no_memory:
@@ -166,6 +172,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             approver=approver,
             grants=grants,
             lessons=build_lessons(memory) if memory is not None else None,
+            read_roots=read_roots,
         ),
     )
     checkpoint = loop.config.task_path("task")
@@ -209,7 +216,8 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
         print("未派发，请去掉 --delegate 让主循环自己完成。")
         return 0
 
-    registry = _plain_registry(project_root, pending)
+    read_roots, _ = _resolve_read_roots(args, project_root)
+    registry = _plain_registry(project_root, pending, read_roots)
     # 子智能体和主循环共用同一套自动验证：审查者本来就有 run_command，
     # 但实测模型几乎从不主动跑测试——指望它凭自觉去验是不现实的。
     from agents_dev.tools.verify import make_verifier
@@ -253,7 +261,7 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
     return 0
 
 
-def _plain_registry(project_root, pending):
+def _plain_registry(project_root, pending, read_roots=()):
     """派发路径用的注册表：不带记忆与教训，子智能体只拿任务说明。"""
     from agents_dev.cli.runtime import attach_index
     from agents_dev.tools.edit import register_edit_tools
@@ -269,9 +277,9 @@ def _plain_registry(project_root, pending):
     registry = ToolRegistry()
     # 与主循环一致：读工具要能看到待确认的改动，否则子智能体读到的
     # 是改之前的文件，而它跑测试看到的是改之后的——两套矛盾的世界。
-    registry.register(read_file_spec(project_root, pending))
-    registry.register(list_dir_spec(project_root, pending))
-    registry.register(search_code_spec(project_root, pending))
+    registry.register(read_file_spec(project_root, pending, read_roots))
+    registry.register(list_dir_spec(project_root, pending, read_roots))
+    registry.register(search_code_spec(project_root, pending, read_roots))
     registry.register(request_diagnosis_spec(project_root))
     registry.register(read_diagnosis_spec(project_root))
     # 必须把 pending 传进去：否则子智能体改完代码再跑测试，测到的是**旧代码**
@@ -283,6 +291,27 @@ def _plain_registry(project_root, pending):
     register_edit_tools(registry, project_root, pending)
     attach_index(project_root, registry, OfflineTokenCounter(), pending)
     return registry
+
+
+def _resolve_read_roots(args, project_root: Path) -> tuple[tuple[Path, ...], list[str]]:
+    """把 --allow-read 解析成可读根，并剔掉不存在、或就在工作区内的。
+
+    授权来自命令行，也就是来自用户——模型自己不能加目录。工作区内的路径
+    本来就读得到，重复授权只会让提示词变长。
+    """
+    roots: list[Path] = []
+    bad: list[str] = []
+    for raw in getattr(args, "allow_read", []) or []:
+        target = Path(raw).expanduser()
+        if not target.exists() or not target.is_dir():
+            bad.append(raw)
+            continue
+        resolved = target.resolve()
+        if resolved == project_root or project_root in resolved.parents:
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots), bad
 
 
 def _maybe_file_diagnosis(

@@ -69,6 +69,9 @@ class LoopWiring:
     # 几乎从不去跑（8 条失败里 0 次 run_command），指望它养成习惯不现实。
     auto_verify: bool = True
     verify: object | None = None
+    # 额外可读根：由用户显式授权（--allow-read）。读得到，写不到，
+    # 工作区绑定不变——「看一个目录」不该等于「换个项目」。
+    read_roots: tuple[Path, ...] = ()
 
 
 def provider_gateway(args, project_root):
@@ -182,9 +185,9 @@ def assemble_loop(
     # 读工具都接上 pending：待确认的改动优先于磁盘。不接的话，模型刚写完
     # 一个文件，read_file 却给它旧内容——而 run_command 在试跑副本里看到的
     # 是新内容，同一个模型活在两套矛盾的世界里。
-    registry.register(read_file_spec(project_root, parts.pending))
-    registry.register(list_dir_spec(project_root, parts.pending))
-    registry.register(search_code_spec(project_root, parts.pending))
+    registry.register(read_file_spec(project_root, parts.pending, parts.read_roots))
+    registry.register(list_dir_spec(project_root, parts.pending, parts.read_roots))
+    registry.register(search_code_spec(project_root, parts.pending, parts.read_roots))
     # 怀疑是环境或工具本身有问题时的申请通道。只登记与读回，
     # 报告由具备真实环境权限的一侧出具——它自己写不了。
     registry.register(request_diagnosis_spec(project_root))
@@ -220,6 +223,7 @@ def assemble_loop(
         on_event=parts.on_event,
         verify=verifier,
         incoming=incoming_reports,
+        read_roots=parts.read_roots,
     )
 
 

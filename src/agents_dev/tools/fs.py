@@ -7,14 +7,14 @@
 from pathlib import Path
 
 from agents_dev.errors import PathOutsideProjectError
-from agents_dev.paths import resolve_within
+from agents_dev.paths import resolve_readable
 from agents_dev.tools.types import ToolResult, ToolSpec
 from agents_dev.tools.view import WorkspaceView
 
 
-def _read_file(root: Path, args: dict, pending=None) -> ToolResult:
+def _read_file(root: Path, args: dict, pending=None, read_roots=()) -> ToolResult:
     try:
-        target = resolve_within(root, args["path"])
+        target = resolve_readable(root, args["path"], read_roots)
     except PathOutsideProjectError as exc:
         return ToolResult(ok=False, content=str(exc))
 
@@ -51,9 +51,9 @@ def _read_file(root: Path, args: dict, pending=None) -> ToolResult:
     return ToolResult(ok=True, content=numbered)
 
 
-def _list_dir(root: Path, args: dict, pending=None) -> ToolResult:
+def _list_dir(root: Path, args: dict, pending=None, read_roots=()) -> ToolResult:
     try:
-        target = resolve_within(root, args["path"])
+        target = resolve_readable(root, args["path"], read_roots)
     except PathOutsideProjectError as exc:
         return ToolResult(ok=False, content=str(exc))
 
@@ -71,7 +71,7 @@ def _list_dir(root: Path, args: dict, pending=None) -> ToolResult:
     return ToolResult(ok=True, content="\n".join(entries))
 
 
-def read_file_spec(root: Path, pending=None) -> ToolSpec:
+def read_file_spec(root: Path, pending=None, read_roots=()) -> ToolSpec:
     """构造读文件工具的规格。"""
     return ToolSpec(
         name="read_file",
@@ -86,11 +86,11 @@ def read_file_spec(root: Path, pending=None) -> ToolSpec:
             "required": ["path"],
             "additionalProperties": False,
         },
-        handler=lambda args: _read_file(root, args, pending),
+        handler=lambda args: _read_file(root, args, pending, read_roots),
     )
 
 
-def list_dir_spec(root: Path, pending=None) -> ToolSpec:
+def list_dir_spec(root: Path, pending=None, read_roots=()) -> ToolSpec:
     """构造列目录工具的规格。"""
     return ToolSpec(
         name="list_dir",
@@ -101,6 +101,6 @@ def list_dir_spec(root: Path, pending=None) -> ToolSpec:
             "required": ["path"],
             "additionalProperties": False,
         },
-        handler=lambda args: _list_dir(root, args, pending),
+        handler=lambda args: _list_dir(root, args, pending, read_roots),
     )
 

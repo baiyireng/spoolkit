@@ -126,6 +126,16 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="以 JSON 行输出事件，供 Web UI 消费；此模式下不打印散文",
     )
+    parser.add_argument(
+        "--allow-read",
+        action="append",
+        default=[],
+        metavar="目录",
+        help=(
+            "授权额外可读目录（可重复）。只放开读，写入仍限工作区内；"
+            "工作区绑定不变"
+        ),
+    )
     parser.set_defaults(func=run)
 
 
@@ -180,6 +190,13 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--proxy", default="")
     parser.add_argument("--policy", default="")
     parser.add_argument("--scope", default="")
+    parser.add_argument(
+        "--allow-read",
+        action="append",
+        default=[],
+        metavar="目录",
+        help="授权额外可读目录（可重复），转发给子进程",
+    )
     parser.add_argument("--root", default=".")
     parser.set_defaults(func=serve_command)
 

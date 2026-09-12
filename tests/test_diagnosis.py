@@ -127,7 +127,8 @@ def test_Agent的文件工具够不到密钥(tmp_path: Path, key_outside: Path) 
     root = _root(tmp_path)
     result = read_file_spec(root).handler({"path": str(key_outside)})
     assert result.ok is False
-    assert "越出项目根目录" in result.content or "不存在" in result.content
+    assert "越出可读范围" in result.content
+    assert "--allow-read" in result.content, "报错要告诉人怎么授权"
 
 
 def test_命令行的报告回路(tmp_path: Path, key_outside: Path, capsys) -> None:

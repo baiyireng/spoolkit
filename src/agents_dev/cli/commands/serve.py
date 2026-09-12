@@ -26,6 +26,8 @@ def serve_command(args: argparse.Namespace) -> int:
     ):
         if value:
             extra += [flag, value]
+    for root in getattr(args, "allow_read", []) or []:
+        extra += ["--allow-read", root]
 
     serve(
         Path(args.root).resolve(),
