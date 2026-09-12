@@ -13,7 +13,7 @@ from agents_dev.llm.providers import ProviderConfig, ProviderError, load_gateway
 from agents_dev.net import system_proxy
 from agents_dev.agent.loop import AgentLoop
 from agents_dev.config import Config
-from agents_dev.index.indexer import index_project
+from agents_dev.index.indexer import MAX_INDEX_FILES, index_project, iter_source_files
 from agents_dev.index.rank import prefetch as prefetch_text
 from agents_dev.index.rank import prefetch_contents
 from agents_dev.index.tools import file_symbols_spec, find_callers_spec, find_symbol_spec
@@ -113,13 +113,30 @@ def attach_index(project_root: Path, registry: ToolRegistry, tokenizer, pending=
 
     索引是可选增强：建索引失败不应让整个 agent 起不来，
     所以这里只做最保守的处理，失败时退化为无索引模式。
+
+    退化时必须**说出来**：模型看不到「本该有的符号工具」这件事，
+    只会以为自己手上就这些。残的索引比没有更糟——查不到会被当成不存在，
+    所以到量停下时同样按「没有索引」处理。
     """
     try:
+        # 先数一遍再决定做不做：数一遍只走目录、不读文件，很便宜；
+        # 而建索引是按文件数花钱的。项目明显太大时直接不做，
+        # 别先花十几秒再把它丢掉。
+        #
+        # 顺序很重要：**必须在开库之前判断**。开库会顺手建出 .agent 目录，
+        # 于是「跳过了索引」反而在用户的项目里留下一个空壳。
+        candidates = sum(1 for _ in iter_source_files(project_root))
+        if candidates > MAX_INDEX_FILES:
+            return _no_index(
+                f"项目里有 {candidates} 个 Python 文件，超过上限 {MAX_INDEX_FILES}，索引已跳过"
+            )
         conn = open_db(project_root / ".agent" / "index.db")
         init_schema(conn)
-        index_project(project_root, conn)
-    except Exception:
-        return None
+        stats = index_project(project_root, conn)
+    except Exception as exc:
+        return _no_index(f"建索引失败（{type(exc).__name__}）")
+    if stats.stopped:
+        return _no_index(f"项目太大，索引已跳过：{stats.stopped}")
 
     registry.register(find_symbol_spec(project_root, conn, pending))
     registry.register(file_symbols_spec(conn, pending))
@@ -133,6 +150,19 @@ def attach_index(project_root: Path, registry: ToolRegistry, tokenizer, pending=
         return "\n\n".join(part for part in (symbols, contents) if part)
 
     return prefetch_for
+
+
+def _no_index(reason: str):
+    """没有索引时的预取函数：只负责把原因说清楚。
+
+    空着不说是最坏的选择——模型会以为项目里就这些东西，然后把
+    「索引里没有」当成「代码里没有」。
+    """
+
+    def explain(_goal: str) -> str:
+        return f"（本项目的代码索引不可用：{reason}。符号类工具因此没有提供，改用 read_file / search_code / list_dir。）"
+
+    return explain
 
 
 def assemble_loop(
