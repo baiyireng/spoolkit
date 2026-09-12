@@ -38,7 +38,15 @@ def _build(tmp_path: Path, script: list) -> AgentLoop:
         gateway=FakeModel(script=script, tokenizer=OfflineTokenCounter()),
         tokenizer=OfflineTokenCounter(),
         registry=registry,
-        config=Config(project_root=tmp_path, context_window=4096, max_steps=10),
+        # 这个文件测的是**机械层**：拦截发生在调用之前，判据是签名。
+        # 督导会在打转升级时插一次调用，那是另一条路——它有自己的测试文件，
+        # 插进来只会把脚本顺序搅乱。
+        config=Config(
+            project_root=tmp_path,
+            context_window=4096,
+            max_steps=10,
+            supervise=False,
+        ),
     )
 
 

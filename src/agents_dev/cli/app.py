@@ -88,6 +88,17 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--window", type=int, default=0, help="0 表示自动向供应商查询")
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument(
+        "--step-ceiling",
+        type=int,
+        default=0,
+        help="总步数上限（含督导给的续期）；0 表示按基础预算自动算",
+    )
+    parser.add_argument(
+        "--no-supervise",
+        action="store_true",
+        help="关掉督导：撞上步数上限就停，由你自己决定要不要 --resume",
+    )
+    parser.add_argument(
         "--subagent-steps",
         type=int,
         default=20,

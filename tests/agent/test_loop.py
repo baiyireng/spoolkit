@@ -99,14 +99,17 @@ def test_状态块被应用且完成后清理检查点(tmp_path: Path) -> None:
 def test_达到步数上限会停止(tmp_path: Path) -> None:
     # 必须用真实的工具调用：空回合现在会被当成「卡住」提前收尾，
     # 那是另一条路径，测不到步数上限。
+    # 督导关掉，测的才是「上限本身」——开着的话撞上限要先问督导，
+    # 那是 tests/agent/test_supervise_loop.py 的事。
     script = [
         _turn(f"第{i}步", [{"name": "list_dir", "arguments": {"path": "."}}])
         for i in range(20)
     ]
-    loop = _build(tmp_path, script, max_steps=3)
+    loop = _build(tmp_path, script, max_steps=3, supervise=False)
     result = loop.run("没完没了")
     assert result.finished is False
     assert result.steps == 3
+    assert result.final == "已达步数上限，任务未完成"
 
 
 def test_服务端说提示词超长时丢掉历史重发(tmp_path: Path) -> None:

@@ -170,6 +170,10 @@ def run_role(
             context_window=config.context_window,
             max_steps=limit,
             subagent_steps=config.subagent_steps,
+            # 督导的设置跟着整个运行走，而不是每个角色各自默认：
+            # 父级关了督导、子智能体却还在自动续期，是最难查的那类不一致。
+            supervise=config.supervise,
+            step_ceiling=config.step_ceiling,
         ),
         prefetch=None,
         memory=None,

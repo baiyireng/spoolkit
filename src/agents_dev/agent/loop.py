@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from agents_dev.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from agents_dev.agent.state import TaskState, clear_state, load_state, save_state
+from agents_dev.agents.supervisor import EXTEND, STOP, Evidence, Verdict, supervise
 from agents_dev.config import Config
 from agents_dev.context.assembler import Assembler
 from agents_dev.context.budget import Budget
@@ -41,6 +42,18 @@ EDIT_TOOLS = ("replace_lines", "replace_text", "write_file")
 REPEAT_WARN_AT = 2
 REPEAT_BLOCK_AT = 3
 
+# 重复到这个次数还停不下来，就升级给督导。
+#
+# 前面两档是**机械**的（提醒、不执行），它们只挡「参数一模一样」的重复。
+# 挡不住的剩下两种情况：一是它换着花样绕（每次都不同，机械计数器永远归零），
+# 二是它明知道在重复也停不下来。这两种都得看它到底在干什么才知道怎么办——
+# 交给督导判断，而不是继续加规则。
+REPEAT_INTERVENE_AT = 4
+
+# 督导给的续期加起来最多到这里（基础预算的倍数）。
+# 这不是任务预算，是安全线：没有它，一个卡住的任务能把 GPU 烧一整夜。
+STEP_CEILING_FACTOR = 8
+
 # 只看「连续相同」会漏掉交替打转：A、B、A、B…每一步都和上一步不同，
 # 计数每次都被重置。实测审查者用 git status / git diff 交替复读了 11 步，
 # 一次都没被拦住。所以再加一条频率判据：同一个调用在最近几次里出现够多，
@@ -51,6 +64,13 @@ RECENT_WINDOW = 6
 # 重复调用检测只盖得住「参数完全相同」的打转，盖不住「每次都换一个查询」
 # 的漫游——实测那条轨迹 12 步里换了 8 种不同的调用，一次都没被拦住。
 NO_EDIT_LIMIT = 4
+
+# 漫游到这个步数还没产出，就升级给督导。
+#
+# NO_EDIT_LIMIT 那一步做的是**收窄输出通道**（只能写），它盖得住「它还想查」
+# 这一种。盖不住的是「收窄之后它去翻别的文件」——每一步换一个查询，
+# 机械计数器永远归零。到这一步该有人看看它到底在干什么，而不是继续加规则。
+NO_EDIT_INTERVENE_AT = 8
 
 # 空回合连续出现到这个次数就收尾。
 #
@@ -298,6 +318,10 @@ class AgentLoop:
         # 续跑给的是**新增**预算，不是沿用已经耗尽的那份。
         # 否则一个撞过上限的任务永远续不动——检查点里的步数已经等于上限了。
         limit = state.step + self.config.max_steps if resumed else self.config.max_steps
+        # 总步数上限：督导的续期从这里扣。基础预算只是**起点**，
+        # 一次跑多久由督导按「有没有进展」决定，这个数是它的天花板。
+        ceiling = self.config.step_ceiling or self.config.max_steps * STEP_CEILING_FACTOR
+        ceiling = max(ceiling, limit)
 
         history: list[Message] = [
             Message(
@@ -310,6 +334,9 @@ class AgentLoop:
             )
         ]
         feedback: str | None = None
+        # 督导让主循环改道时说的话。单独放一个变量，是因为 feedback 会被
+        # 强制收敛那几处覆盖掉——而改道的话比通用提醒具体，不能被覆盖。
+        redirect: str | None = None
         resets = 0
         trace: list[str] = []
         # 上一轮诊断回来的报告：一开局就摆到面前，模型不用记得去查。
@@ -331,6 +358,14 @@ class AgentLoop:
         no_edit_steps = 0
         empty_turns = 0
         overflow_retried = False
+        # 督导连续问几次就该退避：同一个打转状态每步问一遍，问出来的话是一样的，
+        # 只是把成本翻倍。所以每次介入之后把门槛翻倍（4 → 8 → 16），
+        # 而不是设一个「隔几步问一次」的定时器。
+        intervene_at = REPEAT_INTERVENE_AT
+        roam_intervene_at = NO_EDIT_INTERVENE_AT
+        edits_made = 0
+        tool_calls_made = 0
+        stopped_by = ""
 
         # 主动推送：进入任务时就把它相关的历史教训放到模型面前，
         # 而不是等它自己去检索——它不会去检索，因为它不知道自己缺什么。
@@ -344,7 +379,90 @@ class AgentLoop:
                 text[:30] for _, text in pushed
             ))
 
-        while state.step < limit:
+        while True:
+            if state.step >= limit and not self.config.supervise:
+                # 关掉督导就退回老行为：撞上上限即停。这条路仍然要留着——
+                # 它是一个可用的对照，也是督导自己出问题时的最终退路。
+                break
+            stuck_on_repeat = self.config.supervise and repeats >= intervene_at
+            # 换着花样绕：每步都换了查询，重复计数永远归零，只有「一直没产出」
+            # 这个信号还在涨。
+            stuck_on_roam = (
+                self.config.supervise and no_edit_steps >= roam_intervene_at
+            )
+            if state.step >= limit or stuck_on_repeat or stuck_on_roam:
+                # 两个触发点，同一件事：机械层已经说了有事，而模型自己没纠正。
+                # 这是**要判断**的点，不是失败点——原先的处理是停下来提示用户
+                # `--resume`，那等于把判断成本推给用户，还把一件事拆成两次对话。
+                exhausted = state.step >= limit
+                if exhausted:
+                    asking = "这一轮的步数预算用完了，任务还没结束"
+                elif stuck_on_roam:
+                    asking = f"它已经连续 {no_edit_steps} 步只看不写，没有任何产出"
+                else:
+                    asking = (
+                        f"它已经连续 {repeats} 次调用同一个工具（参数也一样），还在重复"
+                    )
+                # 把「为什么把它叫起来」记下来：调这块时唯一能看的东西就是它。
+                trace.append(f"step{state.step}: 叫督导——{asking}")
+                verdict = self._ask_supervisor(
+                    state,
+                    trace,
+                    ceiling=ceiling,
+                    limit=limit,
+                    edits=edits_made,
+                    calls=tool_calls_made,
+                    resets=resets,
+                    repeats=repeats,
+                    no_edit=no_edit_steps,
+                    tokens=prompt_tokens + completion_tokens,
+                    asking=asking,
+                )
+                if verdict is not None:
+                    prompt_tokens += verdict.prompt_tokens
+                    completion_tokens += verdict.completion_tokens
+                    model_calls += 1
+                if verdict is None:
+                    # 拿不到结论时按**不敢续期**处理：含糊的续期比不续期危险——
+                    # 不续期只是停下来，错续期会把预算继续投进一个卡住的任务。
+                    # 打转那条不打断任务，只退避：它还没到花光预算的地步。
+                    intervene_at = max(repeats * 2, intervene_at * 2)
+                    roam_intervene_at = max(
+                        no_edit_steps * 2, roam_intervene_at * 2
+                    )
+                    if exhausted:
+                        stopped_by = "督导没能给出结论（调用失败或结论不合格式）"
+                        trace.append(
+                            f"step{state.step}: 督导没给结论，按预算用尽收尾"
+                        )
+                        break
+                elif verdict.action == STOP:
+                    # 督导说停就直接停——继续烧到上限并不比它诚实。
+                    stopped_by = verdict.reason or "督导判断这个任务做不下去"
+                    trace.append(f"step{state.step}: 督导建议收手——{stopped_by}")
+                    break
+                else:
+                    if verdict.grants:
+                        limit = state.step + verdict.grants
+                    if verdict.message:
+                        redirect = verdict.message
+                    what = (
+                        f"续 {verdict.grants} 步"
+                        if verdict.action == EXTEND
+                        else f"改道（续 {verdict.grants} 步）"
+                    )
+                    trace.append(
+                        f"step{state.step}: 督导{what}（预算 {limit}）——{verdict.reason}"
+                    )
+                    if verdict.message:
+                        trace.append(f"step{state.step}: 发给它的话：{verdict.message}")
+                    if not exhausted:
+                        # 同一个打转状态每步问一遍，问出来的话是一样的，
+                        # 只是把成本翻倍。门槛翻倍，别设定时器。
+                        intervene_at = max(repeats * 2, intervene_at * 2)
+                        roam_intervene_at = max(
+                            no_edit_steps * 2, roam_intervene_at * 2
+                        )
             # 强制收敛：连续若干步只查看不修改时，把「继续查」这个选项从
             # 语法里拿掉。实测这个模型对文字提醒完全免疫（重复提醒、拦截
             # 说明都照发不误），能推得动它的只有「这一轮物理上只能选什么」。
@@ -361,6 +479,11 @@ class AgentLoop:
                 feedback = T.FORCE_COMMIT
             elif concluding:
                 feedback = T.FORCE_CONCLUDE
+            # 督导的话排在最后：它比通用提醒具体，不该被顶掉。只发一次——
+            # 一直挂着会让每一轮的装配都多一段重复内容。
+            if redirect is not None:
+                feedback = redirect
+                redirect = None
             assembled = self._assemble(
                 state, history, feedback, prefetched, hot, lesson_text
             )
@@ -464,11 +587,13 @@ class AgentLoop:
                     seen = recent.count(signature)
                     level = max(repeats, seen)
                     result = self._invoke_guarded(call, repeats, seen)
+                    tool_calls_made += 1
                     if self.sources is not None:
                         self.sources.add(result.content, result.facts)
                     self._note_progress(state, call, result)
                     if result.ok and call.name in EDIT_TOOLS:
                         edited = True
+                        edits_made += 1
                     if level >= REPEAT_WARN_AT:
                         trace.append(
                             f"step{state.step}: 重复调用第 {level} 次：{call.name}"
@@ -516,6 +641,9 @@ class AgentLoop:
 
             if any(call.name in EDIT_TOOLS for call in turn.tool_calls):
                 no_edit_steps = 0
+                # 产出过一次，漫游就算结束了。门槛跟着复位，否则下一段漫游
+                # 要等到翻倍后的那个数字才会被看见。
+                roam_intervene_at = NO_EDIT_INTERVENE_AT
             elif turn.tool_calls:
                 no_edit_steps += 1
                 # 只读角色没有写工具，收窄无从谈起——日志说「收窄为只能写」
@@ -548,9 +676,14 @@ class AgentLoop:
                 )
 
         self._archive(state, "fail", trace, "")
+        final = "已达步数上限，任务未完成"
+        if stopped_by:
+            # 收尾文案必须说清**为什么**停：是钱花完了，还是督导判断做不下去。
+            # 只说「未完成」的话，用户能做的只有原样再来一次。
+            final = f"任务没做完，收手的原因：{stopped_by}"
         return LoopResult(
             False,
-            "已达步数上限，任务未完成",
+            final,
             state,
             state.step,
             resets,
@@ -561,6 +694,59 @@ class AgentLoop:
             tuple(item[0] for item in pushed),
             environment_blocked=self.environment_blocked,
         )
+
+    def _ask_supervisor(
+        self,
+        state: TaskState,
+        trace: list[str],
+        *,
+        ceiling: int,
+        limit: int,
+        edits: int,
+        calls: int,
+        resets: int,
+        repeats: int,
+        no_edit: int,
+        tokens: int,
+        asking: str,
+    ) -> Verdict | None:
+        """问一次督导。关着、或者它没能给出结论，都返回 None。
+
+        证据里刻意不含对话历史：要判断的是「这些动作有没有进展」，
+        读到主循环的推理只会让它附和那个推理——和审查者必须独立同一个理由。
+        它看到的是事实（记录下来的状态、发生过什么、机械统计）。
+
+        结论以事件发出去。网页里看得到「督导说了什么」这件事很重要：
+        否则一次续期在界面上和「它自己一直在跑」完全分不清。
+        """
+        if not self.config.supervise:
+            return None
+        evidence = Evidence(
+            goal=state.goal,
+            step=state.step,
+            limit=limit,
+            ceiling=ceiling,
+            state=state.render(),
+            trace=tuple(trace),
+            edits=edits,
+            calls=calls,
+            resets=resets,
+            repeats=repeats,
+            no_edit=no_edit,
+            tokens=tokens,
+            asking=asking,
+        )
+        verdict = supervise(self.gateway, evidence)
+        if verdict is None:
+            self._emit("note", {"text": "督导：没能给出结论", "ok": False})
+            return None
+        what = {
+            "extend": f"续 {verdict.grants} 步",
+            "redirect": f"改道（续 {verdict.grants} 步）",
+            "stop": "建议收手",
+        }.get(verdict.action, verdict.action)
+        self._emit("note", {"text": f"督导：{what}——{verdict.reason}", "ok": True})
+        return verdict
 
     def _invoke_guarded(
         self, call: ToolCall, repeats: int, seen: int = 1

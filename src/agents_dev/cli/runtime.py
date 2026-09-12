@@ -260,7 +260,9 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
     return assemble_loop(
         project_root,
         FakeModel(script=script, tokenizer=tokenizer),
-        config=Config(project_root=project_root, context_window=window),
+        # 假模型没有判断力：它的「续期」只是把脚本里下一条当成结论。
+        # 这条路是离线演示与测试用的，督导在这里只会有害。
+        config=Config(project_root=project_root, context_window=window, supervise=False),
     )
 
 

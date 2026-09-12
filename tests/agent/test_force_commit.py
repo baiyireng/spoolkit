@@ -51,7 +51,15 @@ def _build(tmp_path: Path, script: list, writable: bool = True) -> AgentLoop:
         gateway=FakeModel(script=script, tokenizer=OfflineTokenCounter()),
         tokenizer=OfflineTokenCounter(),
         registry=registry,
-        config=Config(project_root=tmp_path, context_window=4096, max_steps=12),
+        # 这个文件测的是**强制收敛**这一层本身：它靠的是 schema，不看模型说什么。
+        # 督导会在「撞上限」和「重复升级」时插一次调用，那是另一条路，
+        # 插进来只会把脚本顺序搅乱——它有自己的测试文件。
+        config=Config(
+            project_root=tmp_path,
+            context_window=4096,
+            max_steps=12,
+            supervise=False,
+        ),
     )
 
 

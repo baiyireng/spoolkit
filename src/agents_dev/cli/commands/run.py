@@ -111,6 +111,8 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             context_window=window,
             max_steps=args.max_steps,
             subagent_steps=args.subagent_steps,
+            supervise=not args.no_supervise,
+            step_ceiling=args.step_ceiling,
         ),
         wiring=LoopWiring(
             memory=memory,
@@ -167,6 +169,8 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             context_window=window,
             max_steps=args.max_steps,
             subagent_steps=args.subagent_steps,
+            supervise=not args.no_supervise,
+            step_ceiling=args.step_ceiling,
         ),
         wiring=LoopWiring(
             memory=memory,
