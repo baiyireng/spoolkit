@@ -269,8 +269,9 @@ TOGETHER_GOAL = """这个工作区里放着 {count} 道编程题，每道题一�
 要求：
 - 怎么安排由你决定（自己做、或者把一批一起交出去做）；
 - 每道题做完要能自己验：在那个目录里跑 pytest 确认通过，再往下走；
-- 不要重做已经做完的；做不完没关系，做到你确实做完的那一批为止；
-- 收尾时用 final 报告：做完了哪几道、剩下的为什么没做。
+- 不要重做已经做完的；
+- **尽量多做**：除非预算真的耗尽、或者确实卡住做不下去，否则不要停。
+  收尾时用 final 报告：做完了哪几道、剩下的为什么没做。
 """
 
 
@@ -284,20 +285,48 @@ def prepare_together(tasks: list[Task], workspace: Path) -> None:
     for task in tasks:
         home = workspace / task.name
         prepare(task, home)
+        _rename_acceptance(task, home)
         command = " ".join(task.command) or "（这道题没声明验收命令）"
         (home / "TASK.md").write_text(
             f"# {task.name}\n\n{task.goal}\n\n"
             f"做完的判定：在这个目录里执行 `{command}`，全部通过。\n"
-            "test_acceptance.py 是验收标准，不要改它。\n",
+            "test_acceptance.py 是验收标准，不要改它——**动手前先读它**：\n"
+            "它固定了这个模块**对外长什么样**（导入哪个名字、函数怎么调用、"
+            "返回什么）。把代码改得更「合理」但动了接口，就算改坏了。\n",
             encoding="utf-8",
         )
+
+
+def _unique_test_name(task: Task, name: str) -> str:
+    return f"test_{task.name}.py" if name.endswith(".py") else f"{task.name}_{name}"
+
+
+def _rename_acceptance(task: Task, workdir: Path) -> None:
+    """把验收测试改成**工作区内唯一**的名字。
+
+    每个题目录里的测试文件本来都叫 `test_acceptance.py`。铺在一起之后，
+    在根目录跑一次 pytest 会撞「import file mismatch」（同名模块），
+    而那是布局的坑、不是题目的难点——实测模型为此烧掉二十来步去「修」
+    一个它修不了的东西，最后被督导判成死循环。改名之后根目录也能跑，
+    它还能一眼看到「哪几道通过、哪几道没过」。
+    """
+    for name in task.acceptance_files:
+        source = workdir / name
+        if source.is_file():
+            source.rename(workdir / _unique_test_name(task, name))
 
 
 def verify_together(tasks: list[Task], workspace: Path) -> list[TaskResult]:
     """逐题验收。用的是同一条路径：原始验收测试覆盖回去，只看退出码。"""
     results: list[TaskResult] = []
     for task in tasks:
-        passed, detail = verify(task, workspace / task.name)
+        home = workspace / task.name
+        # 覆盖回**改名之后**那一份：模型改测试想蒙混过关的话，同样作废。
+        for name in task.acceptance_files:
+            source = task.home / "acceptance" / name
+            if source.is_file():
+                shutil.copy(source, home / _unique_test_name(task, name))
+        passed, detail = verify(task, home)
         results.append(
             TaskResult(
                 name=task.name,

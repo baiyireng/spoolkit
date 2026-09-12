@@ -8,6 +8,7 @@
 """
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -654,9 +655,11 @@ class AgentLoop:
                 # 一条 run_command 都没有——所以这件事由循环来做，把结果
                 # 当场顶回去，它才有机会发现自己改错了。
                 if edited and self.verify is not None:
+                    started = time.time()
                     report, passed = self._run_verification(changed)
                     trace.append(
                         f"step{state.step}: 自动验证 -> {'通过' if passed else '失败'}"
+                        f"（{len(changed)} 处改动，{time.time() - started:.1f}s）"
                     )
                     self._emit(
                         "tool",
@@ -834,9 +837,15 @@ class AgentLoop:
             # 记下来：任务没做成时，这决定要不要替它登记诊断请求。
             self.environment_blocked = True
         if result.ok:
+            # 成功那句**不能请它收尾**。验证只覆盖「这次改动的地方」，
+            # 任务整体做完没有它并不知道；而一句「没有别的要改就收尾」，
+            # 实测在 20 道题的铺盘里做完 5 道就让它宣布完成——
+            # 它把「这一批做完」当成了「任务完成」。
             return (
-                f"系统自动跑了一遍项目里的测试：**通过**（{body}）。"
-                "如果没有别的要改，直接给出结论收尾。",
+                f"系统自动跑了一遍测试：**通过**（{body}）——"
+                "这说的是**这次改的地方**通过了。"
+                "任务整体做完没有由你判断：还有没做的接着做，"
+                "确实都做完再给出结论。",
                 True,
             )
         # 失败到底是什么性质，由验证器说——它才知道退出码的含义。

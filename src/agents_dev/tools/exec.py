@@ -246,6 +246,31 @@ def _shape_problem(argv: list[str]) -> str | None:
     )
 
 
+# 这些不是「没权限」，是**这里不需要**。混进权限措辞会把它引去申请授权，
+# 而正确做法它猜不到。
+SHELL_BUILTINS = ("cd", "chdir", "export", "set", "source", "&&", "|")
+
+
+def _usage_problem(argv: list[str]) -> str | None:
+    """用法问题——不是权限问题。先说清该怎么写，别让它去申请权限。
+
+    实测：它写 `cd` 换目录（或 `cd x && pytest` 那一套），撞上「不在白名单内」
+    之后只会换个写法再撞，连撞十几次都不换思路——因为它只知道「不行」，
+    不知道「该怎么写」。换目录的正确做法是 cwd 参数。
+    """
+    problem = _shape_problem(argv)
+    if problem is not None:
+        return problem
+    program = argv[0].strip().lower()
+    if program in SHELL_BUILTINS:
+        return (
+            f"`{program}` 不用写：这里没有 shell，也没有授权一说。"
+            "换目录请用 cwd 参数（相对工作区的路径，例如 "
+            '"cwd": "13_case_insensitive"）；串联命令请拆成多次调用。'
+        )
+    return None
+
+
 def _run(
     root: Path,
     args: dict,
@@ -255,9 +280,9 @@ def _run(
     revert: object = (),
 ) -> ToolResult:
     argv = list(args["command"])
-    shape = _shape_problem(argv)
-    if shape is not None:
-        return ToolResult(ok=False, content=shape)
+    usage = _usage_problem(argv)
+    if usage is not None:
+        return ToolResult(ok=False, content=usage)
     level, reason = classify(argv)
     if level == DENIED:
         return ToolResult(ok=False, content=reason)

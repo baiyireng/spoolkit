@@ -30,6 +30,10 @@ def bench(args: argparse.Namespace) -> int:
     tasks = load_tasks(project_root / args.tasks)
     if args.filter:
         tasks = [task for task in tasks if args.filter in task.name]
+    if args.limit:
+        # 长任务那条仪器动辄几十分钟。先跑前 N 道，形状照样看得见，
+        # 而且和整批跑的前 N 道结果可以直接比（题集顺序是稳定的）。
+        tasks = tasks[: args.limit]
     if not tasks:
         print("没有匹配的任务。", file=sys.stderr)
         return 2

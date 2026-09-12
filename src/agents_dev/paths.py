@@ -24,7 +24,14 @@ def resolve_within(root: Path, candidate: str) -> Path:
     resolved = target.resolve()
 
     if resolved != base and base not in resolved.parents:
-        raise PathOutsideProjectError(f"路径越出项目根目录: {candidate}")
+        # 报错要带上「该怎么写」。实测有模型拿 `/workspace` 这种绝对路径当 cwd
+        # （那是它在别处见过的约定），连续撞十几次都不换写法——因为它只知道
+        # 越界了，不知道什么才算不越界。
+        raise PathOutsideProjectError(
+            f"路径越出项目根目录: {candidate}。"
+            f"要用**相对于工作区**的路径，例如 `{base.name}/子目录` 或 `src/x.py`；"
+            "绝对路径只在额外授权过的可读根之外才有意义。"
+        )
     return resolved
 
 

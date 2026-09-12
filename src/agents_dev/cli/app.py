@@ -176,6 +176,12 @@ def _add_bench_command(sub: argparse._SubParsersAction) -> None:
     _add_provider_args(parser, default="gemini")
     parser.add_argument("--tasks", default=DEFAULT_BENCH_ROOT)
     parser.add_argument("--filter", default="", help="只跑名字含该片段的任务")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="只跑前 N 道题（长任务那条仪器一次要跑几十分钟，先用前 N 道看形状）",
+    )
     parser.add_argument("--window", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=12)
     parser.add_argument(

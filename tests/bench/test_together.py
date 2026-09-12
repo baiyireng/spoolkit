@@ -58,7 +58,9 @@ def test_铺盘_一题一个目录且题目说明在里面(tmp_path: Path) -> No
 
     home = workspace / "01_a"
     assert (home / "calc.py").exists()  # 起始代码
-    assert (home / "test_acceptance.py").exists()  # 验收测试在里面（要能自己跑）
+    # 验收测试在里面（要能自己跑），但**改了名**以避免同名模块冲突
+    assert (home / "test_01_a.py").exists()
+    assert not (home / "test_acceptance.py").exists()
     text = (home / "TASK.md").read_text(encoding="utf-8")
     assert "让 add 通过测试" in text
     assert "python -m pytest -q" in text
@@ -76,7 +78,7 @@ def test_验收覆盖回原始测试(tmp_path: Path) -> None:
     # 先把代码改对，再把验收测试改成永远通过——验收时测试会被覆盖回去，
     # 于是结果只反映它对被测代码做了什么。
     (home / "calc.py").write_text("def add(a, b):\n    return 4\n", encoding="utf-8")
-    (home / "test_acceptance.py").write_text(
+    (home / "test_01_a.py").write_text(
         "def test_nothing():\n    assert True\n", encoding="utf-8"
     )
     results = verify_together(tasks, workspace)
@@ -85,7 +87,7 @@ def test_验收覆盖回原始测试(tmp_path: Path) -> None:
     # 反过来：改测试不改代码，必须判失败
     workspace2 = tmp_path / "ws2"
     prepare_together(tasks, workspace2)
-    (workspace2 / "01_a" / "test_acceptance.py").write_text(
+    (workspace2 / "01_a" / "test_01_a.py").write_text(
         "def test_nothing():\n    assert True\n", encoding="utf-8"
     )
     assert verify_together(tasks, workspace2)[0].passed is False
@@ -100,4 +102,5 @@ def test_真实的题集能读出来并铺好(tmp_path: Path) -> None:
     assert len([p for p in workspace.iterdir() if p.is_dir()]) == 50
     first = workspace / tasks[0].name
     assert (first / "TASK.md").exists()
-    assert list(first.glob("test_acceptance.py"))
+    # 五十个目录里的测试文件必须彼此不同名，否则根目录跑 pytest 会 import mismatch
+    assert list(first.glob(f"test_{tasks[0].name}.py"))

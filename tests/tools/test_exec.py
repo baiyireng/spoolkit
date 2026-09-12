@@ -73,6 +73,28 @@ def test_后面几个参数带空格是合法的(tmp_path: Path) -> None:
     assert "拆成数组" not in result.content
 
 
+def test_cd这类shell内建要说清正确写法(tmp_path: Path) -> None:
+    """实测它连撞十几次「不在白名单内」都不换写法——因为没人告诉它换成什么。
+
+    换目录的正确做法是 cwd 参数；说成「需要用户批准」只会把它引去申请权限。
+    """
+    for argv in (["cd", "13_x"], ["export", "X=1"]):
+        result = _run(tmp_path, command=argv)
+        assert result.ok is False
+        assert "不用写" in result.content
+        assert "cwd" in result.content
+        assert "需要用户批准" not in result.content
+
+
+def test_用绝对路径当cwd时说清该写相对路径(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path, command=["python", "-m", "pytest", "-q"], cwd="/workspace"
+    )
+    assert result.ok is False
+    assert "越出项目根目录" in result.content
+    assert "相对于工作区" in result.content
+
+
 def test_运行项目内脚本(tmp_path: Path) -> None:
     script = _script(tmp_path, "hello.py", "print('来自脚本的输出')\n")
     result = _run(tmp_path, command=[sys.executable, script])
