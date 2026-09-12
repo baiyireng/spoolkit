@@ -4,18 +4,20 @@
 """
 
 import shutil
+import re
 import subprocess
 from pathlib import Path
 
 from agents_dev.errors import PathOutsideProjectError
 from agents_dev.paths import resolve_within
 from agents_dev.tools.types import ToolResult, ToolSpec
+from agents_dev.tools.view import WorkspaceView
 
 DEFAULT_MAX_RESULTS = 50
 TIMEOUT_SECONDS = 20
 
 
-def _search_code(root: Path, args: dict) -> ToolResult:
+def _search_code(root: Path, args: dict, pending=None) -> ToolResult:
     pattern = args["pattern"]
     max_results = args.get("max_results", DEFAULT_MAX_RESULTS)
     if max_results < 1:
@@ -62,10 +64,55 @@ def _search_code(root: Path, args: dict) -> ToolResult:
         line.replace(root_prefix + "\\", "").replace(root_prefix + "/", "")
         for line in lines
     ]
+
+    # 待确认的改动不在磁盘上，rg 搜到的是旧内容。改过的文件整份改用
+    # 「改之后」的内容重搜，否则模型会搜到自己刚删掉的东西。
+    view = WorkspaceView(root, pending)
+    if view.overridden:
+        stale = set(view.overridden)
+        merged = [line for line in cleaned if line.split(":", 1)[0] not in stale]
+        merged.extend(_search_overlay(view, pattern, base, max_results))
+        cleaned = merged[:max_results]
     return ToolResult(ok=True, content="\n".join(cleaned))
 
 
-def search_code_spec(root: Path) -> ToolSpec:
+def _search_overlay(
+    view: WorkspaceView, pattern: str, base: Path, max_results: int
+) -> list[str]:
+    """在待确认改动的内容里搜。只处理改动涉及的那几个文件。"""
+    try:
+        expression = re.compile(pattern)
+    except re.error:
+        return []  # 正则本身不合法时，rg 已经报过错了
+
+    try:
+        base_rel = view.relative(base)
+    except ValueError:
+        base_rel = "."
+
+    def in_scope(path: str) -> bool:
+        if base_rel in (".", ""):
+            return True  # 全项目搜索
+        if base.is_file():
+            return path == base_rel
+        return path.startswith(base_rel + "/")
+
+    hits: list[str] = []
+    for path in view.overridden:
+        if not in_scope(path):
+            continue
+        text = view.overridden_text(path)
+        if text is None:
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            if expression.search(line):
+                hits.append(f"{path}:{number}:{line}")
+                if len(hits) >= max_results:
+                    return hits
+    return hits
+
+
+def search_code_spec(root: Path, pending=None) -> ToolSpec:
     """构造代码搜索工具的规格。"""
     return ToolSpec(
         name="search_code",
@@ -80,6 +127,6 @@ def search_code_spec(root: Path) -> ToolSpec:
             "required": ["pattern"],
             "additionalProperties": False,
         },
-        handler=lambda args: _search_code(root, args),
+        handler=lambda args: _search_code(root, args, pending),
     )
 

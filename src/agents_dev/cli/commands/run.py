@@ -258,9 +258,11 @@ def _plain_registry(project_root, pending):
     from agents_dev.tools.search import search_code_spec
 
     registry = ToolRegistry()
-    registry.register(read_file_spec(project_root))
-    registry.register(list_dir_spec(project_root))
-    registry.register(search_code_spec(project_root))
+    # 与主循环一致：读工具要能看到待确认的改动，否则子智能体读到的
+    # 是改之前的文件，而它跑测试看到的是改之后的——两套矛盾的世界。
+    registry.register(read_file_spec(project_root, pending))
+    registry.register(list_dir_spec(project_root, pending))
+    registry.register(search_code_spec(project_root, pending))
     # 必须把 pending 传进去：否则子智能体改完代码再跑测试，测到的是**旧代码**
     # （改动还没落盘），它会以为自己的修复没生效，然后去改一个已经改对的函数。
     # trial_workspace 这个模块存在的全部理由就是这个，别在这一条路径上漏掉。
@@ -268,7 +270,7 @@ def _plain_registry(project_root, pending):
     # 与主循环共用同一套判定，否则会出现「同一个项目里子智能体有一把
     # 主循环没有的工具」这种分叉，而它只会在跑偏时才暴露。
     register_edit_tools(registry, project_root, pending)
-    attach_index(project_root, registry, OfflineTokenCounter())
+    attach_index(project_root, registry, OfflineTokenCounter(), pending)
     return registry
 
 

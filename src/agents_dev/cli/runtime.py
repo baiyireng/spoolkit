@@ -103,7 +103,7 @@ def provider_gateway(args, project_root):
         return None
 
 
-def attach_index(project_root: Path, registry: ToolRegistry, tokenizer):
+def attach_index(project_root: Path, registry: ToolRegistry, tokenizer, pending=None):
     """建立（或复用）代码索引，注册索引工具并返回预取函数。
 
     索引是可选增强：建索引失败不应让整个 agent 起不来，
@@ -116,8 +116,8 @@ def attach_index(project_root: Path, registry: ToolRegistry, tokenizer):
     except Exception:
         return None
 
-    registry.register(find_symbol_spec(project_root, conn))
-    registry.register(file_symbols_spec(conn))
+    registry.register(find_symbol_spec(project_root, conn, pending))
+    registry.register(file_symbols_spec(conn, pending))
     registry.register(find_callers_spec(conn))
 
     def prefetch_for(goal: str) -> str:
@@ -144,9 +144,12 @@ def assemble_loop(
     settings = config or Config(project_root=project_root)
     parts = wiring or LoopWiring()
     registry = ToolRegistry()
-    registry.register(read_file_spec(project_root))
-    registry.register(list_dir_spec(project_root))
-    registry.register(search_code_spec(project_root))
+    # 读工具都接上 pending：待确认的改动优先于磁盘。不接的话，模型刚写完
+    # 一个文件，read_file 却给它旧内容——而 run_command 在试跑副本里看到的
+    # 是新内容，同一个模型活在两套矛盾的世界里。
+    registry.register(read_file_spec(project_root, parts.pending))
+    registry.register(list_dir_spec(project_root, parts.pending))
+    registry.register(search_code_spec(project_root, parts.pending))
     registry.register(
         run_command_spec(project_root, parts.pending, parts.approver, parts.grants)
     )
@@ -166,7 +169,7 @@ def assemble_loop(
         tokenizer=tokenizer,
         registry=registry,
         config=settings,
-        prefetch=attach_index(project_root, registry, tokenizer),
+        prefetch=attach_index(project_root, registry, tokenizer, parts.pending),
         memory=parts.memory,
         lessons=parts.lessons,
         distiller=parts.distiller,
