@@ -27,7 +27,9 @@ from agents_dev.tools.fs import read_file_spec
 @pytest.fixture
 def key_outside(tmp_path: Path, monkeypatch) -> Path:
     """密钥放在项目目录之外——Agent 的文件工具够不到它。"""
-    key_file = tmp_path.parent / "diagnosis.key"
+    # 文件名带上 tmp_path：basetemp 根是多个测试共用的，共用一个密钥文件
+    # 会让某个测试的签名状态泄漏到另一个测试（实测出现过一次偶发失败）。
+    key_file = tmp_path.parent / f"diagnosis-{tmp_path.name}.key"
     monkeypatch.setenv("AGENTS_DEV_DIAGNOSIS_KEY_PATH", str(key_file))
     return key_file
 

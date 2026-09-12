@@ -40,6 +40,7 @@ from agents_dev.tools.verify import make_verifier
 from agents_dev.tools.search import search_code_spec
 from agents_dev.tools.stats import dir_stats_spec
 from agents_dev.tools.calc import calc_spec
+from agents_dev.tools.sources import SourceLog, check_numbers_spec
 
 # 符号表给人「有哪些东西」，内容给人「它是怎么写的」。两块都要：
 # 只有符号表时，模型会一直查、始终不下手（实测本地 7B 的整条轨迹里
@@ -200,6 +201,7 @@ def assemble_loop(
     settings = config or Config(project_root=project_root)
     parts = wiring or LoopWiring()
     registry = ToolRegistry()
+    sources = SourceLog()
     # 读工具都接上 pending：待确认的改动优先于磁盘。不接的话，模型刚写完
     # 一个文件，read_file 却给它旧内容——而 run_command 在试跑副本里看到的
     # 是新内容，同一个模型活在两套矛盾的世界里。
@@ -208,6 +210,8 @@ def assemble_loop(
     registry.register(search_code_spec(project_root, parts.pending, parts.read_roots))
     registry.register(dir_stats_spec(project_root, parts.read_roots))
     registry.register(calc_spec())
+    # 台账与核对工具共用同一个 SourceLog：模型只能读，循环负责写。
+    registry.register(check_numbers_spec(sources))
     # 怀疑是环境或工具本身有问题时的申请通道。只登记与读回，
     # 报告由具备真实环境权限的一侧出具——它自己写不了。
     registry.register(request_diagnosis_spec(project_root))
@@ -246,6 +250,7 @@ def assemble_loop(
         verify=verifier,
         incoming=incoming_reports,
         read_roots=parts.read_roots,
+        sources=sources,
     )
 
 

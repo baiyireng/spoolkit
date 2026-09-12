@@ -219,6 +219,7 @@ class AgentLoop:
         verify: Callable[[], ToolResult] | None = None,
         incoming: Callable[[], str] | None = None,
         read_roots: tuple = (),
+        sources: Any | None = None,
         persona: str = "",
         on_event: Callable[[str, dict], None] | None = None,
     ) -> None:
@@ -233,6 +234,9 @@ class AgentLoop:
         self.verify = verify
         self.incoming = incoming
         self.read_roots = tuple(read_roots)
+        # 工具输出台账：数字核对要拿它当「出处」。由循环追加，
+        # 模型改不了它——模型自己写进去的出处不算出处。
+        self.sources = sources
         self.environment_blocked = False
         self.persona = persona
         self.on_event = on_event
@@ -460,6 +464,8 @@ class AgentLoop:
                     seen = recent.count(signature)
                     level = max(repeats, seen)
                     result = self._invoke_guarded(call, repeats, seen)
+                    if self.sources is not None:
+                        self.sources.add(result.content)
                     self._note_progress(state, call, result)
                     if result.ok and call.name in EDIT_TOOLS:
                         edited = True

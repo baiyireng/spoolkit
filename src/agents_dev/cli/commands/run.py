@@ -12,6 +12,8 @@ from agents_dev.agents.dispatcher import plan_dispatch, run_delegated
 from agents_dev.config import Config
 from agents_dev.cli.commands.plan import advance_plan, autonomous
 from agents_dev import diagnosis
+from agents_dev.check.numbers import render as render_numbers
+from agents_dev.check.numbers import untraceable
 from agents_dev.cli.options import (
     report_policy,
     resolve_policy,
@@ -119,6 +121,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
         ),
     )
     result = loop.run(args.goal, resume=args.resume)
+    _report_numbers(loop, result, writer)
     _maybe_file_diagnosis(project_root, before, result, writer)
 
     if memory is not None:
@@ -187,6 +190,8 @@ def _standard(args, project_root, gateway, window, pending) -> int:
         )
 
     result = loop.run(args.goal, resume=args.resume)
+    _report_numbers(loop, result)
+    _maybe_file_diagnosis(project_root, before, result)
     if memory is not None:
         settle_lessons(memory, result.lessons_pushed, result.finished)
         record_message(
@@ -354,6 +359,30 @@ def _maybe_file_diagnosis(
     else:
         print(line)
     return request.id
+
+
+def _report_numbers(loop, result, writer: EventWriter | None = None) -> None:
+    """交付物里的数字有没有出处。**只标注，不阻断**。
+
+    把可疑当成错误会误伤——很多数字是合理的推导；而把编造当成正常才是真的
+    危险。所以它只负责把「在工具输出里找不到出处」的那几处挑出来。
+    """
+    log = getattr(loop, "sources", None)
+    if log is None or not result.final:
+        return
+    claims = untraceable(result.final, log.items())
+    if not claims:
+        return
+    if writer is not None:
+        writer.emit(
+            "tool",
+            name="数字核对",
+            ok=False,
+            detail=" ".join(claim.text for claim in claims),
+        )
+        return
+    print("---")
+    print(render_numbers(claims))
 
 
 def _settle_pending(args, project_root, pending) -> None:
