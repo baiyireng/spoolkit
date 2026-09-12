@@ -99,6 +99,13 @@ WORKFLOW_PERMISSION = (
 )
 WORKFLOW_NO_GUESS = "- 信息不足先查，不要猜；确实找不到就直说找不到。"
 
+WORKFLOW_DIAGNOSIS = (
+    "- 如果失败的原因看起来是环境或工具本身（比如测试环境跑不起来、"
+    "工具报的错与你的改动无关），用 request_diagnosis 把问题登记下来，"
+    "交给具备真实环境权限的会话验证，再用 read_diagnosis 读报告。"
+    "它只产出报告，不改变你的权限；也不要拿它当绕过限制的手段。"
+)
+
 LESSONS_HEADER = "以下是过去类似任务里踩过的坑，做之前先看一眼："
 
 FORCE_COMMIT = (

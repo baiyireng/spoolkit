@@ -17,6 +17,7 @@ from agents_dev.cli.commands.policy import policy_command
 from agents_dev.cli.commands.revert import revert_command
 from agents_dev.cli.commands.run import run
 from agents_dev.cli.commands.serve import serve_command
+from agents_dev.cli.commands.diagnose import diagnose_command
 from agents_dev.cli.commands.session import session_command
 from agents_dev.cli.options import (
     DEFAULT_WINDOW,
@@ -183,6 +184,24 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=serve_command)
 
 
+def _add_diagnose_command(sub: argparse._SubParsersAction) -> None:
+    """诊断通道的特权侧：由人（或人来跑的外部会话）执行。"""
+    parser = sub.add_parser(
+        "diagnose", help="处理 Agent 登记的环境/工具异常诊断请求"
+    )
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--list", action="store_true", help="列出全部请求")
+    parser.add_argument("--show", default="", help="看某条请求的完整内容")
+    parser.add_argument("--report", default="", help="给某条请求写回报告")
+    parser.add_argument("--verdict", default="", help="结论，一句话")
+    parser.add_argument("--findings", default="", help="具体发现了什么")
+    parser.add_argument("--evidence", default="", help="支撑结论的证据")
+    parser.add_argument(
+        "--init-key", action="store_true", help="生成签名密钥（放在项目外）"
+    )
+    parser.set_defaults(func=diagnose_command)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agents-dev")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -193,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_bench_command(sub)
     _add_session_command(sub)
     _add_serve_command(sub)
+    _add_diagnose_command(sub)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

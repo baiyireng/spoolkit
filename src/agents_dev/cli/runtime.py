@@ -28,6 +28,10 @@ from agents_dev.memory.transcript import recent_messages, render_transcript
 from agents_dev.store.db import init_schema, open_db
 from agents_dev.tools.edit import PendingChanges, register_edit_tools
 from agents_dev.tools.exec import run_command_spec
+from agents_dev.tools.diagnosis import (
+    read_diagnosis_spec,
+    request_diagnosis_spec,
+)
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.grant import Grants
 from agents_dev.tools.registry import ToolRegistry
@@ -150,6 +154,10 @@ def assemble_loop(
     registry.register(read_file_spec(project_root, parts.pending))
     registry.register(list_dir_spec(project_root, parts.pending))
     registry.register(search_code_spec(project_root, parts.pending))
+    # 怀疑是环境或工具本身有问题时的申请通道。只登记与读回，
+    # 报告由具备真实环境权限的一侧出具——它自己写不了。
+    registry.register(request_diagnosis_spec(project_root))
+    registry.register(read_diagnosis_spec(project_root))
     registry.register(
         run_command_spec(project_root, parts.pending, parts.approver, parts.grants)
     )

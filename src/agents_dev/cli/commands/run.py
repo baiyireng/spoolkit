@@ -252,6 +252,10 @@ def _plain_registry(project_root, pending):
     """派发路径用的注册表：不带记忆与教训，子智能体只拿任务说明。"""
     from agents_dev.cli.runtime import attach_index
     from agents_dev.tools.edit import register_edit_tools
+    from agents_dev.tools.diagnosis import (
+        read_diagnosis_spec,
+        request_diagnosis_spec,
+    )
     from agents_dev.tools.exec import run_command_spec
     from agents_dev.tools.fs import list_dir_spec, read_file_spec
     from agents_dev.tools.registry import ToolRegistry
@@ -263,6 +267,8 @@ def _plain_registry(project_root, pending):
     registry.register(read_file_spec(project_root, pending))
     registry.register(list_dir_spec(project_root, pending))
     registry.register(search_code_spec(project_root, pending))
+    registry.register(request_diagnosis_spec(project_root))
+    registry.register(read_diagnosis_spec(project_root))
     # 必须把 pending 传进去：否则子智能体改完代码再跑测试，测到的是**旧代码**
     # （改动还没落盘），它会以为自己的修复没生效，然后去改一个已经改对的函数。
     # trial_workspace 这个模块存在的全部理由就是这个，别在这一条路径上漏掉。

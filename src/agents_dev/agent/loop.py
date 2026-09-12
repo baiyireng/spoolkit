@@ -144,6 +144,10 @@ def build_workflow(registry: ToolRegistry) -> str:
         lines.append(T.WORKFLOW_RUN)
         lines.append(T.WORKFLOW_TESTS_ARE_SPEC)
         lines.append(T.WORKFLOW_TEST_SCOPE)
+
+    if registry.get("request_diagnosis") is not None:
+        # 紧跟在「怎么验证」后面：它处理的正是验证本身出问题的那种情况。
+        lines.append(T.WORKFLOW_DIAGNOSIS)
         lines.append(T.WORKFLOW_PERMISSION)
         lines.append(T.WORKFLOW_DEPENDENCY)
 
