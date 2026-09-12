@@ -19,6 +19,20 @@ class Fact:
 
 
 @dataclass(frozen=True)
+class Usage:
+    """一类工具自己花掉的模型开销。
+
+    多数工具不花模型的钱；花的那几个（派发、诊断回流）必须**报回来**——
+    主循环的用量表是调这块时唯一的账本，漏掉子智能体那一整段，
+    报出来的数字就不是「这次任务花了多少」，而是「主循环自己花了多少」。
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    calls: int = 0
+
+
+@dataclass(frozen=True)
 class ToolResult:
     """工具执行结果。失败也是正常返回值，不通过异常表达。"""
 
@@ -26,6 +40,8 @@ class ToolResult:
     content: str
     # 可选的结构化事实。给核对用，不给模型看（模型看 content 就够了）。
     facts: tuple[Fact, ...] = ()
+    # 这个工具自己花掉的模型开销，由循环累加进用量。
+    usage: Usage | None = None
 
 
 @dataclass(frozen=True)

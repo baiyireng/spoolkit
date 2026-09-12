@@ -1,0 +1,211 @@
+"""会话内的派发入口。
+
+主循环原先没有派发的能力——`--delegate` 是启动前判断一次。真实任务里
+「该不该派、派哪一块」是做到一半才看得清的，所以入口得在会话里。
+
+这里盯三件事：闸门（没有验收标准不许派）、改动落到**同一份**待确认里
+（否则会出现两套 diff）、以及派发失败不把主循环带走。
+"""
+
+import json
+from pathlib import Path
+
+from agents_dev.agent.loop import AgentLoop
+from agents_dev.config import Config
+from agents_dev.llm.fake import FakeModel
+from agents_dev.llm.tokenizer import OfflineTokenCounter
+from agents_dev.tools.dispatch import dispatch_spec
+from agents_dev.tools.edit import PendingChanges, register_edit_tools
+from agents_dev.tools.fs import list_dir_spec, read_file_spec
+from agents_dev.tools.registry import ToolRegistry
+
+
+def _turn(thought: str, calls=None, final=None) -> str:
+    return json.dumps(
+        {
+            "thought": thought,
+            "tool_calls": calls or [],
+            "state": None,
+            "done": final is not None,
+            "final": final,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _dispatch_turn(acceptance: str = "a.py 里 x 的值是 1") -> str:
+    return _turn(
+        "这块活派出去做",
+        [
+            {
+                "name": "dispatch",
+                "arguments": {
+                    "goal": "把 a.py 里的 x 改成 1",
+                    "acceptance": acceptance,
+                },
+            }
+        ],
+    )
+
+
+def _build(tmp_path: Path, script: list):
+    """主循环与子智能体共用一个网关——它们本来就是同一个模型的两个上下文。"""
+    tokenizer = OfflineTokenCounter()
+    gateway = FakeModel(script=script, tokenizer=tokenizer)
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path))
+    registry.register(list_dir_spec(tmp_path))
+    register_edit_tools(registry, tmp_path, pending)
+    config = Config(
+        project_root=tmp_path,
+        context_window=8192,
+        max_steps=4,
+        subagent_steps=4,
+        supervise=False,
+    )
+    registry.register(dispatch_spec(gateway, registry, config, tokenizer))
+    loop = AgentLoop(
+        gateway=gateway, tokenizer=tokenizer, registry=registry, config=config
+    )
+    return loop, pending
+
+
+def test_没有验收标准不允许派发(tmp_path: Path) -> None:
+    """没有可执行的判断依据，实现者做到什么程度都算完成——这条闸门不能破。"""
+    loop, pending = _build(
+        tmp_path, [_dispatch_turn(""), _turn("那我自己来", [], final="好")]
+    )
+    loop.run("改 a.py")
+    fed_back = "\n".join(
+        message.content for message in loop.gateway.requests[-1].messages
+    )
+    assert "不能派发" in fed_back
+    assert "验收标准" in fed_back
+    # 闸门挡住了就不该真的跑一遍子智能体
+    assert pending.items() == []
+
+
+def test_派发把改动落进同一份待确认(tmp_path: Path) -> None:
+    """子智能体的写完工具绑的是同一份 PendingChanges——只有一份 diff。"""
+    loop, pending = _build(
+        tmp_path,
+        [
+            _dispatch_turn(),
+            _turn(
+                "写文件",
+                [
+                    {
+                        "name": "write_file",
+                        "arguments": {"path": "a.py", "content": "x = 1\n"},
+                    }
+                ],
+            ),
+            _turn("写完了", [], final="已把 a.py 改成 x = 1"),
+            _turn("看过 diff，符合验收标准", [], final="改动正确"),
+            json.dumps({"verdict": "pass", "reasons": ["x 的值是 1"]}),
+            _turn("收到", [], final="派发完成"),
+        ],
+    )
+    result = loop.run("改 a.py")
+
+    assert result.finished is True
+    # 改动进了主循环那一份待确认，而不是子智能体自己的某个副本
+    assert [change.path for change in pending.items()] == ["a.py"]
+    # 结论要带上「审查过了」和「别再自己写一遍」
+    fed_back = "\n".join(
+        message.content for message in loop.gateway.requests[-1].messages
+    )
+    assert "独立审查：通过" in fed_back
+    assert "不要把" in fed_back or "不要自己再写一遍" in fed_back
+
+
+def test_派发那一趟的账记进主循环(tmp_path: Path) -> None:
+    """子智能体的调用也是这次任务花的钱。
+
+    不记的话主循环会报「2 次调用」，而子智能体那一路（实现 + 审查 + 判定）
+    一次都不在表里——那张表是调这块时唯一的账本。
+    """
+    loop, _ = _build(
+        tmp_path,
+        [
+            _dispatch_turn(),
+            _turn(
+                "写文件",
+                [
+                    {
+                        "name": "write_file",
+                        "arguments": {"path": "a.py", "content": "x = 1\n"},
+                    }
+                ],
+            ),
+            _turn("写完了", [], final="改好了"),
+            _turn("看过了", [], final="没问题"),
+            json.dumps({"verdict": "pass", "reasons": ["符合验收标准"]}),
+            _turn("收到", [], final="派发完成"),
+        ],
+    )
+    result = loop.run("改 a.py")
+    # 主循环 2 次（派发那一轮 + 收尾）＋ 子智能体 4 次（实现 2、审查 1、判定 1）
+    assert result.model_calls == 6
+    assert result.prompt_tokens > 0
+
+
+def test_审查不通过会带理由回来(tmp_path: Path) -> None:
+    loop, _ = _build(
+        tmp_path,
+        [
+            _dispatch_turn(),
+            _turn(
+                "写文件",
+                [
+                    {
+                        "name": "write_file",
+                        "arguments": {"path": "a.py", "content": "x = 2\n"},
+                    }
+                ],
+            ),
+            _turn("写完了", [], final="写好了"),
+            _turn("看过了", [], final="x 是 2，不是 1"),
+            json.dumps(
+                {
+                    "verdict": "fail",
+                    "reasons": ["值不对"],
+                    "fix_goal": "把 x 改成 1",
+                }
+            ),
+            # 审查不通过后，运行时会问一次「还要不要再派人修」。
+            # 这里让它决定不修——本次要验的是**理由有没有带回来**。
+            json.dumps(
+                {"delegate": False, "reason": "不值得再派一次", "goal": "收尾"}
+            ),
+            _turn("知道了", [], final="收到审查意见"),
+        ],
+    )
+    loop.run("改 a.py")
+    fed_back = "\n".join(
+        message.content for message in loop.gateway.requests[-1].messages
+    )
+    assert "独立审查：**不通过**" in fed_back
+    assert "值不对" in fed_back
+
+
+def test_派发失败不带走主循环(tmp_path: Path) -> None:
+    """子智能体那边炸了，主循环还该继续——它自己也能做这块活。"""
+
+    class Broken:
+        def chat(self, request):
+            raise RuntimeError("网关掉了")
+
+    tokenizer = OfflineTokenCounter()
+    registry = ToolRegistry()
+    registry.register(list_dir_spec(tmp_path))
+    spec = dispatch_spec(
+        Broken(),
+        registry,
+        Config(project_root=tmp_path, context_window=8192, supervise=False),
+        tokenizer,
+    )
+    result = spec.handler({"goal": "做点什么", "acceptance": "跑通"})
+    assert result.ok is False
+    assert "派发没能跑起来" in result.content

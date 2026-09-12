@@ -187,6 +187,17 @@ class DelegatedResult:
     review: Review | None = None
     rounds: int = 0
     trace: list[str] = field(default_factory=list)
+    # 这一趟花掉的模型开销。要报回主循环——否则用量表会漏掉子智能体整段，
+    # 而主循环看到的「2 次调用」会让人以为派发是免费的。
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    model_calls: int = 0
+
+    @property
+    def usage(self):
+        from agents_dev.tools.types import Usage
+
+        return Usage(self.prompt_tokens, self.completion_tokens, self.model_calls)
 
     @property
     def rejected(self) -> bool:
@@ -256,6 +267,10 @@ def run_delegated(
     if not plan.delegate or plan.spec is None:
         raise ValueError("这份计划不包含可派发的任务说明")
 
+    # 把网关包一层来记账：实现、审查、判定、打回**四处**的调用都要算进来。
+    # 逐个函数去传累加器容易漏（判定和打回就是各一次 chat，很容易忘），
+    # 包一层则一处不漏。
+    gateway = _Counting(gateway)
     result = DelegatedResult(plan=plan)
     limit = config.review_rounds if max_rounds is None else max_rounds
     spec = plan.spec
@@ -318,4 +333,31 @@ def run_delegated(
             break
         spec = repair.spec
 
+    result.prompt_tokens = gateway.prompt_tokens
+    result.completion_tokens = gateway.completion_tokens
+    result.model_calls = gateway.calls
     return result
+
+
+class _Counting:
+    """把网关包一层，数清这一趟花了多少。
+
+    只转 chat：其余属性（context_window / token_counter）原样透传，
+    因为子角色也需要它们。
+    """
+
+    def __init__(self, inner: ModelGateway) -> None:
+        self._inner = inner
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.calls = 0
+
+    def chat(self, request):
+        response = self._inner.chat(request)
+        self.prompt_tokens += response.prompt_tokens
+        self.completion_tokens += response.completion_tokens
+        self.calls += 1
+        return response
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)

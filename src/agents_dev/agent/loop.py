@@ -186,6 +186,11 @@ def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
         lines.append(T.WORKFLOW_PERMISSION)
         lines.append(T.WORKFLOW_DEPENDENCY)
 
+    if registry.get("dispatch") is not None:
+        # 放在最后几条之前：它讲的是「怎么把活干完」的选择，
+        # 而不是某类工具的用法，跟前面的查询/改动规则并列。
+        lines.append(T.WORKFLOW_DISPATCH)
+
     lines.append(T.WORKFLOW_NO_GUESS)
     return "\n".join(lines)
 
@@ -557,7 +562,21 @@ class AgentLoop:
                         )
                 else:
                     empty_turns = 0
-                feedback = _parse_feedback(turn)
+                if turn.kind == "truncated":
+                    # 截断说明「这个任务的输出形态就是偏大」。与其每一轮都撞一次
+                    # 再翻倍重试，不如把这个事实记在这次任务里（封顶见 Budget）。
+                    before = self._budget.output_reserve()
+                    after = self._budget.boost_output()
+                    if after > before:
+                        trace.append(
+                            f"step{state.step}: 输出被截断，本次任务的输出预算 "
+                            f"{before} → {after} token"
+                        )
+                    # 光抬高预算不够：它得知道「这一轮要少说点」，
+                    # 否则重来的还是同样大的一份。
+                    feedback = T.OUTPUT_TRUNCATED.format(limit=after)
+                else:
+                    feedback = _parse_feedback(turn)
                 history.append(Message(role="assistant", content=response.text))
                 history.append(Message(role="user", content=feedback))
                 state.step_forward()
@@ -588,6 +607,13 @@ class AgentLoop:
                     level = max(repeats, seen)
                     result = self._invoke_guarded(call, repeats, seen)
                     tool_calls_made += 1
+                    if result.usage is not None:
+                        # 工具自己花的模型开销（派发那一趟）也要记账：
+                        # 不记的话用量表报的是「主循环自己花了多少」，
+                        # 而人会把它读成「这次任务花了多少」。
+                        prompt_tokens += result.usage.prompt_tokens
+                        completion_tokens += result.usage.completion_tokens
+                        model_calls += result.usage.calls
                     if self.sources is not None:
                         self.sources.add(result.content, result.facts)
                     self._note_progress(state, call, result)

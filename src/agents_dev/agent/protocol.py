@@ -171,7 +171,14 @@ def parse_turn(text: str) -> AgentTurn | ParseFailure:
         hint = ""
         if "Unterminated" in exc.msg or exc.pos >= len(text) - 1:
             hint = "（内容疑似被输出预算截断）"
-        return ParseFailure(reason=f"输出不是合法 JSON{hint}: {exc.msg}")
+        # kind 要标出来：截断和「格式写坏」的处置完全不同——前者要**把这一轮
+        # 的输出变小**并抬高预算，后者要纠正写法。只放在 reason 里，调用方
+        # 就得去认字符串；实测它会照着「请只输出规定的 JSON」再来一遍同样大
+        # 的输出，于是同样被截断。
+        return ParseFailure(
+            reason=f"输出不是合法 JSON{hint}: {exc.msg}",
+            kind="truncated" if hint else "",
+        )
 
     if not isinstance(payload, dict):
         return ParseFailure(reason="输出必须是 JSON 对象")

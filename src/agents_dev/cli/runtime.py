@@ -41,6 +41,7 @@ from agents_dev.tools.verify import make_verifier
 from agents_dev.tools.search import search_code_spec
 from agents_dev.tools.stats import dir_stats_spec
 from agents_dev.tools.calc import calc_spec
+from agents_dev.tools.dispatch import dispatch_spec
 from agents_dev.tools.sources import SourceLog, check_numbers_spec
 
 # 符号表给人「有哪些东西」，内容给人「它是怎么写的」。两块都要：
@@ -236,6 +237,12 @@ def assemble_loop(
     verifier = parts.verify
     if verifier is None and parts.auto_verify and parts.pending is not None:
         verifier = make_verifier(project_root, parts.pending)
+
+    # 会话内的派发入口。注册在最后：它绑定的就是这个注册表里的工具集，
+    # 而子智能体拿的是按角色裁剪后的那一份（里面没有 dispatch，不会递归）。
+    registry.register(
+        dispatch_spec(gateway, registry, settings, tokenizer, verify=verifier)
+    )
 
     def incoming_reports() -> str:
         """上一轮回来的诊断报告：开局就摆到模型面前，不用它记得去查。"""

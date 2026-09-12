@@ -7,6 +7,18 @@
 
 OUTPUT_RESERVE_RATIO = 0.15
 
+# 被截断过一次之后，这一次任务里的输出预算抬到这里。
+#
+# 截断是一个**关于这个任务的事实**：它的输出形态就是偏大（要交一份长文件、
+#
+# 或者要写一段较长的脚本）。与其每一轮都撞一次再翻倍重试，不如把这个事实
+# 记在这次任务里。
+#
+# 不抬更高的理由：抬的是输出的钱，付的是输入的预算——窗口 8192 时 30% 是
+# 2457，留给上下文装配的只剩 5735。再往上就该换代更大的窗口，而不是继续
+# 从这个窗口里切。
+OUTPUT_RESERVE_BOOST_RATIO = 0.30
+
 # 固定配额：与窗口大小无关。系统提示与工具描述长度稳定，按绝对量给定。
 FIXED_QUOTAS: dict[str, int] = {
     "system": 900,
@@ -40,14 +52,23 @@ HARD_TRIGGER_RATIO = 0.90
 class Budget:
     """一次请求的上下文预算。"""
 
-    def __init__(self, window: int) -> None:
+    def __init__(self, window: int, output_ratio: float = OUTPUT_RESERVE_RATIO) -> None:
         if window <= 0:
             raise ValueError("上下文窗口必须为正数")
         self.window = window
+        self._output_ratio = output_ratio
 
     def output_reserve(self) -> int:
         """为模型输出保留的 token 数。"""
-        return int(self.window * OUTPUT_RESERVE_RATIO)
+        return int(self.window * self._output_ratio)
+
+    def boost_output(self, ratio: float = OUTPUT_RESERVE_BOOST_RATIO) -> int:
+        """把输出预算抬高。返回抬高之后的额度（没变就返回原值）。
+
+        调用点只有一个：这次任务的某次请求被输出预算截断了。
+        """
+        self._output_ratio = max(self._output_ratio, ratio)
+        return self.output_reserve()
 
     def effective(self) -> int:
         """可供上下文装配使用的有效预算。"""
