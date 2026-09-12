@@ -274,6 +274,7 @@ def _plain_registry(project_root, pending, read_roots=()):
     from agents_dev.tools.registry import ToolRegistry
     from agents_dev.tools.search import search_code_spec
     from agents_dev.tools.stats import dir_stats_spec
+    from agents_dev.tools.calc import calc_spec
 
     registry = ToolRegistry()
     # 与主循环一致：读工具要能看到待确认的改动，否则子智能体读到的
@@ -282,6 +283,7 @@ def _plain_registry(project_root, pending, read_roots=()):
     registry.register(list_dir_spec(project_root, pending, read_roots))
     registry.register(search_code_spec(project_root, pending, read_roots))
     registry.register(dir_stats_spec(project_root, read_roots))
+    registry.register(calc_spec())
     registry.register(request_diagnosis_spec(project_root))
     registry.register(read_diagnosis_spec(project_root))
     # 必须把 pending 传进去：否则子智能体改完代码再跑测试，测到的是**旧代码**

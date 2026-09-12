@@ -160,6 +160,9 @@ def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
 
     if registry.get("dir_stats") is not None:
         lines.append(T.WORKFLOW_STATS)
+
+    if registry.get("calc") is not None:
+        lines.append(T.WORKFLOW_CALC)
         lines.append(T.WORKFLOW_PERMISSION)
         lines.append(T.WORKFLOW_DEPENDENCY)
 
