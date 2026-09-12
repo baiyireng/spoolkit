@@ -156,6 +156,9 @@ def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
                 roots="、".join(str(item) for item in read_roots)
             )
         )
+
+    if registry.get("dir_stats") is not None:
+        lines.append(T.WORKFLOW_STATS)
         lines.append(T.WORKFLOW_PERMISSION)
         lines.append(T.WORKFLOW_DEPENDENCY)
 

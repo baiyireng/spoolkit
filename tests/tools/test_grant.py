@@ -10,13 +10,23 @@ def test_白名单内直接放行() -> None:
 
 def test_永久禁止的操作不可申请() -> None:
     for argv in (
-        ["rm", "-rf", "x"],
         ["shutdown", "/s"],
         ["sudo", "apt", "install", "x"],
         ["curl", "http://x"],
     ):
         level, _ = classify(argv)
         assert level == DENIED, argv
+
+
+def test_删除类命令降级为可申请() -> None:
+    """原先删除一律永久拒绝，那会把「危险」和「不可申请」划等号。
+
+    一次误判就留下死路：后续任务确实需要删一个文件时，连问都问不到。
+    """
+    for argv in (["rm", "-rf", "x"], ["rm", "x"], ["rmdir", "d"], ["del", "f"]):
+        level, reason = classify(argv)
+        assert level == ASK, argv
+        assert "删除" in reason, argv
 
 
 def test_git破坏性操作被永久禁止() -> None:
@@ -92,8 +102,51 @@ def test_永久禁止的命令不会触发询问(tmp_path: Path) -> None:
         return "always"
 
     result = _spec(tmp_path, approver=approver, grants=Grants()).handler(
-        {"command": ["rm", "-rf", "x"]}
+        {"command": ["shutdown", "/s"]}
     )
     assert result.ok is False
     assert asked == []
 
+
+def test_删除命令会触发询问(tmp_path: Path) -> None:
+    asked: list = []
+
+    def approver(argv, reason):
+        asked.append((argv, reason))
+        return "once"
+
+    result = _spec(tmp_path, approver=approver, grants=Grants()).handler(
+        {"command": ["rm", "some_file.txt"]}
+    )
+    assert asked, "删除应当可以申请，而不是一律拦死"
+    assert "删除" in asked[0][1]
+    assert result.content.startswith("退出码") or result.ok is False
+
+
+def test_本次允许不记入授权下次还会问(tmp_path: Path) -> None:
+    asked: list = []
+
+    def approver(argv, reason):
+        asked.append(argv)
+        return "once"
+
+    spec = _spec(tmp_path, approver=approver, grants=Grants())
+    spec.handler({"command": ["npm", "run", "build"], "timeout": 30})
+    spec.handler({"command": ["npm", "run", "build"], "timeout": 30})
+    assert len(asked) == 2, "只放这一次，下次还要问"
+
+
+def test_本轮全部拒绝之后不再问(tmp_path: Path) -> None:
+    """拒绝一次不该被记成永久不许（那是死路），也不该每次重问（那是骚扰）。"""
+    asked: list = []
+
+    def approver(argv, reason):
+        asked.append(argv)
+        return "block"
+
+    spec = _spec(tmp_path, approver=approver, grants=Grants())
+    first = spec.handler({"command": ["npm", "run", "build"], "timeout": 30})
+    second = spec.handler({"command": ["npm", "run", "build"], "timeout": 30})
+    assert len(asked) == 1, "本轮表过态就不该再问"
+    assert first.ok is False and second.ok is False
+    assert "本轮" in second.content

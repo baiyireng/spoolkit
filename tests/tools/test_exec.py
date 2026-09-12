@@ -19,9 +19,21 @@ def _script(tmp_path: Path, name: str, body: str) -> str:
 
 
 def test_永久禁止的命令被拒绝(tmp_path: Path) -> None:
-    result = _run(tmp_path, command=["rm", "-rf", "/"])
+    # 提权与系统级操作才是永久禁止的那一类；删除已经改成可申请了。
+    result = _run(tmp_path, command=["shutdown", "/s"])
     assert result.ok is False
     assert "永久禁止" in result.content
+
+
+def test_删除命令可以申请而不是一律拦死(tmp_path: Path) -> None:
+    """一律拦死会留下死路：后续任务确实需要删一个文件时，连问都问不到。
+
+    危险的东西该让人来判，而不是让工具替他判不了。
+    """
+    result = _run(tmp_path, command=["rm", "-rf", "some_dir"])
+    assert result.ok is False
+    assert "需要用户批准" in result.content
+    assert "用户手动执行" in result.content
 
 
 def test_白名单外但非禁止的命令需要申请(tmp_path: Path) -> None:

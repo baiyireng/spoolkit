@@ -23,13 +23,10 @@ ALLOWED = "allowed"
 DENIED = "denied"
 ASK = "ask"
 
-# 永久禁止：不可逆，或影响面超出项目。这些不提供申请入口。
+# 永久禁止：影响面明确超出项目，或本身就是提权/任意代码执行的入口。
+# 这些不提供申请入口——不是因为危险就不给，而是因为它们跟「完成用户
+# 交代的任务」没有正当关系。
 DENIED_PREFIXES: tuple[tuple[str, ...], ...] = (
-    ("rm", "-rf"),
-    ("rm", "-r"),
-    ("rm", "-f"),
-    ("del",),
-    ("rmdir",),
     ("shutdown",),
     ("reboot",),
     ("format",),
@@ -47,6 +44,22 @@ DENIED_PREFIXES: tuple[tuple[str, ...], ...] = (
     ("wget",),
     ("iwr",),
     ("invoke-webrequest",),
+)
+
+# 删除类命令**可以申请**。
+#
+# 原先它们一律永久拒绝。那是把「危险」和「不可申请」划了等号——结果是
+# 一次误判就留下死路：后续任务确实需要删一个文件时，连问都问不到。
+# 危险的东西该让人来判，而不是让工具替他判不了。
+#
+# 它们仍然需要申请（不自动放行），而且审批时给四档选择。
+DELETE_PREFIXES: tuple[tuple[str, ...], ...] = (
+    ("rm",),
+    ("del",),
+    ("erase",),
+    ("rmdir",),
+    ("rd",),
+    ("remove-item",),
 )
 
 # git 的破坏性操作单独列出：它们会不可逆地丢掉版本历史，
@@ -99,6 +112,14 @@ def classify(argv: Sequence[str]) -> tuple[str, str]:
                 "提交与回滚请交给用户执行。"
             )
 
+    for prefix in DELETE_PREFIXES:
+        if _matches(argv, prefix):
+            return ASK, (
+                f"{' '.join(prefix)} 会删除文件，而且删掉就找不回来——"
+                "本项目对写操作有基线可回滚，对删除没有。需要你批准；"
+                "批准时可以只放这一次、始终允许（本工作区）、或者本轮一律拒绝。"
+            )
+
     from agents_dev.tools.exec import validate_command
 
     reason = validate_command(list(argv))
@@ -120,13 +141,18 @@ def key_of(argv: Sequence[str]) -> str:
 class Grants:
     """已获得的授权。
 
-    分两层：本轮的临时授权，和持久化的长期授权。
-    临时授权用完即弃，长期授权落盘，跨会话生效。
+    三层：本轮的临时允许、落盘的长期允许（绑定当前工作区）、
+    以及**本轮一律拒绝**。
+
+    最后那一层是「本轮会话全部拒绝」的落点。它必须存在，而且要按前缀粒度：
+    用户拒绝一次删除，不该被记成「永久不许删」——那是死路；但也不该被
+    记成「每次都要重问一遍」——那会变成骚扰。所以它只封本轮。
     """
 
     path: Path | None = None
     session: set[str] = field(default_factory=set)
     persistent: set[str] = field(default_factory=set)
+    blocked: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.path is not None and self.path.exists():
@@ -140,8 +166,18 @@ class Grants:
         key = key_of(argv)
         return key in self.session or key in self.persistent
 
+    def blocks(self, argv: Sequence[str]) -> bool:
+        """本轮已表态「这类别再问了」。"""
+        return key_of(argv) in self.blocked
+
+    def block(self, argv: Sequence[str]) -> str:
+        key = key_of(argv)
+        self.blocked.add(key)
+        return key
+
     def grant(self, argv: Sequence[str], permanent: bool = False) -> str:
         key = key_of(argv)
+        self.blocked.discard(key)  # 允许了就不再拦
         if permanent:
             self.persistent.add(key)
             self._flush()

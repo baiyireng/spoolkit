@@ -38,6 +38,7 @@ from agents_dev.tools.grant import Grants
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.verify import make_verifier
 from agents_dev.tools.search import search_code_spec
+from agents_dev.tools.stats import dir_stats_spec
 
 # 符号表给人「有哪些东西」，内容给人「它是怎么写的」。两块都要：
 # 只有符号表时，模型会一直查、始终不下手（实测本地 7B 的整条轨迹里
@@ -188,6 +189,7 @@ def assemble_loop(
     registry.register(read_file_spec(project_root, parts.pending, parts.read_roots))
     registry.register(list_dir_spec(project_root, parts.pending, parts.read_roots))
     registry.register(search_code_spec(project_root, parts.pending, parts.read_roots))
+    registry.register(dir_stats_spec(project_root, parts.read_roots))
     # 怀疑是环境或工具本身有问题时的申请通道。只登记与读回，
     # 报告由具备真实环境权限的一侧出具——它自己写不了。
     registry.register(request_diagnosis_spec(project_root))
@@ -313,11 +315,18 @@ def build_approver(project_root: Path):
     def approver(argv, reason: str) -> str:
         print(f"\n模型请求执行一条白名单外的命令：\n  {' '.join(argv)}")
         print(f"原因：{reason}")
-        answer = input("[s]本轮允许 / [a]永久允许 / [n]拒绝 → ").strip().lower()
-        if answer in ("a", "always"):
+        # 四档。第三、四档刻意分开：只拒这一次，和「本轮别再问了」是两种
+        # 意思，混成一个的结果要么是骚扰，要么是死路。
+        answer = input(
+            "[o]本次允许 / [s]始终允许（本工作区，落盘） / "
+            "[n]拒绝 / [b]本轮全部拒绝 → "
+        ).strip().lower()
+        if answer in ("o", "once", "y"):
+            return "once"
+        if answer in ("s", "session", "always", "a"):
             return "always"
-        if answer in ("s", "y", "session"):
-            return "session"
+        if answer in ("b", "block"):
+            return "block"
         return "deny"
 
     return approver, grants

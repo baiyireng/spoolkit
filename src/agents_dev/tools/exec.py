@@ -210,9 +210,17 @@ def _request_approval(
         )
 
     answer = approver(argv, reason)
+    if answer == "once":
+        return True, ""  # 只放这一次，不记
     if answer in ("session", "always"):
         grants.grant(argv, permanent=answer == "always")
         return True, ""
+    if answer == "block":
+        grants.block(argv)
+        return False, (
+            f"用户拒绝了，并且本轮不再询问这类命令：{' '.join(argv)}。"
+            "换个不依赖它的做法；确实必要就在结论里说明需要用户手动执行什么。"
+        )
     return False, f"用户拒绝了执行：{' '.join(argv)}"
 
 
@@ -230,6 +238,15 @@ def _run(
         return ToolResult(ok=False, content=reason)
     if level == ASK:
         store = grants if grants is not None else Grants()
+        if store.blocks(argv):
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"用户在本轮已经表过态：这类命令统统不许。"
+                    f"（{' '.join(argv)}）换个不依赖它的做法，或者"
+                    "在结论里说明需要用户手动执行什么。"
+                ),
+            )
         allowed, message = _request_approval(argv, reason, approver, store)
         if not allowed:
             return ToolResult(ok=False, content=message)
