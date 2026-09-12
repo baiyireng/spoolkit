@@ -288,7 +288,7 @@ def _clause_start(line: str, position: int) -> int:
 
 
 def _values_in(items: list, dimension: str) -> list[float]:
-    """这个对象在某一类量纲上的值。没有这一类，就轮不到它当主语。"""
+    """这个对象在某一类量纲上的值。"""
     found: list[float] = []
     for fact in items:
         item = _canonical(fact.value, fact.unit)
@@ -352,7 +352,8 @@ def mismatched(
             )
 
             # 「清了能省多少」不是「它有多大」。前者是推算，不判配错。
-            if _PROJECTION.search(lowered[_clause_start(lowered, match.start()) : match.start()]):
+            clause = lowered[_clause_start(lowered, match.start()) : match.start()]
+            if _PROJECTION.search(clause):
                 continue
 
             # 先找这个数前面最近的那个对象名——**任何量纲都算**，只是定「谁」。
