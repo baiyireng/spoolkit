@@ -117,6 +117,33 @@ def test_连不上服务时给出可操作的提示() -> None:
     gateway.close()
 
 
+def test_生成超时按输出预算放大() -> None:
+    """超时不能是常数：生成 2457 token 和 200 token，该等的时间差一个量级。
+
+    实测踩过：输出预算被抬到 30% 之后，一次生成超过了死的 180 秒，
+    ReadTimeout 把整条长任务打崩——而它本来只是个「服务是不是挂了」的安全网。
+    """
+    gateway = _gateway(lambda request: httpx.Response(200, json=_completion()))
+    assert gateway._timeout_for(200) == 180.0  # 构造时给的下限
+    assert gateway._timeout_for(2000) == 400.0  # 2000 × 0.2
+    gateway.close()
+
+
+def test_超时和连不上分开报() -> None:
+    """混在一起会把排查方向指错：服务好好的，只是这次生成太长。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("too slow")
+
+    gateway = _gateway(handler)
+    with pytest.raises(LlamaCppError) as excinfo:
+        gateway.chat(_request())
+    message = str(excinfo.value)
+    assert "没返回" in message
+    assert "请确认服务已启动" not in message
+    gateway.close()
+
+
 def test_token计数走服务端tokenize() -> None:
     seen: dict = {}
 

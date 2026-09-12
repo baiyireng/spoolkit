@@ -16,6 +16,16 @@ from agents_dev.llm.types import ChatRequest, ChatResponse, Message
 from agents_dev.net import system_proxy
 from agents_dev.errors import ContextOverflowError
 
+# 生成时间的超时**不能是常数**：它是「让它生成多少 token」的函数。
+#
+# 实测踩过这一条：输出预算被抬到 30%（2457 token）之后，一次生成超过了死的
+# 180 秒，httpx 抛 ReadTimeout，而循环没有接住——**整条长任务就这么崩了**，
+# 检查点虽然在，那一轮的上下文全没了。
+#
+# 取值按「每秒 5 token」这种保守下界估：宁可多等，也不要因为算得刚刚好而崩。
+# 它只是「服务是不是挂了」的安全网，不是性能参数。
+SECONDS_PER_OUTPUT_TOKEN = 0.2
+
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_MODEL = "local"
 
@@ -71,6 +81,8 @@ class LlamaCppGateway:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
+        # 这是**下限**：每请求的实际超时按 max_tokens 放大（见 _timeout_for）。
+        self._timeout = timeout
         self._proxy = proxy
         self._base_url = base_url.rstrip("/")
         self._client = httpx.Client(
@@ -87,10 +99,23 @@ class LlamaCppGateway:
         )
 
     def chat(self, request: ChatRequest) -> ChatResponse:
+        timeout = self._timeout_for(request.max_tokens)
         try:
             response = self._client.post(
-                "/v1/chat/completions", json=_to_payload(request, self.model)
+                "/v1/chat/completions",
+                json=_to_payload(request, self.model),
+                timeout=timeout,
             )
+        except httpx.ReadTimeout as exc:
+            # 分开报：超时和「连不上」是两件事，混在一起会把排查方向指错。
+            # 实测那条长任务崩在这里，而报错说的是「请确认服务已启动」——
+            # 服务好好的，只是这一次生成比超时还长。
+            raise LlamaCppError(
+                f"服务端 {timeout:.0f} 秒内没返回（max_tokens={request.max_tokens}，"
+                f"提示词约 {len(''.join(m.content for m in request.messages))} 字）。"
+                "服务多半没挂，是这次生成太长或太慢——"
+                "调小这次的输出量（把活拆开做）比调大超时更管用。"
+            ) from exc
         except httpx.HTTPError as exc:
             raise LlamaCppError(
                 f"无法连接 llama-server（{type(exc).__name__}），"
@@ -129,6 +154,14 @@ class LlamaCppGateway:
             completion_tokens=int(usage.get("completion_tokens", 0)),
             truncated=choices[0].get("finish_reason") in ("length", "max_tokens"),
         )
+
+    def _timeout_for(self, max_tokens: int) -> float:
+        """这次请求该等多久。
+
+        不是常数：让它生成 2457 token 和 200 token，该等的时间差一个量级。
+        构造时的 timeout 当作下限，实际值按 max_tokens 放大。
+        """
+        return max(self._timeout, max_tokens * SECONDS_PER_OUTPUT_TOKEN)
 
     def context_window(self) -> int | None:
         """向 /props 询问实际上下文长度。
