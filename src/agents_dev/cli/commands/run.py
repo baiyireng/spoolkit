@@ -113,6 +113,17 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             subagent_steps=args.subagent_steps,
             supervise=not args.no_supervise,
             step_ceiling=args.step_ceiling,
+            # 能力标定：只在使用者显式给了值时才覆盖默认
+            **(
+                {"max_targets": args.max_targets}
+                if getattr(args, "max_targets", 0)
+                else {}
+            ),
+            **(
+                {"review_limit": args.review_limit}
+                if getattr(args, "review_limit", 0)
+                else {}
+            ),
         ),
         wiring=LoopWiring(
             memory=memory,
@@ -171,6 +182,17 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             subagent_steps=args.subagent_steps,
             supervise=not args.no_supervise,
             step_ceiling=args.step_ceiling,
+            # 能力标定：只在使用者显式给了值时才覆盖默认
+            **(
+                {"max_targets": args.max_targets}
+                if getattr(args, "max_targets", 0)
+                else {}
+            ),
+            **(
+                {"review_limit": args.review_limit}
+                if getattr(args, "review_limit", 0)
+                else {}
+            ),
         ),
         wiring=LoopWiring(
             memory=memory,

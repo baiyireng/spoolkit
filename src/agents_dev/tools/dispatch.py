@@ -26,20 +26,6 @@ from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.types import ToolResult, ToolSpec
 
-# 一次派发最多带几件。子智能体一轮的步数预算默认 20 步，而一件活平均要
-# 2～3 步（读、改、验各一步）——按这个算，十件上下就是它的上限。
-#
-# 超过就**当场拦下并说明算法**，而不是让它硬做：实测一次派了 50 件进去，
-# 实现者把预算烧光后撞上重复保护，回来只剩一句无从行动的话，然后还被送去
-# 审查——审查者审的是个半成品。规模问题该在派之前拦。
-MAX_TARGETS = 10
-
-# 但**审查**的瓶颈比「做」低得多：8 件那次的实测是「活干成了（8/8 通过），
-# 审查没能给出结论」——8 处改动要在审查者自己那一个上下文里核对。
-# 所以 5 件以上不拦，但要在结果里明说风险：那是它下一次决定「派多少」的
-# 唯一时机。光写在描述里没用——描述已经证明是软的。
-REVIEW_LIMIT = 5
-
 # 派发战绩的行数与条数上限：它只在「正好要判断」的时候被取用（见下面
 # dispatch_history），所以留着比丢掉划算——但也别无限长。
 LOG_LIMIT = 20
@@ -121,6 +107,11 @@ def dispatch_spec(
     汇成一份 diff，用户只确认一次，也不会出现两套互相矛盾的视图。
     """
 
+    # 这两个数是**能力标定**，从本次运行的配置来，而不是写死在工具里：
+    # 本地 20 步预算的小模型和远程强模型不是一回事。
+    max_targets = int(getattr(config, "max_targets", 10) or 10)
+    review_limit = int(getattr(config, "review_limit", 5) or 5)
+
     def handler(args: dict) -> ToolResult:
         spec = TaskSpec(
             goal=str(args.get("goal") or "").strip(),
@@ -133,15 +124,15 @@ def dispatch_spec(
         if problem is not None:
             return ToolResult(ok=False, content=f"不能派发：{problem}")
 
-        if len(spec.targets) > MAX_TARGETS:
+        if len(spec.targets) > max_targets:
             return ToolResult(
                 ok=False,
                 content=(
                     f"不能派发：这次带了 {len(spec.targets)} 件，超出一次能派的上限"
-                    f"（{MAX_TARGETS} 件）。子智能体的步数预算是一轮 "
+                    f"（{max_targets} 件）。子智能体的步数预算是一轮 "
                     f"{config.subagent_steps} 步，而一件活平均要 2～3 步——"
                     "派大了它只会烧光预算、交回一个半成品。"
-                    f"而且超过 {REVIEW_LIMIT} 件时**审查那一步就容易给不出结论**"
+                    f"而且超过 {review_limit} 件时**审查那一步就容易给不出结论**"
                     "（实测 8 件那次：活全做对了，审查没结论）。"
                     "拆成几批再派，或者自己先做掉一部分。"
                 ),
@@ -177,21 +168,21 @@ def dispatch_spec(
                 content=(
                     "派出去的活没做完——子智能体说这块对它太大：\n"
                     f"{outcome.too_big}\n"
-                    f"（一次能派的上限约 {MAX_TARGETS} 件，它的步数预算是"
+                    f"（一次能派的上限约 {max_targets} 件，它的步数预算是"
                     f" {config.subagent_steps} 步。）"
                     "拆小之后再派；也可以自己先做掉一部分再派剩下的。"
                 ),
                 usage=outcome.usage,
             )
         content = _render(outcome)
-        if len(spec.targets) > REVIEW_LIMIT:
+        if len(spec.targets) > review_limit:
             # 结果里说，而不是只在描述里说：这一刻它刚看到「这批能不能被审出
             # 结论」，而这是它决定下一批派多少的唯一时机。
             content += (
-                f"\n\n⚠ 这批带了 {len(spec.targets)} 件，超过 {REVIEW_LIMIT} 件："
+                f"\n\n⚠ 这批带了 {len(spec.targets)} 件，超过 {review_limit} 件："
                 "审查者要在一个上下文里核对这么多处，很容易给不出结论"
                 "（实测 8 件那次就是：活全做对了，审查没结论）。"
-                f"下一批拆到 {REVIEW_LIMIT} 件以内。"
+                f"下一批拆到 {review_limit} 件以内。"
             )
         return ToolResult(ok=True, content=content, usage=outcome.usage)
 
@@ -208,9 +199,9 @@ def dispatch_spec(
             "**一次派发可以带一批活**：一批同类的小活合成一次，摊薄固定的那几次"
             "调用之后才划算——单看一道小题，派发是亏的，所以别一道一道派。"
             f"批次别太大：子智能体的上下文和你一样有限，一次交 3～5 件比较稳。"
-            f"超过 {REVIEW_LIMIT} 件时**审查那一步容易给不出结论**（实测 8 件那次："
+            f"超过 {review_limit} 件时**审查那一步容易给不出结论**（实测 8 件那次："
             "活全做对了，审查没结论）——审查者要在一个上下文里核对所有改动。"
-            f"绝对上限 {MAX_TARGETS} 件，硬拦。"
+            f"绝对上限 {max_targets} 件，硬拦。"
             "**它做得完做不完会如实告诉你**：如果这块对它太大，它会在结论里直接说"
             "「太大」并给出拆法，那时把任务拆小再派，不要硬塞——硬塞的代价是"
             "烧掉它的整轮预算，换回一个半成品。"

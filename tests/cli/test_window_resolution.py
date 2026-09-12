@@ -1,8 +1,4 @@
-from agents_dev.cli.app import (
-    DEFAULT_WINDOW,
-    MAX_AUTO_WINDOW,
-    resolve_window,
-)
+from agents_dev.cli.app import DEFAULT_WINDOW, resolve_window
 from agents_dev.llm.fake import FakeModel
 from agents_dev.llm.tokenizer import OfflineTokenCounter
 
@@ -23,14 +19,19 @@ def test_查询不到时退回默认值() -> None:
     assert resolve_window(_gateway(None), 0) == DEFAULT_WINDOW
 
 
-def test_超大窗口被压到上限() -> None:
-    assert resolve_window(_gateway(1048576), 0) == MAX_AUTO_WINDOW
+def test_大窗口不再被我们砍掉() -> None:
+    """这里原先写死过一个 32768 的上限，理由是「不封顶会让短上下文特化失去意义」
+    ——那是为了验证我们自己的设计，不是为了让活干得更好。
+
+    代价很实在：远程供应商报 200K，我们按 32K 跑，能力被自己砍掉五分之四。
+    判据：**这个数字只会因为模型更强而被突破吗？** 是 → 默认不该压低它。
+    """
+    assert resolve_window(_gateway(1048576), 0) == 1048576
 
 
-def test_上限以内的窗口原样采用() -> None:
+def test_普通窗口原样采用() -> None:
     assert resolve_window(_gateway(16384), 0) == 16384
 
 
-def test_显式指定不受上限约束() -> None:
+def test_想限制就显式给window() -> None:
     assert resolve_window(_gateway(1048576), 65536) == 65536
-

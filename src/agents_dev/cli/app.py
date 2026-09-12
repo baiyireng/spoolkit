@@ -21,7 +21,6 @@ from agents_dev.cli.commands.diagnose import diagnose_command
 from agents_dev.cli.commands.session import session_command
 from agents_dev.cli.options import (
     DEFAULT_WINDOW,
-    MAX_AUTO_WINDOW,
     report_policy,
     resolve_policy,
     resolve_scope,
@@ -47,7 +46,6 @@ from agents_dev.policy import POLICIES
 __all__ = [
     "DEFAULT_WINDOW",
     "LoopWiring",
-    "MAX_AUTO_WINDOW",
     "PREFETCH_BUDGET",
     "assemble_loop",
     "build_approver",
@@ -97,6 +95,18 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         "--no-supervise",
         action="store_true",
         help="关掉督导：撞上步数上限就停，由你自己决定要不要 --resume",
+    )
+    parser.add_argument(
+        "--max-targets",
+        type=int,
+        default=0,
+        help="一次派发最多带几件（0 表示用默认值 10）。强模型/远程 API 可以调大",
+    )
+    parser.add_argument(
+        "--review-limit",
+        type=int,
+        default=0,
+        help="超过几件就提醒「审查会吃力」（0 表示用默认值 5）",
     )
     parser.add_argument(
         "--subagent-steps",

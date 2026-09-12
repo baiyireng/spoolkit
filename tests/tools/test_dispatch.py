@@ -308,6 +308,38 @@ def test_超过五件不拦但要看得到风险(tmp_path: Path) -> None:
     assert "审查" in fed_back
 
 
+def test_两个上限是配置而不是写死的常量(tmp_path: Path) -> None:
+    """能力标定不是安全边界：本地小模型和远程强模型不是一回事。
+
+    写死在工具里，等于替强模型砍掉能力——外部 API 的窗口、预算、判断力
+    都比本机 27B 强得多，它一次完全可以带 20 件。
+    """
+    registry = ToolRegistry()
+    registry.register(list_dir_spec(tmp_path))
+    wide = dispatch_spec(
+        None,
+        registry,
+        Config(
+            project_root=tmp_path,
+            context_window=8192,
+            max_targets=20,
+            review_limit=15,
+        ),
+        OfflineTokenCounter(),
+    )
+    # 15 件在这个配置下不越上限
+    result = wide.handler(
+        {
+            "goal": "把这 15 处都改对",
+            "acceptance": "逐个跑测试通过",
+            "targets": [f"{i:02d}.py" for i in range(15)],
+        }
+    )
+    # 网关是 None，会走到「派发没能跑起来」——但**不是被上限拦下的**
+    assert "超出一次能派的上限" not in result.content
+    assert "派发没能跑起来" in result.content
+
+
 def test_太大时给主循环的话是可行动的(tmp_path: Path) -> None:
     """「太大」要和「做砸了」分开说：一个要拆任务，一个要改代码。"""
     loop, _ = _build(

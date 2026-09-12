@@ -16,10 +16,19 @@ from agents_dev.policy import (
     policy_path,
 )
 
-# 云端模型的窗口动辄上百万 token。直接采用会让整套「短上下文特化」的设计
-# 失去意义——配额永远用不完，截断逻辑永远不触发，也就永远测不出问题。
-# 所以给自动探测加一个上限，保留设计前提，同时仍远大于原来写死的 8192。
-MAX_AUTO_WINDOW = 32768
+# 探测到的窗口**直接采用**，不再人为封顶。
+#
+# 这里原先写死过一个 32768 的上限，理由是「不封顶会让短上下文特化失去意义
+# （配额永远用不完、截断永远不触发）」——那是为了**验证我们自己的设计**，
+# 而不是为了把活干好。代价很实在：远程供应商报 200K，我们按 32K 跑，
+# 能力被我们自己砍掉五分之四。
+#
+# 判据用这一句就够：**这个数字只会因为模型更强而被突破吗？** 是 → 它必须
+# 可调，且默认不该压低。想限制就显式给 --window（那条路一直通着）。
+#
+# 代价要说清：配额是**比例**，窗口变大意味着每个请求最多能装的东西也变多
+# （代码块 35% → 200K 窗口下最多 70K）。那是花钱的取舍，不是能力的取舍；
+# 用量报表里看得见，由使用者定，而不是由我们替他砍。
 DEFAULT_WINDOW = 8192
 
 
@@ -35,7 +44,7 @@ def resolve_window(gateway: ModelGateway, requested: int) -> int:
     detected = gateway.context_window()
     if not detected:
         return DEFAULT_WINDOW
-    return min(detected, MAX_AUTO_WINDOW)
+    return detected
 
 
 def resolve_scope(
@@ -76,4 +85,3 @@ def report_policy(policy: str, scope: Sequence[str]) -> None:
             if scope
             else "自动落盘范围：（未指定 --scope，改动仍会逐项确认）"
         )
-
