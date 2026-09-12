@@ -39,6 +39,12 @@ EDIT_TOOLS = ("replace_lines", "replace_text", "write_file")
 REPEAT_WARN_AT = 2
 REPEAT_BLOCK_AT = 3
 
+# 只看「连续相同」会漏掉交替打转：A、B、A、B…每一步都和上一步不同，
+# 计数每次都被重置。实测审查者用 git status / git diff 交替复读了 11 步，
+# 一次都没被拦住。所以再加一条频率判据：同一个调用在最近几次里出现够多，
+# 同样是原地打转，不管中间夹了什么。
+RECENT_WINDOW = 6
+
 # 连续多少步没有提出任何改动，就收窄输出通道。
 # 重复调用检测只盖得住「参数完全相同」的打转，盖不住「每次都换一个查询」
 # 的漫游——实测那条轨迹 12 步里换了 8 种不同的调用，一次都没被拦住。
@@ -283,6 +289,7 @@ class AgentLoop:
         # 中间只要出现一个不同的调用就清零。
         last_signature = ""
         repeats = 0
+        recent: list[str] = []
         no_edit_steps = 0
         empty_turns = 0
 
@@ -306,8 +313,15 @@ class AgentLoop:
                 self._commit_schema is not None
                 and no_edit_steps >= NO_EDIT_LIMIT
             )
+            # 只读角色没有写工具，收窄无从谈起——对它来说唯一的「推进」
+            # 就是给结论。没有这股压力，它会一路翻文件翻到步数上限。
+            concluding = (
+                self._commit_schema is None and no_edit_steps >= NO_EDIT_LIMIT
+            )
             if forcing:
                 feedback = T.FORCE_COMMIT
+            elif concluding:
+                feedback = T.FORCE_CONCLUDE
             assembled = self._assemble(
                 state, history, feedback, prefetched, hot, lesson_text
             )
@@ -388,14 +402,22 @@ class AgentLoop:
                     signature = call_signature(call)
                     repeats = repeats + 1 if signature == last_signature else 1
                     last_signature = signature
-                    result = self._invoke_guarded(call, repeats)
+                    recent.append(signature)
+                    del recent[:-RECENT_WINDOW]
+                    # 两条判据各算各的：连续相同按连续次数算，交替打转按出现频率算。
+                    # 分开是因为文案要说实话——「和上一步完全相同」在交替打转时
+                    # 是假的，上一步明明是别的调用。
+                    seen = recent.count(signature)
+                    level = max(repeats, seen)
+                    result = self._invoke_guarded(call, repeats, seen)
                     self._note_progress(state, call, result)
                     if result.ok and call.name in EDIT_TOOLS:
                         edited = True
-                    if repeats >= REPEAT_WARN_AT:
+                    if level >= REPEAT_WARN_AT:
                         trace.append(
-                            f"step{state.step}: 重复调用第 {repeats} 次：{call.name}"
+                            f"step{state.step}: 重复调用第 {level} 次：{call.name}"
                         )
+                    repeats = level
                     self._emit(
                         "tool",
                         {
@@ -440,7 +462,9 @@ class AgentLoop:
                 no_edit_steps = 0
             elif turn.tool_calls:
                 no_edit_steps += 1
-                if no_edit_steps == NO_EDIT_LIMIT:
+                # 只读角色没有写工具，收窄无从谈起——日志说「收窄为只能写」
+                # 而实际什么都没发生，那是最难查的一类假日志。
+                if no_edit_steps == NO_EDIT_LIMIT and self._commit_schema is not None:
                     trace.append(
                         f"step{state.step}: 连续 {NO_EDIT_LIMIT} 步没有提出改动，"
                         "下一轮收窄为只能写"
@@ -480,31 +504,38 @@ class AgentLoop:
             tuple(item[0] for item in pushed),
         )
 
-    def _invoke_guarded(self, call: ToolCall, repeats: int) -> ToolResult:
+    def _invoke_guarded(
+        self, call: ToolCall, repeats: int, seen: int = 1
+    ) -> ToolResult:
         """执行一次工具调用，并对「原地打转」作出反应。
 
         小模型在短上下文里失去方向时会反复做同一个动作，而且不会自己停：
         实测本地 7B 在回归集里连续 10 次调用同一个 find_callers、参数一字
         不差。它不是在试探，是卡住了——这时候只能由循环把它顶回去，
         等模型自己醒悟是不现实的。
+
+        repeats 是「连续相同的次数」，seen 是「最近几次窗口里出现的次数」。
+        后者管交替打转（A、B、A、B…），前者管原地复读。
         """
-        if repeats >= REPEAT_BLOCK_AT:
+        level = max(repeats, seen)
+        if level >= REPEAT_BLOCK_AT:
             return ToolResult(
                 ok=False,
                 content=(
-                    f"这一步与前面 {repeats - 1} 次完全相同，结果不会改变，"
+                    f"这个调用在最近几步里已经做过 {level - 1} 次，结果不会改变，"
                     "因此没有执行。请换一种做法：换一个工具、换一组参数，"
                     "或者先去看别的地方；如果任务其实已经完成，直接给出结论即可。"
                 ),
             )
         result = self.registry.invoke(call)
-        if repeats >= REPEAT_WARN_AT:
+        if level >= REPEAT_WARN_AT:
+            if repeats >= REPEAT_WARN_AT:
+                note = "注意：这一步和上一步完全相同，你已经做过一次，结果也一样。"
+            else:
+                note = "注意：这个调用你在最近几步里已经做过了，结果不会变。"
             return ToolResult(
                 ok=result.ok,
-                content=(
-                    "注意：这一步和上一步完全相同，你已经做过一次，结果也一样。"
-                    "如果它没有帮你推进，就换一种做法。\n" + result.content
-                ),
+                content=(note + "如果它没有帮你推进，就换一种做法。\n" + result.content),
             )
         return result
 

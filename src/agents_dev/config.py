@@ -18,6 +18,10 @@ class Config:
     context_window: int = 8192
     max_steps: int = 10
     subagent_steps: int = 20
+    # 一次派发最多「实现 → 审查」几轮。审查不通过会打回给主循环，
+    # 由它决定要不要再派一次修复；这个数字是那道循环的上限，
+    # 不是留给模型自己收敛的空间——没有上限的自动重试等于没有退路。
+    review_rounds: int = 2
     state_dir_name: str = ".agent"
 
     @property

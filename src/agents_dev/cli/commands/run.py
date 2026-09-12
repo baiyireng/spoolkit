@@ -205,6 +205,15 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
         return 0
 
     registry = _plain_registry(project_root, pending)
+    # 子智能体和主循环共用同一套自动验证：审查者本来就有 run_command，
+    # 但实测模型几乎从不主动跑测试——指望它凭自觉去验是不现实的。
+    from agents_dev.tools.verify import make_verifier
+
+    # 审查者要审的是「改动差异」，不是实现者的总结文字。不给 diff 的话，
+    # 它只能靠反复读文件自己还原改了什么——实测它为此翻到步数上限。
+    artifacts = "\n\n".join(
+        f"--- {change.path} ---\n{change.diff}" for change in pending.items()
+    )
     delegated = run_delegated(
         plan,
         gateway,
@@ -216,6 +225,8 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
             max_steps=args.max_steps,
             subagent_steps=args.subagent_steps,
         ),
+        artifacts=artifacts,
+        verify=make_verifier(project_root, pending),
     )
     for line in delegated.trace:
         print(line)
@@ -223,6 +234,16 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
     print(delegated.implementer_final)
     print("--- 独立审查 ---")
     print(delegated.reviewer_final)
+    if delegated.rejected:
+        print("--- 审查未通过 ---")
+        print("改动还在待确认清单里，没有自动落盘。理由：")
+        for reason in delegated.review.reasons:
+            print(f"  - {reason}")
+    elif delegated.review is not None and delegated.review.inconclusive:
+        print("--- 审查没有结论 ---")
+        print("审查者自己没跑完，所以这次改动既没被否定也没被确认：")
+        for reason in delegated.review.reasons:
+            print(f"  - {reason}")
     _settle_pending(args, project_root, pending)
     return 0
 
@@ -240,7 +261,10 @@ def _plain_registry(project_root, pending):
     registry.register(read_file_spec(project_root))
     registry.register(list_dir_spec(project_root))
     registry.register(search_code_spec(project_root))
-    registry.register(run_command_spec(project_root))
+    # 必须把 pending 传进去：否则子智能体改完代码再跑测试，测到的是**旧代码**
+    # （改动还没落盘），它会以为自己的修复没生效，然后去改一个已经改对的函数。
+    # trial_workspace 这个模块存在的全部理由就是这个，别在这一条路径上漏掉。
+    registry.register(run_command_spec(project_root, pending))
     # 与主循环共用同一套判定，否则会出现「同一个项目里子智能体有一把
     # 主循环没有的工具」这种分叉，而它只会在跑偏时才暴露。
     register_edit_tools(registry, project_root, pending)

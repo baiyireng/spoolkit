@@ -40,6 +40,68 @@ PLAN_SCHEMA: dict[str, Any] = {
 
 PLAN_PROMPT = T.DISPATCH
 
+# 审查结论必须结构化。审查者的 final 是自由文本，直接拿来判「过没过」
+# 只能靠关键词猜；而「过得含糊」和「没过」是两种完全不同的处置。
+REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "fail"]},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "fix_goal": {"type": "string"},
+    },
+    "required": ["verdict", "reasons"],
+}
+
+
+@dataclass(frozen=True)
+class Review:
+    """一次审查的判定结果。"""
+
+    passed: bool
+    reasons: tuple[str, ...] = ()
+    fix_goal: str = ""
+    # 审查没有得出结论（比如审查者自己撞了步数上限）。这和「审查后判定不合格」
+    # 是两件完全不同的事：前者说明这次审查根本没发生，拿它去触发修复重派，
+    # 会把一处正确的实现判成失败——实测第一次跑就撞上了。
+    inconclusive: bool = False
+
+
+def judge_review(
+    gateway: ModelGateway, acceptance: str, reviewer_final: str, max_tokens: int = 512
+) -> Review:
+    """把审查者的自由文本结论判成 pass / fail。
+
+    解析不出来时按**未通过**处理：含糊的通过等于没有审查，而它带来的
+    代价是把一处未验证的改动当成已验证的交付出去。
+    """
+    response = gateway.chat(
+        ChatRequest(
+            messages=(
+                Message(
+                    role="user",
+                    content=T.JUDGE_REVIEW.format(
+                        acceptance=acceptance or "（没写验收标准）",
+                        review=reviewer_final or "（审查者没有给出结论）",
+                    ),
+                ),
+            ),
+            max_tokens=max_tokens,
+            response_schema=REVIEW_SCHEMA,
+        )
+    )
+    try:
+        payload = json.loads(response.text)
+    except json.JSONDecodeError:
+        return Review(False, ("审查结论无法解析，按未通过处理",))
+    if not isinstance(payload, dict):
+        return Review(False, ("审查结论格式不对，按未通过处理",))
+    verdict = str(payload.get("verdict", "")).strip()
+    reasons = tuple(str(item) for item in payload.get("reasons") or () if item)
+    fix_goal = str(payload.get("fix_goal") or "").strip()
+    if verdict == "pass" and reasons:
+        return Review(True, reasons)
+    return Review(False, reasons or ("审查没有给出通过的依据",), fix_goal)
+
 
 @dataclass(frozen=True)
 class DispatchPlan:
@@ -77,6 +139,22 @@ def _parse_plan(text: str, goal: str) -> DispatchPlan:
     return DispatchPlan(True, reason, spec=spec)
 
 
+def _evidence(artifact: str, verify) -> str:
+    """交给审查者的证据：改动差异 + 自动验证的结果。
+
+    实测不给测试结果时，审查者会自己一路翻文件去还原「刚才发生了什么」，
+    把整轮预算耗光，最后连结论都给不出来。它要的是证据，不是自由度。
+    """
+    if verify is None:
+        return artifact
+    try:
+        result = verify()
+    except Exception as exc:  # 验证出问题不该让审查整个跑不起来
+        return f"{artifact}\n\n自动验证没能跑起来（{type(exc).__name__}）：{exc}"
+    status = "通过" if result.ok else "未通过"
+    return f"{artifact}\n\n自动验证结果：{status}\n{result.content[:600]}"
+
+
 def plan_dispatch(
     gateway: ModelGateway,
     goal: str,
@@ -106,7 +184,53 @@ class DelegatedResult:
     plan: DispatchPlan
     implementer_final: str = ""
     reviewer_final: str = ""
+    review: Review | None = None
+    rounds: int = 0
     trace: list[str] = field(default_factory=list)
+
+    @property
+    def rejected(self) -> bool:
+        """审查最终判了不通过。
+
+        注意不含「审查没得出结论」——那种情况改动既没被否定，也没被确认，
+        该交给用户判断，而不是拿去当失败处理。
+        """
+        return (
+            self.review is not None
+            and not self.review.passed
+            and not self.review.inconclusive
+        )
+
+
+def plan_repair(
+    gateway: ModelGateway,
+    spec: TaskSpec,
+    review: Review,
+    max_tokens: int = 1024,
+) -> DispatchPlan:
+    """把审查结论打回给主循环，由它决定要不要再派一次修复。
+
+    这个判断刻意交回给模型，不用「凡不通过就重试」的规则：有些问题
+    重试多少次都是同一个结果，而模型能看到审查具体说了什么。
+    闸门照旧——再派出去的任务说明仍然必须有验收标准。
+    """
+    response = gateway.chat(
+        ChatRequest(
+            messages=(
+                Message(
+                    role="user",
+                    content=T.REPAIR.format(
+                        goal=spec.goal,
+                        acceptance=spec.acceptance,
+                        reasons="；".join(review.reasons) or "（没给理由）",
+                    ),
+                ),
+            ),
+            max_tokens=max_tokens,
+            response_schema=PLAN_SCHEMA,
+        )
+    )
+    return _parse_plan(response.text, spec.goal)
 
 
 def run_delegated(
@@ -116,33 +240,82 @@ def run_delegated(
     registry: ToolRegistry,
     config: Config,
     artifacts: str = "",
+    verify=None,
+    max_rounds: int | None = None,
 ) -> DelegatedResult:
     """先让实现者做，再让审查者在独立上下文里验。
 
     写者与验者用同一个模型的两个独立上下文——不是不同模型。
     审查者拿到的是需求、约束、验收标准和改动差异，**不含实现者的推理过程**，
     否则它只是在附和那个推理。
+
+    **审查不通过就打回给主循环**：由它决定要不要再派一次修复任务。
+    循环有上限（config.review_rounds）——「不通过就重试」本身会变成
+    一个自动的无限循环，而有些问题重试多少次都是同一个结果。
     """
     if not plan.delegate or plan.spec is None:
         raise ValueError("这份计划不包含可派发的任务说明")
 
     result = DelegatedResult(plan=plan)
+    limit = config.review_rounds if max_rounds is None else max_rounds
+    spec = plan.spec
 
-    implemented = run_role(
-        IMPLEMENTER, plan.spec, gateway, tokenizer, registry, config
-    )
-    result.implementer_final = implemented.final
-    result.trace.extend(f"[实现] {line}" for line in implemented.trace)
+    for index in range(max(1, limit)):
+        round_no = index + 1
+        implemented = run_role(
+            IMPLEMENTER, spec, gateway, tokenizer, registry, config, verify=verify
+        )
+        result.implementer_final = implemented.final
+        result.trace.extend(f"[实现 {round_no}] {line}" for line in implemented.trace)
 
-    review_spec = TaskSpec(
-        goal=f"独立审查这次改动：{plan.spec.goal}",
-        targets=plan.spec.targets,
-        constraints=plan.spec.constraints,
-        acceptance=plan.spec.acceptance,
-        out_of_scope=plan.spec.out_of_scope,
-        artifact=artifacts or implemented.final,
-    )
-    reviewed = run_role(REVIEWER, review_spec, gateway, tokenizer, registry, config)
-    result.reviewer_final = reviewed.final
-    result.trace.extend(f"[审查] {line}" for line in reviewed.trace)
+        review_spec = TaskSpec(
+            goal=f"独立审查这次改动：{spec.goal}",
+            targets=spec.targets,
+            constraints=spec.constraints,
+            acceptance=spec.acceptance,
+            out_of_scope=spec.out_of_scope,
+            artifact=_evidence(artifacts or implemented.final, verify),
+        )
+        reviewed = run_role(
+            REVIEWER, review_spec, gateway, tokenizer, registry, config, verify=verify
+        )
+        result.reviewer_final = reviewed.final
+        result.trace.extend(f"[审查 {round_no}] {line}" for line in reviewed.trace)
+
+        if reviewed.finished:
+            review = judge_review(gateway, spec.acceptance, reviewed.final)
+        else:
+            # 审查者自己没跑完，它的 final 是「已达步数上限」之类的话。
+            # 把这句话当成「审查判定不合格」会把一处正确的实现判死——
+            # 实测第一次跑就是这样：三个文件都改对了，却被打回重做一轮。
+            review = Review(
+                False,
+                (
+                    "审查没有得出结论：审查者自己撞上了步数上限"
+                    f"（{reviewed.steps} 步），不是判定改动不合格",
+                ),
+                inconclusive=True,
+            )
+        result.review = review
+        result.rounds = round_no
+        result.trace.append(
+            f"[判定 {round_no}] "
+            + ("通过" if review.passed else ("审查无结论" if review.inconclusive else "未通过"))
+            + (f"：{'；'.join(review.reasons)}" if review.reasons else "")
+        )
+        # 审查没结论时不该触发修复重派：什么都没查出来，
+        # 重派一次只是把同样的活再干一遍。
+        if review.passed or review.inconclusive or round_no >= limit:
+            break
+
+        # 打回给主循环：由它决定还要不要修。决定不修就停在这里，
+        # 把没通过的改动和理由一并交给用户。
+        repair = plan_repair(gateway, spec, review)
+        result.trace.append(
+            f"[打回] {'再派一次修复' if repair.delegate else '不再修'} —— {repair.reason}"
+        )
+        if not repair.delegate or repair.spec is None:
+            break
+        spec = repair.spec
+
     return result

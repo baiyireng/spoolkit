@@ -140,3 +140,30 @@ def test_中间插入别的调用后计数清零(tmp_path: Path) -> None:
 
     assert len(executed) == 3
     assert "完全相同" not in _last_prompt(loop)
+
+
+def test_交替打转也会被拦住(tmp_path: Path) -> None:
+    """A、B、A、B… 每一步都和上一步不同，只看「连续相同」会全漏掉。
+
+    实测审查者用 git status / git diff 交替复读了 11 步，一次都没被拦。
+    """
+    (tmp_path / "a.txt").write_text("内容\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("内容\n", encoding="utf-8")
+    pair = [
+        _turn("看 a", [_read("a.txt")]),
+        _turn("看 b", [_read("b.txt")]),
+    ]
+    loop = _build(tmp_path, pair * 4 + [_turn("算了", final="结束")])
+    executed: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        executed.append(call.arguments.get("path", ""))
+        return real(call)
+
+    loop.registry.invoke = counting
+    result = loop.run("来回看")
+
+    # 12 轮里每个文件最多真正读 2 次，第三次起被拦
+    assert executed.count("a.txt") <= 2
+    assert any("重复调用" in line for line in result.trace)

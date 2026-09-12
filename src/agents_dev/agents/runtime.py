@@ -59,6 +59,13 @@ REVIEWER = Role(
         "你负责独立审查一处改动。只依据需求描述、改动差异与测试结果判断，"
         "不要附和任何人的推理过程。重点看：是否满足了验收标准、是否引入了"
         "未预期的副作用、是否有更简单的做法。给出明确结论与理由。"
+        # 实测：不写这一句，它会去试 grep / sed / ls / pwd / python -c——
+        # 这些都不在白名单里，于是一整轮预算全花在被拒绝的命令上，
+        # 审查永远得不出结论。工具本来就是够的，它只是没想到用它们。
+        "搜代码用 search_code，看文件用 read_file，看符号用 find_symbol / "
+        "find_callers，跑测试用 run_command 执行 pytest。"
+        "不要用 grep、ls、sed、python -c 这类命令——它们不在白名单里，"
+        "只会把预算浪费在被拒绝上。"
     ),
     # 注意这里没有写权限：审查者不可能通过改代码来掩盖问题。
     # 审查者能跑测试但不能写代码：独立验证要靠自己动手跑，而不是附和实现者。
@@ -135,6 +142,7 @@ def run_role(
     registry: ToolRegistry,
     config: Config,
     max_steps: int | None = None,
+    verify: Any | None = None,
 ) -> LoopResult:
     """在一个独立干净上下文里运行一个角色。
 
@@ -162,5 +170,6 @@ def run_role(
         prefetch=None,
         memory=None,
         persona=role.system_prompt,
+        verify=verify,
     )
     return loop.run(spec.render())
