@@ -84,6 +84,7 @@ class DiagnosisRequest:
     evidence: str = ""
     created_at: float = 0.0
     report: dict = field(default_factory=dict)
+    consumed: bool = False
 
     @property
     def answered(self) -> bool:
@@ -97,6 +98,7 @@ class DiagnosisRequest:
             "evidence": self.evidence,
             "created_at": self.created_at,
             "report": self.report,
+            "consumed": self.consumed,
         }
 
     @classmethod
@@ -108,6 +110,7 @@ class DiagnosisRequest:
             evidence=str(payload.get("evidence", "")),
             created_at=float(payload.get("created_at") or 0.0),
             report=dict(payload.get("report") or {}),
+            consumed=bool(payload.get("consumed")),
         )
 
 
@@ -195,3 +198,48 @@ def read_report(root: Path, request_id: str) -> tuple[dict, bool]:
     report = dict(request.report)
     signature = str(report.pop("signature", ""))
     return report, verify(report, signature, load_key())
+
+
+def unread_reports(root: Path) -> list[tuple[DiagnosisRequest, dict, bool]]:
+    """有报告、但还没被读进上下文的那些。"""
+    found = []
+    for item in load_requests(root):
+        if not item.answered or item.consumed:
+            continue
+        report, verified = read_report(root, item.id)
+        found.append((item, report, verified))
+    return found
+
+
+def mark_consumed(root: Path, ids: list[str]) -> None:
+    """标记为已读。由循环做，不是模型——它不该有「假装读过」的机会。"""
+    wanted = set(ids)
+    for item in load_requests(root):
+        if item.id not in wanted:
+            continue
+        item.consumed = True
+        path = _dir(root) / f"{item.id}.json"
+        path.write_text(
+            json.dumps(item.to_json(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+
+def render_incoming(root: Path) -> str:
+    """把未读报告渲染成一段可直接注入上下文的话，并标记为已读。"""
+    unread = unread_reports(root)
+    if not unread:
+        return ""
+    blocks = ["有诊断报告回来了（问题已由具备真实环境权限的会话查过）："]
+    for item, report, verified in unread:
+        head = "（来源已验证）" if verified else "（来源无法验证，不能当依据）"
+        blocks.append(
+            f"- [{item.id}]{head} 问题：{item.question}\n"
+            f"  结论：{report.get('verdict', '')}\n"
+            f"  发现：{report.get('findings', '')}"
+        )
+        if report.get("evidence"):
+            blocks.append(f"  证据：{report['evidence']}")
+    blocks.append("按这个结论决定下一步；来源无法验证的那几条不要当依据。")
+    mark_consumed(root, [item.id for item, _, _ in unread])
+    return "\n".join(blocks)

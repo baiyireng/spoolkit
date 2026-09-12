@@ -11,6 +11,7 @@ from pathlib import Path
 from agents_dev.agents.dispatcher import plan_dispatch, run_delegated
 from agents_dev.config import Config
 from agents_dev.cli.commands.plan import advance_plan, autonomous
+from agents_dev import diagnosis
 from agents_dev.cli.options import (
     report_policy,
     resolve_policy,
@@ -78,6 +79,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
     那种差异不会报错，只会让人困惑。
     """
     writer = EventWriter()
+    before = len(diagnosis.load_requests(project_root))
     policy = resolve_policy(args, project_root)
     scope = resolve_scope(args)
     writer.emit(
@@ -111,6 +113,8 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
         ),
     )
     result = loop.run(args.goal, resume=args.resume)
+    _maybe_file_diagnosis(project_root, before, result, writer)
+    _maybe_file_diagnosis(project_root, before, result)
 
     if memory is not None:
         settle_lessons(memory, result.lessons_pushed, result.finished)
@@ -132,6 +136,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
 def _standard(args, project_root, gateway, window, pending) -> int:
     """普通路径：主循环自己完成。"""
     approver, grants = build_approver(project_root)
+    before = len(diagnosis.load_requests(project_root))
     memory = None
     distiller = None
     if not args.no_memory:
@@ -278,6 +283,44 @@ def _plain_registry(project_root, pending):
     register_edit_tools(registry, project_root, pending)
     attach_index(project_root, registry, OfflineTokenCounter(), pending)
     return registry
+
+
+def _maybe_file_diagnosis(
+    project_root, before: int, result, writer: EventWriter | None = None
+) -> str:
+    """任务做不下去、而且确认过是环境问题时，替它把诊断请求登记下来。
+
+    触发条件刻意收得很紧，三条同时成立才登记：
+
+    1. **任务没做成**——自己想办法绕过去了就不必查环境；
+    2. **这一步确认过是环境问题**（验证器给出的判定，不是猜的）；
+    3. **它自己没登记过**——它主动申请过就不重复。
+
+    为什么要循环替它做：实测模型在自己被卡住时会去改配置绕过，
+    根本想不起来用这个通道。文字提醒在这台模型上反复被验证为无效，
+    能推得动的只有「循环替它做」。
+    """
+    if result.finished or not getattr(result, "environment_blocked", False):
+        return ""
+    if len(diagnosis.load_requests(project_root)) > before:
+        return ""
+
+    recent = [line for line in result.trace if "自动验证" in line][-3:]
+    request = diagnosis.store_request(
+        project_root,
+        question="任务因环境问题无法继续，请确认是不是环境本身坏了",
+        hypothesis="本机的测试环境存在异常，与本次改动无关，需要真实环境权限才能查证",
+        evidence="\n".join(recent) or "（没有留下更多线索）",
+    )
+    line = (
+        f"已替你登记诊断请求 {request.id}：任务因环境问题无法继续。"
+        "它需要由具备真实环境权限的会话验证，你可以继续或等报告。"
+    )
+    if writer is not None:
+        writer.emit("tool", name="诊断登记", ok=True, detail=line)
+    else:
+        print(line)
+    return request.id
 
 
 def _settle_pending(args, project_root, pending) -> None:

@@ -24,6 +24,7 @@ from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.llm.types import ChatRequest, Message
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.types import ToolCall, ToolResult
+from agents_dev.tools.verify import ENVIRONMENT_MARKER
 
 SYSTEM_PROMPT = T.SYSTEM
 
@@ -176,6 +177,9 @@ class LoopResult:
     completion_tokens: int = 0
     model_calls: int = 0
     lessons_pushed: tuple[int, ...] = ()
+    # 这次运行里确认过「失败是环境造成的」。任务没做成时，它是决定
+    # 要不要替 Agent 登记诊断请求的依据之一。
+    environment_blocked: bool = False
 
     def usage(self) -> str:
         """一行用量摘要，用于比较不同配置的实际成本。"""
@@ -199,6 +203,7 @@ class AgentLoop:
         distiller: Callable[[TaskState, str], list[tuple[str, str]]] | None = None,
         lessons: Callable[[str], list[tuple[int, str]]] | None = None,
         verify: Callable[[], ToolResult] | None = None,
+        incoming: Callable[[], str] | None = None,
         persona: str = "",
         on_event: Callable[[str, dict], None] | None = None,
     ) -> None:
@@ -211,6 +216,8 @@ class AgentLoop:
         self.distiller = distiller
         self.lessons = lessons
         self.verify = verify
+        self.incoming = incoming
+        self.environment_blocked = False
         self.persona = persona
         self.on_event = on_event
         self._budget = Budget(window=config.context_window)
@@ -284,6 +291,12 @@ class AgentLoop:
         feedback: str | None = None
         resets = 0
         trace: list[str] = []
+        # 上一轮诊断回来的报告：一开局就摆到面前，模型不用记得去查。
+        if self.incoming is not None:
+            report = self.incoming()
+            if report:
+                feedback = report
+                trace.append("注入诊断报告")
         prompt_tokens = 0
         completion_tokens = 0
         model_calls = 0
@@ -492,6 +505,7 @@ class AgentLoop:
                     completion_tokens,
                     model_calls,
                     tuple(item[0] for item in pushed),
+                    environment_blocked=self.environment_blocked,
                 )
 
         self._archive(state, "fail", trace, "")
@@ -506,6 +520,7 @@ class AgentLoop:
             completion_tokens,
             model_calls,
             tuple(item[0] for item in pushed),
+            environment_blocked=self.environment_blocked,
         )
 
     def _invoke_guarded(
@@ -555,6 +570,9 @@ class AgentLoop:
         except Exception as exc:
             return (f"自动验证没能跑起来（{type(exc).__name__}）：{exc}", False)
         body = " ".join(result.content.split())[:400]
+        if result.content.startswith(ENVIRONMENT_MARKER):
+            # 记下来：任务没做成时，这决定要不要替它登记诊断请求。
+            self.environment_blocked = True
         if result.ok:
             return (
                 f"系统自动跑了一遍项目里的测试：**通过**（{body}）。"

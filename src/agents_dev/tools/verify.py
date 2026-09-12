@@ -19,6 +19,10 @@ from agents_dev.tools.types import ToolResult
 
 TEST_COMMAND = ("python", "-m", "pytest", "-q")
 
+# 环境问题的报告带这个前缀。主循环据此判断「这次失败是环境造成的」，
+# 而不是去猜文案——文案会改，标记不会。
+ENVIRONMENT_MARKER = "【环境问题】"
+
 _MARKERS = ("pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg")
 
 
@@ -180,7 +184,8 @@ def make_verifier(
                 return ToolResult(
                     ok=False,
                     content=(
-                        f"测试没能跑起来（报错指向的是工作区外面的东西，"
+                        f"{ENVIRONMENT_MARKER}测试没能跑起来"
+                        f"（报错指向的是工作区外面的东西，"
                         f"属于环境问题）：{detail}。"
                         "这不是你的代码造成的，不要为它改代码——"
                         "把情况说清楚就行；如果确实需要查清是什么坏了，"

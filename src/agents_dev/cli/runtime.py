@@ -28,6 +28,7 @@ from agents_dev.memory.transcript import recent_messages, render_transcript
 from agents_dev.store.db import init_schema, open_db
 from agents_dev.tools.edit import PendingChanges, register_edit_tools
 from agents_dev.tools.exec import run_command_spec
+from agents_dev import diagnosis
 from agents_dev.tools.diagnosis import (
     read_diagnosis_spec,
     request_diagnosis_spec,
@@ -172,6 +173,11 @@ def assemble_loop(
     verifier = parts.verify
     if verifier is None and parts.auto_verify and parts.pending is not None:
         verifier = make_verifier(project_root, parts.pending)
+
+    def incoming_reports() -> str:
+        """上一轮回来的诊断报告：开局就摆到模型面前，不用它记得去查。"""
+        return diagnosis.render_incoming(project_root)
+
     return AgentLoop(
         gateway=gateway,
         tokenizer=tokenizer,
@@ -183,6 +189,7 @@ def assemble_loop(
         distiller=parts.distiller,
         on_event=parts.on_event,
         verify=verifier,
+        incoming=incoming_reports,
     )
 
 
