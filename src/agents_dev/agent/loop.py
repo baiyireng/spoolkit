@@ -272,7 +272,10 @@ class AgentLoop:
         self.environment_blocked = False
         self.persona = persona
         self.on_event = on_event
-        self._budget = Budget(window=config.context_window)
+        # 预算里的每个比例都是能力标定值：走本次运行的覆盖，而不是各写一份常量。
+        self._budget = Budget(
+            window=config.context_window, overrides=config.overrides
+        )
         self._schema = build_turn_schema(registry)
         # 强制收敛用的收窄 schema：只留写工具。没有写工具（只读角色）
         # 就没有这回事，None 表示这条路不适用。

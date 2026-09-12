@@ -13,7 +13,8 @@ from agents_dev.llm.providers import ProviderConfig, ProviderError, load_gateway
 from agents_dev.net import system_proxy
 from agents_dev.agent.loop import AgentLoop
 from agents_dev.config import Config
-from agents_dev.index.indexer import MAX_INDEX_FILES, index_project, iter_source_files
+from agents_dev.index.indexer import index_project, iter_source_files
+from agents_dev import limits
 from agents_dev.index.rank import prefetch as prefetch_text
 from agents_dev.index.rank import prefetch_contents
 from agents_dev.index.tools import file_symbols_spec, find_callers_spec, find_symbol_spec
@@ -133,7 +134,9 @@ def provider_gateway(args, project_root):
         return None
 
 
-def attach_index(project_root: Path, registry: ToolRegistry, tokenizer, pending=None):
+def attach_index(
+    project_root: Path, registry: ToolRegistry, tokenizer, pending=None, overrides=None
+):
     """建立（或复用）代码索引，注册索引工具并返回预取函数。
 
     索引是可选增强：建索引失败不应让整个 agent 起不来，
@@ -150,14 +153,20 @@ def attach_index(project_root: Path, registry: ToolRegistry, tokenizer, pending=
         #
         # 顺序很重要：**必须在开库之前判断**。开库会顺手建出 .agent 目录，
         # 于是「跳过了索引」反而在用户的项目里留下一个空壳。
+        # 上限是能力/机器标定值：本机 27B 上建索引的收益与代价在 2000 文件
+        # 附近平衡，换个模型或换台机器就不是这个数了。
+        max_files = int(limits.resolve("max_index_files", overrides)[0])
+        index_seconds = limits.resolve("index_seconds", overrides)[0]
         candidates = sum(1 for _ in iter_source_files(project_root))
-        if candidates > MAX_INDEX_FILES:
+        if candidates > max_files:
             return _no_index(
-                f"项目里有 {candidates} 个 Python 文件，超过上限 {MAX_INDEX_FILES}，索引已跳过"
+                f"项目里有 {candidates} 个 Python 文件，超过上限 {max_files}，索引已跳过"
             )
         conn = open_db(project_root / ".agent" / "index.db")
         init_schema(conn)
-        stats = index_project(project_root, conn)
+        stats = index_project(
+            project_root, conn, max_files=max_files, seconds=index_seconds
+        )
     except Exception as exc:
         return _no_index(f"建索引失败（{type(exc).__name__}）")
     if stats.stopped:
@@ -223,7 +232,13 @@ def assemble_loop(
     registry.register(request_diagnosis_spec(project_root))
     registry.register(read_diagnosis_spec(project_root))
     registry.register(
-        run_command_spec(project_root, parts.pending, parts.approver, parts.grants)
+        run_command_spec(
+            project_root,
+            parts.pending,
+            parts.approver,
+            parts.grants,
+            max_output=int(limits.resolve("max_output_chars", settings.overrides)[0]),
+        )
     )
     if parts.pending is not None:
         register_edit_tools(registry, project_root, parts.pending)
@@ -260,7 +275,13 @@ def assemble_loop(
         tokenizer=tokenizer,
         registry=registry,
         config=settings,
-        prefetch=attach_index(project_root, registry, tokenizer, parts.pending),
+        prefetch=attach_index(
+            project_root,
+            registry,
+            tokenizer,
+            parts.pending,
+            settings.overrides,
+        ),
         memory=parts.memory,
         lessons=parts.lessons,
         distiller=parts.distiller,

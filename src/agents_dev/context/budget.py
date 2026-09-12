@@ -3,7 +3,16 @@
 术语：有效预算 = 上下文窗口 − 输出预留。
 输出预留比例硬性为 0.15，不可被任何区段占用——上下文接近满载时
 模型质量显著下降，且必须留有空间生成响应。
+
+**这里所有的数都是能力标定值**（见设计文档 2.7 与 `agents_dev/limits.py`）：
+它们的作用是在弱模型上防止退化，而同一个比例用在强模型上就是上限。所以
+取值一律走 `limits`，而不是各写一份常量——默认值是按本机 27B + 8K 窗口
+实测出来的，不是普适真理。
 """
+
+from typing import Mapping
+
+from agents_dev import limits
 
 OUTPUT_RESERVE_RATIO = 0.15
 
@@ -49,25 +58,56 @@ SOFT_TRIGGER_RATIO = 0.70
 HARD_TRIGGER_RATIO = 0.90
 
 
-class Budget:
-    """一次请求的上下文预算。"""
+# 区段名 → 登记表里的名字。放在这里是为了让「这个名字对应哪个标定值」
+# 只有一处：改配额就是改表，不用在几条分支里找。
+_FIXED_KNOBS = {"system": "system_quota"}
+_FLEX_KNOBS = {
+    "hot_memory": "hot_memory_ratio",
+    "task_state": "task_state_ratio",
+    "retrieval": "retrieval_ratio",
+    "code": "code_ratio",
+    "lessons": "lessons_ratio",
+}
 
-    def __init__(self, window: int, output_ratio: float = OUTPUT_RESERVE_RATIO) -> None:
+
+class Budget:
+    """一次请求的上下文预算。
+
+    overrides 是本次运行的能力标定覆盖（`.agent/limits.json` + 命令行）。
+    取值一律经 `_knob()`，这样「现在是多少、从哪来」答得出来。
+    """
+
+    def __init__(
+        self,
+        window: int,
+        output_ratio: float | None = None,
+        overrides: Mapping[str, float] | None = None,
+    ) -> None:
         if window <= 0:
             raise ValueError("上下文窗口必须为正数")
         self.window = window
-        self._output_ratio = output_ratio
+        self._overrides = overrides or {}
+        self._output_ratio = (
+            output_ratio
+            if output_ratio is not None
+            else self._knob("output_reserve_ratio")
+        )
+
+    def _knob(self, name: str) -> float:
+        value, _ = limits.resolve(name, self._overrides)
+        return value
 
     def output_reserve(self) -> int:
         """为模型输出保留的 token 数。"""
         return int(self.window * self._output_ratio)
 
-    def boost_output(self, ratio: float = OUTPUT_RESERVE_BOOST_RATIO) -> int:
+    def boost_output(self, ratio: float | None = None) -> int:
         """把输出预算抬高。返回抬高之后的额度（没变就返回原值）。
 
         调用点只有一个：这次任务的某次请求被输出预算截断了。
         """
-        self._output_ratio = max(self._output_ratio, ratio)
+        target = self._knob("output_reserve_boost_ratio") if ratio is None else ratio
+        self._output_ratio = max(self._output_ratio, target)
         return self.output_reserve()
 
     def effective(self) -> int:
@@ -78,12 +118,13 @@ class Budget:
         """区段 name 的配额。固定配额优先，其次比例配额，未定义则为 0。"""
         effective = self.effective()
         if name in FIXED_QUOTAS:
-            return min(FIXED_QUOTAS[name], int(effective * FIXED_QUOTA_CAP))
-        ratio = FLEX_QUOTAS.get(name)
-        if ratio is None:
+            cap = int(effective * self._knob("fixed_quota_cap"))
+            return min(int(self._knob(_FIXED_KNOBS[name])), cap)
+        if name not in FLEX_QUOTAS:
             return 0
-        if name == "code" and effective < COMPACT_THRESHOLD:
-            ratio += COMPACT_CODE_BOOST
+        ratio = self._knob(_FLEX_KNOBS[name])
+        if name == "code" and effective < self._knob("compact_threshold"):
+            ratio += self._knob("compact_code_boost")
         return int(effective * ratio)
 
     def allocation(self) -> dict[str, int]:
@@ -93,9 +134,9 @@ class Budget:
 
     def soft_limit(self) -> int:
         """软触发线：达到后整理上下文，不中断任务。"""
-        return int(self.window * SOFT_TRIGGER_RATIO)
+        return int(self.window * self._knob("soft_trigger_ratio"))
 
     def hard_limit(self) -> int:
         """硬触发线：达到后重置上下文，保留状态。"""
-        return int(self.window * HARD_TRIGGER_RATIO)
+        return int(self.window * self._knob("hard_trigger_ratio"))
 

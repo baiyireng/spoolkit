@@ -75,6 +75,28 @@ def test_签名报告才算数(tmp_path: Path, key_outside: Path) -> None:
         root, item.id, verdict="环境问题", findings="临时目录不可写"
     )
     result = read_diagnosis_spec(root).handler({"id": item.id})
+    if not result.ok:
+        # 偶发过一次：单跑 20 次全过、全量跑偶发。这类失败最怕查不动，
+        # 所以把判断依据一并带进断言消息里。
+        key_file = Path(os.environ.get("AGENTS_DEV_DIAGNOSIS_KEY_PATH", ""))
+        stored = json.loads(
+            (root / ".agent" / "diagnosis" / f"{item.id}.json").read_text(
+                encoding="utf-8"
+            )
+        ).get("report") or {}
+        payload = {k: v for k, v in stored.items() if k != "signature"}
+        key = diagnosis.load_key()
+        expected = (
+            diagnosis.sign(payload, key) if key else "（没有密钥文件）"
+        )
+        pytest.fail(
+            "报告没验过。"
+            f" 密钥 {key_file}：存在={key_file.exists()}"
+            f" 长度={len(key) if key else 0}"
+            f"；存下来的签名={stored.get('signature', '')[:16]}…"
+            f"；用当前密钥重算是={expected[:16]}…"
+            f"；请求数={len(diagnosis.load_requests(root))}"
+        )
     assert result.ok is True
     assert "来源已验证" in result.content
     assert "临时目录不可写" in result.content

@@ -107,6 +107,49 @@ KNOBS: tuple[Knob, ...] = (
         "output_reserve_boost_ratio", 0.30, CAPABILITY,
         "截断过一次之后本次任务的输出预算上限",
     ),
+    Knob(
+        "soft_trigger_ratio", 0.70, CAPABILITY,
+        "上下文达到窗口的多少就开始整理历史（不打断任务）",
+    ),
+    Knob(
+        "hard_trigger_ratio", 0.90, CAPABILITY,
+        "达到多少直接重置上下文（保留任务状态）",
+    ),
+    Knob(
+        "hot_memory_ratio", 0.15, CAPABILITY,
+        "热记忆占有效预算的比例（每轮注入）",
+    ),
+    Knob("task_state_ratio", 0.05, CAPABILITY, "任务状态块占有效预算的比例"),
+    Knob(
+        "code_ratio", 0.35, CAPABILITY,
+        "代码片段占有效预算的比例：小窗口时会自动再加一档（把配额从历史挪向代码）",
+    ),
+    Knob("retrieval_ratio", 0.15, CAPABILITY, "检索内容占有效预算的比例"),
+    Knob("lessons_ratio", 0.10, CAPABILITY, "历史教训占有效预算的比例"),
+    Knob("system_quota", 900, CAPABILITY, "系统提示的固定配额（token）"),
+    Knob(
+        "fixed_quota_cap", 0.20, CAPABILITY,
+        "固定配额也得随窗口伸缩：小窗口下它最多只能占有效预算的两成",
+    ),
+    Knob(
+        "compact_threshold", 3000, CAPABILITY,
+        "有效预算低于这个值就进入小窗口模式（配额从历史挪向代码）",
+    ),
+    Knob("compact_code_boost", 0.10, CAPABILITY, "小窗口模式下代码配额额外加多少"),
+    Knob(
+        "max_index_files", 2000, CAPABILITY,
+        "超过这么多 Python 文件就不建索引（先数一遍再决定，数一遍很便宜）",
+    ),
+    Knob("index_seconds", 20.0, CAPABILITY, "建索引的时间预算，到点停下并说明"),
+    Knob(
+        "max_output_chars", 4000, CAPABILITY,
+        "工具输出回灌给模型时最多留多少字符（超出的截掉并标注）",
+    ),
+    Knob("prefetch_budget", 400, CAPABILITY, "开局预取（符号表）花多少 token"),
+    Knob(
+        "prefetch_content_budget", 1000, CAPABILITY,
+        "开局预取还带上多少 token 的代码片段",
+    ),
     Knob("command_timeout", 180, MECHANICAL, "单条命令的默认超时"),
     Knob("max_command_timeout", 600, SAFETY, "命令超时上限：防止挂死"),
     Knob("path_confinement", 1, SAFETY, "写操作不出工作区（不可覆盖）"),

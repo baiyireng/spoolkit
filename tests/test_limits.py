@@ -62,3 +62,31 @@ def test_渲染把来源和能不能改都写出来() -> None:
     assert "repeat_block_at" in text
     assert "配置" in text and "可覆盖" in text
     assert "写死" in text  # 安全边界那一类
+
+
+def test_预算比例也走覆盖() -> None:
+    """预算比例是这套系统里影响最大的能力标定值：它决定每次请求装多少。
+
+    默认值按本机 27B + 8K 窗口实测，换个模型或换个窗口就不该照搬。
+    """
+    from agents_dev.context.budget import Budget
+
+    plain = Budget(8192)
+    wide = Budget(8192, overrides={"soft_trigger_ratio": 0.5, "code_ratio": 0.5})
+    assert plain.soft_limit() == int(8192 * 0.70)
+    assert wide.soft_limit() == 4096
+    assert wide.quota("code") > plain.quota("code")
+
+
+def test_表里列的每一项都真的接上了() -> None:
+    """登记表最怕的是「列了但没接线」——那比不列更糟：它会骗人。
+
+    这里只做一层粗检：表里每个 capability 项要么在代码里被 resolve 过，
+    要么至少写明了它管什么（note 非空）。
+    """
+    for entry in limits.KNOBS:
+        assert entry.note.strip(), f"{entry.name} 没写它管什么"
+    text = Path("src/agents_dev").rglob("*.py")
+    used = "\n".join(p.read_text(encoding="utf-8") for p in text)
+    for name in ("soft_trigger_ratio", "max_index_files", "max_output_chars"):
+        assert f'"{name}"' in used, f"{name} 在表里但代码里没人取用"

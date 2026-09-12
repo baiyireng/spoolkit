@@ -146,19 +146,26 @@ def resolve_argv(argv: list[str], root: Path) -> list[str]:
     return [interpreter, *argv[1:]]
 
 
-def _truncate(text: str) -> str:
-    if len(text) <= MAX_OUTPUT_CHARS:
+def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    # 上限是能力标定值：小模型上 4000 字符够用，强模型读得下更多——
+    # 硬截断会把「失败在哪」直接切掉。
+    if len(text) <= limit:
         return text
-    half = MAX_OUTPUT_CHARS // 2
+    half = limit // 2
     return (
         f"{text[:half]}\n"
-        f"…（输出过长，中间省略 {len(text) - MAX_OUTPUT_CHARS} 字符）…\n"
+        f"…（输出过长，中间省略 {len(text) - limit} 字符）…\n"
         f"{text[-half:]}"
     )
 
 
 def _execute(
-    base: Path, argv: list[str], requested: str, cwd_arg: str, timeout: int
+    base: Path,
+    argv: list[str],
+    requested: str,
+    cwd_arg: str,
+    timeout: int,
+    max_output: int = MAX_OUTPUT_CHARS,
 ) -> ToolResult:
     """在指定目录里执行。base 可能是原目录，也可能是试跑副本。"""
     try:
@@ -186,7 +193,8 @@ def _execute(
     except OSError as exc:
         return ToolResult(ok=False, content=f"命令执行失败: {exc}")
 
-    body = _truncate(((proc.stdout or "") + (proc.stderr or "")).strip())
+    body = _truncate(
+        ((proc.stdout or "") + (proc.stderr or "")).strip())
     status = "成功" if proc.returncode == 0 else "失败"
     # 输出放在前面：模型和人都先要知道「错在哪」，
     # 而不是先看到自己刚才发了什么命令。
@@ -278,6 +286,7 @@ def _run(
     approver=None,
     grants: Grants | None = None,
     revert: object = (),
+    max_output: int = MAX_OUTPUT_CHARS,
 ) -> ToolResult:
     argv = list(args["command"])
     usage = _usage_problem(argv)
@@ -323,8 +332,10 @@ def _run(
     if pending is not None and len(pending):
         with trial_workspace(root, pending.items()) as work_root:
             _restore_originals(work_root, pending, revert)
-            return _execute(work_root, resolved, requested, cwd_arg, timeout)
-    return _execute(root, resolved, requested, cwd_arg, timeout)
+            return _execute(
+                work_root, resolved, requested, cwd_arg, timeout, max_output
+            )
+    return _execute(root, resolved, requested, cwd_arg, timeout, max_output)
 
 
 def _restore_originals(work_root: Path, pending, paths: object) -> None:
@@ -350,7 +361,11 @@ def _restore_originals(work_root: Path, pending, paths: object) -> None:
 
 
 def run_command_spec(
-    root: Path, pending=None, approver=None, grants: Grants | None = None
+    root: Path,
+    pending=None,
+    approver=None,
+    grants: Grants | None = None,
+    max_output: int = MAX_OUTPUT_CHARS,
 ) -> ToolSpec:
     """执行白名单命令。有未落盘改动时自动在试跑副本上执行。"""
     return ToolSpec(
@@ -371,7 +386,9 @@ def run_command_spec(
             "required": ["command"],
             "additionalProperties": False,
         },
-        handler=lambda args: _run(root, args, pending, approver, grants),
+        handler=lambda args: _run(
+            root, args, pending, approver, grants, max_output=max_output
+        ),
         brief="跑测试或脚本",
         group="跑",
     )
@@ -386,6 +403,7 @@ def run_once(
     timeout: int = DEFAULT_TIMEOUT,
     revert: object = (),
     cwd: str = ".",
+    max_output: int = MAX_OUTPUT_CHARS,
 ) -> ToolResult:
     """执行一条命令，语义与 run_command 工具完全一致。
 
@@ -399,4 +417,5 @@ def run_once(
         approver,
         grants,
         revert,
+        max_output,
     )
