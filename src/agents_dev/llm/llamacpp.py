@@ -104,7 +104,11 @@ class LlamaCppGateway:
 
         text = (choices[0].get("message") or {}).get("content") or ""
         if not text:
-            raise LlamaCppError("模型返回了空内容")
+            raise LlamaCppError(
+                "模型返回了空内容。如果这是带思考的模型（推理内容走单独的字段），"
+                "很可能是推理 token 把输出预算吃光了——用 --reasoning off "
+                "重启 llama-server，或者调大 max_tokens 再试"
+            )
 
         usage = data.get("usage") or {}
         return ChatResponse(
