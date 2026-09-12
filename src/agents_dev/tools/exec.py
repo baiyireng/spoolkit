@@ -322,6 +322,8 @@ def run_command_spec(
             "additionalProperties": False,
         },
         handler=lambda args: _run(root, args, pending, approver, grants),
+        brief="跑测试或脚本",
+        group="跑",
     )
 
 

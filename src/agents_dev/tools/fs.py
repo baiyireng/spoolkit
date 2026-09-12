@@ -87,6 +87,8 @@ def read_file_spec(root: Path, pending=None, read_roots=()) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=lambda args: _read_file(root, args, pending, read_roots),
+        brief="读文件（可只取一段）",
+        group="看",
     )
 
 
@@ -102,5 +104,7 @@ def list_dir_spec(root: Path, pending=None, read_roots=()) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=lambda args: _list_dir(root, args, pending, read_roots),
+        brief="列目录",
+        group="看",
     )
 

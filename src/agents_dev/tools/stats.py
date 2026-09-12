@@ -215,4 +215,6 @@ def dir_stats_spec(root: Path, read_roots=()) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=lambda args: _dir_stats(root, args, read_roots),
+        brief="量目录规模",
+        group="量",
     )

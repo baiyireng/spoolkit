@@ -21,6 +21,7 @@ from agents_dev.config import Config
 from agents_dev.llm.gateway import ModelGateway
 from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.tools.registry import ToolRegistry
+from agents_dev.tools.help import tool_help_spec
 
 
 @dataclass(frozen=True)
@@ -132,9 +133,15 @@ def restrict(registry: ToolRegistry, role: Role) -> ToolRegistry:
     """按角色裁剪工具集。这是权限的执行点，不是提示词里的君子协定。"""
     limited = ToolRegistry()
     for name in role.tools:
+        # tool_help 不走这条路：它必须绑定到**裁剪之后**的注册表，
+        # 否则审查者能查到一个它做不到的写工具，然后去尝试它。
+        if name == "tool_help":
+            continue
         spec = registry.get(name)
         if spec is not None:
             limited.register(spec)
+    if registry.get("tool_help") is not None:
+        limited.register(tool_help_spec(limited))
     return limited
 
 

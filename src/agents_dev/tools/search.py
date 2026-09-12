@@ -128,5 +128,7 @@ def search_code_spec(root: Path, pending=None, read_roots=()) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=lambda args: _search_code(root, args, pending, read_roots),
+        brief="正则搜代码",
+        group="看",
     )
 

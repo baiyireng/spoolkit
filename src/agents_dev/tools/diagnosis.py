@@ -87,6 +87,8 @@ def request_diagnosis_spec(root: Path) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=lambda args: _request(root, args),
+        brief="登记环境问题求验证",
+        group="诊",
     )
 
 
@@ -106,4 +108,6 @@ def read_diagnosis_spec(root: Path) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=lambda args: _read(root, args),
+        brief="读诊断报告",
+        group="诊",
     )

@@ -144,6 +144,8 @@ def replace_text_spec(root: Path, pending: PendingChanges) -> ToolSpec:
         handler=lambda args: _propose(
             root, pending, args, lambda old_text: transform(old_text, args)
         ),
+        brief="按片段替换",
+        group="改",
     )
 
 
@@ -370,6 +372,8 @@ def write_file_spec(root: Path, pending: PendingChanges) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=handler,
+        brief="整份写文件",
+        group="改",
     )
 
 
@@ -409,4 +413,6 @@ def replace_lines_spec(root: Path, pending: PendingChanges) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=handler,
+        brief="按行号替换",
+        group="改",
     )

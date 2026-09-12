@@ -30,12 +30,20 @@ class ToolResult:
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """一个工具的完整定义。parameters 为 JSON Schema 子集。"""
+    """一个工具的完整定义。parameters 为 JSON Schema 子集。
+
+    `brief` 与 `group` 是给**索引**用的：每轮提示词里常驻的只有「名字 +
+    参数名 + 一句干什么」，完整说明（`description`）放在 `tool_help` 后面
+    按需取。这两个字段为空时会退化——brief 取描述的第一句，group 归到
+    「其它」——退化得难看，但比让一个工具在索引里变成光秃秃的名字好。
+    """
 
     name: str
     description: str
     parameters: dict[str, Any]
     handler: Callable[[dict[str, Any]], ToolResult] = field(repr=False)
+    brief: str = ""
+    group: str = "其它"
 
 
 @dataclass(frozen=True)

@@ -38,5 +38,6 @@ def recall_spec(session: MemorySession) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=lambda args: _recall(session, args),
+        brief="检索历史记忆",
+        group="记",
     )
-

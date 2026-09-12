@@ -35,6 +35,7 @@ from agents_dev.tools.diagnosis import (
 )
 from agents_dev.tools.fs import list_dir_spec, read_file_spec
 from agents_dev.tools.grant import Grants
+from agents_dev.tools.help import tool_help_spec
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.verify import make_verifier
 from agents_dev.tools.search import search_code_spec
@@ -210,6 +211,9 @@ def assemble_loop(
     registry.register(search_code_spec(project_root, parts.pending, parts.read_roots))
     registry.register(dir_stats_spec(project_root, parts.read_roots))
     registry.register(calc_spec())
+    # 索引里只写「名字 + 参数名 + 一句干什么」，完整说明按需从这里取。
+    # 注册在最后：它绑定的是这个注册表本身，而注册表是逐个长起来的。
+    registry.register(tool_help_spec(registry))
     # 台账与核对工具共用同一个 SourceLog：模型只能读，循环负责写。
     registry.register(check_numbers_spec(sources))
     # 怀疑是环境或工具本身有问题时的申请通道。只登记与读回，

@@ -61,4 +61,6 @@ def check_numbers_spec(log: SourceLog) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=handler,
+        brief="核对草稿里的数字",
+        group="核",
     )

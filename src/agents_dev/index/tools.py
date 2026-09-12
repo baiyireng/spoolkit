@@ -156,6 +156,8 @@ def find_symbol_spec(root: Path, conn: sqlite3.Connection, pending=None) -> Tool
         handler=lambda args: _find_symbol(
             root, conn, args, WorkspaceView(root, pending)
         ),
+        brief="按名字找符号",
+        group="看",
     )
 
 
@@ -176,6 +178,8 @@ def file_symbols_spec(conn: sqlite3.Connection, pending=None) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=lambda args: _file_symbols(conn, args, view),
+        brief="列文件的符号",
+        group="看",
     )
 
 
@@ -300,4 +304,6 @@ def find_callers_spec(conn: sqlite3.Connection, pending=None, root: Path | None 
         handler=lambda args: _find_callers(
             conn, args, OfflineTokenCounter(), view
         ),
+        brief="查谁引用了它",
+        group="看",
     )
