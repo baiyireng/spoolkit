@@ -13,7 +13,9 @@ from agents_dev.tools.verify import (
     detect_test_command,
     exit_code,
     is_test_path,
+    looks_environmental,
     make_verifier,
+    mentions_workspace,
 )
 from agents_dev.tools.types import ToolResult
 
@@ -154,8 +156,50 @@ def test_退出码能被取出来() -> None:
     assert exit_code("没有退出码的一行") is None
 
 
-def test_测试没跑成与测试没通过要分开(tmp_path: Path) -> None:
-    """退出码 1 是测试没过（去改代码），其它是压根没跑成（改代码没用）。
+def test_退出码分不出测试没过与没跑成() -> None:
+    """实测：收集阶段被权限错误打断时，pytest 返回的也是 1。
+
+    曾经按「非 1 即环境问题」判过，那条判据根本不会触发——记在这里，
+    免得再走一遍。
+    """
+    assert exit_code("退出码 1（失败）\n") == 1
+    assert exit_code("退出码 5（失败）\n") == 5
+
+
+def test_报错指向工作区外的算环境问题(tmp_path: Path) -> None:
+    outside = (
+        "退出码 1（失败）\n$ pytest\n"
+        "ERROR tests/x.py::test_a - PermissionError: [WinError 5] "
+        "拒绝访问。: 'C:\\Users\\someone\\AppData\\Local\\Temp\\pytest-of-x'\n"
+    )
+    assert looks_environmental(outside, tmp_path) is True
+
+
+def test_报错指向工作区内的算代码问题(tmp_path: Path) -> None:
+    inside = (
+        "退出码 1（失败）\n$ pytest\n"
+        f"{tmp_path}\\mod.py:1: in <module>\n"
+        "E   ModuleNotFoundError: No module named 'helpers'\n"
+    )
+    assert looks_environmental(inside, tmp_path) is False
+
+
+def test_没有环境特征时不算环境问题(tmp_path: Path) -> None:
+    plain = "退出码 1（失败）\n$ pytest\nFAILED test_x.py::test_a - AssertionError\n"
+    assert looks_environmental(plain, tmp_path) is False
+
+
+def test_一个测试都没收集到算环境问题(tmp_path: Path) -> None:
+    assert looks_environmental("退出码 5（失败）\n$ pytest\n", tmp_path) is True
+
+
+def test_工作区路径识别(tmp_path: Path) -> None:
+    assert mentions_workspace(f"see {tmp_path}\\a.py:3", tmp_path) is True
+    assert mentions_workspace("see C:\\Windows\\Temp\\a.py:3", tmp_path) is False
+
+
+def test_环境问题与代码问题给出不同反馈(tmp_path: Path) -> None:
+    """环境问题要明确说「不是你的代码」，否则模型会去查自己的改动。
 
     实测踩过：环境坏了导致 pytest 收集失败，反馈却说「测试失败」，
     模型于是拿着 PermissionError 去查自己的改动，白烧好几步。
@@ -181,11 +225,51 @@ def test_测试没跑成与测试没通过要分开(tmp_path: Path) -> None:
         module.run_once = original
 
     module.run_once = lambda *a, **k: ToolResult(
-        ok=False, content="退出码 2（失败）\n$ pytest\nINTERNALERROR> PermissionError\n"
+        ok=False,
+        content=(
+            "退出码 1（失败）\n$ pytest\n"
+            "ERROR tests/t.py::test_a - PermissionError: [WinError 5] 拒绝访问。\n"
+        ),
     )
     try:
         result = make_verifier(tmp_path, pending)()
         assert "没能跑起来" in result.content
-        assert "和你的改动无关" in result.content
+        assert "不是你的代码造成的" in result.content
+    finally:
+        module.run_once = original
+
+
+def test_环境坏了之后不再重跑(tmp_path: Path) -> None:
+    """结论不会变，而每跑一次都要往上下文里再灌一遍同样的报错。
+
+    实测一次运行里它被重报了 7 次——模型明知道不可行动，还是每次都收到。
+    """
+    (tmp_path / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "test_mod.py").write_text(
+        "import mod\n\n\ndef test_v():\n    assert mod.VALUE == 2\n", encoding="utf-8"
+    )
+    import agents_dev.tools.verify as module
+
+    calls = []
+    original = module.run_once
+
+    def fake(*args, **kwargs):
+        calls.append(1)
+        return ToolResult(
+            ok=False,
+            content=(
+                "退出码 1（失败）\n$ pytest\n"
+                "ERROR tests/t.py::test_a - PermissionError: 拒绝访问。\n"
+            ),
+        )
+
+    module.run_once = fake
+    try:
+        verify = make_verifier(tmp_path, PendingChanges(tmp_path))
+        first = verify()
+        assert "没能跑起来" in first.content
+        second = verify()
+        assert "依然是坏的" in second.content
+        assert len(calls) == 1, "环境确认坏了之后不该再跑命令"
     finally:
         module.run_once = original
