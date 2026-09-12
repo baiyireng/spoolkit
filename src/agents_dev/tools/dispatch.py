@@ -24,6 +24,14 @@ from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.types import ToolResult, ToolSpec
 
+# 一次派发最多带几件。子智能体一轮的步数预算默认 20 步，而一件活平均要
+# 2～3 步（读、改、验各一步）——按这个算，十件上下就是它的上限。
+#
+# 超过就**当场拦下并说明算法**，而不是让它硬做：实测一次派了 50 件进去，
+# 实现者把预算烧光后撞上重复保护，回来只剩一句无从行动的话，然后还被送去
+# 审查——审查者审的是个半成品。规模问题该在派之前拦。
+MAX_TARGETS = 10
+
 
 def dispatch_spec(
     gateway: ModelGateway,
@@ -51,6 +59,18 @@ def dispatch_spec(
         if problem is not None:
             return ToolResult(ok=False, content=f"不能派发：{problem}")
 
+        if len(spec.targets) > MAX_TARGETS:
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"不能派发：这次带了 {len(spec.targets)} 件，超出一次能派的上限"
+                    f"（{MAX_TARGETS} 件）。子智能体的步数预算是一轮 "
+                    f"{config.subagent_steps} 步，而一件活平均要 2～3 步——"
+                    "派大了它只会烧光预算、交回一个半成品。"
+                    "拆成几批再派，或者自己先做掉一部分。"
+                ),
+            )
+
         plan = DispatchPlan(delegate=True, reason="主循环在会话中途派发", spec=spec)
         try:
             outcome = run_delegated(
@@ -65,6 +85,20 @@ def dispatch_spec(
                     "这一块你可以自己做，或者换个说法再派一次。"
                 ),
             )
+        if outcome.too_big:
+            # 「太大」是**任务规模**问题，不是「做砸了」：要让它能据此行动，
+            # 就不能混在「审查未通过」里。
+            return ToolResult(
+                ok=False,
+                content=(
+                    "派出去的活没做完——子智能体说这块对它太大：\n"
+                    f"{outcome.too_big}\n"
+                    f"（一次能派的上限约 {MAX_TARGETS} 件，它的步数预算是"
+                    f" {config.subagent_steps} 步。）"
+                    "拆小之后再派；也可以自己先做掉一部分再派剩下的。"
+                ),
+                usage=outcome.usage,
+            )
         return ToolResult(ok=True, content=_render(outcome), usage=outcome.usage)
 
     return ToolSpec(
@@ -76,7 +110,10 @@ def dispatch_spec(
             "**一次派发可以带一批活**：一批同类的小活合成一次，摊薄固定的那几次"
             "调用之后才划算——单看一道小题，派发是亏的，所以别一道一道派。"
             "批次别太大：子智能体的上下文和你一样是有限的，一次交 3～5 件"
-            "（或者一批彼此相像、验收方式相同的活）比较稳。"
+            "（或者一批彼此相像、验收方式相同的活）比较稳；上限见参数校验的报错。"
+            "**它做得完做不完会如实告诉你**：如果这块对它太大，它会在结论里直接说"
+            "「太大」并给出拆法，那时把任务拆小再派，不要硬塞——硬塞的代价是"
+            "烧掉它的整轮预算，换回一个半成品。"
             "acceptance 必须写清怎么算做完——没有它不允许派发；带一批活时，"
             "验收方式要能覆盖整批（例如「这些目录里逐个跑 pytest 都通过」）。"
             "注意：它会真的改文件（进待确认的 diff），所以目标要具体到能验收"

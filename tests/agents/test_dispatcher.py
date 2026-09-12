@@ -362,3 +362,59 @@ def test_子角色不覆盖主循环的检查点(tmp_path: Path) -> None:
         Config(project_root=tmp_path, context_window=4096, supervise=False),
     )
     assert "主循环的进度" in checkpoint.read_text(encoding="utf-8")
+
+
+def test_实现者说太大就不送审(tmp_path: Path) -> None:
+    """子智能体有权说「这件事我独立做不完」，而且该早说。
+
+    实测那次批量派发：实现者烧光预算、撞上重复保护，回来的信号无从行动；
+    而主循环需要的是「这块对它太大，拆小再派」。
+    """
+    plan = plan_dispatch(_gateway([_plan()]), "修复解析")
+    result = run_delegated(
+        plan,
+        _gateway(
+            [
+                _turn(
+                    "【太大】要改 40 个文件，我一轮只有 20 步。"
+                    "建议拆成 01-10 / 11-20 两批，先做第一批。"
+                )
+            ]
+        ),
+        OfflineTokenCounter(),
+        _registry(tmp_path),
+        Config(project_root=tmp_path, context_window=4096, supervise=False),
+    )
+    assert "太大" in result.too_big
+    assert result.review is None, "规模问题不该送去审查——那是在审一个半成品"
+    assert any("不送审" in line for line in result.trace)
+
+
+def test_实现者撞上限也不送审(tmp_path: Path) -> None:
+    """没做完就送审，会把「任务太大」误报成「实现不合格」。"""
+    plan = plan_dispatch(_gateway([_plan()]), "修复解析")
+    looking = json.dumps(
+        {
+            "thought": "先看看",
+            "tool_calls": [{"name": "read_file", "arguments": {"path": "x.py"}}],
+            "state": None,
+            "done": False,
+            "final": None,
+        },
+        ensure_ascii=False,
+    )
+    result = run_delegated(
+        plan,
+        _gateway([looking] * 3),
+        OfflineTokenCounter(),
+        _registry(tmp_path),
+        Config(
+            project_root=tmp_path,
+            context_window=4096,
+            subagent_steps=1,
+            supervise=False,
+        ),
+    )
+    assert result.too_big
+    assert "步预算" in result.too_big
+    assert result.review is None

@@ -15,6 +15,7 @@ from typing import Any
 from agents_dev.agents.runtime import (
     IMPLEMENTER,
     REVIEWER,
+    TOO_BIG_MARKER,
     TaskSpec,
     run_role,
 )
@@ -139,6 +140,11 @@ def _parse_plan(text: str, goal: str) -> DispatchPlan:
     return DispatchPlan(True, reason, spec=spec)
 
 
+def _flatten(text: str, limit: int) -> str:
+    flat = " ".join(str(text or "").split())
+    return flat[:limit] + "…" if len(flat) > limit else flat
+
+
 def _evidence(artifact: str, verify) -> str:
     """交给审查者的证据：改动差异 + 自动验证的结果。
 
@@ -187,6 +193,9 @@ class DelegatedResult:
     review: Review | None = None
     rounds: int = 0
     trace: list[str] = field(default_factory=list)
+    # 子智能体明确说了「这件事我独立做不完」时的说明与建议拆法。
+    # 与「审查未通过」是两件事：前者是**任务太大**，后者是**改动不对**。
+    too_big: str = ""
     # 这一趟花掉的模型开销。要报回主循环——否则用量表会漏掉子智能体整段，
     # 而主循环看到的「2 次调用」会让人以为派发是免费的。
     prompt_tokens: int = 0
@@ -282,6 +291,25 @@ def run_delegated(
         )
         result.implementer_final = implemented.final
         result.trace.extend(f"[实现 {round_no}] {line}" for line in implemented.trace)
+
+        # 两条「别送审」的路，都是**任务规模**问题，不是改动质量问题：
+        #   1. 它自己说了做不完（【太大】）；
+        #   2. 它撞了步数上限（没 finished）——那是在审一个半成品。
+        # 送审会把「任务太大」误报成「实现不合格」，然后触发一轮注定失败的
+        # 修复重派。真正该做的是把话带回主循环：拆小再派。
+        if not implemented.finished or TOO_BIG_MARKER in implemented.final:
+            reason = (
+                implemented.final.strip()
+                if TOO_BIG_MARKER in implemented.final
+                else (
+                    f"做不完：它用完了 {implemented.steps} 步预算仍然没给出结论"
+                    f"（预算 {config.subagent_steps} 步/轮）。"
+                )
+            )
+            result.too_big = reason
+            result.rounds = round_no
+            result.trace.append(f"[规模] 不送审——{_flatten(reason, 300)}")
+            break
 
         review_spec = TaskSpec(
             goal=f"独立审查这次改动：{spec.goal}",

@@ -266,6 +266,12 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
         print("审查者自己没跑完，所以这次改动既没被否定也没被确认：")
         for reason in delegated.review.reasons:
             print(f"  - {reason}")
+    elif delegated.too_big:
+        # 没送审，就没有「审查结论」。不单列这一支的话，上面那两行都不成立，
+        # 用户会以为这次派发是正常结束的。
+        print("--- 这块活太大，子智能体没做完 ---")
+        print(delegated.too_big)
+        print("拆小之后再派，或者加 --subagent-steps 再来一次。")
     _settle_pending(args, project_root, pending)
     return 0
 

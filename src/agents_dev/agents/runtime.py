@@ -23,6 +23,14 @@ from agents_dev.llm.tokenizer import TokenCounter
 from agents_dev.tools.registry import ToolRegistry
 from agents_dev.tools.help import tool_help_spec
 
+# 子智能体判断「这件事我独立做不完」时，final 用这个标记开头。
+#
+# 这条通道是**必需**的，不是礼貌用语：实测一次批量派发里，实现者撞上
+# 「连续 10 次重复调用 write_file」的保护而收手，留下的信号是一句无从
+# 行动的自述；而主循环需要知道的是「这块对它太大，拆小再派」。
+# 不写这个标记，主循环只能从「结果不好」里去猜原因。
+TOO_BIG_MARKER = "【太大】"
+
 
 @dataclass(frozen=True)
 class Role:
@@ -39,6 +47,14 @@ IMPLEMENTER = Role(
     system_prompt=(
         "你负责实现一处具体改动。只做任务说明里要求的事，不要顺手重构其它代码。"
         "改动前先确认目标符号的引用方，避免改坏调用者。"
+        # 开工前先估规模：这是「任务太大就早说」那条通道的入口。实测不写
+        # 这句，它会硬做到底——烧光预算、撞上重复保护，回来只剩一句主循环
+        # 无从行动的话。早说一句的价值在于**主循环还来得及拆**。
+        "开工前先花一步估一估：这件事要读几个文件、改几处、大约几步。"
+        "如果你的步数预算（{limit} 步）明显不够，不要硬做——直接把 done 设为 "
+        f"true，final 以 {TOO_BIG_MARKER} 开头，写清为什么做不完，"
+        "并给出一种可行的拆法（拆成哪几块、先做哪一块）。"
+        "硬做只会烧光预算、留下半成品，比早说更糟。"
     ),
     tools=(
         "read_file",
@@ -69,6 +85,11 @@ REVIEWER = Role(
         "find_callers，跑测试用 run_command 执行 pytest。"
         "不要用 grep、ls、sed、python -c 这类命令——它们不在白名单里，"
         "只会把预算浪费在被拒绝上。"
+        # 审查也要先估规模：实测有一次被派去「审 50 道题的状态」，
+        # 它在里面翻了半天，交回的结论没有意义。审不完也应当早说。
+        "开工前先估一估这份审查有多大。如果一轮（{limit} 步）明显审不完，"
+        f"直接 done 设为 true，final 以 {TOO_BIG_MARKER} 开头，"
+        "说明要审的范围有多大、建议怎么拆。"
     ),
     # 注意这里没有写权限：审查者不可能通过改代码来掩盖问题。
     # 审查者能跑测试但不能写代码：独立验证要靠自己动手跑，而不是附和实现者。
@@ -184,7 +205,9 @@ def run_role(
         ),
         prefetch=None,
         memory=None,
-        persona=role.system_prompt,
+        # 角色提示词里的 {limit} 换成它这一轮真正拿到的步数：不写数字的话，
+        # 它会拿主循环的预算来估自己的活。
+        persona=role.system_prompt.replace("{limit}", str(limit)),
         verify=verify,
     )
     # 检查点用**角色自己的 id**：主循环和子智能体跑在同一个工作区里，

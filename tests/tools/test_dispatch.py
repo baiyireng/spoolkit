@@ -209,3 +209,47 @@ def test_派发失败不带走主循环(tmp_path: Path) -> None:
     result = spec.handler({"goal": "做点什么", "acceptance": "跑通"})
     assert result.ok is False
     assert "派发没能跑起来" in result.content
+
+
+def test_一次派太多当场被拦(tmp_path: Path) -> None:
+    """规模问题该在**派之前**拦：派大了它只会烧光预算、交回半成品。
+
+    实测那次派了 50 件进去，回来是一句无从行动的话，然后还被送去审查。
+    """
+    registry = ToolRegistry()
+    registry.register(list_dir_spec(tmp_path))
+    spec = dispatch_spec(
+        None,
+        registry,
+        Config(project_root=tmp_path, context_window=8192, subagent_steps=20),
+        OfflineTokenCounter(),
+    )
+    result = spec.handler(
+        {
+            "goal": "把这 11 道题都修了",
+            "acceptance": "每个目录跑 pytest 都通过",
+            "targets": [f"{i:02d}_task" for i in range(1, 12)],
+        }
+    )
+    assert result.ok is False
+    assert "超出一次能派的上限" in result.content
+    assert "拆成几批" in result.content
+
+
+def test_太大时给主循环的话是可行动的(tmp_path: Path) -> None:
+    """「太大」要和「做砸了」分开说：一个要拆任务，一个要改代码。"""
+    loop, _ = _build(
+        tmp_path,
+        [
+            _dispatch_turn(),
+            _turn("【太大】这块要读 20 个文件，我只有 4 步。建议拆成两批。",
+                  [], final="【太大】建议拆成两批，先做前一半"),
+            _turn("那我先自己做一半", [], final="好"),
+        ],
+    )
+    loop.run("改 a.py")
+    fed_back = "\n".join(
+        message.content for message in loop.gateway.requests[-1].messages
+    )
+    assert "太大" in fed_back
+    assert "拆小" in fed_back
