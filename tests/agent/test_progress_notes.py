@@ -92,16 +92,33 @@ def test_同一步重复写同一文件只记一次(tmp_path: Path) -> None:
     assert len([item for item in result.state.done if "a.py" in item]) == 1
 
 
-def test_进度条数有上限(tmp_path: Path) -> None:
+def test_状态块只列最近几条但记录不丢(tmp_path: Path) -> None:
+    """块里只列最近几条（它每轮都注入，是每个请求的税），但**记录不能丢**。
+
+    实测一条会话做完 20 道题，收尾时它报「还有 17 道没做」——因为它只看得见
+    块里那 8 条。所以：全量留在状态与清单文件里，块里给总数 + 指针。
+    """
     script = [
         _turn([_call("write_file", path=f"f{i}.py", content="x")])
         for i in range(MAX_DONE_NOTES + 4)
     ]
     script.append(_turn([], final="完成"))
     result = _loop(tmp_path, script, max_steps=len(script)).run("写很多文件")
-    assert len(result.state.done) == MAX_DONE_NOTES
-    # 保留的是最近的
-    assert any(f"f{MAX_DONE_NOTES + 3}.py" in item for item in result.state.done)
+
+    total = MAX_DONE_NOTES + 4
+    # 记录是全的
+    assert len(result.state.done) == total
+    assert any("f0.py" in item for item in result.state.done)
+    # 块里只列最近几条，但说清了总数与完整清单在哪
+    block = result.state.render()
+    assert f"已完成 {total} 项" in block
+    assert f"只列最近 {MAX_DONE_NOTES} 项" in block
+    assert ".agent/progress.md" in block
+    assert "f0.py" not in block
+    assert f"f{total - 1}.py" in block
+    # 清单落盘，模型需要细节时可以读
+    progress = (tmp_path / ".agent" / "progress.md").read_text(encoding="utf-8")
+    assert "f0.py" in progress and f"f{total - 1}.py" in progress
 
 
 def test_进度写进检查点(tmp_path: Path) -> None:

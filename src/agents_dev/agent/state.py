@@ -35,11 +35,22 @@ class TaskState:
     hypothesis: str = ""
     step: int = 0
 
+    # 状态块里「已完成」只列最近几条：它**每轮都要注入一次**，每一条都是
+    # 每个请求的税——和工具清单是同一笔账。完整记录留在状态里（也就落在
+    # 检查点文件上），需要细节时去读 `.agent/progress.md`。
+    DONE_INLINE = 8
+
     def render(self) -> str:
         """渲染成紧凑文本供注入。刻意省略空字段以节省 token。"""
         lines = [f"目标: {self.goal}"]
         if self.done:
-            lines.append("已完成: " + " | ".join(self.done))
+            recent = self.done[-self.DONE_INLINE :]
+            head = f"已完成 {len(self.done)} 项"
+            if len(self.done) > len(recent):
+                head += f"（只列最近 {len(recent)} 项）"
+            lines.append(f"{head}: " + " | ".join(recent))
+            if len(self.done) > len(recent):
+                lines.append("完整清单: .agent/progress.md")
         if self.current:
             lines.append(f"当前: {self.current}")
         if self.verify:

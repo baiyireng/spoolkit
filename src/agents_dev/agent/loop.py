@@ -200,7 +200,9 @@ MAX_RECENT_TURNS = 6
 # 只有这几类工具的结果算「进度」。读文件和搜索不算：它们是手段，
 # 不是产出，记进去只会把状态撑满噪声。
 PROGRESS_TOOLS = ("write_file", "replace_lines", "run_command")
-MAX_DONE_NOTES = 8
+# 「已完成」在状态块里列几条。它每轮都注入，所以是每个请求的税——
+# 完整记录留在状态与 .agent/progress.md 里（见 TaskState.DONE_INLINE）。
+MAX_DONE_NOTES = TaskState.DONE_INLINE
 
 
 @dataclass
@@ -621,6 +623,7 @@ class AgentLoop:
                     if self.sources is not None:
                         self.sources.add(result.content, result.facts)
                     self._note_progress(state, call, result)
+                    self._write_progress(state)
                     if result.ok and call.name in EDIT_TOOLS:
                         edited = True
                         edits_made += 1
@@ -871,8 +874,28 @@ class AgentLoop:
         entry = f"{call.name} {target}".strip()
         if entry not in state.done:
             state.done.append(entry)
-        # 状态每轮都要注入，必须封顶；留最近的，早的先让位。
-        del state.done[:-MAX_DONE_NOTES]
+
+    def _write_progress(self, state: TaskState) -> None:
+        """把「做过什么」落一份在人读得懂的地方。
+
+        状态块（每轮注入的那份）只列最近几条——它是**每个请求的税**。
+        但完整记录不能因此丢掉：实测一条会话做完 20 道题，收尾时它报
+        「还有 17 道没做」，因为它只看得见状态块里那 8 条。
+
+        所以：全量留在状态里（也就落在检查点文件上），另外渲染一份
+        纯文本清单，模型需要细节时可以自己读。
+        """
+        if not state.done:
+            return
+        path = self.config.project_root / ".agent" / "progress.md"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            body = ["# 这次任务里做过的事（由循环记录，不是模型自述）", ""]
+            body += [f"- {item}" for item in state.done]
+            path.write_text("\n".join(body) + "\n", encoding="utf-8")
+        except OSError:
+            # 记录失败不该影响任务本身：它是给人看的旁证，不是必需产物。
+            pass
 
     def _emit(self, kind: str, data: dict) -> None:
         """向外部观察者发一条事件。
