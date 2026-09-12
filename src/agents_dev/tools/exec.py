@@ -27,13 +27,15 @@ from agents_dev.errors import PathOutsideProjectError
 from agents_dev.paths import resolve_within
 from agents_dev.tools.trial import trial_workspace
 from agents_dev.tools.types import ToolResult, ToolSpec
+from agents_dev import limits as _limits
 from agents_dev.tools.grant import ALLOWED, ASK, DENIED, Grants, classify
 
 # 60 秒对真实测试套件是不够的：这个项目自己的套件跑一次就要十几秒，
 # 加上试跑副本的开销很容易翻倍。超时太小会逼着模型去瞎摸索，
 # 把步数预算浪费在恢复上，而不是任务本身。
-DEFAULT_TIMEOUT = 180
-MAX_TIMEOUT = 600
+# 默认值来自登记表；名字留着给外部导入。
+DEFAULT_TIMEOUT = int(_limits.knob("command_timeout").default)
+MAX_TIMEOUT = int(_limits.knob("max_command_timeout").default)
 MAX_OUTPUT_CHARS = 4000
 
 # 只允许只读的 git 子命令。提交、回滚、推送由人来做——
@@ -287,6 +289,8 @@ def _run(
     grants: Grants | None = None,
     revert: object = (),
     max_output: int = MAX_OUTPUT_CHARS,
+    default_timeout: int = DEFAULT_TIMEOUT,
+    max_timeout: int = MAX_TIMEOUT,
 ) -> ToolResult:
     argv = list(args["command"])
     usage = _usage_problem(argv)
@@ -314,9 +318,11 @@ def _run(
     # 模型会把它当成参数再传回来，实测里演变成了 "can't open file <解释器路径>"。
     requested = " ".join(argv)
 
-    timeout = args.get("timeout", DEFAULT_TIMEOUT)
-    if not 1 <= timeout <= MAX_TIMEOUT:
-        return ToolResult(ok=False, content=f"timeout 必须在 1 到 {MAX_TIMEOUT} 秒之间")
+    timeout = args.get("timeout", default_timeout)
+    if not 1 <= timeout <= max_timeout:
+        return ToolResult(
+            ok=False, content=f"timeout 必须在 1 到 {max_timeout} 秒之间"
+        )
 
     if argv[0] == "uv" and shutil.which("uv") is None:
         return ToolResult(
@@ -366,6 +372,8 @@ def run_command_spec(
     approver=None,
     grants: Grants | None = None,
     max_output: int = MAX_OUTPUT_CHARS,
+    default_timeout: int = DEFAULT_TIMEOUT,
+    max_timeout: int = MAX_TIMEOUT,
 ) -> ToolSpec:
     """执行白名单命令。有未落盘改动时自动在试跑副本上执行。"""
     return ToolSpec(
@@ -387,7 +395,14 @@ def run_command_spec(
             "additionalProperties": False,
         },
         handler=lambda args: _run(
-            root, args, pending, approver, grants, max_output=max_output
+            root,
+            args,
+            pending,
+            approver,
+            grants,
+            max_output=max_output,
+            default_timeout=default_timeout,
+            max_timeout=max_timeout,
         ),
         brief="跑测试或脚本",
         group="跑",

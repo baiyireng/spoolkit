@@ -10,6 +10,7 @@
 
 from pathlib import Path
 
+from agents_dev import limits as _limits
 from agents_dev.llm.tokenizer import TokenCounter
 
 HOT_TITLE = "# 项目记忆（自动维护，也可手动编辑）"
@@ -36,12 +37,22 @@ DEMOTE_ORDER: tuple[str, ...] = (
     "fact",
 )
 
-HOT_RATIO = 0.15
+# 「热记忆占多少」这个数只有一个出处：登记表。装配层那个配额
+# （budget.quota("hot_memory")）也从同一个名字取值——两处各写一份时，
+# 改一处不动另一处，比没有这个旋钮更糟。
+HOT_RATIO = float(_limits.knob("hot_memory_ratio").default)
 
 
-def hot_budget(context_window: int, ratio: float = HOT_RATIO) -> int:
+def hot_budget(
+    context_window: int,
+    ratio: float | None = None,
+    overrides: dict | None = None,
+) -> int:
     """热记忆的 token 上限，按有效预算（扣除输出预留）的比例计算。"""
     from agents_dev.context.budget import OUTPUT_RESERVE_RATIO
+
+    if ratio is None:
+        ratio = float(_limits.resolve("hot_memory_ratio", overrides)[0])
 
     effective = int(context_window * (1 - OUTPUT_RESERVE_RATIO))
     return int(effective * ratio)

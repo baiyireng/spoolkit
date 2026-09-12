@@ -8,6 +8,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from agents_dev import limits as _limits
 from agents_dev.llm.tokenizer import TokenCounter
 
 
@@ -38,13 +39,20 @@ class TaskState:
     # 状态块里「已完成」只列最近几条：它**每轮都要注入一次**，每一条都是
     # 每个请求的税——和工具清单是同一笔账。完整记录留在状态里（也就落在
     # 检查点文件上），需要细节时去读 `.agent/progress.md`。
-    DONE_INLINE = 8
+    #
+    # 默认值来自登记表（limits.KNOBS 的 done_inline），这里留名字给外部导入；
+    # 实际列几条由渲染方按本次运行的覆盖决定。
+    DONE_INLINE = int(_limits.knob("done_inline").default)
 
-    def render(self) -> str:
-        """渲染成紧凑文本供注入。刻意省略空字段以节省 token。"""
+    def render(self, done_inline: int | None = None) -> str:
+        """渲染成紧凑文本供注入。刻意省略空字段以节省 token。
+
+        done_inline 由调用方按本次运行的标定值给（默认用登记表的默认值）。
+        """
+        limit = self.DONE_INLINE if done_inline is None else max(1, done_inline)
         lines = [f"目标: {self.goal}"]
         if self.done:
-            recent = self.done[-self.DONE_INLINE :]
+            recent = self.done[-limit:]
             head = f"已完成 {len(self.done)} 项"
             if len(self.done) > len(recent):
                 head += f"（只列最近 {len(recent)} 项）"

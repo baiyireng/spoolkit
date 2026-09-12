@@ -25,6 +25,7 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any
 
+from agents_dev import limits as _limits
 from agents_dev.context import templates as T
 from agents_dev.llm.gateway import ModelGateway
 from agents_dev.llm.types import ChatRequest, Message
@@ -35,7 +36,10 @@ STOP = "stop"
 
 # 一次最多给多少步。给太多等于把上限取消掉：真正的用处是「够走完剩下的事」，
 # 而它下一轮还会被问一次，不必一次给足。
-MAX_GRANT = 20
+#
+# 默认值来自登记表（limits.KNOBS 的 supervisor_max_grant），这里留名字给外部
+# 导入；实际用多少由调用方按本次运行的覆盖给（强模型可以一次多给些）。
+MAX_GRANT = int(_limits.knob("supervisor_max_grant").default)
 
 VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -119,7 +123,9 @@ class Verdict:
         return 0
 
 
-def parse_verdict(text: str, evidence: Evidence) -> Verdict | None:
+def parse_verdict(
+    text: str, evidence: Evidence, max_grant: int = MAX_GRANT
+) -> Verdict | None:
     """把督导的一句话判成结论。解析不出来返回 None——调用方按「不敢续期」处理。
 
     含糊的续期比不续期危险：不续期只是停下来，而错误续期会把预算继续投进
@@ -141,14 +147,17 @@ def parse_verdict(text: str, evidence: Evidence) -> Verdict | None:
     raw = payload.get("steps")
     steps = int(raw) if isinstance(raw, (int, float)) else 0
     # 它想给多少不算数：上限由我们夹住。越权一次就等于上限不存在。
-    steps = max(0, min(steps, MAX_GRANT, evidence.room))
+    steps = max(0, min(steps, max_grant, evidence.room))
     if action in (EXTEND, REDIRECT) and steps <= 0:
         return Verdict(STOP, reason or "总步数上限已经用完了，不能再续", 0, "")
     return Verdict(action, reason, steps, message)
 
 
 def supervise(
-    gateway: ModelGateway, evidence: Evidence, max_tokens: int = 512
+    gateway: ModelGateway,
+    evidence: Evidence,
+    max_tokens: int = 512,
+    max_grant: int = MAX_GRANT,
 ) -> Verdict | None:
     """问一次督导。
 
@@ -170,7 +179,7 @@ def supervise(
         )
     except Exception:
         return None
-    verdict = parse_verdict(response.text, evidence)
+    verdict = parse_verdict(response.text, evidence, max_grant)
     if verdict is None:
         return None
     return replace(

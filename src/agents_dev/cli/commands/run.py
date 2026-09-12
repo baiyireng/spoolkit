@@ -107,6 +107,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
     before = len(diagnosis.load_requests(project_root))
     policy = resolve_policy(args, project_root)
     scope = resolve_scope(args)
+    overrides = _overrides(args, project_root)
     writer.emit(
         START, session=args.session, goal=args.goal, policy=policy, window=window
     )
@@ -119,6 +120,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             window,
             args.session,
             model=f"{args.provider}:{args.model or '默认'}",
+            overrides=overrides,
         )
     )
     loop = assemble_loop(
@@ -132,7 +134,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             supervise=not args.no_supervise,
             step_ceiling=args.step_ceiling,
             # 能力标定：工作区的覆盖 + 命令行显式给的那两个
-            overrides=_overrides(args, project_root),
+            overrides=overrides,
         ),
         wiring=LoopWiring(
             memory=memory,
@@ -165,6 +167,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
 
 def _standard(args, project_root, gateway, window, pending) -> int:
     """普通路径：主循环自己完成。"""
+    overrides = _overrides(args, project_root)
     approver, grants = build_approver(project_root)
     before = len(diagnosis.load_requests(project_root))
     read_roots, _ = _resolve_read_roots(args, project_root)
@@ -176,6 +179,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             window,
             args.session,
             model=f"{args.provider}:{args.model or '默认'}",
+            overrides=overrides,
         )
         # 假模型没有多余脚本条目可分给归纳调用，因此只在真实供应商下启用。
         if args.provider != "fake":
@@ -191,7 +195,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             subagent_steps=args.subagent_steps,
             supervise=not args.no_supervise,
             step_ceiling=args.step_ceiling,
-            overrides=_overrides(args, project_root),
+            overrides=overrides,
         ),
         wiring=LoopWiring(
             memory=memory,

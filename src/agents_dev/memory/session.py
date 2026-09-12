@@ -25,12 +25,15 @@ class MemorySession:
         counter: TokenCounter,
         context_window: int,
         session_id: str = "default",
+        overrides: dict | None = None,
     ) -> None:
         self._conn = conn
         self._hot_path = hot_path
         self._counter = counter
         self._window = context_window
         self.session_id = session_id
+        # 热记忆的占比是能力标定值：装配层和裁剪层必须从同一个出处取。
+        self._overrides = overrides or {}
 
     def hot_text(self) -> str:
         """返回本轮应当注入的热记忆文本，已按容量裁剪。"""
@@ -38,7 +41,7 @@ class MemorySession:
         if not sections:
             return ""
         kept, _ = trim_to_budget(
-            sections, self._counter, hot_budget(self._window)
+            sections, self._counter, hot_budget(self._window, overrides=self._overrides)
         )
         if not kept:
             return ""
@@ -81,4 +84,5 @@ class MemorySession:
             context_window=self._window,
             outcome=outcome,
             promote=promote,
+            overrides=self._overrides,
         )

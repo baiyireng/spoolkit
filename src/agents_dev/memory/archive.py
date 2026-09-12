@@ -43,6 +43,7 @@ def archive_task(
     counter: TokenCounter,
     context_window: int,
     outcome: str = "success",
+    overrides: dict | None = None,
     promote: Sequence[tuple] = (),
 ) -> ArchiveResult:
     """归档一次已结束的任务。"""
@@ -84,7 +85,7 @@ def archive_task(
         promoted_texts.append(text.strip())
 
     kept, demoted = trim_to_budget(
-        sections, counter, hot_budget(context_window)
+        sections, counter, hot_budget(context_window, overrides=overrides)
     )
     for text in demoted:
         add_memory(

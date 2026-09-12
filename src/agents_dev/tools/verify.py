@@ -60,7 +60,7 @@ def scope_for_change(root: Path, changed: str) -> str:
 
 
 def scopes_for_changes(
-    root: Path, changed: Sequence[str]
+    root: Path, changed: Sequence[str], max_scopes: int = MAX_SCOPES
 ) -> tuple[list[str], int]:
     """改动落在哪些范围上，以及有几个范围没来得及验。"""
     scopes: list[str] = []
@@ -70,8 +70,8 @@ def scopes_for_changes(
             scopes.append(scope)
     if not scopes:
         return ["."], 0
-    dropped = max(0, len(scopes) - MAX_SCOPES)
-    return scopes[:MAX_SCOPES], dropped
+    dropped = max(0, len(scopes) - max_scopes)
+    return scopes[:max_scopes], dropped
 
 
 def condense_test_output(text: str, limit: int = 360) -> str:
@@ -194,6 +194,7 @@ def make_verifier(
     root: Path,
     pending,
     timeout: int = DEFAULT_TIMEOUT,
+    overrides: dict | None = None,
 ) -> Callable[[], ToolResult] | None:
     """装配一个验证器。没有测试、或命令不在白名单里，就返回 None。"""
     command = detect_test_command(root)
@@ -228,7 +229,10 @@ def make_verifier(
         # 实测给审查者灌了 50 个 ERROR，它据此写下的结论自然没有意义。
         if not changed:
             changed = [change.path for change in pending.items()]
-        scopes, dropped = scopes_for_changes(root, changed)
+        # 一次改多处时逐处验几个范围是能力标定值：本机 27B 上 5 个范围
+        # 之后「验证比任务本身还贵」；强模型/快机器上可以多验几个。
+        max_scopes = int((overrides or {}).get("max_scopes") or MAX_SCOPES)
+        scopes, dropped = scopes_for_changes(root, changed, max_scopes)
         outcomes = [
             (
                 scope,

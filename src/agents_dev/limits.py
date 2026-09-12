@@ -152,8 +152,18 @@ KNOBS: tuple[Knob, ...] = (
     ),
     Knob("command_timeout", 180, MECHANICAL, "单条命令的默认超时"),
     Knob("max_command_timeout", 600, SAFETY, "命令超时上限：防止挂死"),
-    Knob("path_confinement", 1, SAFETY, "写操作不出工作区（不可覆盖）"),
-    Knob("denied_commands", 1, SAFETY, "永久禁止清单：提权与系统级操作（不可覆盖）"),
+    Knob(
+        "path_confinement",
+        1,
+        SAFETY,
+        "**符号项**（描述一条规则，不是一个可调数值）：写操作不出工作区",
+    ),
+    Knob(
+        "denied_commands",
+        1,
+        SAFETY,
+        "**符号项**：永久禁止清单——提权与系统级操作，不提供申请入口",
+    ),
 )
 
 _BY_NAME = {knob.name: knob for knob in KNOBS}

@@ -49,8 +49,9 @@ from agents_dev.tools.sources import SourceLog, check_numbers_spec
 # 符号表给人「有哪些东西」，内容给人「它是怎么写的」。两块都要：
 # 只有符号表时，模型会一直查、始终不下手（实测本地 7B 的整条轨迹里
 # 连一次 read_file 都没有）。
-PREFETCH_BUDGET = 400
-PREFETCH_CONTENT_BUDGET = 1000
+# 这两个数搬进了登记表（limits.KNOBS），这里只留名字给外部导入。
+PREFETCH_BUDGET = int(limits.knob("prefetch_budget").default)
+PREFETCH_CONTENT_BUDGET = int(limits.knob("prefetch_content_budget").default)
 
 
 def counter_for(gateway: ModelGateway) -> object:
@@ -177,9 +178,19 @@ def attach_index(
     registry.register(find_callers_spec(conn, pending))
 
     def prefetch_for(goal: str) -> str:
-        symbols = prefetch_text(conn, goal, tokenizer, PREFETCH_BUDGET)
+        # 预取预算走登记表：每次运行都要付，且与模型强弱强相关。
+        symbols = prefetch_text(
+            conn,
+            goal,
+            tokenizer,
+            int(limits.resolve("prefetch_budget", overrides)[0]),
+        )
         contents = prefetch_contents(
-            conn, project_root, goal, tokenizer, PREFETCH_CONTENT_BUDGET
+            conn,
+            project_root,
+            goal,
+            tokenizer,
+            int(limits.resolve("prefetch_content_budget", overrides)[0]),
         )
         return "\n\n".join(part for part in (symbols, contents) if part)
 
@@ -238,6 +249,12 @@ def assemble_loop(
             parts.approver,
             parts.grants,
             max_output=int(limits.resolve("max_output_chars", settings.overrides)[0]),
+            default_timeout=int(
+                limits.resolve("command_timeout", settings.overrides)[0]
+            ),
+            max_timeout=int(
+                limits.resolve("max_command_timeout", settings.overrides)[0]
+            ),
         )
     )
     if parts.pending is not None:
@@ -252,7 +269,9 @@ def assemble_loop(
     tokenizer = counter_for(gateway)
     verifier = parts.verify
     if verifier is None and parts.auto_verify and parts.pending is not None:
-        verifier = make_verifier(project_root, parts.pending)
+        verifier = make_verifier(
+            project_root, parts.pending, overrides=settings.overrides
+        )
 
     # 会话内的派发入口。注册在最后：它绑定的就是这个注册表里的工具集，
     # 而子智能体拿的是按角色裁剪后的那一份（里面没有 dispatch，不会递归）。
@@ -263,7 +282,13 @@ def assemble_loop(
     # 何时用、看哪一处。它省的是步数——原先要「列目录 → 猜文件名 → 读 →
     # 猜错了再换」，实测模型猜错过文件名，那一步就白花了。
     registry.register(
-        survey_spec(project_root, tokenizer, parts.pending, parts.read_roots)
+        survey_spec(
+            project_root,
+            tokenizer,
+            parts.pending,
+            parts.read_roots,
+            default_budget=int(limits.resolve("survey_budget", settings.overrides)[0]),
+        )
     )
 
     def incoming_reports() -> str:
@@ -305,12 +330,15 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
     )
 
 
-def build_memory(project_root: Path, window: int, session_id: str = "cli"):
+def build_memory(
+    project_root: Path, window: int, session_id: str = "cli", overrides=None
+):
     """在 .agent 下建立记忆库与热记忆文件。"""
     state_dir = project_root / ".agent"
     conn = open_db(state_dir / "memory.db")
     init_memory_schema(conn)
     return MemorySession(
+        overrides=overrides,
         conn=conn,
         hot_path=state_dir / "memory.md",
         counter=OfflineTokenCounter(),
@@ -320,14 +348,18 @@ def build_memory(project_root: Path, window: int, session_id: str = "cli"):
 
 
 def open_memory(
-    project_root: Path, window: int, session_id: str, model: str = ""
+    project_root: Path,
+    window: int,
+    session_id: str,
+    model: str = "",
+    overrides=None,
 ) -> MemorySession:
     """建立记忆会话，并在登记前检查工作区绑定。
 
     检查必须在登记之前：登记会写入当前工作区，先登记就把
     「上次绑定在哪」这个信息当场覆盖掉了，检查也就永远查不出问题。
     """
-    memory = build_memory(project_root, window, session_id)
+    memory = build_memory(project_root, window, session_id, overrides=overrides)
     warning = check_binding(memory._conn, session_id, str(project_root))
     if warning:
         print(f"提示：{warning}")

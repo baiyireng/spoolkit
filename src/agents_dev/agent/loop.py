@@ -309,7 +309,15 @@ class AgentLoop:
             sections.append(Section(name="hot_memory", text=hot, priority=20))
         if lesson_text:
             sections.append(Section(name="lessons", text=lesson_text, priority=25))
-        sections.append(Section(name="task_state", text=state.render(), priority=30))
+        sections.append(
+            Section(
+                name="task_state",
+                # 「已完成」列几条是能力标定值：强模型可以多列几条，
+                # 但那是每个请求的税，所以由本次运行的覆盖决定。
+                text=state.render(int(self.config.limit("done_inline"))),
+                priority=30,
+            )
+        )
         if prefetched:
             sections.append(Section(name="retrieval", text=prefetched, priority=35))
         if feedback:
@@ -787,7 +795,11 @@ class AgentLoop:
             tokens=tokens,
             asking=asking,
         )
-        verdict = supervise(self.gateway, evidence)
+        verdict = supervise(
+            self.gateway,
+            evidence,
+            max_grant=int(self.config.limit("supervisor_max_grant")),
+        )
         if verdict is None:
             self._emit("note", {"text": "督导：没能给出结论", "ok": False})
             return None

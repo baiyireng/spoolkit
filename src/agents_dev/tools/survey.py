@@ -67,7 +67,13 @@ def _files_to_read(base: Path) -> list[Path]:
     return candidates
 
 
-def survey_spec(root: Path, tokenizer, pending=None, read_roots=()) -> ToolSpec:
+def survey_spec(
+    root: Path,
+    tokenizer,
+    pending=None,
+    read_roots=(),
+    default_budget: int = DEFAULT_BUDGET,
+) -> ToolSpec:
     view = WorkspaceView(root, pending)
 
     def handler(args: dict) -> ToolResult:
@@ -81,7 +87,7 @@ def survey_spec(root: Path, tokenizer, pending=None, read_roots=()) -> ToolSpec:
                 ok=False, content=f"不是目录: {raw}（要看单个文件用 read_file）"
             )
 
-        budget = int(args.get("budget") or DEFAULT_BUDGET)
+        budget = int(args.get("budget") or default_budget)
         budget = max(200, min(budget, 4000))
 
         entries = _entries(base, view)

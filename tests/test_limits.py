@@ -78,15 +78,44 @@ def test_预算比例也走覆盖() -> None:
     assert wide.quota("code") > plain.quota("code")
 
 
+def test_热记忆的占比只有一个出处() -> None:
+    """同一个概念两处各写一份，比没有这个旋钮更糟。
+
+    装配层（budget.quota("hot_memory")）和裁剪层（hot_budget）说的是同一件事；
+    只搬一处的话，`limits --set hot_memory_ratio=0.2` 会改一半、留一半。
+    """
+    from agents_dev.context.budget import Budget
+    from agents_dev.memory.hot import hot_budget
+
+    overrides = {"hot_memory_ratio": 0.2}
+    assert hot_budget(8192, overrides=overrides) == int(
+        int(8192 * 0.85) * 0.2
+    )
+    assert Budget(8192, overrides=overrides).quota("hot_memory") == int(
+        8192 * 0.85 * 0.2
+    )
+
+
 def test_表里列的每一项都真的接上了() -> None:
     """登记表最怕的是「列了但没接线」——那比不列更糟：它会骗人。
 
-    这里只做一层粗检：表里每个 capability 项要么在代码里被 resolve 过，
-    要么至少写明了它管什么（note 非空）。
+    这条不是洁癖：**我自己就犯过一次**——上一轮把预取预算列进「已搬」的名单，
+    而那段批量替换其实没匹配上、却打印了 done，等于登记表在骗人。
+    所以这里**穷尽地**检查：每个 capability / mechanical 项都必须在代码里
+    被取用一次（安全项是符号项——它们描述的是一条规则，不是一个数值）。
     """
+    sources = [
+        path
+        for path in Path("src/agents_dev").rglob("*.py")
+        if path.name != "limits.py"
+    ]
+    text = "\n".join(path.read_text(encoding="utf-8") for path in sources)
+
+    missing = []
     for entry in limits.KNOBS:
         assert entry.note.strip(), f"{entry.name} 没写它管什么"
-    text = Path("src/agents_dev").rglob("*.py")
-    used = "\n".join(p.read_text(encoding="utf-8") for p in text)
-    for name in ("soft_trigger_ratio", "max_index_files", "max_output_chars"):
-        assert f'"{name}"' in used, f"{name} 在表里但代码里没人取用"
+        if entry.kind == SAFETY:
+            continue  # 符号项：它约束的是行为，不是可调数值
+        if f'"{entry.name}"' not in text:
+            missing.append(entry.name)
+    assert not missing, f"表里列了但代码里没人取用：{missing}"
