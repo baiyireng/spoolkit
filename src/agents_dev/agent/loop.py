@@ -362,9 +362,21 @@ class AgentLoop:
         return assembler.assemble(sections, recent_turns=history[-MAX_RECENT_TURNS:])
 
     def run(
-        self, goal: str, task_id: str = "task", resume: bool = False
+        self,
+        goal: str,
+        task_id: str = "task",
+        resume: bool = False,
+        prompt: str | None = None,
     ) -> LoopResult:
-        """运行任务直到给出最终答复或达到步数上限。"""
+        """运行任务直到给出最终答复或达到步数上限。
+
+        `goal` 是**短目标**（进状态块、进检查点、给督导看）；
+        `prompt` 是这一轮真正发给模型的第一段话，不给就等于 goal。
+
+        为什么要分开：按步执行那条路上，原先给的是整段步骤提示词，于是
+        状态块里又原样重复了一遍（"目标: <整段提示词>"）——每一次调用都付
+        两份。分开之后状态块里是那句短目标，读起来也更像"我做到哪儿了"。
+        """
         checkpoint = self.config.task_path(task_id)
 
         # 恢复未完成的检查点。之前这里只写不读，等于「崩溃可恢复」这句
@@ -391,7 +403,7 @@ class AgentLoop:
                 content=(
                     f"继续之前未完成的任务（已进行 {state.step} 步）。"
                     if resumed
-                    else goal
+                    else (prompt or goal)
                 ),
             )
         ]

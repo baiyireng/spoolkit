@@ -252,7 +252,9 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
     if step.executor == SUBAGENT:
         result = _delegate_step(ctx, step, loop, pending)
     else:
-        result = loop.run(render_step_prompt(plan, step))
+        # goal 用**短目标**，整段步骤提示词只作为提示词发一次：
+        # 状态块里再重复一份，等于每次调用多付一遍。
+        result = loop.run(step.goal, prompt=render_step_prompt(plan, step))
 
     if memory is not None:
         settle_lessons(memory, result.lessons_pushed, result.finished)

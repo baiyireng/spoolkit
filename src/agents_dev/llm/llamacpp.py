@@ -197,7 +197,15 @@ class LlamaCppGateway:
 
 
 class LlamaCppTokenCounter:
-    """用服务端 /tokenize 做精确计数。"""
+    """用服务端 /tokenize 做精确计数。
+
+    **必须带记忆**：计数在热路径上——每装一次上下文要按区段计数，
+    区段超预算时还要二分查找（一次几十个 HTTP 往返），而这些文本
+    在相邻几次调用之间大量重复（系统提示、状态块、预取都逐字不变）。
+    实测一次 50 题的自主编排里，未命中的计数是最主要的"没人认领的时间"。
+    """
+
+    CACHE_LIMIT = 256
 
     def __init__(
         self,
@@ -206,6 +214,8 @@ class LlamaCppTokenCounter:
         proxy: str | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        self._cache: dict[str, int] = {}
+        self._requests = 0
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=timeout,
@@ -216,10 +226,25 @@ class LlamaCppTokenCounter:
     def count(self, text: str) -> int:
         if not text:
             return 0
+        cached = self._cache.get(text)
+        if cached is not None:
+            return cached
         response = self._client.post("/tokenize", json={"content": text})
+        self._requests += 1
         if response.status_code != 200:
             raise LlamaCppError(f"tokenize 返回 {response.status_code}")
-        return len(response.json().get("tokens", []))
+        value = len(response.json().get("tokens", []))
+        if len(self._cache) >= self.CACHE_LIMIT:
+            # 长任务里提示词各不相同，缓存得有上界；满了就整体丢掉，
+            # 不做 LRU——这段代码不值得为淘汰策略再引入一层结构。
+            self._cache.clear()
+        self._cache[text] = value
+        return value
+
+    @property
+    def requests(self) -> int:
+        """真正发出去的 /tokenize 次数（调这块时唯一能看的信号）。"""
+        return self._requests
 
     def close(self) -> None:
         self._client.close()
