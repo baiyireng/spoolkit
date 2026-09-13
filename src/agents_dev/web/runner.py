@@ -31,6 +31,10 @@ from agents_dev.web.protocol import (
 
 NOISE_LINES = 3
 
+# 事件留痕的条数上限。外部驱动者（MCP 那条路）不能订阅 SSE，只能按序号轮询，
+# 所以事件必须留一段。留全量不行：长任务的事件是几千条，内存里攒着没意义。
+EVENT_LOG = 400
+
 # 聊天区域里回放多少条历史。它**只是给人看的**：模型上下文不受它影响，
 # 页面上看到的往来不等于模型看到的上下文（后者由状态与记忆按需取）。
 HISTORY_LIMIT = 20
@@ -66,6 +70,10 @@ class Runner:
         # 快照里没有 diff 的话，按钮会回来、内容却是空的——
         # 那时候用户只能盲点「应用」。
         self._diffs: list[dict] = []
+        # 事件留痕：给不能订阅 SSE 的驱动者轮询用（MCP）。带序号，
+        # 因为"上次看到第几条"是驱动者唯一能说的话。
+        self._log: list[dict] = []
+        self._log_seq = 0
 
     # --- 命令 ---
 
@@ -104,6 +112,8 @@ class Runner:
             self._finished = False
             self._noise = []
             self._diffs = []
+            self._log = []
+            self._log_seq = 0
             self._process = subprocess.Popen(
                 self.command(goal),
                 cwd=str(self.project_root),
@@ -205,6 +215,9 @@ class Runner:
 
     def _absorb(self, event: Event) -> None:
         with self._lock:
+            self._log_seq += 1
+            self._log.append({"seq": self._log_seq, **event.data, "type": event.type})
+            del self._log[:-EVENT_LOG]
             if event.type == AWAIT:
                 self._awaiting = int(event.data.get("count", 1))
             elif event.type == DIFF:
@@ -217,6 +230,11 @@ class Runner:
                 self._final = dict(event.data)
                 self._awaiting = 0
                 self._diffs = []
+
+    def events(self, since: int = 0) -> list[dict]:
+        """序号大于 since 的事件。外部驱动者按 last_seq 往下拉。"""
+        with self._lock:
+            return [dict(item) for item in self._log if item["seq"] > since]
 
     def _pump(self, process: subprocess.Popen) -> None:
         """后台读取子进程输出，逐行解析并广播。"""

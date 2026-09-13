@@ -84,6 +84,17 @@ agents-dev serve                 # 供应商/地址取用户级配置，也可�
 agents-dev chat                  # 一行一句，共用同一个会话；/history、/exit
 ```
 
+### 5. 让别的 agent 用它（MCP）
+
+它也能反过来**被**调用：挂成 MCP 服务之后，Codex / Claude Code / Cursor
+可以扮演用户下发编排任务，由这个 agent 在工作区里实施，事件与结论按协议交回。
+
+```json
+{"command": "agents-dev", "args": ["mcp", "--root", "D:\\你的项目", "--scope", "**"]}
+```
+
+工具、信任模型与调用序列见 [`docs/mcp.md`](docs/mcp.md)。
+
 ## 配置
 
 | 配什么 | 在哪 | 怎么用 |
@@ -110,6 +121,7 @@ agents-dev chat                  # 一行一句，共用同一个会话；/histo
 | `agents-dev plan --goal …` | 只拆解、落盘计划，不执行 |
 | `agents-dev serve` | 起 Web UI |
 | `agents-dev chat` | 对话式使用：多轮、共用同一个会话 |
+| `agents-dev mcp` | 以 MCP 服务运行，供别的 agent 调用（见 docs/mcp.md）|
 | `agents-dev config` | 查看/设置用户级默认配置（provider、地址、模型…）|
 | `agents-dev bench --limit N` | 跑回归任务集（可复现的测量）|
 | `agents-dev limits` / `policy` / `session` / `revert` | 标定值 / 授权 / 会话 / 回滚 |
