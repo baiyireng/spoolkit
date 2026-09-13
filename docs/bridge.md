@@ -119,11 +119,15 @@ spool bridge --channel wecom --allow-user zhangsan --policy ask
    `spool chat` 就完全看不到——这条是用户问出来的）：
 
    - 桥的终端/日志里：`有人要配对：<用户>（码 XXXXXX）`
-   - **`spool chat` 开局**：有等待中的请求时打一行提示，并且**可以就地批准**
-     `/approve 5R3CVG`
-   - `spool run`（散文模式）开局同样提示；`--events` 模式不打散文明，免得弄脏
-     JSON 事件流
-   - 随手查：`spool approve --list`
+- **`spool chat` 开局**：有等待中的请求时打一行提示，并且**可以就地批准**
+  `/approve 5R3CVG`
+- `spool run`（散文模式）开局同样提示；`--events` 模式不打散文明，免得弄脏
+  JSON 事件流
+- 随手查：`spool approve --list`
+
+**批准/撤销是即时生效的，不需要重启桥**——这一条曾经不成立：桥拿着启动那一刻的
+内存快照，你在另一个进程里批准它不认账，得重启才行（而"批准了还不认识我"这种
+现象极难自己查出来）。现在读之前会先看文件变没变，变了就重读。
 
    三档准入由你显式选：`--access pairing`（默认）/ `allowlist`（只放行
    `--allow-user` 里的人）/ `open`（谁都行，**要显式选**，启动时会警告）。

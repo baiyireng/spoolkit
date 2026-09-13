@@ -117,3 +117,39 @@ def test_配对状态文件坏掉不影响启动(tmp_path: Path) -> None:
     assert pairings.approved == ()
     code = pairings.ensure_code("u")
     assert pairings.approve_code(code) == "u"
+
+
+def test_另一个进程批准后桥立刻认账(tmp_path: Path) -> None:
+    """真踩过的坑，而且正好卡在主流程上。
+
+    桥是长驻进程，它手里是一份内存快照；而批准是**另一个进程**做的事
+    （你敲 `spool approve <码>`）。原先桥要重启才认，于是流程变成
+    "我批准了，可机器人还说不认识我"。这条测试用两个实例模拟两个进程。
+    """
+    path = tmp_path / ".agent" / "bridge-pairings.json"
+    bridge_view = Pairings(path)          # 桥启动时那份
+    code = bridge_view.ensure_code("openid-a")
+
+    cli_view = Pairings(path)             # 另一个进程（onboarding/approve）
+    assert cli_view.approve_code(code) == "openid-a"
+
+    assert bridge_view.is_approved("openid-a") is True
+
+
+def test_另一个进程撤销后桥立刻不再放行(tmp_path: Path) -> None:
+    path = tmp_path / ".agent" / "bridge-pairings.json"
+    bridge_view = Pairings(path)
+    code = bridge_view.ensure_code("openid-a")
+    bridge_view.approve_code(code)
+
+    cli_view = Pairings(path)
+    assert cli_view.revoke("openid-a") is True
+
+    assert bridge_view.is_approved("openid-a") is False
+
+
+def test_另一边新来的码也看得见(tmp_path: Path) -> None:
+    path = tmp_path / ".agent" / "bridge-pairings.json"
+    bridge_view = Pairings(path)
+    Pairings(path).ensure_code("openid-b")
+    assert [user for _, user in bridge_view.pending] == ["openid-b"]

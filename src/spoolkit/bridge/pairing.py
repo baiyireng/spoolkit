@@ -39,14 +39,27 @@ class Pairings:
     """已批准的人 + 待批准的码。文件读不了就当空的（配对是增强，不挡住启动）。"""
 
     def __init__(self, path: Path) -> None:
-        self.path = path
+        # 允许传字符串：踩过一次（探针脚本里写了 str），报的是
+        # "'str' object has no attribute 'is_file'"——离病根太远。
+        self.path = Path(path)
         self._approved: set[str] = set()
         self._codes: dict[str, str] = {}  # code -> user
+        self._stamp: tuple[int, int] | None = None
         self._load()
 
     # --- 读写 ---
 
+    def _stamp_now(self) -> tuple[int, int] | None:
+        try:
+            info = self.path.stat()
+        except OSError:
+            return None
+        return (info.st_mtime_ns, info.st_size)
+
     def _load(self) -> None:
+        self._stamp = self._stamp_now()
+        self._approved = set()
+        self._codes = {}
         if not self.path.is_file():
             return
         try:
@@ -56,6 +69,17 @@ class Pairings:
         self._approved = {str(item) for item in payload.get("approved") or []}
         codes = payload.get("codes") or {}
         self._codes = {str(code): str(user) for code, user in codes.items()}
+
+    def _refresh(self) -> None:
+        """文件被**别的进程**改过就重读。
+
+        为什么必须有（真踩过）：桥是长驻进程，而批准是在另一个进程里做的
+        （你敲 `spool approve <码>`）。原先桥拿着启动那一刻的内存快照，于是
+        "我批准了，可机器人还说不认识我"——直到重启桥才认。而那条路正是文档
+        写的主流程：手机发消息 → 拿码 → 本机批准 → 再发一句就能用。
+        """
+        if self._stamp_now() != self._stamp:
+            self._load()
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,13 +95,16 @@ class Pairings:
             ),
             encoding="utf-8",
         )
+        self._stamp = self._stamp_now()
 
     # --- 查询与变更 ---
 
     def is_approved(self, user: str) -> bool:
+        self._refresh()
         return str(user) in self._approved
 
     def approve(self, user: str) -> None:
+        self._refresh()
         user = str(user)
         self._approved.add(user)
         # 批准之后那个码就没用了：留着只会让旧消息永远有效。
@@ -88,6 +115,7 @@ class Pairings:
 
     def ensure_code(self, user: str) -> str:
         """给这个人生成一个码（已经有就复用，别刷屏）。"""
+        self._refresh()
         user = str(user)
         for code, owner in self._codes.items():
             if owner == user:
@@ -99,6 +127,7 @@ class Pairings:
 
     def approve_code(self, code: str) -> str:
         """按码批准。返回被批准的人；码不对返回空串。"""
+        self._refresh()
         user = self._codes.pop(str(code).strip().upper(), "")
         if not user:
             return ""
@@ -112,6 +141,7 @@ class Pairings:
         为什么必须有它：`approve` 只进不出的话，"这条通道谁能用"就成了一份
         只能增不能减的名单——手机换人、openid 换号、你想收紧一点，都没有出口。
         """
+        self._refresh()
         user = str(user)
         if user not in self._approved:
             return False
@@ -124,6 +154,7 @@ class Pairings:
 
     def forget_code(self, code: str) -> bool:
         """丢掉一个还没被批准的码（不给理由，也不放行谁）。"""
+        self._refresh()
         dropped = self._codes.pop(str(code).strip().upper(), "")
         if not dropped:
             return False
@@ -132,8 +163,10 @@ class Pairings:
 
     @property
     def approved(self) -> tuple[str, ...]:
+        self._refresh()
         return tuple(sorted(self._approved))
 
     @property
     def pending(self) -> tuple[tuple[str, str], ...]:
+        self._refresh()
         return tuple((code, user) for code, user in sorted(self._codes.items()))

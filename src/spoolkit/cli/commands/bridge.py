@@ -238,7 +238,8 @@ def bridge_command(args: argparse.Namespace) -> int:
     elif not allowed:
         print(
             "按配对模式运行：陌生发送者会拿到一个配对码，"
-            "你用 `spool bridge --approve <码>` 放行。",
+            "你用 `spool approve <码>` 放行（任意目录都能敲）；"
+            "看现状用 `spool approve --list`。",
             file=sys.stderr,
         )
     if pairings.approved:
