@@ -26,6 +26,40 @@ def test_初始状态是空闲的(tmp_path: Path) -> None:
     assert runner.snapshot()["running"] is False
 
 
+def test_状态里带上会话历史(tmp_path: Path) -> None:
+    """聊天区域要有历史可看：网页壳按 /state 回放它。
+
+    它**只是给人看的**：模型上下文不受它影响。两者混为一谈会得出
+    "把历史塞回上下文"的结论，而那会把这个项目的支点（短上下文）推翻。
+    """
+    from agents_dev.memory.store import init_memory_schema
+    from agents_dev.memory.transcript import ASSISTANT, USER, record_message
+    from agents_dev.store.db import open_db
+
+    db = tmp_path / ".agent" / "memory.db"
+    conn = open_db(db)
+    init_memory_schema(conn)
+    record_message(conn, "t", USER, "看看 a.py")
+    record_message(conn, "t", ASSISTANT, "它有个 f()")
+    conn.close()
+
+    messages = _runner(tmp_path).snapshot()["messages"]
+    assert [item["role"] for item in messages] == [USER, ASSISTANT]
+    assert messages[0]["content"] == "看看 a.py"
+
+
+def test_没有历史时是空列表(tmp_path: Path) -> None:
+    assert _runner(tmp_path).snapshot()["messages"] == []
+
+
+def test_历史库读坏了也不影响状态接口(tmp_path: Path) -> None:
+    """历史是增强，不该因为它把状态接口弄挂。"""
+    target = tmp_path / ".agent"
+    target.mkdir(parents=True)
+    (target / "memory.db").write_text("这不是数据库", encoding="utf-8")
+    assert _runner(tmp_path).snapshot()["messages"] == []
+
+
 def test_订阅者在运行结束后仍能收到事件(tmp_path: Path) -> None:
     """一次极短的运行：假模型缺脚本会立刻失败退出。"""
     runner = _runner(tmp_path, "--provider", "fake", "--script", "")

@@ -23,6 +23,7 @@ from agents_dev.cli.commands.diagnose import diagnose_command
 from agents_dev.cli.commands.session import session_command
 from agents_dev.cli.commands.limits import limits_command
 from agents_dev.cli.commands.config import config_command
+from agents_dev.cli.commands.chat import chat_command
 from agents_dev.cli.options import (
     DEFAULT_WINDOW,
     report_policy,
@@ -319,6 +320,36 @@ def _add_config_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=config_command)
 
 
+def _add_chat_command(sub: argparse._SubParsersAction) -> None:
+    """对话式使用：一行一句，共用同一个会话。"""
+    parser = sub.add_parser("chat", help="对话式使用（多轮，共用同一个会话）")
+    _add_provider_args(parser, default="")
+    parser.add_argument("--script", default="", help="假模型脚本 JSON")
+    parser.add_argument("--window", type=int, default=0, help="0 表示自动向供应商查询")
+    parser.add_argument("--max-steps", type=int, default=10)
+    parser.add_argument("--step-ceiling", type=int, default=0)
+    parser.add_argument("--no-supervise", action="store_true")
+    parser.add_argument("--subagent-steps", type=int, default=12)
+    parser.add_argument("--no-memory", action="store_true", help="关闭记忆读写")
+    parser.add_argument(
+        "--policy",
+        choices=POLICIES,
+        default="",
+        help="本次会话的授权策略；留空则用已保存的设置",
+    )
+    parser.add_argument("--scope", default="", help="auto 策略下允许自动落盘的路径")
+    parser.add_argument("--session", default="chat", help="会话名。不同时段/目的的活分开记")
+    parser.add_argument("--history", type=int, default=6)
+    parser.add_argument(
+        "--allow-read",
+        action="append",
+        default=[],
+        metavar="目录",
+        help="授权额外可读目录（可重复）。只放开读，写入仍限工作区内",
+    )
+    parser.set_defaults(func=chat_command)
+
+
 def configure_stdio() -> None:
     """把标准输出/错误固定成 UTF-8，且**永不因为一个字符崩掉整个运行**。
 
@@ -358,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_diagnose_command(sub)
     _add_limits_command(sub)
     _add_config_command(sub)
+    _add_chat_command(sub)
 
     args = parser.parse_args(argv)
     # 供应商相关的取值统一在这里落地一次（命令行 > 环境变量 > 用户配置），

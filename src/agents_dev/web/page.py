@@ -42,6 +42,9 @@ HTML = """<!DOCTYPE html>
   #actions { display:none; gap:8px; margin-top:10px; }
   #actions button { padding:6px 14px; border-radius:6px; border:0;
                     cursor:pointer; }
+  .history { border-bottom:1px solid #232a35; padding-bottom:8px;
+             margin-bottom:10px; }
+  .me { color:#79c0ff; }
   #apply { background:#238636; color:#fff; }
   #reject { background:#30363d; color:#c9d1d9; }
   #conn { position:fixed; right:12px; bottom:10px; color:#c96a6a;
@@ -75,6 +78,7 @@ const startBtn = document.getElementById('start');
 let running = false, decided = false;
 let session = 'cli';
 let pendings = [];
+let historyDrawn = false;
 
 function add(text, cls) {
   const div = document.createElement('div');
@@ -107,6 +111,26 @@ function showPending(items) {
   for (const item of items) { pending.appendChild(diffBox(item.path, item.text)); }
 }
 
+// 会话历史：**给人看的**。它不进模型上下文——页面上看到多少往来，
+// 和模型这一步看到多少，是两件事（后者由状态与记忆按需取）。
+function drawHistory(messages) {
+  if (historyDrawn || !messages || !messages.length) { return; }
+  historyDrawn = true;
+  const box = document.createElement('div');
+  box.className = 'history';
+  const head = document.createElement('div');
+  head.className = 'dim';
+  head.textContent = '── 这个会话之前的往来（给人看的，不进模型上下文）──';
+  box.appendChild(head);
+  for (const item of messages) {
+    const div = document.createElement('div');
+    div.className = 'line ' + (item.role === 'user' ? 'me' : 'dim');
+    div.textContent = (item.role === 'user' ? '你：' : '助手：') + item.content;
+    box.appendChild(div);
+  }
+  stream.insertBefore(box, stream.firstChild);
+}
+
 function setRunning(value) {
   running = value;
   startBtn.disabled = value;
@@ -132,6 +156,7 @@ function applyState(state) {
   pendings = state.diffs || [];
   if (pendings.length) { showPending(pendings); }
   if (state.awaiting) { showActions(); } else { actions.style.display = 'none'; }
+  drawHistory(state.messages);
 }
 
 function showActions() {

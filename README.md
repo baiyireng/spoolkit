@@ -71,11 +71,18 @@ agents-dev run --autonomous --scope "**" --policy auto --limit 20 `
 ### 4. 网页壳
 
 ```powershell
-agents-dev serve --provider llamacpp --base-url http://127.0.0.1:8080
+agents-dev serve                 # 供应商/地址取用户级配置，也可以用命令行覆盖
 # 打开 http://127.0.0.1:8765/
 ```
 
-页面里能发目标、看步骤与工具调用、看 diff，并在越界时点"应用/拒绝"。
+页面里能发目标、看步骤与工具调用、看 diff，并在越界时点"应用/拒绝"；
+**上方会回放这个会话之前的往来**（给人看的，不进模型上下文）。
+
+也可以直接在终端里多轮地聊：
+
+```powershell
+agents-dev chat                  # 一行一句，共用同一个会话；/history、/exit
+```
 
 ## 配置
 
@@ -102,6 +109,7 @@ agents-dev serve --provider llamacpp --base-url http://127.0.0.1:8080
 | `agents-dev run --resume` | 接着上次未完成的检查点继续 |
 | `agents-dev plan --goal …` | 只拆解、落盘计划，不执行 |
 | `agents-dev serve` | 起 Web UI |
+| `agents-dev chat` | 对话式使用：多轮、共用同一个会话 |
 | `agents-dev config` | 查看/设置用户级默认配置（provider、地址、模型…）|
 | `agents-dev bench --limit N` | 跑回归任务集（可复现的测量）|
 | `agents-dev limits` / `policy` / `session` / `revert` | 标定值 / 授权 / 会话 / 回滚 |

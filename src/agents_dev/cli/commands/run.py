@@ -123,6 +123,11 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             overrides=overrides,
         )
     )
+    # 聊天区域要有历史可看：网页壳按 /state 回放它。原先这条路径只开了记忆、
+    # **不记往来**，于是页面刷新之后一片空白——"我上次说到哪儿"全靠回忆。
+    # 注意它只进给人看的 transcript，不进模型上下文。
+    if memory is not None:
+        record_message(memory._conn, args.session, USER, args.goal)
     loop = assemble_loop(
         project_root,
         gateway,
@@ -150,6 +155,13 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
 
     if memory is not None:
         settle_lessons(memory, result.lessons_pushed, result.finished)
+        record_message(
+            memory._conn,
+            args.session,
+            ASSISTANT,
+            result.final or "（没有产出）",
+            meta=f"{result.usage()}，{'完成' if result.finished else '未完成'}",
+        )
 
     writer.emit(
         USAGE,

@@ -11,12 +11,14 @@
 """
 
 import queue
+import sqlite3
 import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import Sequence
 
+from agents_dev.memory.transcript import recent_messages
 from agents_dev.web.protocol import (
     AWAIT,
     CONFIRM,
@@ -29,6 +31,10 @@ from agents_dev.web.protocol import (
 
 NOISE_LINES = 3
 
+# 聊天区域里回放多少条历史。它**只是给人看的**：模型上下文不受它影响，
+# 页面上看到的往来不等于模型看到的上下文（后者由状态与记忆按需取）。
+HISTORY_LIMIT = 20
+
 
 class Runner:
     """管理一次 agent 子进程的运行。"""
@@ -38,10 +44,12 @@ class Runner:
         project_root: Path,
         session: str = "cli",
         extra_args: Sequence[str] = (),
+        history_limit: int = HISTORY_LIMIT,
     ) -> None:
         self.project_root = project_root
         self.session = session
         self.extra_args = list(extra_args)
+        self.history_limit = history_limit
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self._listeners: list[queue.Queue] = []
@@ -154,7 +162,40 @@ class Runner:
                 "final": dict(self._final) if self._final else None,
                 "diffs": [dict(item) for item in self._diffs],
                 "session": self.session,
+                "messages": self._transcript(),
             }
+
+    def _transcript(self) -> list[dict]:
+        """这个会话之前的往来——**给人看的**，不进入模型上下文。
+
+        两者混为一谈会得出"那就把历史塞回上下文吧"的结论，而那会把这个项目
+        的支点（短上下文）直接推翻。所以它只出现在页面快照里。
+
+        读的是子进程在写的那个库：只读打开、失败就当没有——历史是增强，
+        不该因为它把状态接口弄挂。
+        """
+        path = self.project_root / ".agent" / "memory.db"
+        if not path.is_file():
+            return []
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+        except sqlite3.Error:
+            return []
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = recent_messages(conn, self.session, self.history_limit)
+            return [
+                {
+                    "role": row["role"],
+                    "content": row["content"],
+                    "meta": row["meta"] or "",
+                }
+                for row in rows
+            ]
+        except sqlite3.Error:
+            return []
+        finally:
+            conn.close()
 
     def _broadcast(self, event: Event) -> None:
         with self._lock:
