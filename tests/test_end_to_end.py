@@ -80,6 +80,10 @@ def test_脚本文件不存在时返回非零(tmp_path: Path) -> None:
     exit_code = main(
         [
             "run",
+            # 显式指定假模型：这条测的是"假模型的脚本不存在"那条分支，
+            # 不该依赖"默认供应商是什么"（那个默认值现在是可配置的）。
+            "--provider",
+            "fake",
             "--goal",
             "x",
             "--script",

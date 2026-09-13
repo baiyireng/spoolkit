@@ -10,8 +10,10 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 from agents_dev import __version__
+from agents_dev import onboarding
 from agents_dev.bench import DEFAULT_BENCH_ROOT
 from agents_dev.cli.commands.bench import bench
 from agents_dev.cli.commands.plan import make_plan
@@ -90,6 +92,11 @@ def _add_provider_args(parser: argparse.ArgumentParser, default: str) -> None:
     parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
     parser.add_argument("--proxy", default="", help="留空则使用系统代理")
     parser.add_argument("--root", default=".")
+    parser.add_argument(
+        "--no-setup",
+        action="store_true",
+        help="第一次运行时不要弹配置向导（脚本/CI 里用）",
+    )
 
 
 def _add_run_command(sub: argparse._SubParsersAction) -> None:
@@ -392,6 +399,16 @@ def main(argv: list[str] | None = None) -> int:
     _add_chat_command(sub)
 
     args = parser.parse_args(argv)
+    # 第一次用（没配过供应商）且人在终端前：先向导，再干活。
+    # 非交互环境绝不弹问题——那会挂住别人的脚本；那种场景由 provider_gateway
+    # 给一句明确的指路。
+    if (
+        hasattr(args, "provider")
+        and not getattr(args, "no_setup", False)
+        and onboarding.needs_setup(argv)
+        and onboarding.interactive()
+    ):
+        onboarding.run_wizard(Path(getattr(args, "root", ".")).resolve())
     # 供应商相关的取值统一在这里落地一次（命令行 > 环境变量 > 用户配置），
     # 好让每条子命令看到的都是**生效值**——否则 bench 自己拼网关、
     # serve 转发参数、记忆里记的模型名，各拿各的默认，症状是"我设了但没用"。

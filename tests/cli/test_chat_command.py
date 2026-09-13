@@ -87,3 +87,27 @@ def test_空行跳过_help_不调用模型(tmp_path: Path, capsys) -> None:
     assert "/exit" in out  # help 文本打出来了
     assert "答复" in out
 
+
+def test_开局打印状态行(tmp_path: Path, capsys) -> None:
+    """开局那一眼：现在连的是哪儿、拿什么策略在跑。"""
+    script = _script(tmp_path, [_turn("答复")])
+    args = _args(tmp_path, script, ["/exit"])
+
+    assert chat_command(args) == 0
+
+    out = capsys.readouterr().out
+    assert "工作区：" in out
+    assert "供应商：fake" in out
+    assert "授权：auto" in out
+
+
+def test_config_与_policy_不调用模型(tmp_path: Path, capsys) -> None:
+    """脚本只给一条应答：这两个命令要是真去跑模型，假模型会报脚本耗尽。"""
+    script = _script(tmp_path, [_turn("答复")])
+    args = _args(tmp_path, script, ["/config", "/policy", "/exit"])
+
+    assert chat_command(args) == 0
+
+    out = capsys.readouterr().out
+    assert "配置文件：" in out
+    assert "当前授权策略" in out

@@ -18,7 +18,7 @@ from agents_dev.cli.commands.run import (
     _resolve_read_roots,
     _settle_pending,
 )
-from agents_dev.cli.options import report_policy, resolve_policy, resolve_scope, resolve_window
+from agents_dev.cli.options import resolve_policy, resolve_scope, resolve_window
 from agents_dev.cli.runtime import (
     LoopWiring,
     assemble_loop,
@@ -40,8 +40,45 @@ HELP = """\
   把它改成返回 1 到 n 的和
 
 /history   看这个会话最近几轮（给人看的，不进入模型上下文）
+/config    看当前用的供应商/模型/地址，以及它们从哪来
+/policy    看授权策略（写操作怎么放行）
+/help      这一页
 /exit      退出
 """
+
+
+def _status_line(args, project_root: Path, window: int, policy: str, scope) -> str:
+    """开局那一眼：现在到底连的是哪儿、拿什么策略在跑。"""
+    from agents_dev.cli.runtime import resolve_provider_args
+
+    values = resolve_provider_args(args)
+    # 地址只对本地服务有意义：假模型/Gemini 上显示一个 127.0.0.1:8080 是噪音。
+    address = (
+        f"，地址 {values['base_url']}"
+        if values["provider"] == "llamacpp" and values["base_url"]
+        else ""
+    )
+    model = values["model"] or "服务端默认"
+    scope_text = "、".join(scope) if scope else "（无）"
+    return (
+        f"工作区：{project_root}\n"
+        f"供应商：{values['provider']}（{values['provider_source']}）{address}\n"
+        f"模型：{model} ｜ 上下文窗口：{window}\n"
+        f"授权：{policy} ｜ 自动落盘范围：{scope_text}"
+    )
+
+
+def _show_config() -> None:
+    """复用 config 命令那张表：值 + 来源。"""
+    from agents_dev import settings as settings_module
+    from agents_dev.cli.commands.config import _render
+
+    effective: dict[str, str] = {}
+    for key in settings_module.KEYS:
+        value, source = settings_module.resolve(key)
+        effective[key] = value
+        effective[f"{key}_source"] = source
+    print(_render(effective, settings_module.config_path()))
 
 
 def _turn(args, project_root, gateway, window, memory) -> int:
@@ -115,7 +152,9 @@ def chat_command(args: argparse.Namespace) -> int:
             model=f"{args.provider}:{args.model or '默认'}",
         )
         show_history(memory, args.session, args.history)
-    report_policy(resolve_policy(args, project_root), resolve_scope(args))
+    policy = resolve_policy(args, project_root)
+    scope = resolve_scope(args)
+    print(_status_line(args, project_root, window, policy, scope))
     print("进入对话模式（/help 看提示，/exit 退出）。每轮独立：历史不塞回模型。")
 
     # reader 只在测试里给：直接喂几行进去，测"多轮 + /exit"这条链。
@@ -139,6 +178,14 @@ def chat_command(args: argparse.Namespace) -> int:
                 show_history(memory, args.session, args.history)
             else:
                 print("（这次运行关了记忆，没有历史可看）")
+            continue
+        if text == "/config":
+            _show_config()
+            continue
+        if text == "/policy":
+            print(f"当前授权策略：{policy}（范围 {('、'.join(scope) or '（无）')}）")
+            print("改当前会话：重启 chat 时加 --policy ask|auto|deny 与 --scope；")
+            print("改长期默认：agents-dev policy --set auto")
             continue
         args.goal = text
         _turn(args, project_root, gateway, window, memory)
