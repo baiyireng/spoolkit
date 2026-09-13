@@ -13,6 +13,7 @@
 | 通道 | 收消息 | 发消息 | 今天能不能用 |
 |---|---|---|---|
 | `fake` | stdin 一行 | stdout | **能**（不需要任何凭据，也是测试用的那条） |
+| `qqbot`（**QQ 官方机器人**） | WebSocket 网关（长连接，**不需要公网入口**） | `POST /v2/users|groups/.../messages` | 能，只要 AppID + AppSecret |
 | `telegram` | 长轮询 `getUpdates`（**不需要公网入口**） | `sendMessage` | 能，只要一个 bot token（国内要自备代理） |
 | `wecom`（企业微信自建应用） | **回调推送**（需要公网 URL + 解密） | `message/send` | 发消息本机可用；收消息要先把回调接出去 |
 
@@ -23,6 +24,11 @@ agents-dev bridge --channel fake --provider llamacpp --policy auto --scope "**" 
 # 接 Telegram
 $env:AGENTS_DEV_TELEGRAM_TOKEN = "123456:ABC..."     # @BotFather 给的
 agents-dev bridge --channel telegram --allow-user 123456789 --policy auto --scope "src"
+
+# 接 QQ 官方机器人（QQ 机器人开放平台建的应用）
+$env:AGENTS_DEV_QQ_APPID  = "102xxxxxx"
+$env:AGENTS_DEV_QQ_SECRET = "xxxxxxxx"
+agents-dev bridge --channel qqbot --policy auto --scope "src"     # 沙箱加 --sandbox
 
 # 接企业微信（自建应用）
 $env:AGENTS_DEV_WECOM_CORP_ID = "ww...."
@@ -97,6 +103,14 @@ agents-dev bridge --channel wecom --allow-user zhangsan --policy ask
 
 ## 已知边界
 
+- **QQ 官方机器人的两处平台规矩**：一是事件里 `author` 给的是 **openid**
+  （不是 QQ 号，同一个用户在不同机器人下不同），白名单就按这个 openid 配；
+  二是"被动回复"要带 `msg_id`（+`msg_seq`），只在收到消息后 5 分钟内有效——
+  桥已经自动把它带上（`Incoming.message_id`），超时的长任务会走主动推送
+  （那条有配额限制，平台侧可查）。
+- **QQ 的 `resume` 还没做**：网关断了就重连（5 秒后），但不带 `op 6 RESUME`
+  续上 `seq`——平台会把未确认的事件重发一段时间，所以短抖动不会丢消息，
+  长时间断开可能漏。这条留着，等真有抖动再加。
 - **只处理文本消息**：图片/语音/事件先不接（`parse_callback` 对它们返回空，
   而不是塞一条读不懂的消息给桥）。
 - **企业微信回调的解密没做**：正式回调是 AES 加密的，解密要用 EncodingAESKey。

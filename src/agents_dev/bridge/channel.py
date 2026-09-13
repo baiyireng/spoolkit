@@ -31,6 +31,8 @@ class Incoming:
     # 通道自己的会话标识（Telegram 的 chat_id、企业微信的会话 ID）。
     # 回复要发回这里；为空时由通道自己决定默认发到哪。
     conversation: str = ""
+    # 这条消息自己的 ID（能被"回复某条消息"的通道用上：QQ 的被动回复要带它）。
+    message_id: str = ""
     # 通道自带的元数据（原始报文等），调试时有用，桥本身不看。
     raw: str = ""
 

@@ -423,7 +423,7 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--channel",
         default="fake",
-        choices=("fake", "telegram", "wecom"),
+        choices=("fake", "telegram", "wecom", "qqbot"),
         help="通道种类；fake 本地可跑，不需要任何凭据",
     )
     parser.add_argument(
@@ -459,6 +459,11 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
         "--timeout", type=float, default=900.0, help="一轮任务最多等多少秒"
     )
     parser.add_argument("--token", default="", help="Telegram bot token（或用环境变量）")
+    parser.add_argument("--appid", default="", help="QQ 机器人的 AppID（或用环境变量）")
+    parser.add_argument("--secret", default="", help="QQ 机器人的 AppSecret（或用环境变量）")
+    parser.add_argument(
+        "--sandbox", action="store_true", help="QQ 机器人用沙箱环境（sandbox.api.sgroup.qq.com）"
+    )
     _add_provider_args(parser, default="")
     parser.add_argument("--script", default="", help="假模型脚本 JSON")
     parser.add_argument(

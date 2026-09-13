@@ -48,6 +48,27 @@ def _build_channel(args, log) -> object:
             )
         log("企业微信通道：发消息本机可用；**收**消息需要公网回调 URL（见文档）")
         return channel
+    if args.channel == "qqbot":
+        from agents_dev.bridge.qqbot import QQBotChannel
+
+        app_id = args.appid or __import__("os").environ.get("AGENTS_DEV_QQ_APPID", "")
+        secret = args.secret or __import__("os").environ.get("AGENTS_DEV_QQ_SECRET", "")
+        if not (app_id and secret):
+            raise SystemExit(
+                "QQ 官方机器人需要 AppID 与 AppSecret："
+                "设 AGENTS_DEV_QQ_APPID / AGENTS_DEV_QQ_SECRET，或用 --appid / --secret 给。"
+                "（在 QQ 机器人开放平台建应用后能看到；沙箱加 --sandbox）"
+            )
+        channel = QQBotChannel(
+            app_id=app_id,
+            secret=secret,
+            sandbox=args.sandbox,
+            transport=None,
+        )
+        # 收事件是长连接，起后台线程；桥那边只是 poll。
+        channel.start()
+        log("QQ 机器人通道已起：网关长连接在后台，消息进来就交给 agent。")
+        return channel
     # 内置的三种都不匹配：去装载的通道插件里找。
     # 这样接一家新通道（比如第三方 hook 的个人微信/QQ）不必改这个文件——
     # 插件自己注册，核心不认识它。
