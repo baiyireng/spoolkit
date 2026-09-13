@@ -11,6 +11,7 @@ from pathlib import Path
 
 from agents_dev.llm.providers import ProviderConfig, ProviderError, load_gateway
 from agents_dev.net import system_proxy
+from agents_dev import settings
 from agents_dev.agent.loop import AgentLoop
 from agents_dev.config import Config
 from agents_dev.index.indexer import index_project, iter_source_files
@@ -103,17 +104,52 @@ class LoopWiring:
     prefetch_anchors: tuple[str, ...] = ()
 
 
+def resolve_provider_args(args) -> dict[str, str]:
+    """把命令行、环境变量、用户配置合成一次运行真正用的值。"""
+    resolved = {}
+    for key in ("provider", "model", "base_url", "proxy", "script"):
+        flag = str(getattr(args, key, "") or "")
+        # 已经解析过的值会被写回 args（见 cli/app.main）。第二次解析时它看起来
+        # 像"命令行给的"，来源就串了位——"来自：命令行"而实际来自配置文件，
+        # 这种错误比不显示来源更坏。所以认得出的旧来源就留着。
+        known = str(getattr(args, f"{key}_source", "") or "")
+        if flag and known and str(getattr(args, key, "")) == flag:
+            resolved[key] = flag
+            resolved[f"{key}_source"] = known
+            continue
+        value, source = settings.resolve(key, flag)
+        resolved[key] = value
+        resolved[f"{key}_source"] = source
+    if not resolved["provider"]:
+        # 什么都没配：用假模型（离线可跑），但下面会给出怎么固定下来。
+        resolved["provider"] = "fake"
+        resolved["provider_source"] = "内置默认"
+    return resolved
+
+
 def provider_gateway(args, project_root):
     """按命令行参数装载网关。失败时打印原因并返回 None。
 
     集中在一处：三条执行路径都要用它，各写一遍的结果是某一条上
     悄悄漏掉代理或密钥来源，而那种问题只会表现为「连不上」。
     """
+    values = resolve_provider_args(args)
+    provider = values["provider"]
     script: tuple[str, ...] = ()
-    if args.provider == "fake":
-        raw_path = getattr(args, "script", "")
+    if provider == "fake":
+        raw_path = values["script"]
         if not raw_path:
-            print("假模型需要 --script 指定脚本文件。", file=sys.stderr)
+            # 第一次用最容易撞这里：默认供应商是假模型，而报错原先只说
+            # "需要 --script"，一个字都没提"你大概想接本地模型"。
+            print(
+                "假模型需要 --script 指定脚本文件。\n"
+                "如果你是想接本地模型，加这两个参数就行："
+                " --provider llamacpp --base-url http://127.0.0.1:8080\n"
+                "想把它固定成默认（以后不用每次打）："
+                " agents-dev config --set provider=llamacpp "
+                "--set base_url=http://127.0.0.1:8080",
+                file=sys.stderr,
+            )
             return None
         script_path = Path(raw_path)
         if not script_path.exists():
@@ -127,17 +163,35 @@ def provider_gateway(args, project_root):
 
     config = ProviderConfig(
         project_root=project_root,
-        model=args.model,
-        base_url=args.base_url,
-        proxy=args.proxy if args.proxy else system_proxy(),
+        model=values["model"],
+        base_url=values["base_url"],
+        proxy=values["proxy"] or system_proxy(),
         script=script,
         env=dict(__import__("os").environ),
     )
     try:
-        return load_gateway(args.provider, config)
+        gateway = load_gateway(provider, config)
     except ProviderError as exc:
-        print(f"无法装载供应商 {args.provider}: {exc}", file=sys.stderr)
+        print(f"无法装载供应商 {provider}: {exc}", file=sys.stderr)
         return None
+
+    # 本地服务的失败要在**开工之前**说清楚：连不上时后面的每一步都会以
+    # 各种奇怪的形式报错（分词 502、HTTP 超时、窗口探测失败），
+    # 而真正的原因只有一个，且只有一句话。
+    if provider == "llamacpp" and gateway.context_window() is None:
+        address = values["base_url"] or "(供应商默认地址)"
+        print(
+            f"连不上 llama.cpp 服务：{address}\n"
+            f"（地址来自：{values.get('base_url_source') or '未设置'}）\n"
+            "先确认服务起着，例如：\n"
+            "  llama-server.exe -m <模型.gguf> --host 127.0.0.1 --port 8080 "
+            "-c 8192 -ngl 99 --reasoning off\n"
+            "地址不对就用 --base-url 指定，或固定下来："
+            " agents-dev config --set base_url=http://127.0.0.1:8080",
+            file=sys.stderr,
+        )
+        return None
+    return gateway
 
 
 def attach_index(

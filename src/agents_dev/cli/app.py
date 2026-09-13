@@ -22,6 +22,7 @@ from agents_dev.cli.commands.serve import serve_command
 from agents_dev.cli.commands.diagnose import diagnose_command
 from agents_dev.cli.commands.session import session_command
 from agents_dev.cli.commands.limits import limits_command
+from agents_dev.cli.commands.config import config_command
 from agents_dev.cli.options import (
     DEFAULT_WINDOW,
     report_policy,
@@ -38,6 +39,7 @@ from agents_dev.cli.runtime import (
     build_loop,
     build_memory,
     open_memory,
+    resolve_provider_args,
     settle_lessons,
     show_history,
 )
@@ -67,12 +69,20 @@ __all__ = [
 
 
 def _add_provider_args(parser: argparse.ArgumentParser, default: str) -> None:
+    """供应商相关参数。
+
+    `default` 只是**名义上的**兜底：真正生效的值由 `resolve_provider_args`
+    按「命令行 > 环境变量 > 用户配置 > 内置默认」算出来。所以这里的 argparse
+    默认值必须是空串——写成 "fake"/"gemini" 的话，解析完就成了一次"显式指定"，
+    用户在 `agents-dev config` 里设的默认永远盖不过它。
+    """
+    del default  # 保留形参只为让调用点读起来清楚
     parser.add_argument(
         "--provider",
         "--engine",
         dest="provider",
         choices=provider_names(),
-        default=default,
+        default="",
         help="模型供应商；" + describe_providers(),
     )
     parser.add_argument("--model", default="", help="留空则用供应商默认模型")
@@ -242,6 +252,7 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--provider", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--script", default="", help="假模型的应答脚本（配合 --provider fake）")
+    parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
     parser.add_argument("--proxy", default="")
     parser.add_argument("--policy", default="")
     parser.add_argument("--scope", default="")
@@ -289,6 +300,25 @@ def _add_limits_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=limits_command)
 
 
+def _add_config_command(sub: argparse._SubParsersAction) -> None:
+    """用户级默认配置：看现在用哪个 provider、从哪来。"""
+    parser = sub.add_parser("config", help="查看/设置用户级默认配置")
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="键=值",
+        help="设置一项（可重复），例如 --set provider=llamacpp",
+    )
+    parser.add_argument(
+        "--reset", action="append", default=[], metavar="键", help="清除一项（可重复）"
+    )
+    parser.add_argument(
+        "--path", dest="show_path", action="store_true", help="只打印配置文件路径"
+    )
+    parser.set_defaults(func=config_command)
+
+
 def configure_stdio() -> None:
     """把标准输出/错误固定成 UTF-8，且**永不因为一个字符崩掉整个运行**。
 
@@ -327,8 +357,15 @@ def main(argv: list[str] | None = None) -> int:
     _add_serve_command(sub)
     _add_diagnose_command(sub)
     _add_limits_command(sub)
+    _add_config_command(sub)
 
     args = parser.parse_args(argv)
+    # 供应商相关的取值统一在这里落地一次（命令行 > 环境变量 > 用户配置），
+    # 好让每条子命令看到的都是**生效值**——否则 bench 自己拼网关、
+    # serve 转发参数、记忆里记的模型名，各拿各的默认，症状是"我设了但没用"。
+    if hasattr(args, "provider"):
+        for key, value in resolve_provider_args(args).items():
+            setattr(args, key, value)
     return int(args.func(args))
 
 

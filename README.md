@@ -53,13 +53,15 @@ llama-server.exe -m <模型.gguf> --host 127.0.0.1 --port 8080 -c 8192 -ngl 99 -
 ### 3. 跑第一条任务
 
 ```powershell
+# 先把默认值固定下来（只做一次），以后不用每次打 --provider/--base-url
+agents-dev config --set provider=llamacpp --set base_url=http://127.0.0.1:8080
+agents-dev config            # 看生效值，以及每一项是从哪来的
+
 # 一题一跑：给目标，它在当前工作区里做完
-agents-dev run --provider llamacpp --base-url http://127.0.0.1:8080 `
-    --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测试"
+agents-dev run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测试"
 
 # 长任务：自己拆解、逐步做完（--scope 是允许自动落盘的范围，必须由你给）
-agents-dev run --provider llamacpp --base-url http://127.0.0.1:8080 `
-    --autonomous --scope "**" --policy auto --limit 20 `
+agents-dev run --autonomous --scope "**" --policy auto --limit 20 `
     --goal "把这个工作区里的题目都做对"
 ```
 
@@ -79,7 +81,9 @@ agents-dev serve --provider llamacpp --base-url http://127.0.0.1:8080
 
 | 配什么 | 在哪 | 怎么用 |
 |---|---|---|
-| 供应商 / 模型 / 服务地址 | 命令行 | `--provider llamacpp --model <名> --base-url <地址>` |
+| 供应商 / 模型 / 服务地址 | 用户级默认 | `agents-dev config --set provider=llamacpp --set base_url=<地址>`；`agents-dev config` 看现值与来源 |
+| 同上，临时改一次 | 命令行 | `--provider llamacpp --model <名> --base-url <地址>`（优先于配置文件）|
+| 同上，只在这个 shell 生效 | 环境变量 | `AGENTS_DEV_PROVIDER` / `AGENTS_DEV_BASE_URL` / `AGENTS_DEV_MODEL` / `AGENTS_DEV_PROXY` |
 | Gemini 密钥 | 项目根 `.env` | `GEMINI_API_KEY=...`（本地模型不需要任何密钥）|
 | 能力标定值（预算、超时、上限） | `.agent/limits.json` | `agents-dev limits --set 名字=值`，`agents-dev limits` 看现值与来源 |
 | 授权策略 | `.agent/policy.json` | `agents-dev policy --set auto`（三档：ask/auto/deny）|
@@ -98,6 +102,7 @@ agents-dev serve --provider llamacpp --base-url http://127.0.0.1:8080
 | `agents-dev run --resume` | 接着上次未完成的检查点继续 |
 | `agents-dev plan --goal …` | 只拆解、落盘计划，不执行 |
 | `agents-dev serve` | 起 Web UI |
+| `agents-dev config` | 查看/设置用户级默认配置（provider、地址、模型…）|
 | `agents-dev bench --limit N` | 跑回归任务集（可复现的测量）|
 | `agents-dev limits` / `policy` / `session` / `revert` | 标定值 / 授权 / 会话 / 回滚 |
 

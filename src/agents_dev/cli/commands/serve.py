@@ -19,6 +19,7 @@ def serve_command(args: argparse.Namespace) -> int:
     for flag, value in (
         ("--provider", args.provider),
         ("--model", args.model),
+        ("--base-url", args.base_url),
         ("--script", args.script),
         ("--proxy", args.proxy),
         ("--policy", args.policy),
