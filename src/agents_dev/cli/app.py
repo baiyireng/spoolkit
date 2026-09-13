@@ -137,6 +137,15 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
     )
     parser.add_argument("--limit", type=int, default=10, help="自主模式下最多拆几步")
     parser.add_argument(
+        "--cover",
+        default="",
+        help=(
+            "拆解后要检查覆盖的清单（逗号分隔）。目标明说「把这 N 件事都做完」"
+            "时才给；不给就不检查——什么算「必须覆盖」是关于目标的判断，"
+            "不该由 harness 猜"
+        ),
+    )
+    parser.add_argument(
         "--session", default="cli", help="会话名。不同时段/目的的活分开记"
     )
     parser.add_argument(
@@ -166,6 +175,11 @@ def _add_plan_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--goal", required=True)
     _add_provider_args(parser, default="gemini")
     parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument(
+        "--cover",
+        default="",
+        help="拆解后要检查覆盖的清单（逗号分隔），见 run --help",
+    )
     parser.set_defaults(func=make_plan)
 
 

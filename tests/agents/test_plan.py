@@ -13,7 +13,6 @@ from agents_dev.agents.plan import (
     plan_path,
     render_step_prompt,
     save_plan,
-    top_level_entries,
     uncovered,
 )
 from agents_dev.llm.fake import FakeModel
@@ -347,13 +346,6 @@ def test_覆盖判定是字面的(tmp_path: Path) -> None:
     plan = parse_plan(_payload(("改 01_a", "通过")), "目标")
     assert uncovered(plan, ["01_a", "02_b"]) == ["02_b"]
     assert uncovered(plan, []) == []
-
-
-def test_顶层目录名单排除_agent(tmp_path: Path) -> None:
-    (tmp_path / "01_a").mkdir()
-    (tmp_path / "02_b").mkdir()
-    (tmp_path / ".agent").mkdir()
-    assert top_level_entries(tmp_path) == ["01_a", "02_b"]
 
 
 def test_步骤提示带上整体位置() -> None:

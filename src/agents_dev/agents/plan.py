@@ -315,18 +315,6 @@ def decompose(
     return Plan(goal=goal, steps=planned)
 
 
-def top_level_entries(root: Path) -> list[str]:
-    """工作区顶层目录名（`.agent` 不算）。覆盖检查拿它当名单。"""
-    try:
-        return sorted(
-            item.name
-            for item in root.iterdir()
-            if item.is_dir() and item.name != ".agent"
-        )
-    except OSError:
-        return []
-
-
 def uncovered(plan: Plan, names: Sequence[str]) -> list[str]:
     """名单里没有任何步骤提到的名字。
 

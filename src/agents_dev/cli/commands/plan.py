@@ -22,7 +22,6 @@ from agents_dev.agents.plan import (
     plan_path,
     render_step_prompt,
     save_plan,
-    top_level_entries,
     uncovered,
 )
 from agents_dev.llm.gateway import CountingGateway
@@ -139,6 +138,15 @@ def _plan_phase(gateway, project_root: Path, args) -> object:
     原先没有任何机制会发现。
     """
     counting = CountingGateway(gateway)
+    # 覆盖名单由调用方给：什么算「必须覆盖」是关于目标的判断，harness 猜不准。
+    # 早先这里自动拿「工作区顶层目录」当名单——那是为「N 道题摆成 N 个目录」
+    # 这一种形状写的，放到真实项目上只会误报（src/ 覆盖了，docs/ 没覆盖，
+    # 然后去补一堆没人要的步骤）。
+    cover = tuple(
+        part.strip()
+        for part in str(getattr(args, "cover", "") or "").split(",")
+        if part.strip()
+    )
     started = time.time()
     steps_log: list[str] = []
     plan = decompose(
@@ -148,7 +156,7 @@ def _plan_phase(gateway, project_root: Path, args) -> object:
         limit=args.limit,
         # `plan` 子命令没有 --window，`run --autonomous` 有：两边都要能用。
         window=resolve_window(gateway, getattr(args, "window", 0)),
-        must_cover=top_level_entries(project_root),
+        must_cover=cover,
         trace=steps_log,
     )
     elapsed = time.time() - started
@@ -158,11 +166,11 @@ def _plan_phase(gateway, project_root: Path, args) -> object:
         f"拆解：{counting.calls} 次调用 / {counting.prompt_tokens} 输入 + "
         f"{counting.completion_tokens} 输出 token / {elapsed:.0f}s"
     )
-    missing = uncovered(plan, top_level_entries(project_root))
+    missing = uncovered(plan, cover)
     if missing:
-        # 报，不猜：它可能是有意不做的（比如那个目录不在目标范围内）。
+        # 补了两轮还缺就报出来——报，不猜：它可能是有意不做的。
         print(
-            f"⚠ 计划没有覆盖这些顶层目录（{len(missing)} 个）："
+            f"⚠ 计划没有覆盖这些（{len(missing)} 个）："
             + "、".join(missing[:10])
             + ("…" if len(missing) > 10 else ""),
             file=sys.stderr,
