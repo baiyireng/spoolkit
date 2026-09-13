@@ -95,6 +95,21 @@ agents-dev chat                  # 一行一句，共用同一个会话；/histo
 
 工具、信任模型与调用序列见 [`docs/mcp.md`](docs/mcp.md)。
 
+### 6. 用聊天驱动它（消息通道桥）
+
+在手机上发一条消息 → agent 在工作区里跑一轮 → 把结果发回来。三条通道：
+`fake`（本地可跑，不需要凭据）、`telegram`（长轮询，不需要公网入口）、
+`wecom`（企业微信自建应用）。
+
+```powershell
+agents-dev bridge --channel fake --provider llamacpp --policy auto --scope "**" --allow-user me
+```
+
+白名单按用户判（不给就等于谁都能驱动这个工作区），`--policy`/`--scope` 原样转给
+agent，越界照样退回确认。**个人微信/QQ 没有官方接口**（第三方 hook 违反服务条款、
+有封号风险），这条路的合规选择是企业微信或 Telegram——细节见
+[`docs/bridge.md`](docs/bridge.md)。
+
 反过来也成立：**它自己能调别的 MCP 服务**（外面现成的工具不用重写一遍）。
 在用户配置里加一段即可，加完用 `agents-dev mcp-servers --check` 验一遍：
 
@@ -136,6 +151,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", 'D:\work']
 | `agents-dev chat` | 对话式使用：多轮、共用同一个会话 |
 | `agents-dev mcp` | 以 MCP 服务运行，供别的 agent 调用（见 docs/mcp.md）|
 | `agents-dev mcp-servers --check` | 看/验自己配的外挂 MCP 服务 |
+| `agents-dev bridge --channel fake` | 用聊天消息驱动它（本地可跑；telegram / wecom 见 docs/bridge.md）|
 | `agents-dev config` | 查看/设置用户级默认配置（provider、地址、模型…）|
 | `agents-dev bench --limit N` | 跑回归任务集（可复现的测量）|
 | `agents-dev limits` / `policy` / `session` / `revert` | 标定值 / 授权 / 会话 / 回滚 |

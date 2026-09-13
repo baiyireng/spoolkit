@@ -26,6 +26,7 @@ from agents_dev.cli.commands.session import session_command
 from agents_dev.cli.commands.limits import limits_command
 from agents_dev.cli.commands.config import config_command
 from agents_dev.cli.commands.chat import chat_command
+from agents_dev.cli.commands.bridge import bridge_command
 from agents_dev.cli.commands.mcp import mcp_command
 from agents_dev.cli.commands.mcp_servers import mcp_servers_command
 from agents_dev.cli.options import (
@@ -414,6 +415,46 @@ def _add_mcp_servers_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=mcp_servers_command)
 
 
+def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
+    """把工作区接到一条聊天通道上（消息驱动的 agent）。"""
+    parser = sub.add_parser(
+        "bridge", help="把工作区接到聊天通道上（fake / telegram / wecom）"
+    )
+    parser.add_argument(
+        "--channel",
+        default="fake",
+        choices=("fake", "telegram", "wecom"),
+        help="通道种类；fake 本地可跑，不需要任何凭据",
+    )
+    parser.add_argument(
+        "--allow-user",
+        action="append",
+        default=[],
+        metavar="用户",
+        help="白名单：只有这些用户的消息会交给 agent（可重复）。不给就等于谁都行",
+    )
+    parser.add_argument(
+        "--user", default="local", help="假通道里模拟的用户名（配合白名单用）"
+    )
+    parser.add_argument(
+        "--max-chars", type=int, default=4000, help="单条消息长度上限"
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=900.0, help="一轮任务最多等多少秒"
+    )
+    parser.add_argument("--token", default="", help="Telegram bot token（或用环境变量）")
+    _add_provider_args(parser, default="")
+    parser.add_argument("--script", default="", help="假模型脚本 JSON")
+    parser.add_argument(
+        "--policy", choices=POLICIES, default="", help="子进程的授权策略"
+    )
+    parser.add_argument(
+        "--scope", default="", help="允许自动落盘的范围（越界仍会退回确认）"
+    )
+    parser.add_argument("--session", default="bridge", help="会话名")
+    parser.set_defaults(func=bridge_command)
+
+
 def configure_stdio() -> None:
     """把标准输出/错误固定成 UTF-8，且**永不因为一个字符崩掉整个运行**。
 
@@ -456,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_chat_command(sub)
     _add_mcp_command(sub)
     _add_mcp_servers_command(sub)
+    _add_bridge_command(sub)
 
     args = parser.parse_args(argv)
     # 第一次用（没配过供应商）且人在终端前：先向导，再干活。

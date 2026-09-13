@@ -1,0 +1,89 @@
+# 消息通道桥：用聊天驱动 agent
+
+在手机上发一条消息 → agent 在你的工作区里跑一轮 → 把结果发回来。
+
+```
+你（手机）→ [通道] → Bridge → AgentRunner → agents-dev run --events（工作区）
+                     ↑                                  ↓
+                     └──────────── 回复 ← 结局/待确认 ←──┘
+```
+
+## 三条通道
+
+| 通道 | 收消息 | 发消息 | 今天能不能用 |
+|---|---|---|---|
+| `fake` | stdin 一行 | stdout | **能**（不需要任何凭据，也是测试用的那条） |
+| `telegram` | 长轮询 `getUpdates`（**不需要公网入口**） | `sendMessage` | 能，只要一个 bot token（国内要自备代理） |
+| `wecom`（企业微信自建应用） | **回调推送**（需要公网 URL + 解密） | `message/send` | 发消息本机可用；收消息要先把回调接出去 |
+
+```powershell
+# 本地跑通（不需要任何外部服务）
+agents-dev bridge --channel fake --provider llamacpp --policy auto --scope "**" --user me --allow-user me
+
+# 接 Telegram
+$env:AGENTS_DEV_TELEGRAM_TOKEN = "123456:ABC..."     # @BotFather 给的
+agents-dev bridge --channel telegram --allow-user 123456789 --policy auto --scope "src"
+
+# 接企业微信（自建应用）
+$env:AGENTS_DEV_WECOM_CORP_ID = "ww...."
+$env:AGENTS_DEV_WECOM_SECRET  = "..."
+$env:AGENTS_DEV_WECOM_AGENT_ID = "1000002"
+agents-dev bridge --channel wecom --allow-user zhangsan --policy ask
+```
+
+## 安全模型（用之前先看这一段）
+
+聊天通道等于把 agent 挂出去了，所以三件事必须同时成立：
+
+1. **白名单按用户判，不按内容判**。`--allow-user` 可以给多次；**不给就等于谁都能
+   驱动这个工作区**（启动时会打警告）。按内容判（"消息里有没有敏感词"）等于没判
+   ——任何人都能把那句话发进来。
+2. **agent 自己的授权模型不变**。桥把 `--policy` / `--scope` 原样转给子进程，
+   所以"自动落盘"仍然只覆盖 scope 划定的范围，越界照样退回确认；桥会把待确认的
+   改动列出来并提示回 `y`/`n`。
+3. **单条消息有长度上限**（默认 4000 字，`--max-chars` 改），超长直接回一句说明，
+   不交给 agent——一条一万字的消息会把这一步的上下文预算吃光。
+
+还有一条不是技术问题：**个人微信与个人 QQ 没有官方接口**。第三方 hook
+（itchat / wechaty / NapCat 之类）违反服务条款、有封号风险，而且等于把上面
+那三件事全绕过去了。所以这个包只做官方通道；想在手机上用，最接近的选择是
+**企业微信**（官方、免费档够用、消息能转到微信里看）或 **Telegram**。
+
+## 分层（为什么这么分）
+
+| 层 | 管什么 | 文件 |
+|---|---|---|
+| `Channel` | 收与发。**每家的形状不同**（回调/长轮询/socket），差异全关在这里 | `channel.py`、`fake.py`、`telegram.py`、`wecom.py` |
+| `Bridge` | 白名单、长度上限、调 runner、把回复发回去 | `core.py` |
+| `AgentRunner` | 把一条消息变成一次 agent 运行 | `agent_runner.py` |
+
+`AgentRunner` **复用网页壳那套机制**（`web.runner.Runner`：起 `run --events`
+子进程、读事件流），所以聊天入口与网页入口的判定完全一致——同一个授权策略、
+同一个工作区、同一份待确认清单。不是另写一套。
+
+## 已知边界
+
+- **只处理文本消息**：图片/语音/事件先不接（`parse_callback` 对它们返回空，
+  而不是塞一条读不懂的消息给桥）。
+- **企业微信回调的解密没做**：正式回调是 AES 加密的，解密要用 EncodingAESKey。
+  这一版只保证"明文形状"的解析正确（形状一样），解密与公网入口留在部署层；
+  回调的 `echostr` URL 验证同样属于接入方的 HTTP 服务。
+- **一轮一条消息、顺序处理**：桥不并发。聊天场景里并发只会让"它在做哪件事"
+  变得说不清。
+- **超时是回执而不是失败**：长任务超过 `--timeout`（默认 900 秒）会回一句
+  "我先不等了"，子进程继续跑。
+
+## 加一条新通道
+
+实现 `Channel` 协议的两个方法就够了：
+
+```python
+class MyChannel:
+    name = "my"
+    def send(self, text: str, to: str = "") -> None: ...
+    def poll(self) -> list[Incoming]: ...   # 没有消息就返回空列表，不要阻塞
+    def close(self) -> None: ...
+```
+
+然后在 `cli/commands/bridge.py::_build_channel` 里加一支。测试照着
+`tests/bridge/test_channels.py` 写：给假 transport，验请求形状与解析。
