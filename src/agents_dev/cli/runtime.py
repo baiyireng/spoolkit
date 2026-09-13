@@ -17,6 +17,7 @@ from agents_dev.index.indexer import index_project, iter_source_files
 from agents_dev import limits
 from agents_dev.index.rank import prefetch as prefetch_text
 from agents_dev.index.rank import prefetch_contents
+from agents_dev.index.rank import prefetch_scope
 from agents_dev.index.tools import file_symbols_spec, find_callers_spec, find_symbol_spec
 from agents_dev.llm.fake import FakeModel
 from agents_dev.llm.gateway import ModelGateway
@@ -96,6 +97,10 @@ class LoopWiring:
     # 额外可读根：由用户显式授权（--allow-read）。读得到，写不到，
     # 工作区绑定不变——「看一个目录」不该等于「换个项目」。
     read_roots: tuple[Path, ...] = ()
+    # 这一步自己声明的范围（计划里的 scope）。有它就按它锚定预取：
+    # 关键词排序会被步骤提示词里的噪音带偏，实测能把两个正文名额
+    # 全给测试文件，而真正要改的文件一个都进不来。
+    prefetch_anchors: tuple[str, ...] = ()
 
 
 def provider_gateway(args, project_root):
@@ -136,7 +141,12 @@ def provider_gateway(args, project_root):
 
 
 def attach_index(
-    project_root: Path, registry: ToolRegistry, tokenizer, pending=None, overrides=None
+    project_root: Path,
+    registry: ToolRegistry,
+    tokenizer,
+    pending=None,
+    overrides=None,
+    anchors: tuple[str, ...] = (),
 ):
     """建立（或复用）代码索引，注册索引工具并返回预取函数。
 
@@ -179,6 +189,16 @@ def attach_index(
 
     def prefetch_for(goal: str) -> str:
         # 预取预算走登记表：每次运行都要付，且与模型强弱强相关。
+        content_budget = int(
+            limits.resolve("prefetch_content_budget", overrides)[0]
+        )
+        # 锚定部分先占额度：范围是「这一步要动什么」最可靠的信号，
+        # 而关键词排序是在整段提示词上做的，容易被噪音带偏。
+        anchored, spent, covered = "", 0, set()
+        if anchors:
+            anchored, spent, covered = prefetch_scope(
+                project_root, anchors, tokenizer, max_tokens=content_budget
+            )
         symbols = prefetch_text(
             conn,
             goal,
@@ -190,9 +210,10 @@ def attach_index(
             project_root,
             goal,
             tokenizer,
-            int(limits.resolve("prefetch_content_budget", overrides)[0]),
+            max_tokens=max(0, content_budget - spent),
+            skip=covered,
         )
-        return "\n\n".join(part for part in (symbols, contents) if part)
+        return "\n\n".join(part for part in (anchored, symbols, contents) if part)
 
     return prefetch_for
 
@@ -306,6 +327,7 @@ def assemble_loop(
             tokenizer,
             parts.pending,
             settings.overrides,
+            anchors=tuple(parts.prefetch_anchors),
         ),
         memory=parts.memory,
         lessons=parts.lessons,

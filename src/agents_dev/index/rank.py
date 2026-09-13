@@ -7,8 +7,10 @@
 
 import re
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 
+from agents_dev.index.indexer import SKIP_DIRS
 from agents_dev.index.repo_map import render_file_symbols
 from agents_dev.llm.tokenizer import TokenCounter
 
@@ -31,6 +33,11 @@ DEFAULT_LIMIT = 5
 CONTENT_BUDGET = 1000
 CONTENT_MAX_FILES = 2
 CONTENT_FILE_CAP = 600
+
+# 列目录的上限。一个目录一行、一行几十个 token，所以给得松；
+# 文件正文沿用内容预取的额度（CONTENT_BUDGET / CONTENT_FILE_CAP），
+# 别让一次锚定把上下文吃光。
+LISTING_MAX_ITEMS = 30
 
 
 def extract_keywords(text: str) -> list[str]:
@@ -105,6 +112,7 @@ def prefetch_contents(
     counter: TokenCounter,
     max_tokens: int = CONTENT_BUDGET,
     max_files: int = CONTENT_MAX_FILES,
+    skip: frozenset[str] | set[str] = frozenset(),
 ) -> str:
     """把最相关文件的**当前内容**也放进去。
 
@@ -116,7 +124,15 @@ def prefetch_contents(
     取用范围是有限的：只取排在最前面的少数几个文件，单个文件超过
     CONTENT_FILE_CAP 就跳过——那种文件本来就该用 read_file 按行取。
     """
-    files = rank_files(conn, extract_keywords(task_text), limit=max_files)
+    # 已经被锚定预取放进上下文的文件不再重复一遍——同一段正文出现两次
+    # 不只是浪费，还会让模型以为看到了两个版本。
+    files = [
+        path
+        for path in rank_files(
+            conn, extract_keywords(task_text), limit=max_files + len(skip)
+        )
+        if path not in skip
+    ][:max_files]
     blocks: list[str] = []
     remaining = max_tokens
     for path in files:
@@ -138,3 +154,91 @@ def prefetch_contents(
     if not blocks:
         return ""
     return "以下是相关文件当前的内容：\n\n" + "\n\n".join(blocks)
+
+
+def prefetch_scope(
+    root: Path,
+    scope: Sequence[str],
+    counter: TokenCounter,
+    max_tokens: int = CONTENT_BUDGET,
+    max_files: int = CONTENT_MAX_FILES,
+) -> tuple[str, int, set[str]]:
+    """按**步骤自己声明的范围**预取：先列同目录的条目，再给这些文件的正文。
+
+    为什么要有它：关键词预取是在**整段步骤提示词**上做的，而那段文字噪音
+    很多——「已完成」列着前几步的目标、「验收标准」写着 pytest、契约里写着
+    `不得改动 test_xxx.py`。实测第 4 步（修一个 import）里，两个内容名额
+    被两个**测试文件**占满，真正要改的 `main.py` 和它旁边的 `helper.py`
+    一个都没进去，于是执行者只能自己 read_file + list_dir 一路找下去，
+    一步 6 轮 12802 token（同一批 5 题里 37% 的开销）。
+
+    范围是这一步最可靠的信号：它是计划写下的、也是写入闸门用的那一条。
+    所以锚定部分优先占额度，剩下的才轮到关键词排序。
+
+    目录范围只给条目列表、不给正文——列目录就是「我还不确定改哪个文件」
+    时最缺的那条信息，正文留给 read_file 按需取。
+    """
+    blocks: list[str] = []
+    covered: set[str] = set()
+    remaining = max_tokens
+    for raw in scope:
+        rel = str(raw).strip().replace("\\", "/").lstrip("./")
+        if not rel or any(char in rel for char in "*?["):
+            # 通配范围（`**`）宽到没有信息量，交给关键词排序。
+            continue
+        target = root / rel
+        listing = ""
+        if target.is_dir():
+            listing = _render_listing(root, target)
+        elif target.is_file():
+            listing = _render_listing(root, target.parent)
+        if listing:
+            cost = counter.count(listing)
+            if cost <= remaining:
+                blocks.append(listing)
+                remaining -= cost
+        if not target.is_file() or rel in covered:
+            continue
+        try:
+            body = target.read_text(encoding="utf-8").rstrip("\n")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not body:
+            continue
+        block = f"{rel}\n{body}"
+        cost = counter.count(block)
+        if len(covered) >= max_files:
+            # 名额用完了。说清楚是「没预取」，不是「没有这个文件」。
+            blocks.append(f"（{rel} 也在这一步的范围里，没预取，要看就用 read_file）")
+            continue
+        if cost > min(remaining, CONTENT_FILE_CAP):
+            # 放不下就说清楚，别让它以为「上面没有」等于「文件是空的」。
+            blocks.append(f"（{rel} 太大，没整份预取，用 read_file 按行看）")
+            remaining = max(0, remaining - counter.count(blocks[-1]))
+            continue
+        blocks.append(block)
+        covered.add(rel)
+        remaining -= cost
+    if not blocks:
+        return "", 0, covered
+    text = "本次要动的地方：\n\n" + "\n\n".join(blocks)
+    return text, max_tokens - remaining, covered
+
+
+def _render_listing(root: Path, directory: Path) -> str:
+    """一行列出一个目录里有什么。找相邻模块（改 import 这类）只靠它。"""
+    try:
+        entries = sorted(
+            item.name + ("/" if item.is_dir() else "")
+            for item in directory.iterdir()
+            if item.name not in SKIP_DIRS
+        )
+    except OSError:
+        return ""
+    if not entries:
+        return ""
+    shown = entries[:LISTING_MAX_ITEMS]
+    more = "" if len(entries) <= LISTING_MAX_ITEMS else f"…（还有 {len(entries) - LISTING_MAX_ITEMS} 项）"
+    rel = directory.relative_to(root).as_posix()
+    where = "工作区根目录" if rel == "." else f"{rel}/"
+    return f"{where} 下的条目：" + "、".join(shown) + more

@@ -186,6 +186,9 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
             approver=approver,
             grants=grants,
             lessons=build_lessons(memory) if memory is not None else None,
+            # 这一步要动哪儿由计划声明，执行时把它交给预取——
+            # 否则预取只能靠整段提示词里的关键词猜，实测会猜偏到测试文件上。
+            prefetch_anchors=tuple(step.scope or scope),
         ),
     )
     if step.executor == SUBAGENT:
