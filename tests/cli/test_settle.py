@@ -98,3 +98,43 @@ def test_无人值守但范围内仍然自动落盘(tmp_path: Path) -> None:
         pending, AUTO, ("src",), ask=lambda _: "n", non_interactive=True
     )
     assert action == AUTO_APPLIED
+
+
+def test_无人值守时越界的丢掉_范围内的照落(tmp_path: Path) -> None:
+    """一条越界不该把同一批里**对的**改动一起作废。
+
+    实测事故：自主运行第 43 步越界写了两处别的题，而它自己那处改动是对的。
+    整批作废之后，审查看到的是「测试没过」，于是判这一步失败，
+    整份计划在 43/49 处中止——剩下 6 题连试都没试。
+    """
+    pending = PendingChanges(tmp_path)
+    write_file_spec(tmp_path, pending).handler(
+        {"path": "43_nested_get/nested.py", "content": "fixed = True\n"}
+    )
+    write_file_spec(tmp_path, pending).handler(
+        {"path": "44_merge_counts/counter.py", "content": "越界\n"}
+    )
+
+    action, written = settle(
+        pending,
+        AUTO,
+        ("43_nested_get",),
+        non_interactive=True,
+    )
+
+    assert action == AUTO_APPLIED
+    assert written == ["43_nested_get/nested.py"]
+    assert (tmp_path / "43_nested_get" / "nested.py").exists()
+    assert not (tmp_path / "44_merge_counts" / "counter.py").exists()
+
+
+def test_无人值守时全是越界仍然拒绝(tmp_path: Path) -> None:
+    pending = PendingChanges(tmp_path)
+    write_file_spec(tmp_path, pending).handler(
+        {"path": "44_merge_counts/counter.py", "content": "越界\n"}
+    )
+    action, written = settle(
+        pending, AUTO, ("43_nested_get",), non_interactive=True
+    )
+    assert action == DENIED
+    assert written == []

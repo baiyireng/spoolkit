@@ -20,10 +20,21 @@ from typing import Any, Sequence
 from agents_dev.llm.gateway import ModelGateway
 from agents_dev.llm.types import ChatRequest, Message
 from agents_dev.context import templates as T
+from agents_dev import limits
 
 PENDING = "pending"
 DONE = "done"
 FAILED = "failed"
+
+# 一步的 JSON 大约占多少**输出** token。
+#
+# 实测（27B，8192 窗口，50 题）：输出预算 2048 在第十八步处被切断
+# （finish_reason=length），JSON 停在半个字符串上，解析出 0 步——整条自主
+# 路线崩在第一步。2048 / 18 ≈ 114，这里留 25% 余量。
+#
+# 它只用来把「输出预算」换算成「一次能排几步」，本身不是限制：排不完就再排
+# 一批（见 decompose）。
+STEP_TOKENS = 140
 
 # 这一步由谁执行。见 PlanStep.executor。
 SELF = "self"
@@ -51,6 +62,16 @@ PLAN_SCHEMA: dict[str, Any] = {
 }
 
 DECOMPOSE_PROMPT = T.DECOMPOSE
+
+# 分批时追加在后面的那一段。第一批不加——一次排得完的时候，提示词与
+# 原来逐字相同，老测量还能对照。
+BATCH_CONTINUE = T.DECOMPOSE_CONTINUE
+
+# 分批用的 schema：多一个 done，用来问「后面还有没有」。
+BATCH_SCHEMA: dict[str, Any] = {
+    **PLAN_SCHEMA,
+    "properties": {**PLAN_SCHEMA["properties"], "done": {"type": "boolean"}},
+}
 
 
 @dataclass
@@ -167,24 +188,113 @@ def decompose(
     goal: str,
     context: str = "",
     limit: int = 10,
-    max_tokens: int = 2048,
+    max_tokens: int | None = None,
+    window: int | None = None,
 ) -> Plan:
-    """让模型把目标拆成可验收的步骤序列。"""
-    response = gateway.chat(
-        ChatRequest(
-            messages=(
-                Message(
-                    role="user",
-                    content=DECOMPOSE_PROMPT.format(
-                        goal=goal, context=context or "无", limit=limit
-                    ),
-                ),
-            ),
-            max_tokens=max_tokens,
-            response_schema=PLAN_SCHEMA,
+    """让模型把目标拆成可验收的步骤序列。**一次排不完就再排一批。**
+
+    为什么必须有分批：输出预算是单次生成的硬边界，而步骤数没有上限。
+    实测 50 题那次，提示词 4375 token、输出在 2048 处被服务端截断
+    （finish_reason=length），JSON 停在第十八步，解析出 0 步——自主路线
+    不是「做得慢」，是**根本起不来**。分批之后每批都小到装得下，
+    步骤数就不再受输出预算限制。
+
+    预算口径：单次 output 取登记表里的 `decompose_output_budget`，
+    知道窗口时再按「窗口 − 提示词」收一次口；每一步按 STEP_TOKENS 折算。
+    被截断不重来整份，而是**把这一批要小一半再排**——截断说明的是
+    「这批太大」，不是「模型不会排」。
+    """
+    budget = int(max_tokens or limits.resolve("decompose_output_budget", {})[0])
+    planned: list[PlanStep] = []
+    planned_text = "（无）"
+    for _ in range(max(1, limit)):  # 最多上限批次；正常远用不到
+        remaining = limit - len(planned)
+        if remaining <= 0:
+            break
+        ask = _batch_size(budget, goal, context, planned_text, window, remaining)
+        # 「一次排得完」：第一批就把剩下的全要了。这条路要保住老行为——
+        # 它给几步就是几步，不再追问，也不用续排提示。
+        single = ask >= remaining
+        if single:
+            # 一次排得完：提示词与「没有分批」时逐字相同。
+            prompt = DECOMPOSE_PROMPT.format(
+                goal=goal, context=context or "无", limit=limit
+            )
+            schema = PLAN_SCHEMA
+        else:
+            prompt = DECOMPOSE_PROMPT.format(
+                goal=goal, context=context or "无", limit=ask
+            ) + BATCH_CONTINUE.format(
+                planned=planned_text,
+                start=len(planned) + 1,
+                ask=ask,
+            )
+            schema = BATCH_SCHEMA
+        response = gateway.chat(
+            ChatRequest(
+                messages=(Message(role="user", content=prompt),),
+                max_tokens=budget,
+                response_schema=schema,
+            )
         )
-    )
-    return parse_plan(response.text, goal, limit=limit)
+        if response.truncated and ask > 1:
+            # 这一批没排完就被切断：把批次砍半重排，而不是重新排整份计划。
+            budget = max(1, budget // 2)
+            continue
+        fresh, done = _parse_batch(response.text, goal, limit=ask)
+        for step in fresh:
+            step.index = len(planned) + 1
+            planned.append(step)
+        if done or not fresh or single:
+            break
+        if len(fresh) < ask:
+            # 续批时说好「没排完就排满」，它没排满就是「后面没有了」。
+            break
+        planned_text = "\n".join(f"{s.index}. {s.goal}" for s in planned)
+    return Plan(goal=goal, steps=planned)
+
+
+def _batch_size(
+    budget: int,
+    goal: str,
+    context: str,
+    planned_text: str,
+    window: int | None,
+    remaining: int,
+) -> int:
+    """这一批排几步。
+
+    知道窗口时按「窗口 − 提示词 − 余量」收口：不知道窗口就只按登记表里的
+    输出预算算。余量留给分词误差，宁可少排一步，也不要撞服务端的拒绝。
+    """
+    usable = budget
+    if window:
+        prompt_tokens = _estimate_tokens(goal, context, planned_text)
+        usable = min(usable, max(1, window - prompt_tokens - 256))
+    return max(1, min(remaining, usable // STEP_TOKENS))
+
+
+def _estimate_tokens(*texts: str) -> int:
+    """粗估长度：拉丁按 4 字符 / token、其余按 1.5 字符 / token。
+
+    这里只需要「够保守地不小看它」。真正精确的分词在调用方手里，
+    而它不该被拆解这一步反向依赖——估偏了只是少排一步。
+    """
+    total = 0.0
+    for text in texts:
+        ascii_chars = sum(1 for char in text if ord(char) < 128)
+        total += ascii_chars / 4 + (len(text) - ascii_chars) / 1.5
+    return int(total)
+
+
+def _parse_batch(text: str, goal: str, limit: int) -> tuple[list[PlanStep], bool]:
+    """解析一批：返回（步骤，是否已经排完）。"""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return [], False
+    steps = parse_plan(text, goal, limit=limit).steps
+    return steps, bool(payload.get("done"))
 
 
 def plan_path(project_root: Path) -> Path:

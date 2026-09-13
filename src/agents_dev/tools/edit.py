@@ -9,7 +9,7 @@
 
 import difflib
 import json
-from typing import Any
+from typing import Any, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -236,6 +236,19 @@ class PendingChanges:
 
     def discard(self) -> None:
         self._changes.clear()
+
+    def drop(self, paths: Sequence[str]) -> list[str]:
+        """丢掉指定的几处改动，返回真正被丢掉的路径。
+
+        存在的理由是一个实测事故：自主运行里某一步**越界**写了两处别的题，
+        同时还有一处**在范围内、而且是对的**修改。整批一起作废的代价是
+        那处对的修改也没了，审查据此判它没做完，整份计划在 43/49 处中止。
+        「一条越界、全批作废」在无人值守时不是谨慎，是把对的部分一起扔掉。
+        """
+        removed = [path for path in paths if path in self._changes]
+        for path in removed:
+            self._changes.pop(path, None)
+        return removed
 
 
 @dataclass(frozen=True)

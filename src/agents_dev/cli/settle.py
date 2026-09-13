@@ -46,13 +46,24 @@ def settle(
         # 越界就退回确认：auto 只覆盖它被允许的范围，
         # 不等于「这次运行整体被信任」。
         print("以下改动超出允许范围，需要逐项确认：" + "、".join(blocked))
+        if non_interactive:
+            # 无人值守时不能弹问题。这里只丢**越界的那几处**，范围内的照落。
+            #
+            # 原先是整批作废，代价实测过：43 步那处**在范围内、而且是对的**
+            # 修改被一起丢掉，审查据此判它「测试尚未通过」，整份计划在
+            # 43/49 处中止——剩下 6 题连试都没试。谨慎不等于把对的一起扔。
+            dropped = pending.drop(blocked)
+            print(f"无人值守运行：范围外的 {len(dropped)} 处已丢弃，范围内的照落。")
+            if len(pending) == 0:
+                return DENIED, []
+            return AUTO_APPLIED, apply_with_audit(pending, baseline_path)
 
-    # 无人值守时不能弹问题——没有人会回答。此时越界一律拒绝，
-    # 并把原因说清楚，而不是静默丢弃。
+    # 无人值守时不能弹问题——没有人会回答。没有自动授权的策略下，
+    # 一律拒绝，并把原因说清楚，而不是静默丢弃。
     if non_interactive:
         _show(pending)
         pending.discard()
-        print("无人值守运行，且改动不在授权范围内，已拒绝。")
+        print("无人值守运行，且本次运行没有自动授权，已拒绝。")
         return DENIED, []
 
     applied, written = review_and_apply(

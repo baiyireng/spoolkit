@@ -157,6 +157,12 @@ KNOBS: tuple[Knob, ...] = (
         "拆解时最多读多少 token 的任务材料（题目说明与验收测试）——"
         "在这里读一次比在每个子任务里各读一遍便宜得多",
     ),
+    Knob(
+        "decompose_output_budget", 3072, CAPABILITY,
+        "拆解单次生成最多多少 token。**它不是步骤数的上限**：排不完就再排"
+        "一批（每批按 140 token/步折算）。实测 2048 在第十八步被截断，"
+        "五十步的计划于是整体解析失败",
+    ),
     Knob("command_timeout", 180, MECHANICAL, "单条命令的默认超时"),
     Knob("max_command_timeout", 600, SAFETY, "命令超时上限：防止挂死"),
     Knob(

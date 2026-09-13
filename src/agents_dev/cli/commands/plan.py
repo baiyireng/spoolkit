@@ -127,6 +127,8 @@ def make_plan(args: argparse.Namespace) -> int:
         args.goal,
         context=_survey(project_root, args.goal, counter_for(gateway)),
         limit=args.limit,
+        # `plan` 子命令没有 --window，`run --autonomous` 有：两边都要能用。
+        window=resolve_window(gateway, getattr(args, "window", 0)),
     )
     if not plan.steps:
         print("没有拆出任何带验收标准的步骤。", file=sys.stderr)
@@ -353,6 +355,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         args.goal,
         context=_survey(project_root, args.goal, counter_for(gateway)),
         limit=args.limit,
+        window=resolve_window(gateway, getattr(args, "window", 0)),
     )
     if not plan.steps:
         print("没能拆出任何带验收标准的步骤。", file=sys.stderr)

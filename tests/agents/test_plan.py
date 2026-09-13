@@ -16,6 +16,7 @@ from agents_dev.agents.plan import (
 )
 from agents_dev.llm.fake import FakeModel
 from agents_dev.llm.tokenizer import OfflineTokenCounter
+from agents_dev.llm.types import ChatResponse
 
 
 def _gateway(script: list[str]) -> FakeModel:
@@ -142,6 +143,117 @@ def test_分解请求带结构约束与目标() -> None:
     assert plan.goal == "做一个工具"
     assert gateway.requests[0].response_schema is not None
     assert "做一个工具" in gateway.requests[0].messages[0].content
+
+
+# --- 拆解的分批：步骤数不该被**单次输出预算**卡住 -------------------------
+#
+# 实测（27B、8192 窗口、50 题）：提示词 4375 token，输出在 2048 处被服务端
+# 截断（finish_reason=length），JSON 停在第十八步的半个字符串上，解析出
+# 0 步。`run --autonomous --limit 50` 直接回一句「没能拆出任何带验收标准的
+# 步骤」——自主路线不是慢，是起不来。
+
+
+def _batch(*pairs, done: bool = False) -> str:
+    return json.dumps(
+        {
+            "steps": [
+                {"goal": g, "acceptance": a, "scope": ["x/"], "executor": "self"}
+                for g, a in pairs
+            ],
+            "done": done,
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_一次排得完时不加续排提示() -> None:
+    """小计划的提示词与「没有分批」时逐字相同——老的测量才还能对照。"""
+    gateway = _gateway([_batch(("甲", "a"), ("乙", "b"), done=True)])
+    plan = decompose(gateway, "小事", limit=3, max_tokens=2048)
+    assert len(plan.steps) == 2
+    assert len(gateway.requests) == 1
+    assert "已经排好的步骤" not in gateway.requests[0].messages[0].content
+
+
+def test_排不完就接着排下一批() -> None:
+    # 每批 280//140 = 2 步，于是 20 步要排很多批；脚本给两批就够看出接续。
+    gateway = _gateway(
+        [
+            _batch(("甲", "a"), ("乙", "b")),
+            _batch(("丙", "c"), ("丁", "d"), done=True),
+        ]
+    )
+    plan = decompose(gateway, "大事", limit=20, max_tokens=280)
+    assert [s.goal for s in plan.steps] == ["甲", "乙", "丙", "丁"]
+    assert [s.index for s in plan.steps] == [1, 2, 3, 4]
+    assert len(gateway.requests) == 2
+    second = gateway.requests[1].messages[0].content
+    # 续批要看到「已经排好的」并只接着排，不许重排
+    assert "已经排好的步骤" in second
+    assert "1. 甲" in second
+    assert "从第 3 步开始" in second
+
+
+def test_说排完了就不再问() -> None:
+    gateway = _gateway([_batch(("甲", "a"), done=True)])
+    plan = decompose(gateway, "小事", limit=20, max_tokens=280)
+    assert len(plan.steps) == 1
+    assert len(gateway.requests) == 1
+
+
+def test_空批次结束循环不留死循环() -> None:
+    gateway = _gateway(["{}", "{}"])
+    plan = decompose(gateway, "小事", limit=20, max_tokens=280)
+    assert plan.steps == []
+    assert len(gateway.requests) == 1
+
+
+def test_步骤数只受limit约束不受输出预算约束() -> None:
+    """输出预算小到一次只排一步，也照样排满 limit 步。"""
+    gateway = _gateway([_batch((f"第{i}步", "通过")) for i in range(1, 6)])
+    plan = decompose(gateway, "大事", limit=5, max_tokens=140)
+    assert [s.goal for s in plan.steps] == [f"第{i}步" for i in range(1, 6)]
+
+
+def test_窗口小就少排几步():
+    from agents_dev.agents.plan import _batch_size
+
+    # 不知道窗口：只看预算
+    assert _batch_size(3072, "目标", "", "（无）", None, 50) == 21
+    # 窗口 4096 而材料就占了 4000：留给生成的位置不够，一批只排得下 1 步
+    small = _batch_size(3072, "目标", "材料" * 3000, "（无）", 4096, 50)
+    assert small == 1
+
+
+def test_被截断就把这一批砍半重排() -> None:
+    """截断说明的是「这批太大」，不是「模型不会排」——所以砍半，不重头来。"""
+
+    class TruncatingFake(FakeModel):
+        def __init__(self, script, tokenizer):
+            super().__init__(script, tokenizer)
+            self.calls = 0
+
+        def chat(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                self.requests.append(request)
+                return ChatResponse(
+                    text='{"steps": [{"goal": "半截',
+                    prompt_tokens=10,
+                    completion_tokens=2048,
+                    truncated=True,
+                )
+            return super().chat(request)
+
+    gateway = TruncatingFake(
+        [_batch(("甲", "a"), done=True)], OfflineTokenCounter()
+    )
+    plan = decompose(gateway, "大事", limit=20, max_tokens=2048)
+    assert [s.goal for s in plan.steps] == ["甲"]
+    assert len(gateway.requests) == 2
+    # 第一次问 14 步（2048/140），砍半之后问 7 步
+    assert "最多 14 步" in gateway.requests[0].messages[0].content
+    assert "最多 7 步" in gateway.requests[1].messages[0].content
 
 
 def test_步骤提示带上整体位置() -> None:
