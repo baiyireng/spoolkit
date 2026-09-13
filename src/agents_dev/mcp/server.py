@@ -24,6 +24,8 @@ Cursor 都能挂 MCP 服务，自己定一套 JSON 就得让对方改代码—�
 
 import json
 import sys
+import threading
+import queue
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
@@ -124,9 +126,16 @@ class McpServer:
         self,
         project_root: Path,
         runner: Runner,
+        writer: Any = None,
     ) -> None:
         self.project_root = project_root
         self.runner = runner
+        self.writer = writer
+        # 调用方给的进度令牌（tools/call 的 _meta.progressToken）。
+        # 有它才推通知：没要进度还一直推，对方只是多收一堆噪音。
+        self._progress_token: Any = None
+        self._progress_count = 0
+        self._forwarding = False
 
     # --- JSON-RPC ---
 
@@ -178,6 +187,43 @@ class McpServer:
             return _text(f"没有这个工具：{name}", is_error=True)
         return handler(arguments)
 
+    def set_progress_token(self, token: Any) -> None:
+        self._progress_token = token
+        self._progress_count = 0
+
+    def start_forwarding(self) -> None:
+        """把子进程的事件转成 MCP 进度通知推给调用方。
+
+        为什么是推送而不是只让它们轮询：轮询的代价是"要么慢、要么白问"——
+        长任务里最需要的恰恰是"它现在走到哪了"。MCP 有进度通知这条路，
+        就没理由让对方隔几秒问一次。
+        """
+        if self._forwarding or self.writer is None:
+            return
+        self._forwarding = True
+        listener = self.runner.subscribe()
+
+        def pump() -> None:
+            while True:
+                event = listener.get()
+                token = self._progress_token
+                if token is None:
+                    continue
+                self._progress_count += 1
+                self.writer.line(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": {
+                            "progressToken": token,
+                            "progress": self._progress_count,
+                            "message": _summarize(event),
+                        },
+                    }
+                )
+
+        threading.Thread(target=pump, daemon=True).start()
+
     def _delegate(self, arguments: dict) -> dict:
         goal = str(arguments.get("goal") or "").strip()
         if not goal:
@@ -189,6 +235,11 @@ class McpServer:
                 is_error=True,
             )
         self.runner.mode = mode
+        # _meta 由调用方给（协议里就长这样）；有令牌就按进度推。
+        meta = arguments.get("_meta") if isinstance(arguments, dict) else None
+        if isinstance(meta, dict) and meta.get("progressToken") is not None:
+            self.set_progress_token(meta["progressToken"])
+            self.start_forwarding()
         started = self.runner.start(goal)
         if not started:  # pragma: no cover - 上面刚判过
             return _text("任务没能启动", is_error=True)
@@ -258,6 +309,53 @@ def _json(data: Any) -> dict:
     return _text(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def _summarize(event: Any) -> str:
+    """把一条内部事件折成一句给人看的话（进度通知的 message）。"""
+    kind = getattr(event, "type", "")
+    data = getattr(event, "data", {}) or {}
+    if kind == "start":
+        return f"开始：{data.get('goal', '')[:60]}"
+    if kind == "step":
+        return f"第 {data.get('n', '?')} 步"
+    if kind == "tool":
+        state = "成功" if data.get("ok") else "失败"
+        return f"工具 {data.get('name', '?')} → {state}"
+    if kind == "diff":
+        return f"待确认改动：{data.get('path', '?')}"
+    if kind == "await":
+        return f"等待确认（{data.get('count', 1)} 处改动）——用 confirm_changes 回答"
+    if kind == "confirm":
+        return "改动已处理"
+    if kind == "usage":
+        return (
+            f"用量：{data.get('steps', 0)} 步 / {data.get('calls', 0)} 次调用 / "
+            f"{data.get('prompt_tokens', 0)}+{data.get('completion_tokens', 0)} token"
+        )
+    if kind == "final":
+        return "结束：" + ("完成" if data.get("ok") else "未完成")
+    if kind == "note":
+        return str(data.get("text", ""))[:80]
+    return kind or "事件"
+
+
+class _LockedWriter:
+    """多线程往同一路 stdout 写时的互斥。
+
+    事件转发是在后台线程里发生的（子进程还在跑），而工具回话在主线程——
+    不互斥的话两条 JSON 会**交错成一行**，对方的解析器只能报"格式错误"，
+    而那种错误看起来像我们这边坏了。
+    """
+
+    def __init__(self, sink: TextIO) -> None:
+        self._sink = sink
+        self._lock = threading.Lock()
+
+    def line(self, payload: dict) -> None:
+        with self._lock:
+            self._sink.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self._sink.flush()
+
+
 def serve_stdio(
     project_root: Path,
     runner: Runner,
@@ -266,8 +364,8 @@ def serve_stdio(
 ) -> None:
     """从 stdin 读、往 stdout 写，一行一条 JSON-RPC。到 EOF 就结束。"""
     reader = source if source is not None else sys.stdin
-    writer = sink if sink is not None else sys.stdout
-    server = McpServer(project_root, runner)
+    writer = _LockedWriter(sink if sink is not None else sys.stdout)
+    server = McpServer(project_root, runner, writer=writer)
     for line in reader:
         text = line.strip()
         if not text:
@@ -280,5 +378,4 @@ def serve_stdio(
         response = server.handle(message)
         if response is None:
             continue
-        writer.write(json.dumps(response, ensure_ascii=False) + "\n")
-        writer.flush()
+        writer.line(response)

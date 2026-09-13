@@ -7,6 +7,8 @@
 
 import io
 import json
+import queue
+import time
 from pathlib import Path
 
 from agents_dev.agents.plan import DONE, parse_plan, plan_path, save_plan
@@ -24,6 +26,7 @@ class 假Runner:
         self._events: list[dict] = []
         self._log_seq = 0
         self._lock = __import__("threading").Lock()
+        self._listeners: list[queue.Queue] = []
 
     def start(self, goal: str) -> bool:
         if self.running:
@@ -55,6 +58,19 @@ class 假Runner:
     def push(self, type_: str, **data) -> None:
         self._log_seq += 1
         self._events.append({"seq": self._log_seq, "type": type_, **data})
+        from agents_dev.web.protocol import Event
+
+        for listener in list(self._listeners):
+            listener.put(Event(type_, data))
+
+    def subscribe(self) -> queue.Queue:
+        listener: queue.Queue = queue.Queue()
+        self._listeners.append(listener)
+        return listener
+
+    def unsubscribe(self, listener: queue.Queue) -> None:
+        if listener in self._listeners:
+            self._listeners.remove(listener)
 
 
 def _server(tmp_path: Path) -> tuple[McpServer, 假Runner]:
@@ -208,3 +224,72 @@ def test_stdio_一行一条_杂音被忽略(tmp_path: Path) -> None:
     lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert [item["id"] for item in lines] == [1, 2]
     assert lines[1]["result"]["tools"]
+
+
+def test_给了进度令牌就推通知(tmp_path: Path, ) -> None:
+    """长任务里最需要的正是"它现在走到哪了"，而 MCP 有进度通知这条路——
+    那就不该让对方隔几秒轮询一次。"""
+    runner = 假Runner()
+    stdin = io.StringIO(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "delegate_task",
+                    "arguments": {"goal": "做点事", "_meta": {"progressToken": "tok-1"}},
+                },
+            }
+        )
+        + "\n"
+    )
+    stdout = io.StringIO()
+    serve_stdio(tmp_path, runner, source=stdin, sink=stdout)
+
+    runner.push("start", goal="做点事")
+    runner.push("tool", name="read_file", ok=True)
+    runner.push("final", ok=True, text="好了")
+
+    deadline = time.time() + 3
+    notes: list[dict] = []
+    while time.time() < deadline:
+        notes = _notifications(stdout.getvalue())
+        if len(notes) >= 3:
+            break
+        time.sleep(0.05)
+
+    assert [item["params"]["progressToken"] for item in notes] == ["tok-1"] * 3
+    assert [item["params"]["progress"] for item in notes] == [1, 2, 3]
+    assert "read_file" in notes[1]["params"]["message"]
+    assert "完成" in notes[2]["params"]["message"]
+
+
+def test_没要进度就不推(tmp_path: Path) -> None:
+    """没要进度还一直推，对方只是多收一堆噪音。"""
+    runner = 假Runner()
+    stdin = io.StringIO(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "delegate_task", "arguments": {"goal": "做点事"}},
+            }
+        )
+        + "\n"
+    )
+    stdout = io.StringIO()
+    serve_stdio(tmp_path, runner, source=stdin, sink=stdout)
+
+    runner.push("start", goal="做点事")
+    time.sleep(0.2)
+    assert _notifications(stdout.getvalue()) == []
+
+
+def _notifications(text: str) -> list[dict]:
+    return [
+        item
+        for item in (json.loads(line) for line in text.splitlines() if line.strip())
+        if item.get("method") == "notifications/progress"
+    ]

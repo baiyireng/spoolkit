@@ -66,6 +66,16 @@ MCP 的一次 `tools/call` 是请求/响应，而这里的任务可以跑几十�
 事件在服务端留最近 400 条（带递增序号），所以驱动者只要说清"上次看到第几条"，
 断线重连也不会漏。
 
+**也可以不轮询**：`delegate_task` 的 `_meta.progressToken` 给了之后，服务端会把
+每条事件折成一句进度通知推回来——
+
+```json
+{"method": "notifications/progress",
+ "params": {"progressToken": "tok-1", "progress": 3, "message": "工具 read_file → 成功"}}
+```
+
+（没给令牌就不推：没要进度还一直推，对方只是多收一堆噪音。）
+
 ## 为什么用 MCP 而不是自己定协议
 
 对方已经会说 MCP。自己定一套 JSON，等于要求每个接入方先写适配层——
