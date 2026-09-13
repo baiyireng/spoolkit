@@ -187,3 +187,42 @@ def test_换着花样绕也逃不掉(tmp_path: Path) -> None:
     assert result.finished is True
     # 督导是在漫游到第 8 步时被叫起来的，不是等到 20 步烧完。
     assert any("连续 8 步只看不写" in line for line in result.trace), result.trace
+
+
+def test_督导说完成后按成功收尾(tmp_path: Path) -> None:
+    """「事情已经做完、只是它自己没宣告」要有出路——这条是实测逼出来的。
+
+    审查者完成了核对、自动验证也通过，但它在收尾前用完了回合，于是循环记下
+    「任务没做完，收手的原因：任务已完成」——一句自相矛盾的话，而后果是这次
+    工作被记成失败（派发路径里表现为「审查没得出结论」）。
+    """
+    loop = _build(
+        tmp_path,
+        [
+            _turn("看", [_look()]),
+            _turn("看", [_look()]),
+            _verdict("finish", reason="自动验证已通过，该做的都做了"),
+        ],
+    )
+    result = loop.run("做点什么")
+    assert result.finished is True
+    assert "自动验证已通过" in result.final
+    assert any("督导判断已完成" in line for line in result.trace)
+
+
+def test_督导说完成时带上它给的话(tmp_path: Path) -> None:
+    loop = _build(
+        tmp_path,
+        [
+            _turn("看", [_look()]),
+            _turn("看", [_look()]),
+            _verdict(
+                "finish",
+                reason="都做完了",
+                message="8 个目录逐个跑 pytest 都通过，任务已完成。",
+            ),
+        ],
+    )
+    result = loop.run("做点什么")
+    assert result.finished is True
+    assert result.final == "8 个目录逐个跑 pytest 都通过，任务已完成。"

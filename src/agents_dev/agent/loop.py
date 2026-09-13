@@ -15,7 +15,14 @@ from typing import Any, Callable
 from agents_dev.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from agents_dev.agent.state import TaskState, clear_state, load_state, save_state
 from agents_dev import limits as _limits
-from agents_dev.agents.supervisor import EXTEND, STOP, Evidence, Verdict, supervise
+from agents_dev.agents.supervisor import (
+    EXTEND,
+    FINISH,
+    STOP,
+    Evidence,
+    Verdict,
+    supervise,
+)
 from agents_dev.config import Config
 from agents_dev.context.assembler import Assembler
 from agents_dev.context.budget import Budget
@@ -466,6 +473,30 @@ class AgentLoop:
                     stopped_by = verdict.reason or "督导判断这个任务做不下去"
                     trace.append(f"step{state.step}: 督导建议收手——{stopped_by}")
                     break
+                elif verdict.action == FINISH:
+                    # 「它已经做完了，只是自己没宣告」。这条以前不存在，
+                    # 于是出现自相矛盾的收尾（「任务没做完，收手的原因：
+                    # 任务已完成」），而后果是这次工作被记成失败——
+                    # 派发路径里就表现为「审查没得出结论」。
+                    done_text = verdict.message or verdict.reason
+                    trace.append(
+                        f"step{state.step}: 督导判断已完成——{verdict.reason}"
+                    )
+                    self._archive(state, "success", trace, done_text)
+                    clear_state(checkpoint)
+                    return LoopResult(
+                        True,
+                        done_text,
+                        state,
+                        state.step,
+                        resets,
+                        trace,
+                        prompt_tokens,
+                        completion_tokens,
+                        model_calls,
+                        tuple(item[0] for item in pushed),
+                        environment_blocked=self.environment_blocked,
+                    )
                 else:
                     if verdict.grants:
                         limit = state.step + verdict.grants

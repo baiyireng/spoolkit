@@ -37,7 +37,15 @@ def _log_path(root: Path) -> Path:
 
 
 def record_dispatch(
-    root: Path, *, kind: str, calls: int, rounds: int, targets: int, note: str = ""
+    root: Path,
+    *,
+    kind: str,
+    calls: int,
+    rounds: int,
+    targets: int,
+    note: str = "",
+    implementer_steps: int = 0,
+    reviewer_steps: int = 0,
 ) -> None:
     """把一次派发的结果记在工作区里。
 
@@ -50,9 +58,12 @@ def record_dispatch(
     """
     path = _log_path(root)
     stamp = time.strftime("%m-%d %H:%M")
+    # 两个角色各花多少步要记下来：「审查没给出结论」时，「它把预算花在验证
+    # 动作上了」和「它判断不出来」是两件完全不同的事，只看一句结论分不清。
+    steps = f"实现 {implementer_steps} 步 / 审查 {reviewer_steps} 步"
     # 目标件数是模型自己声明的；它常常不填，那写「0 件」不如说清是没声明。
     size = f"目标 {targets} 件" if targets else "目标未声明"
-    line = f"- {stamp} [{kind}] {calls} 次调用 / {rounds} 轮 / {size}"
+    line = f"- {stamp} [{kind}] {calls} 次调用 / {rounds} 轮 / {steps} / {size}"
     if note:
         line += f" — {' '.join(note.split())[:80]}"
     try:
@@ -271,6 +282,9 @@ def _render(outcome: object) -> str:
 
     lines.append(
         f"共 {getattr(outcome, 'rounds', 0)} 轮（实现→审查）。"
+        f"（实现者 {getattr(outcome, 'implementer_steps', 0)} 步 / "
+        f"审查者 {getattr(outcome, 'reviewer_steps', 0)} 步 / "
+        f"合计 {getattr(outcome, 'model_calls', 0)} 次调用）"
         "改动已经在待确认的 diff 里了——**不要自己再写一遍**；"
         "下一步要么根据审查意见再派一次，要么去做别的。"
     )

@@ -33,6 +33,13 @@ from agents_dev.llm.types import ChatRequest, Message
 EXTEND = "extend"
 REDIRECT = "redirect"
 STOP = "stop"
+# 「它已经做完了，只是自己没说」。
+#
+# 这条是实测逼出来的：审查者完成了核对、自动验证也通过了，但它在收尾前
+# 用完了回合，于是循环记下的是「任务没做完，收手的原因：任务已完成」——
+# 一句自相矛盾的话，而后果是这次审查被当成了「没得出结论」。
+# 督导看得见证据，就该有办法说「它做完了」。
+FINISH = "finish"
 
 # 一次最多给多少步。给太多等于把上限取消掉：真正的用处是「够走完剩下的事」，
 # 而它下一轮还会被问一次，不必一次给足。
@@ -44,7 +51,7 @@ MAX_GRANT = int(_limits.knob("supervisor_max_grant").default)
 VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": [EXTEND, REDIRECT, STOP]},
+        "action": {"type": "string", "enum": [EXTEND, REDIRECT, FINISH, STOP]},
         "steps": {"type": "integer"},
         "reason": {"type": "string"},
         "message": {"type": "string"},
@@ -139,10 +146,12 @@ def parse_verdict(
         return None
 
     action = str(payload.get("action", "")).strip().lower()
-    if action not in (EXTEND, REDIRECT, STOP):
+    if action not in (EXTEND, REDIRECT, FINISH, STOP):
         return None
     reason = str(payload.get("reason") or "").strip()
     message = str(payload.get("message") or "").strip()
+    if action == FINISH:
+        return Verdict(FINISH, reason or "证据显示任务已经完成", 0, message)
 
     raw = payload.get("steps")
     steps = int(raw) if isinstance(raw, (int, float)) else 0

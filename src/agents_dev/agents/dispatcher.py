@@ -190,6 +190,11 @@ class DelegatedResult:
     plan: DispatchPlan
     implementer_final: str = ""
     reviewer_final: str = ""
+    # 两个角色各自花了多少步、多少次调用。**必须交出来**：审查没给出结论时，
+    # 「它把预算花在验证动作上了」和「它判断不出来」是两件完全不同的事，
+    # 而只看一句结论分不清——实测三次批量派发全是「没结论」，原因一直不明。
+    implementer_steps: int = 0
+    reviewer_steps: int = 0
     review: Review | None = None
     rounds: int = 0
     trace: list[str] = field(default_factory=list)
@@ -290,6 +295,7 @@ def run_delegated(
             IMPLEMENTER, spec, gateway, tokenizer, registry, config, verify=verify
         )
         result.implementer_final = implemented.final
+        result.implementer_steps = implemented.steps
         result.trace.extend(f"[实现 {round_no}] {line}" for line in implemented.trace)
 
         # 两条「别送审」的路，都是**任务规模**问题，不是改动质量问题：
@@ -323,6 +329,7 @@ def run_delegated(
             REVIEWER, review_spec, gateway, tokenizer, registry, config, verify=verify
         )
         result.reviewer_final = reviewed.final
+        result.reviewer_steps = reviewed.steps
         result.trace.extend(f"[审查 {round_no}] {line}" for line in reviewed.trace)
 
         if reviewed.finished:
@@ -392,6 +399,8 @@ def run_delegated(
         note=result.too_big or (
             "；".join(result.review.reasons) if result.review else ""
         ),
+        implementer_steps=result.implementer_steps,
+        reviewer_steps=result.reviewer_steps,
     )
     return result
 
