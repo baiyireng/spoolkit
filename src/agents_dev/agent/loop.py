@@ -176,6 +176,9 @@ def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
 
     if registry.get("run_command") is not None:
         lines.append(T.WORKFLOW_RUN)
+        # 紧跟「怎么验证」：它是"验证命令本身写错"那一类失败的补丁
+        # （实测模型自己发明导入路径，一路验证失败还以为是代码错了）。
+        lines.append(T.WORKFLOW_CONVENTIONS)
         lines.append(T.WORKFLOW_TESTS_ARE_SPEC)
         lines.append(T.WORKFLOW_TEST_SCOPE)
 

@@ -24,6 +24,7 @@ from agents_dev.agents.plan import (
     render_step_prompt,
     save_plan,
     extend_plan,
+    out_of_scope,
     reflect_progress,
     uncovered,
 )
@@ -36,6 +37,7 @@ from agents_dev.cli.options import (
     resolve_window,
 )
 from agents_dev.config import Config
+from agents_dev.policy import AUTO
 from agents_dev.cli.runtime import (
     LoopWiring,
     assemble_loop,
@@ -354,17 +356,33 @@ def record_step(ctx: StepRun, step, result, pending, scope: Sequence[str]) -> No
     """记录步骤结果并按策略处理待落盘改动。"""
     project_root, plan = ctx.project_root, ctx.plan
     note = (result.final or "").strip().splitlines()[0][:80] if result.final else ""
-    plan.mark(step.index, DONE if result.finished else FAILED, note=note)
-    save_plan(plan_path(project_root), plan)
 
+    dropped: list[str] = []
     if len(pending):
+        # 越界的路径要在 settle **之前**取：settle 会把待确认清空
+        # （落盘或丢弃），之后 items() 就是空的了。
+        policy = resolve_policy(ctx.args, project_root)
+        if policy == AUTO and ctx.non_interactive:
+            dropped = out_of_scope([item.path for item in pending.items()], scope)
         settle(
             pending,
-            resolve_policy(ctx.args, project_root),
+            policy,
             scope,
             baseline_path=project_root / ".agent" / "last_change.json",
             non_interactive=ctx.non_interactive,
         )
+    if dropped:
+        # **越界被丢掉这件事必须进记录**。实测代价：第 3 步改的是
+        # `cli/app.py`，而它声明的范围写成了不存在的 `cli.py`——改动被丢掉，
+        # 模型只看到"自动验证失败"（它不知道自己的写入根本没落盘），
+        # 于是"写 → 验证失败 → 重置 → 再写"转到督导叫停。
+        # 记进 note 之后：计划渲染、回头看的总结、续排的提示词都看得到，
+        # 下一批就能把范围写全、或者把这一步拆开。
+        note = (note + f"；（{len(dropped)} 处改动超出本步范围被丢弃："
+                       + "、".join(dropped[:3])
+                       + ("…" if len(dropped) > 3 else "") + "）")[:200]
+    plan.mark(step.index, DONE if result.finished else FAILED, note=note)
+    save_plan(plan_path(project_root), plan)
 
 
 def advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
@@ -605,6 +623,12 @@ def _effective_scope(granted: tuple[str, ...], step) -> tuple[str, ...]:
     提议被全部驳回时回退到你授予的范围，而不是回退成「什么都不许」。
     授权来自你；步骤提议只是模型想进一步收窄的意愿，它不该有
     把整步变成只读的能力。
+
+    另外**永远允许写 `.agent/`**：那是 agent 自己的工作目录（计划、进度、
+    索引、scratch、基线）。不加这一条会出现一个自相矛盾：提示词里让它把
+    临时脚本写进 `.agent/scratch/`，而范围闸门又把那处改动丢掉——实测就
+    这么丢过（一个真实需求里它想写个验证脚本，结果被挡，只看到"验证失败"）。
+    这不是给模型扩权：`.agent/` 不是用户的代码。
     """
     effective, rejected = narrow_scope(granted, step.scope or granted)
     if rejected:
@@ -612,7 +636,10 @@ def _effective_scope(granted: tuple[str, ...], step) -> tuple[str, ...]:
             f"第 {step.index} 步提出的范围超出授权，已收窄："
             + "、".join(rejected)
         )
-    return effective or granted
+    allowed = tuple(effective or granted)
+    if not any(item.startswith(".agent") for item in allowed):
+        allowed = allowed + (".agent/",)
+    return allowed
 
 
 def enter_autonomous(args: argparse.Namespace, project_root: Path) -> int:
