@@ -395,7 +395,11 @@ def _raise_for_error(response: httpx.Response, what: str) -> None:
     code = payload.get("code")
     if response.status_code >= 400 or code not in (0, None):
         detail = payload.get("message") or response.text[:200]
-        raise RuntimeError(f"{what} 失败（code={code}）：{detail}")
+        # trace_id 是平台侧排查的凭据：拿着它去提工单/查文档才有得对。原先只打
+        # code+message，真出事时（11001 那次）少了这条线索。
+        trace = payload.get("trace_id")
+        suffix = f"，trace_id={trace}" if trace else ""
+        raise RuntimeError(f"{what} 失败（code={code}）：{detail}{suffix}")
 
 
 def _resolve(given: str, root, names) -> tuple[str, str]:

@@ -23,6 +23,10 @@ from spoolkit.web.runner import Runner
 
 POLL_SECONDS = 0.5
 
+# "应用 / 丢弃"怎么回答。中英文都给：用户在手机上打字，越短越顺手。
+YES_WORDS = frozenset({"y", "yes", "是", "好", "可以", "应用", "1"})
+NO_WORDS = frozenset({"n", "no", "不", "否", "丢弃", "不要", "0"})
+
 
 class AgentRunner:
     """`Callable[[str], str]`：给一条消息，回一段答复。"""
@@ -47,6 +51,9 @@ class AgentRunner:
     # --- 给桥用的接口 ---
 
     def __call__(self, message: str) -> str:
+        reply = self._confirmation_answer(message)
+        if reply is not None:
+            return reply
         runner = Runner(
             self.project_root, session=self.session, extra_args=self.extra_args
         )
@@ -66,6 +73,27 @@ class AgentRunner:
                     "它还在后台跑，等会儿问它进度（或者直接去看工作区）。"
                 )
             self._sleep(POLL_SECONDS)
+
+    def _confirmation_answer(self, message: str) -> str | None:
+        """正在等授权时，`y`/`n` 是**回答**，不是新任务。
+
+        真踩过：提示语写着"回 y 应用、n 丢弃"，而 CLI 那条循环把每条消息都当
+        新目标——你回一个 `y`，它就拿着目标 "y" 又跑一轮 agent，而真正在等确认
+        的那一轮一直卡着。这类"看起来在工作、其实答非所问"最难查。
+        """
+        word = message.strip().lower()
+        if word not in YES_WORDS and word not in NO_WORDS:
+            return None
+        runner = self._runner
+        if runner is None:
+            return None
+        try:
+            snapshot = runner.snapshot()
+        except Exception:  # noqa: BLE001 - 快照拿不到就当没在等
+            return None
+        if not snapshot.get("awaiting"):
+            return None
+        return self.confirm(word in YES_WORDS)
 
     def confirm(self, apply: bool) -> str:
         """回答 agent 的授权询问（它正在等）。"""

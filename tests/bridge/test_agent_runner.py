@@ -78,3 +78,57 @@ def test_超时会回执_而不是干等(tmp_path: Path) -> None:
     answer = runner("做事")
 
     assert "超过" in answer or "没有产出" in answer
+class _StubRunner:
+    """顶替真的 Runner：只回答"我现在在等确认吗"。"""
+
+    def __init__(self, awaiting: int = 0) -> None:
+        self.awaiting = awaiting
+        self.started: list[str] = []
+        self.confirmed: list[bool] = []
+
+    def start(self, message: str) -> bool:
+        self.started.append(message)
+        return True
+
+    def snapshot(self) -> dict:
+        return {
+            "awaiting": self.awaiting,
+            "finished": self.awaiting == 0,
+            "final": {"text": "好"},
+        }
+
+    def confirm(self, apply: bool) -> bool:
+        self.confirmed.append(apply)
+        self.awaiting = 0
+        return True
+
+
+def test_等确认时回_y_是回答而不是新任务():
+    """提示语说"回 y 应用、n 丢弃"，那就真的得是"回答"。
+
+    原先 CLI 那条循环把每条消息都当新目标：你回一个 `y`，它拿着目标 "y" 又跑
+    一轮 agent，而真正在等确认的那一轮一直卡着——症状是"它好像在工作，但做的
+    不是我说的那件事"。
+    """
+    stub = _StubRunner(awaiting=2)
+    runner = AgentRunner(Path("."), sleep=lambda _: None)
+    runner._runner = stub
+
+    assert runner("y") == "已应用。"
+    assert stub.confirmed == [True]
+    assert stub.started == []          # 没有拿 "y" 去开新任务
+
+    runner._runner = _StubRunner(awaiting=1)
+    assert runner("丢弃") == "已丢弃。"
+
+
+def test_没有在等确认时_y_就是普通目标(monkeypatch):
+    """别把正常的词吃掉：没人等确认时，`y` 该照常当一句话送进 agent。"""
+    import spoolkit.bridge.agent_runner as module
+
+    stub = _StubRunner(awaiting=0)
+    monkeypatch.setattr(module, "Runner", lambda *a, **k: stub)
+    runner = AgentRunner(Path("."), sleep=lambda _: None)
+
+    assert runner("y") == "好"
+    assert stub.started == ["y"]
