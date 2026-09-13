@@ -263,12 +263,12 @@ def test_不说清目标就派不了(tmp_path: Path) -> None:
     assert "targets" in result.content
 
 
-def test_超过上限当场拦下并说明理由(tmp_path: Path) -> None:
-    """限制它的不是「做不完」，是「审不完」——这是三次实测逼出来的。
+def test_超过提醒线只是提醒不是上限(tmp_path: Path) -> None:
+    """这条界线**撤过一次**，原因值得留着。
 
-    三次批量派发（8 件）里，活都做对了（其中两次客观验收全过），而**审查
-    三次都没给出结论**：8 处改动要在一个上下文里核对。所以上限从「提醒」
-    改成硬拦——软的那些实测不管用（必填生效了，告警没影响它派 9 件）。
+    曾经按「大批次审不出结论」把它改成硬拦——那条证据后来被推翻了：真正的
+    原因是督导缺少「它已经做完了」这种结论（`supervisor.FINISH`），同一个
+    9 件派发在修好之后连过两次。**混杂观察不能当结论用。**
     """
     loop, _ = _build(
         tmp_path,
@@ -286,17 +286,28 @@ def test_超过上限当场拦下并说明理由(tmp_path: Path) -> None:
                     }
                 ],
             ),
-            _turn("自己做", [], final="我自己来"),
+            _turn(
+                "写文件",
+                [
+                    {
+                        "name": "write_file",
+                        "arguments": {"path": "a.py", "content": "x = 1\n"},
+                    }
+                ],
+            ),
+            _turn("写完了", [], final="改好了"),
+            _turn("看过了", [], final="没问题"),
+            json.dumps({"verdict": "pass", "reasons": ["符合验收标准"]}),
+            _turn("收到", [], final="派发完成"),
         ],
     )
     loop.run("改 8 处")
     fed_back = "\n".join(
         message.content for message in loop.gateway.requests[-1].messages
     )
-    assert "超出一次能派的上限" in fed_back
-    assert "审不完" in fed_back or "审查三次都没给出结论" in fed_back
-    # 想放宽有旋钮，不是写死的
-    assert "review_limit" in fed_back
+    # 没被拦下（照常派出去了），但拿到了提醒
+    assert "超出一次能派的上限" not in fed_back
+    assert "超过 5 件" in fed_back
 
 
 def test_两个上限是配置而不是写死的常量(tmp_path: Path) -> None:
