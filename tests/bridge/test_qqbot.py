@@ -178,7 +178,7 @@ def test_收到事件后默认发回同一个会话() -> None:
             },
         }
     )
-    assert channel._default_to == ("group", "G2")  # 群消息要回群里
+    assert channel._default_to == "group:G2"  # 群消息要回群里
     # poll 把消息交出去，并且不再重复给
     assert len(channel.poll()) == 1
     assert channel.poll() == []
@@ -282,7 +282,7 @@ def test_网关逻辑_问好发识别_事件进队列() -> None:
     assert identify["d"]["intents"] == 1 << 25
     assert [m.text for m in channel.poll()] == ["把 01 修好"]
     # 收到事件之后：默认回给这个人（私聊）
-    assert channel._default_to == ("c2c", "U9")
+    assert channel._default_to == "c2c:U9"
     assert channel._last_event_id == "m9"  # 被动回复要用
 
 
@@ -360,7 +360,7 @@ def test_被动回复被拒时改试主动推送() -> None:
         return httpx.Response(200, json={"id": "m1"})
 
     channel, calls = _channel(handler)
-    channel._default_to = ("c2c", "OPENID")
+    channel._default_to = "c2c:OPENID"
     channel._last_event_id = "MSG1"
 
     channel.send("你好")  # 不抛
@@ -378,7 +378,7 @@ def test_被动与主动都不行时要把两次原因都说出来() -> None:
         return httpx.Response(500, json={"code": 11001, "message": "不支持的调用"})
 
     channel, _ = _channel(handler)
-    channel._default_to = ("c2c", "OPENID")
+    channel._default_to = "c2c:OPENID"
     channel._last_event_id = "MSG1"
 
     with pytest.raises(RuntimeError, match="主动推送也不行"):
@@ -405,3 +405,95 @@ def test_每条事件都留痕() -> None:
 
     assert any("C2C_MESSAGE_CREATE" in item for item in notes)
     assert any("SOMETHING_ELSE" in item for item in notes)
+
+
+def test_私聊回消息不能打到频道接口() -> None:
+    """真凶回归测试：手机发消息完全没反应，根因在这里。
+
+    C2C 事件里 `conversation` 是**裸 openid**；桥把它原样交给 `send(to=…)`，
+    而老的 `partition(":")` 会把 openid 当成 kind、openid 变成空串，于是请求打到
+    `/v2/channels//messages`——一个空 id 的频道接口，QQ 回 `code=11001
+   不支持的调用`。日志看着像"平台不允许"，其实是发错了接口。
+    """
+    channel, sent = _capturing_channel(
+        _ScriptedWS(
+            [
+                {"op": 10, "d": {"heartbeat_interval": 30000}},
+                {
+                    "op": 0,
+                    "s": 1,
+                    "t": "C2C_MESSAGE_CREATE",
+                    "d": {
+                        "id": "m9",
+                        "content": "你好",
+                        "author": {"user_openid": "U9"},
+                    },
+                },
+            ]
+        )
+    )
+    channel._run_gateway_once()          # 走一遍真事件 → 桥拿到 conversation
+    message = channel.poll()[0]
+
+    channel.send("答复", message.conversation)   # 桥就是这么调的
+
+    assert sent == ["/v2/users/U9/messages"], f"打到别的接口去了：{sent}"
+
+
+def test_群消息回群接口() -> None:
+    channel, sent = _capturing_channel(
+        _ScriptedWS(
+            [
+                {"op": 10, "d": {"heartbeat_interval": 30000}},
+                {
+                    "op": 0,
+                    "s": 1,
+                    "t": "GROUP_AT_MESSAGE_CREATE",
+                    "d": {
+                        "id": "m2",
+                        "content": "在吗",
+                        "group_openid": "G7",
+                        "author": {"member_openid": "M1"},
+                    },
+                },
+            ]
+        )
+    )
+    channel._run_gateway_once()
+    message = channel.poll()[0]
+
+    channel.send("答复", message.conversation)
+
+    assert sent == ["/v2/groups/G7/messages"]
+
+
+def _capturing_channel(ws):
+    """像 `_channel_with`，但把"发到哪个接口"记下来。"""
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
+        if path.endswith("/gateway"):
+            return httpx.Response(200, json={"url": "ws://example.invalid/"})
+        sent.append(path)
+        return httpx.Response(200, json={"id": "m1"})
+
+    channel = QQBotChannel(
+        app_id="A",
+        secret="S",
+        transport=httpx.MockTransport(handler),
+        ws_factory=lambda url: ws,
+    )
+    return channel, sent
+
+
+def test_只给裸_openid_也能发出去() -> None:
+    """兜底：调用方只给一个 openid（没有 `kind:` 前缀）时按最后一条消息的场景回。"""
+    channel, sent = _capturing_channel(_ScriptedWS([]))
+    channel._last_kind = "c2c"
+
+    channel.send("答复", "OPENID9")
+
+    assert sent == ["/v2/users/OPENID9/messages"]

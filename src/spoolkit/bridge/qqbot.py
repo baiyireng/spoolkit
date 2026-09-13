@@ -117,9 +117,9 @@ class QQBotChannel:
         self._queue: list[Incoming] = []
         # 默认回复目标：从最后一条收到的消息来（回给同一个人/同一个群）。
         # 存成 (kind, openid) 而不是拼好的字符串——省的号段里再拆一次。
-        self._default_to: tuple[str, str] | None = None
+        self._default_to = ""      # "c2c:<openid>" / "group:<openid>"：最近一条消息
         self._last_event_id = ""   # 被动回复要带 msg_id，就靠它记住
-        self._last_kind = ""
+        self._last_kind = ""       # "c2c" / "group"（规范化过的，不是事件类型名）
         self._seq = 0
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -128,13 +128,22 @@ class QQBotChannel:
     # --- 通道协议 ---
 
     def send(self, text: str, to: str = "") -> None:
-        """`to` 的形状决定发到哪：`c2c:<openid>` / `group:<openid>` / `channel:<id>`。"""
-        if to:
-            kind, _, openid = to.partition(":")
-        elif self._default_to is not None:
-            kind, openid = self._default_to
-        else:
+        """`to` 的形状决定发到哪：`c2c:<openid>` / `group:<openid>` / `channel:<id>`。
+
+        也接受**裸的 openid**（事件里的 `conversation` 就是它）：那时按最后一条消息
+        的场景回。
+
+        为什么要这条兜底——真踩过，而且是"手机发消息完全没反应"的真凶：C2C 事件里
+        `conversation` 是裸 openid，`partition(":")` 于是把 openid 当成 kind、
+        openid 变成空串，请求打到 `/v2/channels//messages`（频道接口、空 id），
+        QQ 回 `code=11001 不支持的调用`。日志看着像"平台不允许"，其实是**发错了接口**。
+        """
+        target = to or self._default_to
+        if not target:
             raise RuntimeError("不知道发给谁：这条通道还没收到过消息")
+        kind, _, openid = target.partition(":")
+        if not openid:
+            kind, openid = (self._last_kind or "c2c"), kind
         if kind == "c2c":
             url = f"/v2/users/{openid}/messages"
         elif kind == "group":
@@ -320,12 +329,9 @@ class QQBotChannel:
         if messages:
             latest = messages[-1]
             # 群事件回群里，私聊回私聊——回错了人比不回更糟。
-            self._default_to = (
-                "group" if kind == "GROUP_AT_MESSAGE_CREATE" else "c2c",
-                latest.conversation,
-            )
+            self._last_kind = "group" if kind == "GROUP_AT_MESSAGE_CREATE" else "c2c"
+            self._default_to = f"{self._last_kind}:{latest.conversation}"
             self._last_event_id = latest.message_id
-            self._last_kind = kind
         self._queue.extend(messages)
         return messages
 
