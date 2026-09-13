@@ -87,6 +87,10 @@ class Runner:
             "spoolkit.cli.app",
             "run",
             "--events",
+            # 网页壳有人可问（页面上的"应用/拒绝"按钮），所以允许在 stdin 上问授权。
+            # 不带这个参数时 events 模式一律拒绝——那正是"它想跑一条白名单外的
+            # 命令、被拒、反复重试、最后整轮收尾"的由来。
+            "--ask-on-stdin",
             "--session",
             self.session,
             "--root",

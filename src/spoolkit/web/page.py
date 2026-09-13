@@ -155,8 +155,22 @@ function applyState(state) {
   // 断线重连时事件已经漏掉了，只能按快照把待确认面板整个重建出来。
   pendings = state.diffs || [];
   if (pendings.length) { showPending(pendings); }
+  // 等命令授权时**没有 diff**：不把那条命令显示出来，按钮就是盲操作。
+  const asking = state.awaiting_detail || {};
+  if (state.awaiting && asking.command) { showCommandAsk(asking); }
   if (state.awaiting) { showActions(); } else { actions.style.display = 'none'; }
   drawHistory(state.messages);
+}
+
+// 「它想跑一条白名单外的命令」——把这句和被问的东西一起摆在按钮上面。
+// 授权和落盘是两件事：一个是问"能不能跑"，一个是问"要不要写入"，
+// 混成一句「有 1 处改动待确认」，人根本不知道自己在批什么。
+function showCommandAsk(detail) {
+  showPending([{
+    path: '要执行：' + detail.command,
+    text: '原因：' + (detail.reason || '未说明') +
+          '\n（点「应用」= 允许这一次；要长期允许，去 .agent/grants.json 或用聊天里的 /allow-read）'
+  }]);
 }
 
 function showActions() {
@@ -189,7 +203,11 @@ function onEvent(event) {
     showPending(pendings);
     return;
   }
-  if (data.type === 'await') { showActions(); return; }
+  if (data.type === 'await') {
+    if (data.command) { showCommandAsk(data); }
+    showActions();
+    return;
+  }
   if (data.type === 'confirm') {
     // auto 策略下改动是静默落盘的，界面上必须留一句话，
     // 否则「它自己改了文件」这件事只有翻 git 才知道。
