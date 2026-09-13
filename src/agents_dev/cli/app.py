@@ -164,6 +164,20 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
     )
     parser.add_argument("--limit", type=int, default=10, help="自主模式下最多拆几步")
     parser.add_argument(
+        "--batch",
+        type=int,
+        default=0,
+        help=(
+            "分批推进：每批排几步。给了它就变成「先做一批 → 回头看一眼 → "
+            "再排下一批」，后续步骤能吃到前面的实际结果。0 表示一次排完"
+        ),
+    )
+    parser.add_argument(
+        "--no-roll",
+        action="store_true",
+        help="即使给了 --batch 也一次排完（对照用）",
+    )
+    parser.add_argument(
         "--cover",
         default="",
         help=(

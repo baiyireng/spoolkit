@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Sequence
 
 from agents_dev.agents.plan import (
+    BATCH_LIMIT_NOTE,
     DONE,
     FAILED,
     SUBAGENT,
@@ -22,6 +23,8 @@ from agents_dev.agents.plan import (
     plan_path,
     render_step_prompt,
     save_plan,
+    extend_plan,
+    reflect_progress,
     uncovered,
 )
 from agents_dev.llm.gateway import CountingGateway
@@ -128,7 +131,14 @@ def _survey(project_root: Path, goal: str, tokenizer) -> str:
     return "\n\n".join(lines)
 
 
-def _plan_phase(gateway, project_root: Path, args) -> object:
+def _plan_phase(
+    gateway,
+    project_root: Path,
+    args,
+    limit: int | None = None,
+    extra: str = "",
+    context: str | None = None,
+) -> object:
     """拆解那一段：排完、对一遍覆盖、把这笔账说出来。
 
     账要说出来：拆解在实测里占墙钟的四分之一（50 题 3 次调用、约 5.5 分钟），
@@ -149,15 +159,23 @@ def _plan_phase(gateway, project_root: Path, args) -> object:
     )
     started = time.time()
     steps_log: list[str] = []
+    # 材料只读一次：分批推进时续排也要用它（不给就会退化成笼统的步骤）。
+    surveyed = (
+        context
+        if context is not None
+        else _survey(project_root, args.goal, counter_for(gateway))
+    )
     plan = decompose(
         counting,
         args.goal,
-        context=_survey(project_root, args.goal, counter_for(gateway)),
-        limit=args.limit,
+        context=surveyed,
+        # 分批推进时，第一批只排 batch 步——一次排满就没有"回头看一眼"的机会了。
+        limit=int(limit if limit is not None else args.limit),
         # `plan` 子命令没有 --window，`run --autonomous` 有：两边都要能用。
         window=resolve_window(gateway, getattr(args, "window", 0)),
         must_cover=cover,
         trace=steps_log,
+        extra=extra,
     )
     elapsed = time.time() - started
     for line in steps_log:
@@ -413,7 +431,22 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         )
         return 2
 
-    plan = _plan_phase(gateway, project_root, args)
+    batch = int(getattr(args, "batch", 0) or 0)
+    rolling = batch > 0 and not getattr(args, "no_roll", False)
+    # 分批推进时第一批只排 batch 步：一次排满就没有"回头看一眼"的机会了。
+    # 材料读一次，第一批与后面的续排共用——不给续排材料，它排出来的
+    # 步骤会退化成"修复 04 目录下的编程题"这种话（实测）。
+    context = _survey(project_root, args.goal, counter_for(gateway))
+    plan = _plan_phase(
+        gateway,
+        project_root,
+        args,
+        limit=min(int(args.limit), batch) if rolling else int(args.limit),
+        # 分批推进时第一批必须补这一句：只说"最多 N 步"会让模型把多件事
+        # 并成一条步骤（实测那一步跑了 191 秒）。
+        extra=BATCH_LIMIT_NOTE.format(limit=batch) if rolling else "",
+        context=context,
+    )
     if not plan.steps:
         print("没能拆出任何带验收标准的步骤。", file=sys.stderr)
         return 1
@@ -429,39 +462,77 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         plan=plan,
         non_interactive=True,
     )
-    for step in plan.steps:
-        blocked = plan.blocked_by()
-        if blocked is not None:
-            print(
-                f"\n计划被第 {blocked.index} 步阻塞：{blocked.goal}"
-                f"（{blocked.note or '未记录'}）",
-                file=sys.stderr,
-            )
+    # 分批推进：先做一批 → 回头看一眼 → 再排下一批。
+    #
+    # 这样每一批都能吃到前一批的**实际结果**（某个接口不是那样、某个约束
+    # 计划里没料到），而不是把五十步一次排死。要看完整目标时才用 --no-roll。
+    cursor = 0
+    while True:
+        steps = plan.steps[cursor:]
+        if not steps:
             break
-
-        effective = _effective_scope(granted, step)
-
-        print(f"\n执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
-        _step_started = time.time()
-        result, pending = execute_step(
-            ctx,
-            step,
-            effective,
-            approver=None,
-            grants=Grants(path=project_root / ".agent" / "grants.json"),
+        for step in steps:
+            cursor = plan.steps.index(step) + 1
+            if not _run_one_step(ctx, granted, step, plan):
+                print(plan.render())
+                return 1
+            completed += 1
+        if not rolling or completed >= int(getattr(args, "limit", 0) or 0):
+            break
+        # 这一批做完了：回头看一眼，再排下一批。
+        reflection = reflect_progress(gateway, plan.goal, plan.steps)
+        if reflection:
+            print(f"\n回头看这一批：{reflection}")
+        fresh = extend_plan(
+            gateway,
+            plan,
+            reflection,
+            limit=min(batch, max(0, int(getattr(args, "limit", 0) or 0) - len(plan.steps))),
+            context=context,
+            window=resolve_window(gateway, getattr(args, "window", 0)),
+            trace=[],
         )
-        _step_seconds = time.time() - _step_started
-        record_step(ctx, step, result, pending, effective)
-        _settle_seconds = time.time() - _step_started - _step_seconds
-        _report_step_cost(result, _step_seconds, _settle_seconds)
-        if not result.finished:
-            print(plan.render())
-            return 1
-        completed += 1
+        if not fresh:
+            # 它说没有更多步骤了。这是**它的判断**，如实报出来。
+            print("\n续排：模型认为目标已经排完（没有更多步骤）。")
+            break
+        for step in fresh:
+            step.index = len(plan.steps) + 1
+            plan.steps.append(step)
+        save_plan(plan_path(project_root), plan)
+        print(plan.render())
 
     print(plan.render())
     print(f"\n自主运行结束：完成 {completed}/{len(plan.steps)} 步。")
     return 0 if completed == len(plan.steps) else 1
+
+
+def _run_one_step(ctx, granted: tuple[str, ...], step, plan) -> bool:
+    """跑一步并记账。返回它是否做完了。"""
+    blocked = plan.blocked_by()
+    if blocked is not None:
+        print(
+            f"\n计划被第 {blocked.index} 步阻塞：{blocked.goal}"
+            f"（{blocked.note or '未记录'}）",
+            file=sys.stderr,
+        )
+        return False
+
+    effective = _effective_scope(granted, step)
+    print(f"\n执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
+    _step_started = time.time()
+    result, pending = execute_step(
+        ctx,
+        step,
+        effective,
+        approver=None,
+        grants=Grants(path=ctx.project_root / ".agent" / "grants.json"),
+    )
+    _step_seconds = time.time() - _step_started
+    record_step(ctx, step, result, pending, effective)
+    _settle_seconds = time.time() - _step_started - _step_seconds
+    _report_step_cost(result, _step_seconds, _settle_seconds)
+    return bool(result.finished)
 
 
 def _report_step_cost(result, step_seconds: float, settle_seconds: float) -> None:

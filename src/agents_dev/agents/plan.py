@@ -67,8 +67,15 @@ DECOMPOSE_PROMPT = T.DECOMPOSE
 # 原来逐字相同，老测量还能对照。
 BATCH_CONTINUE = T.DECOMPOSE_CONTINUE
 
+# 分批推进（先做一批、回头看一眼、再排下一批）用的两段。
+REFLECT_PROMPT = T.REFLECT
+EXTEND_PROMPT = T.EXTEND
+
 # 覆盖检查之后补排用的那一段。
 DECOMPOSE_FILL = T.DECOMPOSE_FILL
+
+# 分批推进时，第一批要补的一句（把「批的大小」和「步的粒度」分开说）。
+BATCH_LIMIT_NOTE = T.DECOMPOSE_BATCH_LIMIT
 
 # 分批用的 schema：多一个 done，用来问「后面还有没有」。
 BATCH_SCHEMA: dict[str, Any] = {
@@ -195,6 +202,7 @@ def decompose(
     window: int | None = None,
     must_cover: Sequence[str] = (),
     trace: list[str] | None = None,
+    extra: str = "",
 ) -> Plan:
     """让模型把目标拆成可验收的步骤序列。**一次排不完就再排一批。**
 
@@ -217,6 +225,8 @@ def decompose(
     budget = int(max_tokens or limits.resolve("decompose_output_budget", {})[0])
     planned: list[PlanStep] = []
     planned_text = "（无）"
+    # 调用方追加的一句（分批推进时用来把「批的大小」和「步的粒度」分开说）。
+    tail = extra or ""
     # 这一批被截断时，只把**下一批**要的步数压小，不动整段的预算。
     # 原先砍的是 budget 本身，于是后面的批次一路变小——实测一次 50 步的
     # 拆解因此从 3 次调用涨到 9 次，输入 token 多了两倍。
@@ -246,6 +256,8 @@ def decompose(
                 ask=ask,
             )
             schema = BATCH_SCHEMA
+        if tail:
+            prompt = prompt + tail
         response = gateway.chat(
             ChatRequest(
                 messages=(Message(role="user", content=prompt),),
@@ -327,6 +339,95 @@ def uncovered(plan: Plan, names: Sequence[str]) -> list[str]:
         for step in plan.steps
     )
     return [name for name in names if name not in text]
+
+
+# --- 分批推进：先做一批、回头看一眼、再排下一批 ---------------------------
+#
+# 为什么要有它：一次排 50 步，等于把"实际会怎样"排除在决策之外——而真实
+# 任务里，前三步做完之后你往往才知道后面该怎么做（某个接口不是那样、
+# 某个约束计划里没料到）。分批推进让**每一批都能吃到前一批的实际结果**。
+#
+# 代价要说清：计划的总生成量并不因此变少（步骤数没变），反而多出每批一次
+# 的"回头看"调用。它换的是**更准的后续计划**，不是更少的 token。
+
+REFLECT_MAX_CHARS = 300  # 回头看那三句话的上限（它是提示词，不是文档）
+
+
+def reflect_progress(
+    gateway: ModelGateway,
+    goal: str,
+    steps: Sequence[PlanStep],
+    max_tokens: int = 400,
+) -> str:
+    """把刚做完的这一批总结成三句话。失败就返回空串（不挡推进）。
+
+    输入只有**已完成步骤的目标 + 实际结果**（note 是循环记的第一行产出），
+    所以它不会被自己的计划复述带偏——它看的是事实。
+    """
+    done = [step for step in steps if step.status == DONE]
+    if not done:
+        return ""
+    results = "\n".join(
+        f"- {step.goal}｜结果：{step.note or '（没记结果）'}" for step in done
+    )
+    response = gateway.chat(
+        ChatRequest(
+            messages=(
+                Message(
+                    role="user",
+                    content=REFLECT_PROMPT.format(goal=goal, results=results),
+                ),
+            ),
+            max_tokens=max_tokens,
+        )
+    )
+    return response.text.strip()[:REFLECT_MAX_CHARS]
+
+
+def extend_plan(
+    gateway: ModelGateway,
+    plan: Plan,
+    reflection: str,
+    limit: int = 8,
+    context: str = "",
+    window: int | None = None,
+    trace: list[str] | None = None,
+) -> list[PlanStep]:
+    """按回头看的结论排下一批，返回新步骤（索引接在已排步骤之后）。
+
+    调用方负责把它追加进 plan。返回空列表表示"模型认为做完了"——
+    这是**它的判断**，所以调用方要把"没有更多步骤了"如实报出来。
+    """
+    budget = int(limits.resolve("decompose_output_budget", {})[0])
+    done_text = "\n".join(
+        f"{step.index}. {step.goal}（{step.status}）" for step in plan.steps
+    )
+    prompt = (
+        # 材料必须一起给：不给的话，续排出来的步骤会退化成"修复 04 目录下的
+        # 编程题"这种笼统的话（实测），而第一批之所以具体，正是因为看到了
+        # 各目录的 TASK.md 与验收测试。
+        DECOMPOSE_PROMPT.format(goal=plan.goal, context=context or "（无）", limit=limit)
+        + EXTEND_PROMPT.format(
+            done=done_text or "（无）",
+            reflection=reflection or "（无）",
+            start=len(plan.steps) + 1,
+            ask=limit,
+        )
+    )
+    response = gateway.chat(
+        ChatRequest(
+            messages=(Message(role="user", content=prompt),),
+            max_tokens=budget,
+            response_schema=BATCH_SCHEMA,
+        )
+    )
+    fresh, done = _parse_batch(response.text, plan.goal, limit=limit)
+    if trace is not None:
+        trace.append(
+            f"续排：要 {limit} 步 → 回来 {len(fresh)} 步"
+            + ("（它认为做完了）" if done else "")
+        )
+    return fresh
 
 
 def _batch_size(
