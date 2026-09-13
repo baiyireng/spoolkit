@@ -14,6 +14,7 @@ from pathlib import Path
 
 from spoolkit import __version__
 from spoolkit import onboarding
+from spoolkit import settings
 from spoolkit import workspace
 from spoolkit.bench import DEFAULT_BENCH_ROOT
 from spoolkit.cli.commands.bench import bench
@@ -608,6 +609,8 @@ def main(argv: list[str] | None = None) -> int:
         and onboarding.needs_setup(argv)
         and onboarding.interactive()
     ):
+        # 先交代"找过哪儿"：不然人只会看到"又问了我一遍"。
+        print(settings.describe_missing())
         onboarding.run_wizard(Path(getattr(args, "root", ".")).resolve())
     # 供应商相关的取值统一在这里落地一次（命令行 > 环境变量 > 用户配置），
     # 好让每条子命令看到的都是**生效值**——否则 bench 自己拼网关、

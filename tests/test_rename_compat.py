@@ -83,3 +83,30 @@ def test_新诊断密钥存在时优先用它(monkeypatch, tmp_path: Path) -> No
         path.write_bytes(payload)
 
     assert diagnosis.load_key() == b"new"
+
+
+def test_弹向导前要说清找过哪儿(monkeypatch, tmp_path: Path) -> None:
+    """用户真遇到过"它又问了我一遍，可旧配置明明还在"——那一刻没有任何痕迹。
+
+    这条输出就是痕迹：新位置在不在、旧位置在不在、里面有键没有。
+    """
+    new = tmp_path / "new" / "config.toml"
+    old = tmp_path / "old" / "config.toml"
+    old.parent.mkdir(parents=True)
+    old.write_text('base_url = "http://127.0.0.1:8080"\n', encoding="utf-8")
+    monkeypatch.delenv("SPOOLKIT_CONFIG", raising=False)
+    monkeypatch.delenv("AGENTS_DEV_CONFIG", raising=False)
+    monkeypatch.setattr(settings, "config_path", lambda: new)
+    monkeypatch.setattr(settings, "legacy_config_path", lambda: old)
+
+    text = settings.describe_missing()
+    assert str(new) in text and "不存在" in text
+    assert str(old) in text and "base_url" in text
+
+
+def test_配置被环境变量指走时要说明(monkeypatch, tmp_path: Path) -> None:
+    override = tmp_path / "somewhere.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(override))
+    text = settings.describe_missing()
+    assert str(override) in text
+    assert "环境变量" in text

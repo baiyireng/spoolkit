@@ -80,6 +80,31 @@ def effective_config_path() -> Path:
     return legacy if legacy.is_file() else target
 
 
+def describe_missing() -> str:
+    """向导要弹之前，把"找过哪儿、结果如何"说清楚。
+
+    为什么值得单独写一段：改名之后配置有两个可能的位置（新的 `spoolkit`、旧的
+    `agents-dev`），"它又问了我一遍"这件事本来就容易让人怀疑代码。真发生过一次
+    用户机器上弹出向导，而**当时那份旧配置明明还在**——问题是我们没有留下任何
+    "它到底看了哪儿"的痕迹，于是只能靠复现去猜。这一行输出就是那条痕迹。
+    """
+    lines = ["没找到供应商配置，找过这些位置："]
+    for label, path in (("新位置", config_path()), ("改名前的旧位置", legacy_config_path())):
+        if not path.is_file():
+            lines.append(f"  [{label}] {path} —— 不存在")
+            continue
+        payload, error = read_config(path)
+        if error:
+            lines.append(f"  [{label}] {path} —— 存在，但读不出来：{error}")
+        else:
+            keys = "、".join(sorted(payload)) or "空文件"
+            lines.append(f"  [{label}] {path} —— 存在，里面有：{keys}")
+    override = os.environ.get("SPOOLKIT_CONFIG") or os.environ.get("AGENTS_DEV_CONFIG")
+    if override:
+        lines.append(f"  注意：位置被环境变量指到了 {override}")
+    return "\n".join(lines)
+
+
 def load(path: Path | None = None) -> dict[str, str]:
     """读配置。文件不存在或读坏了都返回空——配置是增强，不该挡住启动。"""
     payload, _ = read_config(path)
