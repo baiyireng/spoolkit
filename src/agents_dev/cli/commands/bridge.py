@@ -20,6 +20,8 @@ from pathlib import Path
 from agents_dev.bridge.agent_runner import AgentRunner
 from agents_dev.bridge.core import Bridge
 from agents_dev.bridge.fake import FakeChannel
+from agents_dev.bridge.pairing import ALLOWLIST, OPEN, PAIRING, POLICIES, Pairings
+from agents_dev.bridge.plugins import load_channel_factories
 
 
 def _build_channel(args, log) -> object:
@@ -46,6 +48,22 @@ def _build_channel(args, log) -> object:
             )
         log("企业微信通道：发消息本机可用；**收**消息需要公网回调 URL（见文档）")
         return channel
+    # 内置的三种都不匹配：去装载的通道插件里找。
+    # 这样接一家新通道（比如第三方 hook 的个人微信/QQ）不必改这个文件——
+    # 插件自己注册，核心不认识它。
+    factories = load_channel_factories()
+    factory = factories.get(args.channel)
+    if factory is not None:
+        return factory(
+            {
+                "name": args.channel,
+                "root": str(args.root),
+                "token": getattr(args, "token", ""),
+                "proxy": getattr(args, "proxy", ""),
+            }
+        )
+    if factories:
+        log(f"装载过的通道插件：{'、'.join(sorted(factories))}")
     raise SystemExit(f"没有这种通道：{args.channel}")
 
 
@@ -69,11 +87,37 @@ def _fake_loop(bridge: Bridge, channel: FakeChannel, user: str) -> int:
 
 def bridge_command(args: argparse.Namespace) -> int:
     project_root = Path(args.root).resolve()
+    pairings = Pairings(project_root / ".agent" / "bridge-pairings.json")
+
+    if args.approve:
+        user = pairings.approve_code(args.approve)
+        if not user:
+            print(f"没有这个配对码：{args.approve}", file=sys.stderr)
+            return 2
+        print(f"已批准 {user}（写进 {pairings.path}）")
+        return 0
+
     allowed = {str(item) for item in (getattr(args, "allow_user", []) or []) if str(item).strip()}
-    if not allowed:
+    access = args.access
+    if allowed and access == PAIRING:
+        # `--allow-user` 是"这几个人直接放行"，语义上属于名单模式。
+        access = ALLOWLIST
+    if access == OPEN:
         print(
-            "⚠ 没给 --allow-user：**任何人都能驱动这个工作区**。"
-            "建议至少给一个（Telegram 用数字 id、企业微信用 userid）。",
+            "⚠ access=open：**任何人都能驱动这个工作区**（你显式选了这一档）。",
+            file=sys.stderr,
+        )
+    elif not allowed:
+        print(
+            "按配对模式运行：陌生发送者会拿到一个配对码，"
+            "你用 `agents-dev bridge --approve <码>` 放行。",
+            file=sys.stderr,
+        )
+    if pairings.approved:
+        print(f"已批准：{'、'.join(pairings.approved)}", file=sys.stderr)
+    if pairings.pending:
+        print(
+            "待配对：" + "、".join(f"{user}（码 {code}）" for code, user in pairings.pending),
             file=sys.stderr,
         )
 
@@ -103,6 +147,8 @@ def bridge_command(args: argparse.Namespace) -> int:
         allowed_users=allowed,
         max_chars=args.max_chars,
         on_note=lambda text: print(f"· {text}", file=sys.stderr),
+        pairings=pairings,
+        access=access,
     )
 
     if args.channel == "fake":

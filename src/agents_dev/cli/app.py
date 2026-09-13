@@ -431,7 +431,23 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
         action="append",
         default=[],
         metavar="用户",
-        help="白名单：只有这些用户的消息会交给 agent（可重复）。不给就等于谁都行",
+        help="白名单：只有这些用户的消息会交给 agent（可重复）。给了就切到名单模式",
+    )
+    parser.add_argument(
+        "--access",
+        choices=("pairing", "allowlist", "open"),
+        default="pairing",
+        help=(
+            "准入策略。pairing（默认）：陌生发送者拿配对码，由你用"
+            " --approve 放行；allowlist：只放行 --allow-user 里的人；"
+            "open：谁都放行（会警告）"
+        ),
+    )
+    parser.add_argument(
+        "--approve",
+        default="",
+        metavar="配对码",
+        help="批准一个配对码然后退出（不用起通道）",
     )
     parser.add_argument(
         "--user", default="local", help="假通道里模拟的用户名（配合白名单用）"

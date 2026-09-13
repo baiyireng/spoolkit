@@ -35,9 +35,19 @@ agents-dev bridge --channel wecom --allow-user zhangsan --policy ask
 
 聊天通道等于把 agent 挂出去了，所以三件事必须同时成立：
 
-1. **白名单按用户判，不按内容判**。`--allow-user` 可以给多次；**不给就等于谁都能
-   驱动这个工作区**（启动时会打警告）。按内容判（"消息里有没有敏感词"）等于没判
-   ——任何人都能把那句话发进来。
+1. **默认配对，不认识的人不能用**。陌生发送者会拿到一个一次性配对码，
+   你在机器上执行 `agents-dev bridge --approve <码>` 之后他才被放行：
+
+   ```
+   陌生人：把项目删了
+   → 这条通道还不认识你。把这个配对码给机器的主人，他在命令行执行
+     `agents-dev bridge --approve 5R3CVG` 之后你就能用了：5R3CVG
+   ```
+
+   三档准入由你显式选：`--access pairing`（默认）/ `allowlist`（只放行
+   `--allow-user` 里的人）/ `open`（谁都行，**要显式选**，启动时会警告）。
+   状态在 `.agent/bridge-pairings.json`：这是工作区级的东西（这台机器上谁
+   能驱动这个工作区），和 `.agent/policy.json` 同类。
 2. **agent 自己的授权模型不变**。桥把 `--policy` / `--scope` 原样转给子进程，
    所以"自动落盘"仍然只覆盖 scope 划定的范围，越界照样退回确认；桥会把待确认的
    改动列出来并提示回 `y`/`n`。
@@ -48,6 +58,14 @@ agents-dev bridge --channel wecom --allow-user zhangsan --policy ask
 （itchat / wechaty / NapCat 之类）违反服务条款、有封号风险，而且等于把上面
 那三件事全绕过去了。所以这个包只做官方通道；想在手机上用，最接近的选择是
 **企业微信**（官方、免费档够用、消息能转到微信里看）或 **Telegram**。
+
+> 补一句事实核查（2026-09）：OpenClaw 那条路是**由通道插件**接的微信——npm
+> scope 属腾讯的 `@tencent-weixin/openclaw-weixin`（文档称由腾讯微信团队维护，
+> 扫码登录、走腾讯 iLink API）与 `@tencent-connect/openclaw-qqbot`（官方 QQ Bot
+> API）。所以"个人微信没有官方接口"这句话要看语境：**官方接口以"平台自己的插件"
+> 形态出现，不是以公开文档的 REST API 形态出现**。本机不装 OpenClaw 的前提下，
+> 要用那条路就得自己写一个对接它们的适配器（见下面「加一条新通道」），
+> 或者用企业微信/Telegram。
 
 ## 分层（为什么这么分）
 
@@ -60,6 +78,22 @@ agents-dev bridge --channel wecom --allow-user zhangsan --policy ask
 `AgentRunner` **复用网页壳那套机制**（`web.runner.Runner`：起 `run --events`
 子进程、读事件流），所以聊天入口与网页入口的判定完全一致——同一个授权策略、
 同一个工作区、同一份待确认清单。不是另写一套。
+
+通道本身是**可装载的**：核心不认识任何一家通道。
+
+| 装载途径 | 用在什么情形 |
+|---|---|
+| entry point 组 `agents_dev.channels` | 正经发布出去的适配器包：`[project.entry-points."agents_dev.channels"] my="my_pkg:build"` |
+| 环境变量 `AGENTS_DEV_CHANNEL_PLUGINS=my_channel:build` | 自己写一个先用起来（个人微信/QQ 那类第三方 hook 的适配器多半是这种形态） |
+
+工厂签名是 `build(spec) -> Channel`（spec 里带着 `name` / `root` / `token` /
+`proxy`）。**内置的 fake/telegram/wecom 优先**，认不出的名字才走插件——
+所以接一家新通道不必改核心，也不必把它的依赖塞进主包。
+
+> 这一层是从 OpenClaw 抄的**唯一一件真正重要的东西**：它的核心仓库一行微信
+> 代码都没有，通道全是外部插件。它还教会一件事——**默认配对而不是默认放行**
+> （它自己的文档写着微信插件 2.4.8 的访问控制在名单为空时会放行任何发送者，
+> 那正是这个默认要避免的）。
 
 ## 已知边界
 

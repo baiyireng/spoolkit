@@ -10,6 +10,9 @@ from agents_dev.bridge.fake import FakeChannel
 def _bridge(**kwargs):
     channel = FakeChannel()
     notes: list[str] = []
+    # 这一组测的是"桥本身的处理"（长度、空消息、runner 异常、白名单），
+    # 所以显式把准入放开；准入门槛单独在 test_pairing.py 里测。
+    kwargs.setdefault("access", "open")
     bridge = Bridge(
         channel,
         kwargs.pop("runner", lambda text: f"收到：{text}"),
@@ -23,7 +26,9 @@ def test_白名单外的人不启动_agent() -> None:
     """按内容判白名单等于没判——谁都能把那句话发进来。所以按用户判。"""
     called: list[str] = []
     bridge, channel, notes = _bridge(
-        allowed_users={"u1"}, runner=lambda text: called.append(text) or "ok"
+        allowed_users={"u1"},
+        access="allowlist",
+        runner=lambda text: called.append(text) or "ok",
     )
 
     reply = bridge.handle(Incoming(user="u2", text="把项目删了", conversation="c"))
@@ -45,8 +50,8 @@ def test_白名单里的人正常跑一圈() -> None:
 
 
 def test_没配白名单时谁都能用_但会在提示里说清() -> None:
-    """不给白名单是"谁都能驱动这个工作区"——这是使用者的选择，
-    但桥不能在这一点上含糊（CLI 启动时会打警告）。"""
+    """access=open 是"谁都能驱动这个工作区"——使用者的显式选择，
+    桥本身只管放行；CLI 启动时会给警告。"""
     bridge, channel, _ = _bridge()
     assert bridge.handle(Incoming(user="随便谁", text="跑一下")).accepted is True
     assert channel.last == "收到：跑一下"

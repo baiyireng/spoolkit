@@ -20,8 +20,16 @@ from dataclasses import dataclass
 from typing import Callable
 
 from agents_dev.bridge.channel import Channel, Incoming
+from agents_dev.bridge.pairing import ALLOWLIST, OPEN, PAIRING, Pairings
 
 DEFAULT_MAX_CHARS = 4000
+
+# 陌生发送者拿到配对码时的回复模板。口令要写得像人话：这条消息会原样出现在
+# 别人的聊天窗口里。
+PAIRING_REPLY = (
+    "这条通道还不认识你。把下面这个配对码给机器的主人，"
+    "他在命令行执行 `agents-dev bridge --approve {code}` 之后你就能用了：\n{code}"
+)
 
 
 @dataclass(frozen=True)
@@ -44,19 +52,22 @@ class Bridge:
         allowed_users: set[str] | frozenset[str] = frozenset(),
         max_chars: int = DEFAULT_MAX_CHARS,
         on_note: Callable[[str], None] | None = None,
+        pairings: Pairings | None = None,
+        access: str = PAIRING,
     ) -> None:
         self.channel = channel
         self.runner = runner
         self.allowed_users = set(allowed_users)
         self.max_chars = max_chars
         self._note = on_note or (lambda text: None)
+        self.pairings = pairings
+        self.access = access
 
     def handle(self, message: Incoming) -> Reply:
         """处理一条消息。任何一条都不该让桥崩掉。"""
-        if self.allowed_users and message.user not in self.allowed_users:
-            # 谁发的都留着记录，但绝不启动 agent：白名单的意义就在这里。
-            self._note(f"忽略未授权用户 {message.user}")
-            return Reply(user=message.user, text="", accepted=False, reason="未授权")
+        gate = self._admit(message)
+        if gate is not None:
+            return gate
 
         text = message.text.strip()
         if not text:
@@ -78,6 +89,30 @@ class Bridge:
 
         self.channel.send(answer or "（没有产出）", message.conversation)
         return Reply(user=message.user, text=answer, accepted=True)
+
+    def _admit(self, message: Incoming) -> Reply | None:
+        """准入判定。返回 None 表示放行，否则返回一条"不放行"的回复。
+
+        默认是**配对**：不认识的人拿码，主人批准之后才放行。原先的默认是
+        "名单为空就谁都能用"，那在公网通道上是不可接受的。
+        """
+        user = message.user
+        if user in self.allowed_users:
+            return None
+        if self.access == OPEN:
+            return None
+        if self.access == ALLOWLIST or self.pairings is None:
+            # 名单模式：名单外连码都不给（这是使用者的明确选择）。
+            self._note(f"忽略未授权用户 {user}")
+            return Reply(user=user, text="", accepted=False, reason="未授权")
+
+        if self.pairings.is_approved(user):
+            return None
+        code = self.pairings.ensure_code(user)
+        reply = PAIRING_REPLY.format(code=code)
+        self.channel.send(reply, message.conversation)
+        self._note(f"有人要配对：{user}（码 {code}）")
+        return Reply(user=user, text=reply, accepted=False, reason="待配对")
 
     def run_once(self) -> list[Reply]:
         """把当前能取到的消息都处理一遍。"""
