@@ -266,6 +266,33 @@ def test_步骤提示带上整体位置() -> None:
     assert "不要顺手做后面步骤的事" in text
 
 
+def test_已完成清单不会随进度无限膨胀() -> None:
+    """这一行随进度线性增长，而**每一轮**都要带着它。
+
+    实测 50 题那次：267 次调用，第 43 步的提示词里这一行已经几百 token，
+    而状态块里本来就有一份按同一标定值截断的版本，完整清单在
+    .agent/progress.md——这里是重复付款，不是信息。
+    """
+    raw = _payload(*[(f"第{i}步", "通过") for i in range(1, 31)])
+    plan = parse_plan(raw, "总目标", limit=30)
+    for step in plan.steps[:20]:
+        plan.mark(step.index, DONE)
+
+    text = render_step_prompt(plan, plan.steps[20], done_inline=5)
+    assert "20 步已完成" in text
+    assert "第16步" in text  # 最近 5 条里有
+    assert "第1步" not in text  # 很久以前的，不在这儿摊
+    assert "progress.md" in text
+
+
+def test_已完成不多时照旧全列() -> None:
+    plan = parse_plan(_payload(("甲", "a"), ("乙", "b"), ("丙", "c")), "目标")
+    plan.mark(1, DONE)
+    plan.mark(2, DONE)
+    text = render_step_prompt(plan, plan.steps[2], done_inline=5)
+    assert "已完成：甲、乙" in text
+
+
 def test_计划是可变对象但步骤状态可追踪() -> None:
     step = PlanStep(index=1, goal="甲", acceptance="a")
     assert step.status == PENDING

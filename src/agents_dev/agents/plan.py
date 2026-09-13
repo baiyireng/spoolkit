@@ -383,15 +383,33 @@ def narrow_scope(
     return tuple(allowed), tuple(rejected)
 
 
-def render_step_prompt(plan: Plan, step: PlanStep) -> str:
+def render_step_prompt(
+    plan: Plan, step: PlanStep, done_inline: int | None = None
+) -> str:
     """把某一步渲染成交给主循环的任务，并带上它在整体里的位置。
 
     带上位置很重要：主循环只知道当前这一步，不知道自己在长链条的哪一环，
     很容易为了完成当前一步而破坏前面步骤的产物。
+
+    「已完成」只列**最近的几条**：这一行随进度线性增长，而每一轮都要付一次。
+    实测 50 题那次，第 43 步的这一步提示词里它已经占掉几百 token，而 267 次
+    调用每次都带着它——完整清单在 `.agent/progress.md`，状态块里也有一份
+    按同一标定值截断的版本，没有必要在这里再摊一遍。
     """
-    done = "、".join(
-        item.goal for item in plan.steps if item.status == DONE
-    ) or "无"
+    finished = [item.goal for item in plan.steps if item.status == DONE]
+    limit = (
+        int(limits.knob("done_inline").default) if done_inline is None else done_inline
+    )
+    recent = finished[-max(1, limit) :]
+    if not finished:
+        done = "无"
+    elif len(finished) <= len(recent):
+        done = "、".join(recent)
+    else:
+        done = (
+            f"{len(finished)} 步已完成，最近的：{'、'.join(recent)}"
+            "（完整清单见 .agent/progress.md）"
+        )
     # 把这一步的 scope 交出去。**它本来就有**（拆解时 schema 要求每步声明范围，
     # 那道闸门还用它决定自动落盘边界），但执行时没给执行者看——实测后果很实在：
     # 模型不知道要改哪个文件，于是每步先花一轮 survey 自己翻（每任务 3 轮 vs
