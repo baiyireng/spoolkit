@@ -35,13 +35,17 @@
 ## 30 秒上手
 
 ```powershell
-uv venv --python 3.12
-uv pip install -e .                       # 只装来用；开发加 ".[dev]"
+# 装成全局命令（推荐）：装完在任何目录都能敲 spool
+uv tool install --editable .
+# 想固定一份不改动的：去掉 --editable（升级用 uv tool upgrade spoolkit）
 
 spool init                                # 把当前目录做成工作区（幂等）
 spool config --set provider=llamacpp --set base_url=http://127.0.0.1:8080
 spool                                     # 什么都不带就进对话；不是工作区会先问一句
 ```
+
+只想在虚拟环境里跑（开发用）：`uv venv --python 3.12 && uv pip install -e ".[dev]"`，
+那样得先激活虚拟环境才有 `spool`。
 
 也可以直接给一件事：
 

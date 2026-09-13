@@ -6,14 +6,33 @@
 ## 1. 装
 
 ```powershell
-uv venv --python 3.12
-uv pip install -e .          # 只装来用
-uv pip install -e ".[dev]"   # 开发（带 pytest）
+# 装成全局命令：装完**任意目录**都能敲 spool（uv 把启动器放进 ~/.local/bin，
+# 那目录通常已经在 PATH 上；不在的话 uv 会提示你加）
+uv tool install --editable .
+
 spool --version              # → spool 0.0.1 (spoolkit)
 ```
 
 装好会有三个命令，指同一份代码：**`spool`**（手敲这个）、`spoolkit`、`agents-dev`
 （改名前的旧名，留着免得你写好的脚本失效）。要求 Python ≥ 3.12。
+
+两种装法的区别，**这条最容易踩**：
+
+| 装法 | 命令在哪 | 改代码后 |
+|---|---|---|
+| `uv tool install --editable .` | `~\.local\bin`，已在 PATH 上 → 任意目录可用 | 立刻生效（指向本仓库源码）|
+| `uv venv` + `uv pip install -e .` | 只在 `.venv\Scripts\`，**不在 PATH 上** | 要先 `activate`，否则只能写完整路径 |
+
+`--editable` 的代价是**别删或移动这个仓库**（全局那条 `spool` 指着它）。
+要一份独立的：`uv tool install --reinstall .`（不带 `--editable`）。
+卸载：`uv tool uninstall spoolkit`。
+
+从 GitHub 装（还没发 PyPI）：
+
+```powershell
+uv tool install git+https://github.com/baiyireng/spoolkit
+pipx install git+https://github.com/baiyireng/spoolkit   # 用 pipx 也行
+```
 
 ## 2. 起一个模型服务
 
@@ -109,6 +128,7 @@ spool serve                  # 打开 http://127.0.0.1:8765/
 | 输出被截断 | 输出预算不够 | 看 `.agent/limits.json`；它支持续写与分轮，真要调就 `spool limits --set 名字=值` |
 | 改不动文件，一直问 | 策略是 `ask` | `spool policy --set auto` 并给 `--scope`，或运行时 `--policy auto` |
 | 命令被拒 | 不在白名单里 | 它会**申请权限**（本轮允许 / 工作区始终允许 / 拒绝 / 本轮全拒），按提示选 |
+| 报 `No module named 'socksio'` | 通道要经 SOCKS 出去但缺可选依赖 | 虚拟环境 `uv pip install "httpx[socks]"`；uv 工具装的 `uv tool install --reinstall --editable ".[socks]"` |
 | 它说"环境有问题"却查不动 | 工具受限 | 它会登记一条诊断请求：`spool diagnose --list` 看，`--report` 写回结论 |
 | 外挂 MCP 工具不见了 | 连不上被跳过 | `spool mcp-servers --check` 真连一遍看报错 |
 

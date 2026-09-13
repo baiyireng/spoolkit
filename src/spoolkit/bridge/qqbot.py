@@ -91,12 +91,23 @@ class QQBotChannel:
         # 代理是可选的：平台侧有 IP 白名单，借一台云主机出去（ssh -D 给的
         # SOCKS5）就能把白名单固定成那台主机的 IP。
         # 注意 httpx 走 SOCKS 需要 `httpx[socks]`（可选的加装，不是主包依赖）。
-        self._client = httpx.Client(
-            base_url=self._api,
-            timeout=timeout,
-            transport=transport,
-            proxy=proxy or None,
-        )
+        try:
+            self._client = httpx.Client(
+                base_url=self._api,
+                timeout=timeout,
+                transport=transport,
+                proxy=proxy or None,
+            )
+        except ImportError as exc:
+            # httpx 走 SOCKS 要可选的 socksio，而它报出来的是 `No module named
+            # 'socksio'`——完全看不出"该往哪装"。这里的场景几乎都是同一个
+            # （借云主机出口过 QQ 的 IP 白名单），所以直接给两条装法。
+            raise RuntimeError(
+                "让通道走 SOCKS 代理需要 httpx 的 socks 可选依赖（socksio）：\n"
+                '  uv pip install "httpx[socks]"          # 在虚拟环境里\n'
+                '  uv tool install --reinstall --editable ".[socks]"   # 用 uv 工具装的\n'
+                f"（原始错误：{exc}）"
+            ) from exc
         self._clock = clock
         self._ws_factory = ws_factory or (
             lambda url: WebSocket(url, timeout=timeout, proxy=proxy or None)

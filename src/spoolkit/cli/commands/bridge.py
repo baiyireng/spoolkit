@@ -250,9 +250,18 @@ def _check(project_root: Path, args) -> int:
             return 2
         from spoolkit.bridge.qqbot import QQBotChannel
 
+        # 代理必须传下去。**这条是踩出来的**：原先 `--check` 没传，于是它测的是
+        # 直连——而 QQ 平台有 IP 白名单，直连和借云主机出去是两条不同的路。
+        # 结果是"检查通过、真跑失败"，检查工具本身在骗人。
         qq = QQBotChannel(
-            app_id=app_id, secret=secret, sandbox=args.sandbox, root=project_root
+            app_id=app_id,
+            secret=secret,
+            sandbox=args.sandbox,
+            root=project_root,
+            proxy=getattr(args, "bridge_proxy", ""),
         )
+        if getattr(args, "bridge_proxy", ""):
+            print(f"通道出网走代理：{args.bridge_proxy}")
         try:
             token = qq.access_token()
             print(f"换到了 access_token：{credentials.mask(token)}")

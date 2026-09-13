@@ -63,8 +63,14 @@ spool bridge --channel qqbot --bridge-proxy socks5://127.0.0.1:1080 --policy ask
 
 - **`--bridge-proxy` 和 `--proxy` 不是一回事**：前者管通道自己出网，后者管模型
   供应商（比如 Gemini 要走代理）。两个都可能在用，所以分开。
-- HTTP 那一半走 SOCKS 需要 `httpx[socks]`（可选加装）：`uv pip install "httpx[socks]"`。
+- HTTP 那一半走 SOCKS 要 httpx 的 socks 可选依赖，按你的装法选一条：
+  **虚拟环境**：`uv pip install "httpx[socks]"`；**uv 工具装的**（在仓库里跑）
+  `uv tool install --reinstall --editable ".[socks]"`。
+  缺了它会报 `No module named 'socksio'`——我们把这句话换成了带装法的提示。
   网关那一半（WebSocket）用的是我们自己的 SOCKS5 握手，不需要额外依赖。
+- **`--check` 走的是真正要跑的那条路**（包括 `--bridge-proxy`）。早先它没把代理
+  传下去，于是测的是直连——而直连和借云主机出去是两条路，症状是"检查通过、
+  真跑失败"。现在检查报告里会明写"通道出网走代理：…"。
 - `ssh -D` 需要**服务端允许端口转发**。有些加固过的机器上
   `/etc/ssh/sshd_config.d/99-hardening.conf` 里写着 `AllowTcpForwarding no`，
   症状是 `ssh -D` 连上、但本地 1080 端口谁也连不通。改成 `local` 即可
