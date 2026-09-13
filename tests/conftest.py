@@ -19,6 +19,9 @@ def _isolate_user_config(tmp_path_factory, monkeypatch):
     # 旧名字也要堵住：改名兼容让我们**继续读** `AGENTS_DEV_*`，
     # 若它从开发机泄漏进来，测试就会变成"在我这儿能过"。
     monkeypatch.delenv("AGENTS_DEV_CONFIG", raising=False)
+    # 全局工作区登记表同理：开发机上登记过的工作区一旦泄漏进来，
+    # "当前目录不是工作区"这类用例会莫名其妙地指向别人真实的项目。
+    monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path_factory.mktemp("state")))
     for name in ("PROVIDER", "MODEL", "BASE_URL", "PROXY", "SCRIPT"):
         monkeypatch.delenv(f"AGENTS_DEV_{name}", raising=False)
         monkeypatch.delenv(f"SPOOLKIT_{name}", raising=False)

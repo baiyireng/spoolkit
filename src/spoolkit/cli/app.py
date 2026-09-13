@@ -14,6 +14,7 @@ from pathlib import Path
 
 from spoolkit import __version__
 from spoolkit import onboarding
+from spoolkit import workspace
 from spoolkit.bench import DEFAULT_BENCH_ROOT
 from spoolkit.cli.commands.bench import bench
 from spoolkit.cli.commands.plan import make_plan
@@ -26,7 +27,8 @@ from spoolkit.cli.commands.session import session_command
 from spoolkit.cli.commands.limits import limits_command
 from spoolkit.cli.commands.config import config_command
 from spoolkit.cli.commands.chat import chat_command
-from spoolkit.cli.commands.bridge import bridge_command
+from spoolkit.cli.commands.bridge import approve_entry, bridge_command
+from spoolkit.cli.commands.init import init_command
 from spoolkit.cli.commands.mcp import mcp_command
 from spoolkit.cli.commands.mcp_servers import mcp_servers_command
 from spoolkit.cli.options import (
@@ -94,7 +96,7 @@ def _add_provider_args(parser: argparse.ArgumentParser, default: str) -> None:
     parser.add_argument("--model", default="", help="留空则用供应商默认模型")
     parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
     parser.add_argument("--proxy", default="", help="留空则使用系统代理")
-    parser.add_argument("--root", default=".")
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.add_argument(
         "--no-setup",
         action="store_true",
@@ -228,13 +230,13 @@ def _add_plan_command(sub: argparse._SubParsersAction) -> None:
 def _add_policy_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("policy", help="查看或调整授权策略")
     parser.add_argument("--set", dest="new_policy", choices=POLICIES, default="")
-    parser.add_argument("--root", default=".")
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.set_defaults(func=policy_command)
 
 
 def _add_revert_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("revert", help="回滚上一次写入的改动")
-    parser.add_argument("--root", default=".")
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.set_defaults(func=revert_command)
 
 
@@ -270,7 +272,7 @@ def _add_bench_command(sub: argparse._SubParsersAction) -> None:
 
 def _add_session_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("session", help="列出这个工作区里的会话")
-    parser.add_argument("--root", default=".")
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.set_defaults(func=session_command)
 
 
@@ -293,7 +295,7 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
         metavar="目录",
         help="授权额外可读目录（可重复），转发给子进程",
     )
-    parser.add_argument("--root", default=".")
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.set_defaults(func=serve_command)
 
 
@@ -302,7 +304,7 @@ def _add_diagnose_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser(
         "diagnose", help="处理 Agent 登记的环境/工具异常诊断请求"
     )
-    parser.add_argument("--root", default=".")
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.add_argument("--list", action="store_true", help="列出全部请求")
     parser.add_argument("--show", default="", help="看某条请求的完整内容")
     parser.add_argument("--report", default="", help="给某条请求写回报告")
@@ -318,7 +320,7 @@ def _add_diagnose_command(sub: argparse._SubParsersAction) -> None:
 def _add_limits_command(sub: argparse._SubParsersAction) -> None:
     """能力标定值：看现在是多少、从哪来；按工作区覆盖。"""
     parser = sub.add_parser("limits", help="查看/覆盖能力标定值")
-    parser.add_argument("--root", default=".")
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.add_argument(
         "--set", action="append", default=[], metavar="名字=值",
         help="覆盖一项（写进 .agent/limits.json，可重复）",
@@ -491,6 +493,28 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=bridge_command)
 
 
+def _add_init_command(sub: argparse._SubParsersAction) -> None:
+    """把一个目录做成工作区（幂等）。"""
+    parser = sub.add_parser(
+        "init", help="把当前目录（或给定路径）做成工作区：建 .agent/ 并登记"
+    )
+    # 位置参数而不是 `--root`：init 的对象是"哪个目录"，而且它**绝不能**参与
+    # main() 里那套"自动找已有工作区"的解析——否则在别处敲 `spool init`，
+    # 它会一路找到登记表里的旧工作区去，而不是初始化你脚下这个目录。
+    parser.add_argument("path", nargs="?", default=None, help="目录，默认当前目录")
+    parser.set_defaults(func=init_command)
+
+
+def _add_approve_command(sub: argparse._SubParsersAction) -> None:
+    """批准聊天通道的配对码。手机配对时最需要随手敲的动作，所以放在顶层。"""
+    parser = sub.add_parser(
+        "approve", help="批准一个配对码（等价于 bridge --approve）"
+    )
+    parser.add_argument("code", metavar="配对码")
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
+    parser.set_defaults(func=approve_entry)
+
+
 def configure_stdio() -> None:
     """把标准输出/错误固定成 UTF-8，且**永不因为一个字符崩掉整个运行**。
 
@@ -513,6 +537,30 @@ def configure_stdio() -> None:
             pass
 
 
+def _start_here(parser: argparse.ArgumentParser) -> int:
+    """什么都不带就敲 `spool` 时该发生什么。
+
+    想学的是 Claude Code 那样"在任何目录敲一下就能起手"：不是工作区就问一句
+    要不要在这里初始化，是工作区就直接进对话。
+
+    非交互环境（管道、CI、被别的程序调起）**不弹问题**：那会挂住别人的自动化。
+    那种情况下打帮助并返回非零，让人显式说出他想干什么。
+    """
+    if not workspace.find_root() and not workspace.known():
+        if not onboarding.interactive():
+            parser.print_help()
+            return 2
+        answer = input("当前目录还不是工作区，在这里初始化吗？[Y/n] ").strip().lower()
+        if answer not in ("", "y", "yes"):
+            parser.print_help()
+            return 1
+        here = Path.cwd().resolve()
+        (here / workspace.MARK).mkdir(parents=True, exist_ok=True)
+        workspace.register(here)
+        print(f"已初始化工作区：{here}")
+    return main(["chat"])
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_stdio()
     parser = argparse.ArgumentParser(prog="spool")
@@ -521,7 +569,8 @@ def main(argv: list[str] | None = None) -> int:
         # 对不上时人才知道该 `pip uninstall` 谁。
         "--version", action="version", version=f"spool {__version__} (spoolkit)"
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=False)
+    _add_init_command(sub)
     _add_run_command(sub)
     _add_plan_command(sub)
     _add_policy_command(sub)
@@ -536,8 +585,20 @@ def main(argv: list[str] | None = None) -> int:
     _add_mcp_command(sub)
     _add_mcp_servers_command(sub)
     _add_bridge_command(sub)
+    _add_approve_command(sub)
 
     args = parser.parse_args(argv)
+    if args.command is None:
+        return _start_here(parser)
+    # 工作区只在这里解析一次（规则见 workspace.py）。放在这里而不是各条子命令里，
+    # 是因为十几个 `Path(args.root).resolve()` 迟早会分叉——而分叉的症状是
+    # "某个命令的记忆跟别的命令不是同一份"，那种问题最难查。
+    if hasattr(args, "root"):
+        try:
+            args.root = str(workspace.resolve_root(args.root))
+        except workspace.WorkspaceError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     # 第一次用（没配过供应商）且人在终端前：先向导，再干活。
     # 非交互环境绝不弹问题——那会挂住别人的脚本；那种场景由 provider_gateway
     # 给一句明确的指路。

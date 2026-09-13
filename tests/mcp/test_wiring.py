@@ -58,7 +58,7 @@ def _configure(tmp_path: Path, monkeypatch, command: str | None = None) -> None:
         f"args = ['{stub}']\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("AGENTS_DEV_CONFIG", str(config))
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(config))
 
 
 def _loop(tmp_path: Path, mcp: bool = True):
@@ -87,7 +87,7 @@ def test_no_mcp_时不挂(tmp_path: Path, monkeypatch, clean_mcp) -> None:
 
 
 def test_没配就是空操作(tmp_path: Path, monkeypatch, clean_mcp) -> None:
-    monkeypatch.setenv("AGENTS_DEV_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(tmp_path / "missing.toml"))
     loop = _loop(tmp_path)
     assert not [name for name in loop.registry.names() if name.startswith("mcp__")]
 

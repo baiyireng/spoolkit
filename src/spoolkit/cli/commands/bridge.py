@@ -118,20 +118,41 @@ def _fake_loop(bridge: Bridge, channel: FakeChannel, user: str) -> int:
     return 0
 
 
+def pairings_for(root: Path) -> Pairings:
+    """这个工作区的配对记录。单独拎出来：`spool approve` 与
+    `spool bridge --approve` 走的是同一份文件、同一段逻辑。"""
+    return Pairings(Path(root).resolve() / ".agent" / "bridge-pairings.json")
+
+
+def approve_command(root: Path, code: str) -> int:
+    """批准一个配对码。返回进程退出码。"""
+    pairings = pairings_for(root)
+    user = pairings.approve_code(code)
+    if not user:
+        print(
+            f"没有这个配对码：{code}\n"
+            f"（看的是 {pairings.path}）",
+            file=sys.stderr,
+        )
+        return 2
+    print(f"已批准 {user}（写进 {pairings.path}）")
+    return 0
+
+
+def approve_entry(args: argparse.Namespace) -> int:
+    """`spool approve <码>` 的入口（顶层快捷方式，见 app.py）。"""
+    return approve_command(Path(args.root).resolve(), args.code)
+
+
 def bridge_command(args: argparse.Namespace) -> int:
     project_root = Path(args.root).resolve()
-    pairings = Pairings(project_root / ".agent" / "bridge-pairings.json")
+    pairings = pairings_for(project_root)
 
     if getattr(args, "check", False):
         return _check(project_root, args)
 
     if args.approve:
-        user = pairings.approve_code(args.approve)
-        if not user:
-            print(f"没有这个配对码：{args.approve}", file=sys.stderr)
-            return 2
-        print(f"已批准 {user}（写进 {pairings.path}）")
-        return 0
+        return approve_command(project_root, args.approve)
 
     allowed = {str(item) for item in (getattr(args, "allow_user", []) or []) if str(item).strip()}
     access = args.access

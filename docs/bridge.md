@@ -75,32 +75,38 @@ spool bridge --channel qqbot --bridge-proxy socks5://127.0.0.1:1080 --policy ask
 spool bridge --channel fake --provider llamacpp --policy auto --scope "**" --user me --allow-user me
 
 # 接 Telegram
-$env:AGENTS_DEV_TELEGRAM_TOKEN = "123456:ABC..."     # @BotFather 给的
+$env:SPOOLKIT_TELEGRAM_TOKEN = "123456:ABC..."     # @BotFather 给的
 spool bridge --channel telegram --allow-user 123456789 --policy auto --scope "src"
 
 # 接 QQ 官方机器人（QQ 机器人开放平台建的应用）
-$env:AGENTS_DEV_QQ_APPID  = "102xxxxxx"
-$env:AGENTS_DEV_QQ_SECRET = "xxxxxxxx"
+$env:SPOOLKIT_QQ_APPID  = "102xxxxxx"
+$env:SPOOLKIT_QQ_SECRET = "xxxxxxxx"
 spool bridge --channel qqbot --policy auto --scope "src"     # 沙箱加 --sandbox
 
 # 接企业微信（自建应用）
-$env:AGENTS_DEV_WECOM_CORP_ID = "ww...."
-$env:AGENTS_DEV_WECOM_SECRET  = "..."
-$env:AGENTS_DEV_WECOM_AGENT_ID = "1000002"
+$env:SPOOLKIT_WECOM_CORP_ID = "ww...."
+$env:SPOOLKIT_WECOM_SECRET  = "..."
+$env:SPOOLKIT_WECOM_AGENT_ID = "1000002"
 spool bridge --channel wecom --allow-user zhangsan --policy ask
 ```
+
+> 环境变量也可以写在项目根 `.env` 里（推荐，不用每次开 shell 都设），
+> QQ 那两个键写成 `QQ_AppID` / `QQ_AppSecret` 就行。改名前的 `AGENTS_DEV_*`
+> 名字**仍然认**，所以已有的 .bat 不用改。
 
 ## 安全模型（用之前先看这一段）
 
 聊天通道等于把 agent 挂出去了，所以三件事必须同时成立：
 
 1. **默认配对，不认识的人不能用**。陌生发送者会拿到一个一次性配对码，
-   你在机器上执行 `spool bridge --approve <码>` 之后他才被放行：
+   你在机器上执行 `spool approve <码>`（等价于 `spool bridge --approve <码>`）
+   之后他才被放行。**这条命令在任意目录都能敲**——工作区靠 `.agent/` 或全局
+   登记表定位；报"没有这个配对码"时先看它说的是哪个文件，多半是找错了工作区：
 
    ```
    陌生人：把项目删了
    → 这条通道还不认识你。把这个配对码给机器的主人，他在命令行执行
-     `spool bridge --approve 5R3CVG` 之后你就能用了：5R3CVG
+     `spool approve 5R3CVG` 之后你就能用了：5R3CVG
    ```
 
    三档准入由你显式选：`--access pairing`（默认）/ `allowlist`（只放行
@@ -143,7 +149,7 @@ spool bridge --channel wecom --allow-user zhangsan --policy ask
 | 装载途径 | 用在什么情形 |
 |---|---|
 | entry point 组 `spoolkit.channels` | 正经发布出去的适配器包：`[project.entry-points."spoolkit.channels"] my="my_pkg:build"` |
-| 环境变量 `AGENTS_DEV_CHANNEL_PLUGINS=my_channel:build` | 自己写一个先用起来（个人微信/QQ 那类第三方 hook 的适配器多半是这种形态） |
+| 环境变量 `SPOOLKIT_CHANNEL_PLUGINS=my_channel:build` | 自己写一个先用起来（个人微信/QQ 那类第三方 hook 的适配器多半是这种形态）。改名前的 `AGENTS_DEV_CHANNEL_PLUGINS` 也认 |
 
 工厂签名是 `build(spec) -> Channel`（spec 里带着 `name` / `root` / `token` /
 `proxy`）。**内置的 fake/telegram/wecom 优先**，认不出的名字才走插件——

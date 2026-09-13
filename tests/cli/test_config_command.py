@@ -14,8 +14,11 @@ from spoolkit.cli.runtime import resolve_provider_args
 @pytest.fixture()
 def config_file(tmp_path: Path, monkeypatch) -> Path:
     path = tmp_path / "config.toml"
-    monkeypatch.setenv("AGENTS_DEV_CONFIG", str(path))
+    # 用新名字：conftest 的自动隔离也设了 `SPOOLKIT_CONFIG`，而**新名字优先**——
+    # 这里若还写旧名，拿到的会是 conftest 那一个，断言就会指着别的路径失败。
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
     for name in ("PROVIDER", "MODEL", "BASE_URL", "PROXY", "SCRIPT"):
+        monkeypatch.delenv(f"SPOOLKIT_{name}", raising=False)
         monkeypatch.delenv(f"AGENTS_DEV_{name}", raising=False)
     return path
 

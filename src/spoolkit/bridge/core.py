@@ -28,7 +28,7 @@ DEFAULT_MAX_CHARS = 4000
 # 别人的聊天窗口里。
 PAIRING_REPLY = (
     "这条通道还不认识你。把下面这个配对码给机器的主人，"
-    "他在命令行执行 `spool bridge --approve {code}` 之后你就能用了：\n{code}"
+    "他在命令行执行 `spool approve {code}` 之后你就能用了：\n{code}"
 )
 
 

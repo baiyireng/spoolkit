@@ -1,18 +1,38 @@
-# spool
+# spoolkit
 
-一个面向**本地小模型**（llama.cpp）的编程特化 Agent。
+**面向本地小模型的编程特化 Agent**，命令叫 `spool`。
 
-核心命题：在 4K–8K 的有效上下文预算下，用 7B–27B 级本地模型完成真实的中小型
-编程任务。小模型做 Agent 的瓶颈不是"不够聪明"，而是三件事：上下文一塞满质量
-就断崖式下跌、多步规划能力弱、以及爱编造。所以整套架构只有一个目标——
-**让模型每一步面对的上下文都尽可能小、精确、可承载**。
+在 4K–8K 的有效上下文预算下，用 7B–27B 级本地模型完成真实的中小型编程任务。
+小模型做 Agent 的瓶颈不是"不够聪明"，而是三件事：上下文一塞满质量就断崖式下跌、
+多步规划能力弱、以及爱编造。所以整套架构只有一个目标——**让模型每一步面对的
+上下文都尽可能小、精确、可承载**。
 
-实现手段是把状态外置（计划、进度、记忆都在文件与 SQLite 里，历史可以随时丢），
+手段是把状态外置（计划、进度、记忆都在文件与 SQLite 里，历史可以随时丢），
 再用代码索引保证"精确取用"而不是"整份塞入"。
 
-现状：**可用但仍是实验品**（0.0.1）。实测在同一批 50 道题上：单题逐条 6.5 分钟
+现状：**可用但仍是实验品**（0.0.1）。实测同一批 50 道题：单题逐条 6.5 分钟
 50/50，自主编排（自己拆解、自己执行、自己验收）16 分钟 50/50。数字与测量方法
-都在 [`docs/`](docs/) 里，不在 README 里复述。
+都在 [`docs/benchmarking.md`](docs/benchmarking.md)，不在 README 里复述。
+
+## 30 秒上手
+
+```powershell
+uv venv --python 3.12
+uv pip install -e .                       # 只装来用；开发加 ".[dev]"
+
+spool init                                # 把当前目录做成工作区（幂等）
+spool config --set provider=llamacpp --set base_url=http://127.0.0.1:8080
+spool                                     # 什么都不带就进对话；不是工作区会先问一句
+```
+
+也可以直接给一件事：
+
+```powershell
+spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测试"
+```
+
+改动默认只产出 diff；`--policy auto` 才在授权范围内自动落盘。详细走法见
+[`docs/getting-started.md`](docs/getting-started.md)。
 
 ## 它能做什么
 
@@ -28,100 +48,30 @@
   越界自动退回确认，白名单外的命令可以申请（无人值守时不会静默放行）。
 - **自我验证**：改完自动跑验收并把结果顶回给模型；它报"做完了"不算数，
   验收命令的退出码才算数。
+- **能被别的 agent 调用**：挂成 MCP 服务，Codex / Claude Code / Cursor 可以
+  扮演用户下发编排任务（[`docs/mcp.md`](docs/mcp.md)）。
+- **能被聊天驱动**：手机发一条消息 → 在工作区里跑一轮 → 结果发回来
+  （[`docs/bridge.md`](docs/bridge.md)）。
 
-## 快速开始
+## 常用命令
 
-### 1. 装
+| 命令 | 做什么 |
+|---|---|
+| `spool` | 进对话；当前目录不是工作区就先问一句要不要初始化 |
+| `spool init [路径]` | 把目录做成工作区（建 `.agent/` 并登记，幂等） |
+| `spool approve <码>` | 批准聊天通道的配对码（**任意目录都能敲**） |
+| `spool run --goal …` | 跑一次任务 |
+| `spool run --autonomous --scope … --goal …` | 自主拆解并逐步做完 |
+| `spool run --plan` / `--resume` | 推进已有计划的下一步 / 接着检查点继续 |
+| `spool plan --goal …` | 只拆解、落盘计划，不执行 |
+| `spool chat` | 对话式使用：多轮、共用同一个会话 |
+| `spool serve` | 起 Web UI（在浏览器里看步骤、diff、待确认） |
+| `spool bridge --channel fake` | 用聊天消息驱动它（telegram / qqbot / wecom 见文档） |
+| `spool mcp` / `spool mcp-servers --check` | 被别的 agent 调用 / 看自己配的外挂 MCP |
+| `spool config` `limits` `policy` `session` `revert` | 默认值 / 标定值 / 授权 / 会话 / 回滚 |
+| `spool bench --limit N` | 跑回归任务集（可复现的测量） |
 
-```powershell
-uv venv --python 3.12
-uv pip install -e ".[dev]"      # 开发；只要用的话去掉 [dev]
-```
-
-装好后有 `spool` 命令（`spool --version` 能验证）。
-
-### 2. 起一个本地模型服务
-
-```powershell
-llama-server.exe -m <模型.gguf> --host 127.0.0.1 --port 8080 -c 8192 -ngl 99 --reasoning off
-```
-
-两个注意点（都踩过）：带思考的模型要加 `--reasoning off`，否则推理内容会把输出
-预算吃光、表现为"模型返回空内容"；窗口 `-c` 要按你的显存给，Agent 会向服务端
-询问真实窗口，不写死。
-
-### 3. 跑第一条任务
-
-```powershell
-# 先把默认值固定下来（只做一次），以后不用每次打 --provider/--base-url
-spool config --set provider=llamacpp --set base_url=http://127.0.0.1:8080
-spool config            # 看生效值，以及每一项是从哪来的
-
-# 一题一跑：给目标，它在当前工作区里做完
-spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测试"
-
-# 长任务：自己拆解、逐步做完（--scope 是允许自动落盘的范围，必须由你给）
-spool run --autonomous --scope "**" --policy auto --limit 20 `
-    --goal "把这个工作区里的题目都做对"
-```
-
-改动默认只产出 diff；`--policy auto` 才会在授权范围内自动落盘。`spool revert`
-可以回滚上一次写入。
-
-### 4. 网页壳
-
-```powershell
-spool serve                 # 供应商/地址取用户级配置，也可以用命令行覆盖
-# 打开 http://127.0.0.1:8765/
-```
-
-页面里能发目标、看步骤与工具调用、看 diff，并在越界时点"应用/拒绝"；
-**上方会回放这个会话之前的往来**（给人看的，不进模型上下文）。
-
-也可以直接在终端里多轮地聊：
-
-```powershell
-spool chat                  # 一行一句，共用同一个会话；/history、/exit
-```
-
-### 5. 让别的 agent 用它（MCP）
-
-它也能反过来**被**调用：挂成 MCP 服务之后，Codex / Claude Code / Cursor
-可以扮演用户下发编排任务，由这个 agent 在工作区里实施，事件与结论按协议交回。
-
-```json
-{"command": "spool", "args": ["mcp", "--root", "D:\\你的项目", "--scope", "**"]}
-```
-
-工具、信任模型与调用序列见 [`docs/mcp.md`](docs/mcp.md)。
-
-### 6. 用聊天驱动它（消息通道桥）
-
-在手机上发一条消息 → agent 在工作区里跑一轮 → 把结果发回来。三条通道：
-`fake`（本地可跑，不需要凭据）、`telegram`（长轮询，不需要公网入口）、
-`wecom`（企业微信自建应用）。
-
-```powershell
-spool bridge --channel fake --provider llamacpp --policy auto --scope "**" --allow-user me
-```
-
-白名单按用户判（不给就等于谁都能驱动这个工作区），`--policy`/`--scope` 原样转给
-agent，越界照样退回确认。**个人微信/QQ 没有官方接口**（第三方 hook 违反服务条款、
-有封号风险），这条路的合规选择是企业微信或 Telegram——细节见
-[`docs/bridge.md`](docs/bridge.md)。
-
-反过来也成立：**它自己能调别的 MCP 服务**（外面现成的工具不用重写一遍）。
-在用户配置里加一段即可，加完用 `spool mcp-servers --check` 验一遍：
-
-```toml
-[[mcp]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", 'D:\work']
-```
-
-挂进来的工具长这样：`mcp__filesystem__read_text_file`（名字带出处），
-在工具表里单独一组「外挂」，只给主循环用。细节见 [`docs/mcp.md`](docs/mcp.md)。
+逐条参数见 [`docs/cli.md`](docs/cli.md)。
 
 ## 配置
 
@@ -129,8 +79,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", 'D:\work']
 |---|---|---|
 | 供应商 / 模型 / 服务地址 | 用户级默认 | `spool config --set provider=llamacpp --set base_url=<地址>`；`spool config` 看现值与来源 |
 | 同上，临时改一次 | 命令行 | `--provider llamacpp --model <名> --base-url <地址>`（优先于配置文件）|
-| 同上，只在这个 shell 生效 | 环境变量 | `AGENTS_DEV_PROVIDER` / `AGENTS_DEV_BASE_URL` / `AGENTS_DEV_MODEL` / `AGENTS_DEV_PROXY` |
+| 同上，只在这个 shell 生效 | 环境变量 | `SPOOLKIT_PROVIDER` / `SPOOLKIT_BASE_URL` / `SPOOLKIT_MODEL` / `SPOOLKIT_PROXY` |
 | Gemini 密钥 | 项目根 `.env` | `GEMINI_API_KEY=...`（本地模型不需要任何密钥）|
+| 通道凭据 | 项目根 `.env` | `QQ_AppID` / `QQ_AppSecret` / `SPOOLKIT_TELEGRAM_TOKEN`… |
 | 能力标定值（预算、超时、上限） | `.agent/limits.json` | `spool limits --set 名字=值`，`spool limits` 看现值与来源 |
 | 授权策略 | `.agent/policy.json` | `spool policy --set auto`（三档：ask/auto/deny）|
 | 额外可读目录 | 命令行 | `--allow-read D:\别的地方`（只放开读，写入仍限工作区）|
@@ -138,23 +89,21 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", 'D:\work']
 能力标定值全部可覆盖、可回退：默认值是按本机 27B + 8K 窗口实测出来的，
 换模型或换机器就该改，`spool limits` 会告诉你每个值"现在是多少、从哪来"。
 
-## 常用命令
+> **改名说明**：本项目原先叫 `agents-dev`。旧名字仍然可用——命令 `agents-dev`、
+> 环境变量 `AGENTS_DEV_*`、用户配置 `%APPDATA%\agents-dev\config.toml` 都继续认，
+> 已经配好的人一个字都不用改。
 
-| 命令 | 做什么 |
+## 文档
+
+| 文档 | 讲什么 |
 |---|---|
-| `spool run --goal …` | 跑一次任务 |
-| `spool run --autonomous --scope … --goal …` | 自主拆解并逐步做完 |
-| `spool run --plan` | 推进已有计划的下一个待办步骤 |
-| `spool run --resume` | 接着上次未完成的检查点继续 |
-| `spool plan --goal …` | 只拆解、落盘计划，不执行 |
-| `spool serve` | 起 Web UI |
-| `spool chat` | 对话式使用：多轮、共用同一个会话 |
-| `spool mcp` | 以 MCP 服务运行，供别的 agent 调用（见 docs/mcp.md）|
-| `spool mcp-servers --check` | 看/验自己配的外挂 MCP 服务 |
-| `spool bridge --channel fake` | 用聊天消息驱动它（本地可跑；telegram / wecom 见 docs/bridge.md）|
-| `spool config` | 查看/设置用户级默认配置（provider、地址、模型…）|
-| `spool bench --limit N` | 跑回归任务集（可复现的测量）|
-| `spool limits` / `policy` / `session` / `revert` | 标定值 / 授权 / 会话 / 回滚 |
+| [`docs/getting-started.md`](docs/getting-started.md) | 装、配、第一个任务、常见故障 |
+| [`docs/cli.md`](docs/cli.md) | 每条命令与参数 |
+| [`docs/manual.md`](docs/manual.md) | 使用手册：工作区／权限／记忆／长任务／通道／排错 |
+| [`docs/benchmarking.md`](docs/benchmarking.md) | 怎么量、量到什么 |
+| [`docs/dogfooding.md`](docs/dogfooding.md) | 每次改动的原因与结果 |
+| [`docs/mcp.md`](docs/mcp.md) · [`docs/bridge.md`](docs/bridge.md) | 两个方向的外部接口 |
+| [`docs/superpowers/specs/`](docs/superpowers/specs/) | 设计文档 |
 
 ## 已知限制
 
@@ -172,12 +121,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", 'D:\work']
 
 ```powershell
 uv venv --python 3.12
-uv sync --extra dev
+uv pip install -e ".[dev]"
 uv run pytest -q
 ```
-
-设计与测量记录在 [`docs/`](docs/)：`benchmarking.md`（怎么量、量到什么）、
-`dogfooding.md`（每次改动的原因与结果）、`superpowers/specs/`（设计文档）。
 
 ## License
 
