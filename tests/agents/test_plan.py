@@ -13,6 +13,8 @@ from agents_dev.agents.plan import (
     plan_path,
     render_step_prompt,
     save_plan,
+    top_level_entries,
+    uncovered,
 )
 from agents_dev.llm.fake import FakeModel
 from agents_dev.llm.tokenizer import OfflineTokenCounter
@@ -254,6 +256,104 @@ def test_被截断就把这一批砍半重排() -> None:
     # 第一次问 14 步（2048/140），砍半之后问 7 步
     assert "最多 14 步" in gateway.requests[0].messages[0].content
     assert "最多 7 步" in gateway.requests[1].messages[0].content
+
+
+def test_截断只压下一批_不把整段预算一起砍() -> None:
+    """原先砍的是 budget 本身，于是后面的批次一路变小。
+
+    实测一次 50 步的拆解因此从 3 次调用涨到 9 次、输入 token 多两倍——
+    而它当时看起来「只是慢了点」，没有任何地方报出来。
+    """
+
+    class TruncatingFake(FakeModel):
+        def __init__(self, script, tokenizer):
+            super().__init__(script, tokenizer)
+            self.calls = 0
+
+        def chat(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                self.requests.append(request)
+                return ChatResponse(
+                    text='{"steps": [{"goal": "半截',
+                    prompt_tokens=10,
+                    completion_tokens=2048,
+                    truncated=True,
+                )
+            return super().chat(request)
+
+    gateway = TruncatingFake(
+        [
+            _batch(*[(f"第{i}步", "通过") for i in range(1, 8)]),
+            _batch(*[(f"第{i}步", "通过") for i in range(1, 14)], done=True),
+        ],
+        OfflineTokenCounter(),
+    )
+    log: list[str] = []
+    plan = decompose(gateway, "大事", limit=20, max_tokens=2048, trace=log)
+
+    assert len(plan.steps) == 20
+    # 第二批被压到 7 步（14 的一半），第三批回到正常（剩下的 13 步一起要）
+    assert "最多 7 步" in gateway.requests[1].messages[0].content
+    assert "最多 13 步" in gateway.requests[2].messages[0].content
+    assert any("截断" in line for line in log)
+
+
+# --- 覆盖检查：目标说「把 N 件事都做完」时，少一件不该靠人眼发现 ---------
+#
+# 实测：50 题的自主跑两次都只排出 49 步（漏了 `50_retry_count`），两次都
+# 没人察觉——验收就停在 49/50。
+
+
+def test_覆盖漏了就把缺的补回来() -> None:
+    gateway = _gateway(
+        [
+            _batch(("改 01_a", "通过")),
+            _batch(("改 02_b", "通过"), done=True),
+        ]
+    )
+    plan = decompose(
+        gateway,
+        "把两道题都做对",
+        limit=5,
+        max_tokens=2048,
+        must_cover=["01_a", "02_b"],
+    )
+    assert [s.goal for s in plan.steps] == ["改 01_a", "改 02_b"]
+    assert len(gateway.requests) == 2
+    assert "现在没有任何步骤覆盖" in gateway.requests[1].messages[0].content
+    assert "02_b" in gateway.requests[1].messages[0].content
+
+
+def test_覆盖齐了就不再问() -> None:
+    gateway = _gateway([_batch(("改 01_a", "通过"), ("改 02_b", "通过"), done=True)])
+    plan = decompose(
+        gateway, "把两道题都做对", limit=5, max_tokens=2048, must_cover=["01_a", "02_b"]
+    )
+    assert len(plan.steps) == 2
+    assert len(gateway.requests) == 1
+
+
+def test_补不回来就停手_由调用方报出来(tmp_path: Path) -> None:
+    """两轮还没补上就停：报，不猜——那可能是有意不做的。"""
+    gateway = _gateway([_batch(("改 01_a", "通过"))] * 4)
+    plan = decompose(
+        gateway, "把两道题都做对", limit=5, max_tokens=2048, must_cover=["01_a", "02_b"]
+    )
+    assert uncovered(plan, ["01_a", "02_b"]) == ["02_b"]
+
+
+def test_覆盖判定是字面的(tmp_path: Path) -> None:
+    plan = parse_plan(_payload(("改 01_a", "通过")), "目标")
+    assert uncovered(plan, ["01_a", "02_b"]) == ["02_b"]
+    assert uncovered(plan, []) == []
+
+
+def test_顶层目录名单排除_agent(tmp_path: Path) -> None:
+    (tmp_path / "01_a").mkdir()
+    (tmp_path / "02_b").mkdir()
+    (tmp_path / ".agent").mkdir()
+    assert top_level_entries(tmp_path) == ["01_a", "02_b"]
 
 
 def test_步骤提示带上整体位置() -> None:

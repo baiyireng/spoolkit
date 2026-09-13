@@ -7,6 +7,7 @@
 
 import argparse
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -21,7 +22,10 @@ from agents_dev.agents.plan import (
     plan_path,
     render_step_prompt,
     save_plan,
+    top_level_entries,
+    uncovered,
 )
+from agents_dev.llm.gateway import CountingGateway
 from agents_dev import limits
 from agents_dev.cli.options import (
     report_policy,
@@ -66,7 +70,10 @@ def _survey(project_root: Path, goal: str, tokenizer) -> str:
     material_budget = int(limits.resolve("decompose_material_budget", {})[0])
     material: list[str] = []
     used = 0
+    exhausted = False
     for home in sorted(p for p in project_root.iterdir() if p.is_dir()):
+        if exhausted:
+            break
         if home.name == ".agent":
             continue
         for item in sorted(home.iterdir()):
@@ -83,10 +90,17 @@ def _survey(project_root: Path, goal: str, tokenizer) -> str:
             block = f"### {home.name}/{item.name}\n{body}"
             cost = tokenizer.count(block)
             if used + cost > material_budget:
-                material.append(f"（还有材料没放下：{home.name}/{item.name}）")
+                # 预算用完了：说一句就够。原先每个目录报一行，50 个目录就是
+                # 五十行噪音——而每一批拆解都要把这段材料重发一遍。
+                exhausted = True
                 break
             material.append(block)
             used += cost
+    if exhausted:
+        material.append(
+            f"（材料预算 {material_budget} token 用完，只展开了 {used} token 的部分，"
+            "其余条目没有展开——需要时直接看工作区里的文件）"
+        )
     if material:
         lines.append("各题目的材料（题目说明与验收测试）：\n" + "\n\n".join(material))
     try:
@@ -115,6 +129,47 @@ def _survey(project_root: Path, goal: str, tokenizer) -> str:
     return "\n\n".join(lines)
 
 
+def _plan_phase(gateway, project_root: Path, args) -> object:
+    """拆解那一段：排完、对一遍覆盖、把这笔账说出来。
+
+    账要说出来：拆解在实测里占墙钟的四分之一（50 题 3 次调用、约 5.5 分钟），
+    而它原先只有总时间能看，「为什么慢」只能猜。
+
+    覆盖检查也是这一步的活：目标说「把 50 道题都做对」，计划少一道，
+    原先没有任何机制会发现。
+    """
+    counting = CountingGateway(gateway)
+    started = time.time()
+    steps_log: list[str] = []
+    plan = decompose(
+        counting,
+        args.goal,
+        context=_survey(project_root, args.goal, counter_for(gateway)),
+        limit=args.limit,
+        # `plan` 子命令没有 --window，`run --autonomous` 有：两边都要能用。
+        window=resolve_window(gateway, getattr(args, "window", 0)),
+        must_cover=top_level_entries(project_root),
+        trace=steps_log,
+    )
+    elapsed = time.time() - started
+    for line in steps_log:
+        print("  " + line)
+    print(
+        f"拆解：{counting.calls} 次调用 / {counting.prompt_tokens} 输入 + "
+        f"{counting.completion_tokens} 输出 token / {elapsed:.0f}s"
+    )
+    missing = uncovered(plan, top_level_entries(project_root))
+    if missing:
+        # 报，不猜：它可能是有意不做的（比如那个目录不在目标范围内）。
+        print(
+            f"⚠ 计划没有覆盖这些顶层目录（{len(missing)} 个）："
+            + "、".join(missing[:10])
+            + ("…" if len(missing) > 10 else ""),
+            file=sys.stderr,
+        )
+    return plan
+
+
 def make_plan(args: argparse.Namespace) -> int:
     """把一个较大目标拆成可验收的步骤序列并落盘。"""
     project_root = Path(args.root).resolve()
@@ -122,14 +177,7 @@ def make_plan(args: argparse.Namespace) -> int:
     if gateway is None:
         return 2
 
-    plan = decompose(
-        gateway,
-        args.goal,
-        context=_survey(project_root, args.goal, counter_for(gateway)),
-        limit=args.limit,
-        # `plan` 子命令没有 --window，`run --autonomous` 有：两边都要能用。
-        window=resolve_window(gateway, getattr(args, "window", 0)),
-    )
+    plan = _plan_phase(gateway, project_root, args)
     if not plan.steps:
         print("没有拆出任何带验收标准的步骤。", file=sys.stderr)
         return 1
@@ -350,13 +398,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         )
         return 2
 
-    plan = decompose(
-        gateway,
-        args.goal,
-        context=_survey(project_root, args.goal, counter_for(gateway)),
-        limit=args.limit,
-        window=resolve_window(gateway, getattr(args, "window", 0)),
-    )
+    plan = _plan_phase(gateway, project_root, args)
     if not plan.steps:
         print("没能拆出任何带验收标准的步骤。", file=sys.stderr)
         return 1

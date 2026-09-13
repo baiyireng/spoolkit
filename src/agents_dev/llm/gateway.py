@@ -24,3 +24,30 @@ class ModelGateway(Protocol):
         """
         ...
 
+
+class CountingGateway:
+    """把网关包一层，数清某一段工作花了多少。
+
+    只拦 chat：其余属性（context_window / token_counter）原样透传，
+    因为被包的代码也需要它们。
+
+    它存在的理由和「时间拆成模型/工具两笔」一样：**账算不清就调不动**。
+    拆解那一段原先只有墙钟能看，于是「拆解为什么慢」只能靠猜。
+    """
+
+    def __init__(self, inner: ModelGateway) -> None:
+        self._inner = inner
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    def chat(self, request: ChatRequest) -> ChatResponse:
+        response = self._inner.chat(request)
+        self.calls += 1
+        self.prompt_tokens += response.prompt_tokens
+        self.completion_tokens += response.completion_tokens
+        return response
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+

@@ -61,7 +61,27 @@ def test_拆解前先看工作区(tmp_path: Path) -> None:
 def test_自主模式把环境信息喂给拆解(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     gateway = FakeModel(
-        script=[_plan("把题做完"), _turn("做完了")], tokenizer=OfflineTokenCounter()
+        # 第二份是覆盖检查要的补排：假计划只覆盖了 01，工作区里还有 02。
+        script=[
+            _plan("把题做完"),
+            json.dumps(
+                {
+                    "steps": [
+                        {
+                            "goal": "改 02_empty_input/stats.py",
+                            "acceptance": "在 02_empty_input/ 下跑 pytest 通过",
+                            "scope": ["02_empty_input/"],
+                            "executor": "self",
+                        }
+                    ],
+                    "done": True,
+                },
+                ensure_ascii=False,
+            ),
+            _turn("做完了"),
+            _turn("做完了"),
+        ],
+        tokenizer=OfflineTokenCounter(),
     )
     args = argparse.Namespace(
         goal="把题做完",

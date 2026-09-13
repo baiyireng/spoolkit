@@ -208,6 +208,30 @@ def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
 
 MAX_RECENT_TURNS = 6
 
+# 工具输出短于这个长度就不去重：短内容本来就不值钱，比对反而增加噪音。
+REPEAT_MIN_CHARS = 200
+
+
+def _is_repeat_output(content: str, prefetched: str, seen: set[str]) -> bool:
+    """这段工具输出是不是「上面已经有了」。
+
+    为什么要它：预取（锚定 + 关键词）已经把这一步要改的文件正文放进提示词了，
+    而模型经常还是先 `read_file` 看一遍——同一段正文于是在提示词里出现两次，
+    并且**每一次后续调用**都带着这两份。实测 50 题那轮，工具输出来自读文件，
+    读到的内容原样留在最近几轮里。
+
+    判定是「正文完整出现过」：要么就是这段提示词里已有（预取），要么本轮
+    已经返回过一模一样的一份。两种情况都不丢信息——相同正文仍在提示词里，
+    只是不再重复第二遍。
+    """
+    body = content.strip()
+    if len(body) < REPEAT_MIN_CHARS:
+        return False
+    if body in seen:
+        return True
+    seen.add(body)
+    return body in prefetched
+
 # 只有这几类工具的结果算「进度」。读文件和搜索不算：它们是手段，
 # 不是产出，记进去只会把状态撑满噪声。
 PROGRESS_TOOLS = ("write_file", "replace_lines", "run_command")
@@ -372,6 +396,9 @@ class AgentLoop:
             )
         ]
         feedback: str | None = None
+        # 本次任务里已经出现过的工具输出正文。同一步里第二遍读到同一份内容时，
+        # 只在历史里留一行说明——省下的正是「每轮都要重发一遍」的那部分。
+        seen_outputs: set[str] = set()
         # 督导让主循环改道时说的话。单独放一个变量，是因为 feedback 会被
         # 强制收敛那几处覆盖掉——而改道的话比通用提醒具体，不能被覆盖。
         redirect: str | None = None
@@ -661,6 +688,7 @@ class AgentLoop:
             if turn.tool_calls:
                 _tools_started = time.time()
                 outputs = []
+                repeated = 0
                 edited = False
                 # 这一轮改过哪些文件。自动验证靠它判断「该在哪儿验」——
                 # 一个工作区里有很多件事时，范围跟着改动走才对得上因果。
@@ -709,7 +737,14 @@ class AgentLoop:
                         },
                     )
                     status = "成功" if result.ok else "失败"
-                    outputs.append(f"[{call.name}] {status}: {result.content}")
+                    if _is_repeat_output(result.content, prefetched, seen_outputs):
+                        # 相同正文仍在提示词里（预取或上一轮），只是不再重复第二遍。
+                        outputs.append(
+                            f"[{call.name}] {status}: （这段内容上面已经给过，未重复）"
+                        )
+                        repeated += 1
+                    else:
+                        outputs.append(f"[{call.name}] {status}: {result.content}")
                     # 失败时把输出压成一行摘要。取第一行不行：那里是命令本身，
                     # 而不是错误原因——调试时会被误导。
                     # 失败信息给足长度：160 字刚好够看到命令本身，
@@ -718,6 +753,11 @@ class AgentLoop:
                     detail = "" if result.ok else f": {flat[:400]}"
                     trace.append(f"step{state.step}: 工具 {call.name} -> {status}{detail}")
                 tool_seconds += time.time() - _tools_started
+                if repeated:
+                    trace.append(
+                        f"step{state.step}: {repeated} 条工具输出的内容与上面重复，"
+                        "没有重复计入上下文"
+                    )
                 history.append(Message(role="tool", content="\n".join(outputs)))
 
                 # 改完就替它验一次。模型不会主动去跑测试——实测 8 条失败里

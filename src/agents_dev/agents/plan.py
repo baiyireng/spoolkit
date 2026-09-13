@@ -67,6 +67,9 @@ DECOMPOSE_PROMPT = T.DECOMPOSE
 # 原来逐字相同，老测量还能对照。
 BATCH_CONTINUE = T.DECOMPOSE_CONTINUE
 
+# 覆盖检查之后补排用的那一段。
+DECOMPOSE_FILL = T.DECOMPOSE_FILL
+
 # 分批用的 schema：多一个 done，用来问「后面还有没有」。
 BATCH_SCHEMA: dict[str, Any] = {
     **PLAN_SCHEMA,
@@ -190,6 +193,8 @@ def decompose(
     limit: int = 10,
     max_tokens: int | None = None,
     window: int | None = None,
+    must_cover: Sequence[str] = (),
+    trace: list[str] | None = None,
 ) -> Plan:
     """让模型把目标拆成可验收的步骤序列。**一次排不完就再排一批。**
 
@@ -203,18 +208,29 @@ def decompose(
     知道窗口时再按「窗口 − 提示词」收一次口；每一步按 STEP_TOKENS 折算。
     被截断不重来整份，而是**把这一批要小一半再排**——截断说明的是
     「这批太大」，不是「模型不会排」。
+
+    `must_cover` 是**覆盖检查**：目标说「把这 50 件事都做完」时，计划少一件
+    不该靠人眼发现。实测两次 50 题的跑都只排出 49 步（漏了 `50_retry_count`），
+    而两次都没人察觉。这里在排完之后对一遍名单，缺的补一轮；补两轮还缺，
+    由调用方把名单报出来（报，不猜——它可能是有意不做的）。
     """
     budget = int(max_tokens or limits.resolve("decompose_output_budget", {})[0])
     planned: list[PlanStep] = []
     planned_text = "（无）"
+    # 这一批被截断时，只把**下一批**要的步数压小，不动整段的预算。
+    # 原先砍的是 budget 本身，于是后面的批次一路变小——实测一次 50 步的
+    # 拆解因此从 3 次调用涨到 9 次，输入 token 多了两倍。
+    ask_cap: int | None = None
     for _ in range(max(1, limit)):  # 最多上限批次；正常远用不到
         remaining = limit - len(planned)
         if remaining <= 0:
             break
         ask = _batch_size(budget, goal, context, planned_text, window, remaining)
-        # 「一次排得完」：第一批就把剩下的全要了。这条路要保住老行为——
-        # 它给几步就是几步，不再追问，也不用续排提示。
-        single = ask >= remaining
+        if ask_cap is not None:
+            ask = min(ask, ask_cap)
+        # 「一次排得完」：第一批就把全部要了。这条路要保住老行为——
+        # 提示词与没有分批时逐字相同，它给几步就是几步，不再追问。
+        single = not planned and ask >= remaining
         if single:
             # 一次排得完：提示词与「没有分批」时逐字相同。
             prompt = DECOMPOSE_PROMPT.format(
@@ -238,10 +254,16 @@ def decompose(
             )
         )
         if response.truncated and ask > 1:
-            # 这一批没排完就被切断：把批次砍半重排，而不是重新排整份计划。
-            budget = max(1, budget // 2)
+            # 这一批没排完就被切断：把**这一批**砍半重排，而不是重排整份计划，
+            # 也不把整段的预算一起砍掉。
+            ask_cap = max(1, ask // 2)
+            if trace is not None:
+                trace.append(f"拆解：要 {ask} 步被截断，下一批压到 {ask_cap} 步")
             continue
+        ask_cap = None
         fresh, done = _parse_batch(response.text, goal, limit=ask)
+        if trace is not None:
+            trace.append(f"拆解：要 {ask} 步 → 回来 {len(fresh)} 步")
         for step in fresh:
             step.index = len(planned) + 1
             planned.append(step)
@@ -251,7 +273,72 @@ def decompose(
             # 续批时说好「没排完就排满」，它没排满就是「后面没有了」。
             break
         planned_text = "\n".join(f"{s.index}. {s.goal}" for s in planned)
+
+    # 覆盖检查：名单里有没有谁一条步骤都没摊上。
+    for _ in range(2):
+        missing = uncovered(Plan(goal=goal, steps=list(planned)), must_cover)
+        if not missing:
+            break
+        ask = _batch_size(budget, goal, context, planned_text, window, len(missing))
+        prompt = (
+            DECOMPOSE_PROMPT.format(
+                goal=goal, context=context or "无", limit=max(ask, len(missing))
+            )
+            + BATCH_CONTINUE.format(
+                planned=planned_text or "（无）",
+                start=len(planned) + 1,
+                ask=max(ask, len(missing)),
+            )
+            + DECOMPOSE_FILL.format(ask=max(ask, len(missing)), missing="、".join(missing))
+        )
+        response = gateway.chat(
+            ChatRequest(
+                messages=(Message(role="user", content=prompt),),
+                max_tokens=budget,
+                response_schema=BATCH_SCHEMA,
+            )
+        )
+        fresh, done = _parse_batch(response.text, goal, limit=max(ask, len(missing)))
+        if trace is not None:
+            trace.append(
+                f"拆解：覆盖检查要补 {len(missing)} 个（{missing[0]}…），"
+                f"回来 {len(fresh)} 步"
+            )
+        if not fresh:
+            break
+        for step in fresh:
+            step.index = len(planned) + 1
+            planned.append(step)
+        planned_text = "\n".join(f"{s.index}. {s.goal}" for s in planned)
+        if done:
+            break
     return Plan(goal=goal, steps=planned)
+
+
+def top_level_entries(root: Path) -> list[str]:
+    """工作区顶层目录名（`.agent` 不算）。覆盖检查拿它当名单。"""
+    try:
+        return sorted(
+            item.name
+            for item in root.iterdir()
+            if item.is_dir() and item.name != ".agent"
+        )
+    except OSError:
+        return []
+
+
+def uncovered(plan: Plan, names: Sequence[str]) -> list[str]:
+    """名单里没有任何步骤提到的名字。
+
+    判定是**字面**的：目录名出现在 goal / acceptance / contract / scope 之一
+    就算覆盖。这会漏报（一步可能用别的说法涵盖了某目录），但不会误伤——
+    宁可漏报，也不要把「看起来覆盖了」当成证据。
+    """
+    text = "\n".join(
+        " ".join([step.goal, step.acceptance, step.contract, *step.scope])
+        for step in plan.steps
+    )
+    return [name for name in names if name not in text]
 
 
 def _batch_size(
