@@ -229,6 +229,7 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
             model=f"{args.provider}:{args.model or '默认'}",
         )
     )
+    _wiring_started = time.time()
     loop = assemble_loop(
         project_root,
         gateway,
@@ -249,12 +250,16 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
             prefetch_anchors=tuple(step.scope or scope),
         ),
     )
+    # 必须在**装配完那一刻**就读走：晚一步（比如等 run 回来再读）量到的
+    # 就是整步墙钟，而它会顶着"装配循环"这个名字，把账搅成 0 其它时间。
+    _wiring_seconds = time.time() - _wiring_started
     if step.executor == SUBAGENT:
         result = _delegate_step(ctx, step, loop, pending)
     else:
         # goal 用**短目标**，整段步骤提示词只作为提示词发一次：
         # 状态块里再重复一份，等于每次调用多付一遍。
         result = loop.run(step.goal, prompt=render_step_prompt(plan, step))
+    result.wiring_seconds = _wiring_seconds
 
     if memory is not None:
         settle_lessons(memory, result.lessons_pushed, result.finished)
@@ -437,6 +442,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         effective = _effective_scope(granted, step)
 
         print(f"\n执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
+        _step_started = time.time()
         result, pending = execute_step(
             ctx,
             step,
@@ -444,7 +450,10 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
             approver=None,
             grants=Grants(path=project_root / ".agent" / "grants.json"),
         )
+        _step_seconds = time.time() - _step_started
         record_step(ctx, step, result, pending, effective)
+        _settle_seconds = time.time() - _step_started - _step_seconds
+        _report_step_cost(result, _step_seconds, _settle_seconds)
         if not result.finished:
             print(plan.render())
             return 1
@@ -453,6 +462,33 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
     print(plan.render())
     print(f"\n自主运行结束：完成 {completed}/{len(plan.steps)} 步。")
     return 0 if completed == len(plan.steps) else 1
+
+
+def _report_step_cost(result, step_seconds: float, settle_seconds: float) -> None:
+    """把这个**步**的墙钟拆开。
+
+    前面那笔"4.6 秒/步没人认领"是从残差推出来的，而残差推不出结论——
+    所以这里把每一步的墙钟当场拆成几笔打出来。谁占大头一眼就看得到，
+    不必再去猜。
+    """
+    known = (
+        result.wiring_seconds
+        + result.model_seconds
+        + result.tool_seconds
+        + result.assemble_seconds
+        + result.verify_seconds
+        + result.state_seconds
+        + result.supervisor_seconds
+        + settle_seconds
+    )
+    other = max(0.0, step_seconds + settle_seconds - known)
+    print(
+        f"本步墙钟 {step_seconds + settle_seconds:.1f}s ｜ "
+        f"模型 {result.model_seconds:.1f} 装配循环 {result.wiring_seconds:.1f} "
+        f"装配上下文 {result.assemble_seconds:.1f} 工具 {result.tool_seconds:.1f} "
+        f"验证 {result.verify_seconds:.1f} 落盘 {result.state_seconds:.1f} "
+        f"收尾 {settle_seconds:.1f} 其它 {other:.1f}"
+    )
 
 
 def _effective_scope(granted: tuple[str, ...], step) -> tuple[str, ...]:

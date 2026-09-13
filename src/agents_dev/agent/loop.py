@@ -258,6 +258,16 @@ class LoopResult:
     # 只有总耗时的话，两种编排差一倍也看不出该动哪边。
     model_seconds: float = 0.0
     tool_seconds: float = 0.0
+    # 账上没人认领的那部分要拆开——原先只有「模型 + 工具」两笔，
+    # 剩下的全落进"其它"，而"其它"这个东西是调不动的。这里把其余三笔
+    # 也计出来：装配上下文、自动验证、落盘（检查点/进度）。
+    assemble_seconds: float = 0.0
+    verify_seconds: float = 0.0
+    state_seconds: float = 0.0
+    supervisor_seconds: float = 0.0
+    # 装配这一次循环本身（建索引、装注册表、算预取）。它发生在 run() 之外，
+    # 所以由调用方填进来——按步执行那条路上，它每步都要付一次。
+    wiring_seconds: float = 0.0
     lessons_pushed: tuple[int, ...] = ()
     # 这次运行里确认过「失败是环境造成的」。任务没做成时，它是决定
     # 要不要替 Agent 登记诊断请求的依据之一。
@@ -269,6 +279,13 @@ class LoopResult:
             f"步数 {self.steps}，模型调用 {self.model_calls}，"
             f"输入 {self.prompt_tokens} token，输出 {self.completion_tokens} token，"
             f"模型 {self.model_seconds:.1f}s / 工具 {self.tool_seconds:.1f}s"
+            f" / 装配 {self.assemble_seconds:.1f}s / 验证 {self.verify_seconds:.1f}s"
+            f" / 落盘 {self.state_seconds:.1f}s"
+            + (
+                f" / 督导 {self.supervisor_seconds:.1f}s"
+                if self.supervisor_seconds
+                else ""
+            )
         )
 
 
@@ -427,6 +444,10 @@ class AgentLoop:
         model_calls = 0
         model_seconds = 0.0
         tool_seconds = 0.0
+        assemble_seconds = 0.0
+        verify_seconds = 0.0
+        state_seconds = 0.0
+        supervisor_seconds = 0.0
         prefetched = self.prefetch(goal) if self.prefetch is not None else ""
         hot = self.memory.hot_text() if self.memory is not None else ""
         # 「原地打转」检测：连续相同的调用计数。跨步骤累计，
@@ -484,6 +505,7 @@ class AgentLoop:
                     )
                 # 把「为什么把它叫起来」记下来：调这块时唯一能看的东西就是它。
                 trace.append(f"step{state.step}: 叫督导——{asking}")
+                _supervisor_started = time.time()
                 verdict = self._ask_supervisor(
                     state,
                     trace,
@@ -497,6 +519,7 @@ class AgentLoop:
                     tokens=prompt_tokens + completion_tokens,
                     asking=asking,
                 )
+                supervisor_seconds += time.time() - _supervisor_started
                 if verdict is not None:
                     prompt_tokens += verdict.prompt_tokens
                     completion_tokens += verdict.completion_tokens
@@ -532,18 +555,22 @@ class AgentLoop:
                     self._archive(state, "success", trace, done_text)
                     clear_state(checkpoint)
                     return LoopResult(
-                        True,
-                        done_text,
-                        state,
-                        state.step,
-                        resets,
-                        trace,
-                        prompt_tokens,
-                        completion_tokens,
-                        model_calls,
-                    model_seconds,
-                    tool_seconds,
-                        tuple(item[0] for item in pushed),
+                        finished=True,
+                        final=done_text,
+                        state=state,
+                        steps=state.step,
+                        resets=resets,
+                        trace=trace,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        model_calls=model_calls,
+                        model_seconds=model_seconds,
+                        tool_seconds=tool_seconds,
+                        assemble_seconds=assemble_seconds,
+                        verify_seconds=verify_seconds,
+                        state_seconds=state_seconds,
+                        supervisor_seconds=supervisor_seconds,
+                        lessons_pushed=tuple(item[0] for item in pushed),
                         environment_blocked=self.environment_blocked,
                     )
                 else:
@@ -590,9 +617,11 @@ class AgentLoop:
             if redirect is not None:
                 feedback = redirect
                 redirect = None
+            _assemble_started = time.time()
             assembled = self._assemble(
                 state, history, feedback, prefetched, hot, lesson_text
             )
+            assemble_seconds += time.time() - _assemble_started
             self._emit("step", {"n": state.step})
 
             # 预算守卫：软触发整理，硬触发重置。依据需求体积而非装入量。
@@ -601,9 +630,11 @@ class AgentLoop:
                 feedback = None
                 resets += 1
                 trace.append(f"step{state.step}: 上下文重置（第 {resets} 次）")
+                _assemble_started = time.time()
                 assembled = self._assemble(
                     state, history, feedback, prefetched, hot, lesson_text
                 )
+                assemble_seconds += time.time() - _assemble_started
             elif assembled.demand_tokens >= self._budget.soft_limit():
                 history = history[-(MAX_RECENT_TURNS // 2):]
                 trace.append(f"step{state.step}: 上下文整理")
@@ -653,18 +684,22 @@ class AgentLoop:
                         )
                         self._archive(state, "fail", trace, "")
                         return LoopResult(
-                            False,
-                            T.EMPTY_TURN_FINAL,
-                            state,
-                            state.step,
-                            resets,
-                            trace,
-                            prompt_tokens,
-                            completion_tokens,
-                            model_calls,
-                    model_seconds,
-                    tool_seconds,
-                            tuple(item[0] for item in pushed),
+                            finished=False,
+                            final=T.EMPTY_TURN_FINAL,
+                            state=state,
+                            steps=state.step,
+                            resets=resets,
+                            trace=trace,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            model_calls=model_calls,
+                            model_seconds=model_seconds,
+                            tool_seconds=tool_seconds,
+                            assemble_seconds=assemble_seconds,
+                            verify_seconds=verify_seconds,
+                            state_seconds=state_seconds,
+                            supervisor_seconds=supervisor_seconds,
+                            lessons_pushed=tuple(item[0] for item in pushed),
                         )
                 else:
                     empty_turns = 0
@@ -688,7 +723,9 @@ class AgentLoop:
                 state.step_forward()
                 # 解析失败也要落盘：步数确实推进了，不写的话这类失败
                 # 会连一个可续跑的检查点都不留下。
+                _state_started = time.time()
                 save_state(state, checkpoint)
+                state_seconds += time.time() - _state_started
                 snippet = response.text.strip().replace("\n", " ")[:160]
                 trace.append(f"step{state.step}: 解析失败 - {turn.reason} | 原始: {snippet}")
                 continue
@@ -779,7 +816,9 @@ class AgentLoop:
                     _verify_started = time.time()
                     started = time.time()
                     report, passed = self._run_verification(changed)
-                    tool_seconds += time.time() - _verify_started
+                    # 验证单独计一笔：它是**起子进程跑测试**，优化方向
+                    # （换更快的测试、只跑相关文件）与工具那条完全不同。
+                    verify_seconds += time.time() - _verify_started
                     trace.append(
                         f"step{state.step}: 自动验证 -> {'通过' if passed else '失败'}"
                         f"（{len(changed)} 处改动，{time.time() - started:.1f}s）"
@@ -816,25 +855,31 @@ class AgentLoop:
                     )
 
             state.step_forward()
+            _state_started = time.time()
             save_state(state, checkpoint)
+            state_seconds += time.time() - _state_started
 
             if turn.done:
                 trace.append(f"step{state.step}: 完成")
                 self._archive(state, "success", trace, turn.final or "")
                 clear_state(checkpoint)
                 return LoopResult(
-                    True,
-                    turn.final or "",
-                    state,
-                    state.step,
-                    resets,
-                    trace,
-                    prompt_tokens,
-                    completion_tokens,
-                    model_calls,
-                    model_seconds,
-                    tool_seconds,
-                    tuple(item[0] for item in pushed),
+                    finished=True,
+                    final=turn.final or "",
+                    state=state,
+                    steps=state.step,
+                    resets=resets,
+                    trace=trace,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    model_calls=model_calls,
+                    model_seconds=model_seconds,
+                    tool_seconds=tool_seconds,
+                    assemble_seconds=assemble_seconds,
+                    verify_seconds=verify_seconds,
+                    state_seconds=state_seconds,
+                    supervisor_seconds=supervisor_seconds,
+                    lessons_pushed=tuple(item[0] for item in pushed),
                     environment_blocked=self.environment_blocked,
                 )
 
@@ -845,18 +890,22 @@ class AgentLoop:
             # 只说「未完成」的话，用户能做的只有原样再来一次。
             final = f"任务没做完，收手的原因：{stopped_by}"
         return LoopResult(
-            False,
-            final,
-            state,
-            state.step,
-            resets,
-            trace,
-            prompt_tokens,
-            completion_tokens,
-            model_calls,
-            model_seconds,
-            tool_seconds,
-            tuple(item[0] for item in pushed),
+            finished=False,
+            final=final,
+            state=state,
+            steps=state.step,
+            resets=resets,
+            trace=trace,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            model_calls=model_calls,
+            model_seconds=model_seconds,
+            tool_seconds=tool_seconds,
+            assemble_seconds=assemble_seconds,
+            verify_seconds=verify_seconds,
+            state_seconds=state_seconds,
+            supervisor_seconds=supervisor_seconds,
+            lessons_pushed=tuple(item[0] for item in pushed),
             environment_blocked=self.environment_blocked,
         )
 
