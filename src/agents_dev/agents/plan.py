@@ -492,7 +492,7 @@ def render_step_prompt(
     scope = "、".join(step.scope) if step.scope else "（没声明）"
     contract = f"契约（不能动的接口与必须满足的断言）：{step.contract}\n" if step.contract else ""
     return (
-        f"项目目标：{plan.goal}\n"
+        f"项目目标：{_goal_digest(plan.goal)}\n"
         f"已完成：{done}\n"
         f"涉及：{scope}\n"
         f"本次只做这一步：{step.goal}\n"
@@ -500,3 +500,20 @@ def render_step_prompt(
         f"验收标准：{step.acceptance}\n"
         "不要顺手做后面步骤的事。"
     )
+
+
+def _goal_digest(goal: str, cap: int = 90) -> str:
+    """整条目标压成第一句。
+
+    它每一轮都要随步骤提示词走一遍，而整条目标往往有一两百 token（例如
+    "这个工作区里放着 50 道编程题……每道题在它自己的目录里跑 pytest 通过"），
+    其中可执行的部分（改哪个文件、验收是什么）在这一步的契约与验收标准里
+    已经写清了。留下第一句是为了不让执行者失去"这事在整个链条里的位置"。
+    """
+    text = goal.strip()
+    for mark in ("。", "\n"):
+        cut = text.find(mark)
+        if 0 < cut:
+            text = text[:cut]
+            break
+    return text if len(text) <= cap else text[:cap] + "…"
