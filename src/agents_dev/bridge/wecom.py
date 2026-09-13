@@ -25,6 +25,7 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
+from agents_dev.bridge import credentials
 from agents_dev.bridge.channel import Incoming
 
 DEFAULT_API = "https://qyapi.weixin.qq.com"
@@ -41,14 +42,17 @@ class WeComChannel:
         corp_id: str = "",
         secret: str = "",
         agent_id: str = "",
+        root=None,
         api: str = DEFAULT_API,
         transport: httpx.BaseTransport | None = None,
         timeout: float = 20.0,
         clock=time.monotonic,
     ) -> None:
-        self.corp_id = corp_id or os.environ.get("AGENTS_DEV_WECOM_CORP_ID", "")
-        self.secret = secret or os.environ.get("AGENTS_DEV_WECOM_SECRET", "")
-        self.agent_id = agent_id or os.environ.get("AGENTS_DEV_WECOM_AGENT_ID", "")
+        self.corp_id, self.corp_id_source = _resolve(corp_id, root, credentials.WECOM_CORP_ID)
+        self.secret, self.secret_source = _resolve(secret, root, credentials.WECOM_SECRET)
+        self.agent_id, self.agent_id_source = _resolve(
+            agent_id, root, credentials.WECOM_AGENT_ID
+        )
         self._client = httpx.Client(
             base_url=api.rstrip("/"), timeout=timeout, transport=transport
         )
@@ -170,3 +174,9 @@ def _raise_for_error(response: httpx.Response, what: str) -> None:
     if response.status_code != 200 or code not in (0, None):
         detail = payload.get("errmsg") or response.text[:200]
         raise RuntimeError(f"{what} 失败（errcode={code}）：{detail}")
+
+
+def _resolve(given: str, root, names) -> tuple[str, str]:
+    if given:
+        return given, "命令行"
+    return credentials.find(root, *names)

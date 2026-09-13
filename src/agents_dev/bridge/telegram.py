@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from agents_dev.bridge import credentials
 from agents_dev.bridge.channel import Incoming
 
 DEFAULT_API = "https://api.telegram.org"
@@ -30,12 +31,17 @@ class TelegramChannel:
         self,
         token: str,
         api: str = DEFAULT_API,
+        root=None,
         proxy: str | None = None,
         transport: httpx.BaseTransport | None = None,
         timeout: float = 30.0,
         offset: int = 0,
     ) -> None:
-        self.token = token
+        self.token, self.token_source = (
+            (token, "命令行")
+            if token
+            else credentials.find(root, *credentials.TELEGRAM_TOKEN)
+        )
         self._client = httpx.Client(
             base_url=f"{api.rstrip('/')}/bot{token}",
             timeout=timeout,

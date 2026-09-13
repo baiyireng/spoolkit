@@ -17,6 +17,33 @@
 | `telegram` | 长轮询 `getUpdates`（**不需要公网入口**） | `sendMessage` | 能，只要一个 bot token（国内要自备代理） |
 | `wecom`（企业微信自建应用） | **回调推送**（需要公网 URL + 解密） | `message/send` | 发消息本机可用；收消息要先把回调接出去 |
 
+## 凭据从哪来
+
+**环境变量 → 项目根 `.env`**（后者优先不了一点：环境变量是"这次 shell 的意图"）。
+`.env` 里就写成平台给的名字，常见的几种拼写都认：
+
+```ini
+# QQ 官方机器人
+QQ_AppID=102000000
+QQ_AppSecret=xxxxxxxx
+```
+
+配置完先跑一次 **`--check`**：它把"认到没有、从哪认到的、连不连得上"直接说出来，
+不起通道、不跑 agent——
+
+```
+$ agents-dev bridge --channel qqbot --check
+工作区：D:\workSpace\agents_dev
+凭据文件：D:\workSpace\agents_dev\.env
+AppID：102***66（D:\workSpace\agents_dev\.env 里的 QQ_AppID）
+AppSecret：C73***Kj（D:\workSpace\agents_dev\.env 里的 QQ_AppSecret）
+换到了 access_token：uhp***Cw
+连不上或凭据不对：取网关地址 失败（code=11298）：接口访问源IP不在白名单
+```
+
+（上面最后一行是真实的：**QQ 机器人开放平台有"IP 白名单"**，把调用方的公网
+IP 填进那个应用的白名单里才行。凭据本身是对的——否则换不到 access_token。）
+
 ```powershell
 # 本地跑通（不需要任何外部服务）
 agents-dev bridge --channel fake --provider llamacpp --policy auto --scope "**" --user me --allow-user me

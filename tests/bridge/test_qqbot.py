@@ -108,6 +108,22 @@ def test_沙箱域名() -> None:
     assert channel._api == "https://sandbox.api.sgroup.qq.com"
 
 
+def test_凭据可以从工作区的_env_里来(tmp_path, monkeypatch) -> None:
+    """用户把 AppID/AppSecret 写进了项目根的 .env——那就该认它。"""
+    for name in ("AGENTS_DEV_QQ_APPID", "QQ_AppID", "QQ_APPID",
+                 "AGENTS_DEV_QQ_SECRET", "QQ_AppSecret", "QQ_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text(
+        "QQ_AppID=102000000\nQQ_AppSecret=secret-from-file\n", encoding="utf-8"
+    )
+
+    channel = QQBotChannel(root=tmp_path)
+
+    assert channel.app_id == "102000000"
+    assert channel.secret == "secret-from-file"
+    assert ".env" in channel.app_id_source
+
+
 # --- 事件解析 ---
 
 

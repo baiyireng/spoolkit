@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 
 from agents_dev.bridge.channel import Incoming
+from agents_dev.bridge import credentials
 from agents_dev.bridge.ws import Timeout as WebSocketTimeout
 from agents_dev.bridge.ws import WebSocket, WebSocketError
 
@@ -56,6 +57,7 @@ class QQBotChannel:
         app_id: str = "",
         secret: str = "",
         sandbox: bool = False,
+        root=None,
         token_url: str = TOKEN_URL,
         api: str = "",
         transport: httpx.BaseTransport | None = None,
@@ -63,8 +65,9 @@ class QQBotChannel:
         clock=time.monotonic,
         ws_factory=None,
     ) -> None:
-        self.app_id = app_id or os.environ.get("AGENTS_DEV_QQ_APPID", "")
-        self.secret = secret or os.environ.get("AGENTS_DEV_QQ_SECRET", "")
+        # 凭据来源要能说出来（用户可能写在 .env 里，也可能挂在环境变量上）。
+        self.app_id, self.app_id_source = _resolve(app_id, root, credentials.QQ_APP_ID)
+        self.secret, self.secret_source = _resolve(secret, root, credentials.QQ_SECRET)
         self.sandbox = sandbox
         self._token_url = token_url
         self._api = api or (SANDBOX_API if sandbox else DEFAULT_API)
@@ -303,3 +306,9 @@ def _raise_for_error(response: httpx.Response, what: str) -> None:
     if response.status_code >= 400 or code not in (0, None):
         detail = payload.get("message") or response.text[:200]
         raise RuntimeError(f"{what} 失败（code={code}）：{detail}")
+
+
+def _resolve(given: str, root, names) -> tuple[str, str]:
+    if given:
+        return given, "命令行"
+    return credentials.find(root, *names)

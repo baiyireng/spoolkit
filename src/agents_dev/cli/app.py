@@ -450,6 +450,11 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
         help="批准一个配对码然后退出（不用起通道）",
     )
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="只看凭据与连通性：认到没有、从哪认到的、能不能连上（不起通道）",
+    )
+    parser.add_argument(
         "--user", default="local", help="假通道里模拟的用户名（配合白名单用）"
     )
     parser.add_argument(
