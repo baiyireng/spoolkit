@@ -10,7 +10,7 @@ import json
 
 import httpx
 
-from agents_dev.llm.llamacpp import LlamaCppTokenCounter
+from spoolkit.llm.llamacpp import LlamaCppTokenCounter
 
 
 class _Spy:

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.agents.runtime import (
+from spoolkit.agents.runtime import (
     IMPLEMENTER,
     REVIEWER,
     ROLES,
@@ -11,12 +11,12 @@ from agents_dev.agents.runtime import (
     restrict,
     run_role,
 )
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
-from agents_dev.tools.fs import read_file_spec
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
+from spoolkit.tools.fs import read_file_spec
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _turn(final: str) -> str:
@@ -101,7 +101,7 @@ def test_裁剪工具集只保留角色允许的(tmp_path: Path) -> None:
 
 
 def test_裁剪后审查者调用写工具会被拒绝(tmp_path: Path) -> None:
-    from agents_dev.tools.types import ToolCall
+    from spoolkit.tools.types import ToolCall
 
     limited = restrict(
         _registry(tmp_path, PendingChanges(tmp_path)), REVIEWER

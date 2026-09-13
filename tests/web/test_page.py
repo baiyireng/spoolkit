@@ -1,4 +1,4 @@
-from agents_dev.web.page import HTML
+from spoolkit.web.page import HTML
 
 
 def test_页面是一个完整的HTML文档() -> None:

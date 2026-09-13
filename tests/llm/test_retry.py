@@ -1,9 +1,9 @@
 import httpx
 
-from agents_dev.llm.gemini import GeminiGateway
-from agents_dev.llm.llamacpp import LlamaCppGateway
-from agents_dev.llm.retry import chat_with_escalation
-from agents_dev.llm.types import ChatRequest, ChatResponse, Message
+from spoolkit.llm.gemini import GeminiGateway
+from spoolkit.llm.llamacpp import LlamaCppGateway
+from spoolkit.llm.retry import chat_with_escalation
+from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
 
 class _Scripted:

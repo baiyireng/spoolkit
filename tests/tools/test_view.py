@@ -7,16 +7,16 @@ run_command 在试跑副本里给新内容。实测审查者据此判定「改�
 
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project
-from agents_dev.index.tools import (
+from spoolkit.index.indexer import index_project
+from spoolkit.index.tools import (
     file_symbols_spec,
     find_callers_spec,
     find_symbol_spec,
 )
-from agents_dev.store.db import init_schema, open_db
-from agents_dev.tools.edit import PendingChanges
-from agents_dev.tools.fs import list_dir_spec, read_file_spec
-from agents_dev.tools.search import search_code_spec
+from spoolkit.store.db import init_schema, open_db
+from spoolkit.tools.edit import PendingChanges
+from spoolkit.tools.fs import list_dir_spec, read_file_spec
+from spoolkit.tools.search import search_code_spec
 
 
 def _project(tmp_path: Path) -> PendingChanges:

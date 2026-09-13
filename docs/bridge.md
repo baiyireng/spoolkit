@@ -3,7 +3,7 @@
 在手机上发一条消息 → agent 在你的工作区里跑一轮 → 把结果发回来。
 
 ```
-你（手机）→ [通道] → Bridge → AgentRunner → agents-dev run --events（工作区）
+你（手机）→ [通道] → Bridge → AgentRunner → spool run --events（工作区）
                      ↑                                  ↓
                      └──────────── 回复 ← 结局/待确认 ←──┘
 ```
@@ -32,11 +32,11 @@ QQ_AppSecret=xxxxxxxx
 不起通道、不跑 agent——
 
 ```
-$ agents-dev bridge --channel qqbot --check
-工作区：D:\workSpace\agents_dev
-凭据文件：D:\workSpace\agents_dev\.env
-AppID：102***66（D:\workSpace\agents_dev\.env 里的 QQ_AppID）
-AppSecret：C73***Kj（D:\workSpace\agents_dev\.env 里的 QQ_AppSecret）
+$ spool bridge --channel qqbot --check
+工作区：D:\workSpace\spoolkit
+凭据文件：D:\workSpace\spoolkit\.env
+AppID：102***66（D:\workSpace\spoolkit\.env 里的 QQ_AppID）
+AppSecret：C73***Kj（D:\workSpace\spoolkit\.env 里的 QQ_AppSecret）
 换到了 access_token：uhp***Cw
 连不上或凭据不对：取网关地址 失败（code=11298）：接口访问源IP不在白名单
 ```
@@ -54,7 +54,7 @@ IP 填进那个应用的白名单里才行。凭据本身是对的——否则�
 ssh -D 1080 root@<云主机>          # 本地 1080 就是一个 SOCKS5
 
 # 本机这条命令让**通道**走那条 SOCKS，agent 与工作区都还在本机
-agents-dev bridge --channel qqbot --bridge-proxy socks5://127.0.0.1:1080 --policy ask
+spool bridge --channel qqbot --bridge-proxy socks5://127.0.0.1:1080 --policy ask
 ```
 
 于是腾讯看到的是云主机的 IP（填它进白名单），本机的 agent 照常读写本地工作区。
@@ -72,22 +72,22 @@ agents-dev bridge --channel qqbot --bridge-proxy socks5://127.0.0.1:1080 --polic
 
 ```powershell
 # 本地跑通（不需要任何外部服务）
-agents-dev bridge --channel fake --provider llamacpp --policy auto --scope "**" --user me --allow-user me
+spool bridge --channel fake --provider llamacpp --policy auto --scope "**" --user me --allow-user me
 
 # 接 Telegram
 $env:AGENTS_DEV_TELEGRAM_TOKEN = "123456:ABC..."     # @BotFather 给的
-agents-dev bridge --channel telegram --allow-user 123456789 --policy auto --scope "src"
+spool bridge --channel telegram --allow-user 123456789 --policy auto --scope "src"
 
 # 接 QQ 官方机器人（QQ 机器人开放平台建的应用）
 $env:AGENTS_DEV_QQ_APPID  = "102xxxxxx"
 $env:AGENTS_DEV_QQ_SECRET = "xxxxxxxx"
-agents-dev bridge --channel qqbot --policy auto --scope "src"     # 沙箱加 --sandbox
+spool bridge --channel qqbot --policy auto --scope "src"     # 沙箱加 --sandbox
 
 # 接企业微信（自建应用）
 $env:AGENTS_DEV_WECOM_CORP_ID = "ww...."
 $env:AGENTS_DEV_WECOM_SECRET  = "..."
 $env:AGENTS_DEV_WECOM_AGENT_ID = "1000002"
-agents-dev bridge --channel wecom --allow-user zhangsan --policy ask
+spool bridge --channel wecom --allow-user zhangsan --policy ask
 ```
 
 ## 安全模型（用之前先看这一段）
@@ -95,12 +95,12 @@ agents-dev bridge --channel wecom --allow-user zhangsan --policy ask
 聊天通道等于把 agent 挂出去了，所以三件事必须同时成立：
 
 1. **默认配对，不认识的人不能用**。陌生发送者会拿到一个一次性配对码，
-   你在机器上执行 `agents-dev bridge --approve <码>` 之后他才被放行：
+   你在机器上执行 `spool bridge --approve <码>` 之后他才被放行：
 
    ```
    陌生人：把项目删了
    → 这条通道还不认识你。把这个配对码给机器的主人，他在命令行执行
-     `agents-dev bridge --approve 5R3CVG` 之后你就能用了：5R3CVG
+     `spool bridge --approve 5R3CVG` 之后你就能用了：5R3CVG
    ```
 
    三档准入由你显式选：`--access pairing`（默认）/ `allowlist`（只放行
@@ -142,7 +142,7 @@ agents-dev bridge --channel wecom --allow-user zhangsan --policy ask
 
 | 装载途径 | 用在什么情形 |
 |---|---|
-| entry point 组 `agents_dev.channels` | 正经发布出去的适配器包：`[project.entry-points."agents_dev.channels"] my="my_pkg:build"` |
+| entry point 组 `spoolkit.channels` | 正经发布出去的适配器包：`[project.entry-points."spoolkit.channels"] my="my_pkg:build"` |
 | 环境变量 `AGENTS_DEV_CHANNEL_PLUGINS=my_channel:build` | 自己写一个先用起来（个人微信/QQ 那类第三方 hook 的适配器多半是这种形态） |
 
 工厂签名是 `build(spec) -> Channel`（spec 里带着 `name` / `root` / `token` /

@@ -1,12 +1,12 @@
 from pathlib import Path
 
-from agents_dev.check.constraints import (
+from spoolkit.check.constraints import (
     Limits,
     blocking,
     check_source,
     format_violations,
 )
-from agents_dev.tools.edit import PendingChanges, write_file_spec
+from spoolkit.tools.edit import PendingChanges, write_file_spec
 
 
 def _rules(source: str, limits: Limits | None = None) -> set[str]:

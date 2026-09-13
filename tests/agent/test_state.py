@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from agents_dev.agent.state import StateDelta, TaskState, load_state, save_state
-from agents_dev.llm.tokenizer import OfflineTokenCounter
+from spoolkit.agent.state import StateDelta, TaskState, load_state, save_state
+from spoolkit.llm.tokenizer import OfflineTokenCounter
 
 
 def _state() -> TaskState:

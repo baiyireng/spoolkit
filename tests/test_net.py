@@ -1,4 +1,4 @@
-from agents_dev.net import system_proxy
+from spoolkit.net import system_proxy
 
 
 def test_优先取https代理() -> None:

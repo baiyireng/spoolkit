@@ -1,7 +1,7 @@
 """入口这一层要有：能报版本、重定向输出不崩。
 
 后者是真踩过的坑：Windows 默认编码 cp936，而输出一旦被重定向或走管道
-（`agents-dev run … > log.txt`、任何子进程捕获、Web 壳），Python 就按 locale
+（`spool run … > log.txt`、任何子进程捕获、Web 壳），Python 就按 locale
 写字节——进度块里的 `✓` 编不出来，于是
 `UnicodeEncodeError: 'gbk' codec can't encode character '\\u2713'`
 把整个运行打断。它在一次 50 题的长跑里真的发生过。
@@ -23,7 +23,7 @@ def _env_without_io_encoding() -> dict[str, str]:
 
 def test_版本号能打印() -> None:
     proc = subprocess.run(
-        [sys.executable, "-m", "agents_dev.cli.app", "--version"],
+        [sys.executable, "-m", "spoolkit.cli.app", "--version"],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -31,13 +31,13 @@ def test_版本号能打印() -> None:
         timeout=60,
     )
     assert proc.returncode == 0
-    assert "agents-dev" in proc.stdout
+    assert "spool" in proc.stdout
 
 
 def test_输出被重定向时非GBK字符不再打断运行() -> None:
     """stdout 是管道时（重定向/子进程捕获）打印 ✓ 必须成功。"""
     code = (
-        "from agents_dev.cli.app import configure_stdio;"
+        "from spoolkit.cli.app import configure_stdio;"
         "configure_stdio();"
         "print('✓ 通过')"
     )

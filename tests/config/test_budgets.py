@@ -1,11 +1,11 @@
 import json
 from pathlib import Path
 
-from agents_dev.agents.runtime import IMPLEMENTER, TaskSpec, run_role
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agents.runtime import IMPLEMENTER, TaskSpec, run_role
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _turn(final: str) -> str:

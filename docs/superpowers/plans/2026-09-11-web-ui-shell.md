@@ -32,14 +32,14 @@
 
 | 文件 | 职责 |
 |---|---|
-| `src/agents_dev/web/__init__.py` | 包说明 |
-| `src/agents_dev/web/protocol.py` | 事件类型、序列化、解析 |
-| `src/agents_dev/web/runner.py` | 子进程生命周期、读取线程、确认写入 |
-| `src/agents_dev/web/server.py` | HTTP 路由与 SSE 广播 |
-| `src/agents_dev/web/page.py` | 内嵌的单页 HTML |
-| `src/agents_dev/cli/events.py` | 内核侧的事件输出器 |
-| `src/agents_dev/cli/commands/serve.py` | `serve` 命令 |
-| `src/agents_dev/agent/loop.py` | 修改：加 `on_event` 回调 |
+| `src/spoolkit/web/__init__.py` | 包说明 |
+| `src/spoolkit/web/protocol.py` | 事件类型、序列化、解析 |
+| `src/spoolkit/web/runner.py` | 子进程生命周期、读取线程、确认写入 |
+| `src/spoolkit/web/server.py` | HTTP 路由与 SSE 广播 |
+| `src/spoolkit/web/page.py` | 内嵌的单页 HTML |
+| `src/spoolkit/cli/events.py` | 内核侧的事件输出器 |
+| `src/spoolkit/cli/commands/serve.py` | `serve` 命令 |
+| `src/spoolkit/agent/loop.py` | 修改：加 `on_event` 回调 |
 
 页面内嵌成 Python 字符串而不是外置 HTML：**跑起来只有一个东西要分发**，也避免打包漏文件。代价是编辑时没有语法高亮，可以接受。
 
@@ -48,16 +48,16 @@
 ## Task 1: 事件协议
 
 **Files:**
-- Create: `src/agents_dev/web/__init__.py`
-- Create: `src/agents_dev/web/protocol.py`
+- Create: `src/spoolkit/web/__init__.py`
+- Create: `src/spoolkit/web/protocol.py`
 - Test: `tests/web/__init__.py`, `tests/web/test_protocol.py`
 
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `agents_dev.web.protocol.Event(type: str, data: dict)`
+  - `spoolkit.web.protocol.Event(type: str, data: dict)`
     - `.to_line() -> str`
-  - `agents_dev.web.protocol.parse_line(line: str) -> Event | None`
+  - `spoolkit.web.protocol.parse_line(line: str) -> Event | None`
   - 事件类型常量：`START` `STEP` `TOOL` `DIFF` `AWAIT` `CONFIRM` `USAGE` `FINAL` `ERROR`
 
 - [ ] **Step 1: 写失败测试**
@@ -69,7 +69,7 @@
 
 ```python
 # tests/web/test_protocol.py
-from agents_dev.web.protocol import (
+from spoolkit.web.protocol import (
     AWAIT,
     DIFF,
     FINAL,
@@ -129,17 +129,17 @@ def test_type不进入data() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/web -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.web'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.web'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/web/__init__.py
+# src/spoolkit/web/__init__.py
 """Web UI 壳：用本地 HTTP 服务把命令行 agent 包起来。"""
 ```
 
 ```python
-# src/agents_dev/web/protocol.py
+# src/spoolkit/web/protocol.py
 """事件协议。
 
 子进程在 stdout 上一行吐一个 JSON 对象。非 JSON 行一律忽略——
@@ -209,7 +209,7 @@ Expected: PASS（8 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/web/ tests/web/
+git add src/spoolkit/web/ tests/web/
 git commit -m "feat: Web UI 事件协议"
 ```
 
@@ -218,7 +218,7 @@ git commit -m "feat: Web UI 事件协议"
 ## Task 2: 主循环的事件回调
 
 **Files:**
-- Modify: `src/agents_dev/agent/loop.py`
+- Modify: `src/spoolkit/agent/loop.py`
 - Test: `tests/agent/test_loop_events.py`
 
 **Interfaces:**
@@ -236,12 +236,12 @@ git commit -m "feat: Web UI 事件协议"
 import json
 from pathlib import Path
 
-from agents_dev.agent.loop import AgentLoop
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.fs import read_file_spec
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agent.loop import AgentLoop
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.fs import read_file_spec
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _turn(calls, final=None) -> str:
@@ -401,7 +401,7 @@ Expected: PASS（全部，含原有测试）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/agent/loop.py tests/agent/test_loop_events.py
+git add src/spoolkit/agent/loop.py tests/agent/test_loop_events.py
 git commit -m "feat: 主循环支持事件回调（可选，不传则行为不变）"
 ```
 
@@ -410,13 +410,13 @@ git commit -m "feat: 主循环支持事件回调（可选，不传则行为不�
 ## Task 3: `--events` 输出器
 
 **Files:**
-- Create: `src/agents_dev/cli/events.py`
+- Create: `src/spoolkit/cli/events.py`
 - Test: `tests/cli/test_events.py`
 
 **Interfaces:**
-- Consumes: `agents_dev.web.protocol.Event`
+- Consumes: `spoolkit.web.protocol.Event`
 - Produces:
-  - `agents_dev.cli.events.EventWriter(stream=None)`
+  - `spoolkit.cli.events.EventWriter(stream=None)`
     - `.emit(kind: str, **data) -> None`
     - `.handle(kind: str, data: dict) -> None`（直接作为 `on_event` 传进主循环）
 
@@ -428,8 +428,8 @@ import io
 import json
 from pathlib import Path
 
-from agents_dev.cli.events import EventWriter
-from agents_dev.web.protocol import FINAL, parse_line
+from spoolkit.cli.events import EventWriter
+from spoolkit.web.protocol import FINAL, parse_line
 
 
 def test_输出一行JSON() -> None:
@@ -478,12 +478,12 @@ def test_handle可直接作为回调() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/cli/test_events.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.cli.events'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.cli.events'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/cli/events.py
+# src/spoolkit/cli/events.py
 """内核侧的事件输出器。
 
 `--events` 模式下，stdout 上只应该有 JSON 行——不夹杂任何散文。
@@ -496,7 +496,7 @@ Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.cli.events'`
 import sys
 from typing import Any, TextIO
 
-from agents_dev.web.protocol import Event
+from spoolkit.web.protocol import Event
 
 
 class EventWriter:
@@ -522,7 +522,7 @@ Expected: PASS（5 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/cli/events.py tests/cli/test_events.py
+git add src/spoolkit/cli/events.py tests/cli/test_events.py
 git commit -m "feat: --events 模式的事件输出器"
 ```
 
@@ -531,13 +531,13 @@ git commit -m "feat: --events 模式的事件输出器"
 ## Task 4: 子进程运行器
 
 **Files:**
-- Create: `src/agents_dev/web/runner.py`
+- Create: `src/spoolkit/web/runner.py`
 - Test: `tests/web/test_runner.py`
 
 **Interfaces:**
 - Consumes: `parse_line`、`Event`
 - Produces:
-  - `agents_dev.web.runner.Runner(project_root: Path, session: str, extra_args: Sequence[str] = ())`
+  - `spoolkit.web.runner.Runner(project_root: Path, session: str, extra_args: Sequence[str] = ())`
     - `.start(goal: str) -> bool`（已有运行在跑时返回 False）
     - `.confirm(apply: bool) -> bool`（没有待确认时返回 False）
     - `.subscribe() -> queue.Queue`、`.unsubscribe(q) -> None`
@@ -554,8 +554,8 @@ import sys
 import time
 from pathlib import Path
 
-from agents_dev.web.protocol import Event
-from agents_dev.web.runner import Runner
+from spoolkit.web.protocol import Event
+from spoolkit.web.runner import Runner
 
 
 def _runner(tmp_path: Path, *extra: str) -> Runner:
@@ -565,7 +565,7 @@ def _runner(tmp_path: Path, *extra: str) -> Runner:
 def test_命令拼装包含事件模式(tmp_path: Path) -> None:
     command = _runner(tmp_path).command("看看代码")
     assert command[0] == sys.executable
-    assert "agents_dev.cli.app" in command
+    assert "spoolkit.cli.app" in command
     assert "run" in command
     assert "--events" in command
     assert "--goal" in command
@@ -625,12 +625,12 @@ def test_开始后快照记录目标(tmp_path: Path) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/web/test_runner.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.web.runner'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.web.runner'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/web/runner.py
+# src/spoolkit/web/runner.py
 """子进程运行器。
 
 一次只跑一个运行。这不是偷懒：并发要处理多个待确认队列怎么合并、
@@ -647,7 +647,7 @@ import threading
 from pathlib import Path
 from typing import Sequence
 
-from agents_dev.web.protocol import (
+from spoolkit.web.protocol import (
     AWAIT,
     ERROR,
     FINAL,
@@ -687,7 +687,7 @@ class Runner:
         return [
             sys.executable,
             "-m",
-            "agents_dev.cli.app",
+            "spoolkit.cli.app",
             "run",
             "--events",
             "--session",
@@ -819,7 +819,7 @@ Expected: PASS（全部）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/web/runner.py tests/web/test_runner.py
+git add src/spoolkit/web/runner.py tests/web/test_runner.py
 git commit -m "feat: Web UI 的子进程运行器"
 ```
 
@@ -828,14 +828,14 @@ git commit -m "feat: Web UI 的子进程运行器"
 ## Task 5: HTTP 服务与 SSE
 
 **Files:**
-- Create: `src/agents_dev/web/server.py`
+- Create: `src/spoolkit/web/server.py`
 - Test: `tests/web/test_server.py`
 
 **Interfaces:**
 - Consumes: `Runner`、`Event`、`page.HTML`
 - Produces:
-  - `agents_dev.web.server.build_server(runner, host, port) -> ThreadingHTTPServer`
-  - `agents_dev.web.server.serve(project_root, host, port, session, extra_args) -> None`
+  - `spoolkit.web.server.build_server(runner, host, port) -> ThreadingHTTPServer`
+  - `spoolkit.web.server.serve(project_root, host, port, session, extra_args) -> None`
 
 **两个实现要点，写代码时不能踩**：必须用 `ThreadingHTTPServer`（默认的单线程服务会让一个 SSE 连接把整个服务堵死）；SSE 写完必须 flush（否则事件攒在缓冲里，界面看起来像卡住）。
 
@@ -851,8 +851,8 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.web.runner import Runner
-from agents_dev.web.server import build_server
+from spoolkit.web.runner import Runner
+from spoolkit.web.server import build_server
 
 
 @pytest.fixture
@@ -934,12 +934,12 @@ def test_事件流首帧是状态快照(server: str) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/web/test_server.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.web.server'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.web.server'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/web/server.py
+# src/spoolkit/web/server.py
 """HTTP 服务与 SSE 广播。
 
 必须用 ThreadingHTTPServer：默认的单线程服务会让一个 SSE 长连接
@@ -955,8 +955,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Sequence
 
-from agents_dev.web.page import HTML
-from agents_dev.web.runner import Runner
+from spoolkit.web.page import HTML
+from spoolkit.web.runner import Runner
 
 KEEPALIVE_SECONDS = 15
 MAX_BODY = 64 * 1024
@@ -1099,7 +1099,7 @@ Expected: PASS（全部）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/web/server.py tests/web/test_server.py
+git add src/spoolkit/web/server.py tests/web/test_server.py
 git commit -m "feat: Web UI 的 HTTP 服务与 SSE 广播"
 ```
 
@@ -1108,12 +1108,12 @@ git commit -m "feat: Web UI 的 HTTP 服务与 SSE 广播"
 ## Task 6: 前端页面
 
 **Files:**
-- Create: `src/agents_dev/web/page.py`
+- Create: `src/spoolkit/web/page.py`
 - Test: `tests/web/test_page.py`
 
 **Interfaces:**
 - Consumes: 无
-- Produces: `agents_dev.web.page.HTML: str`
+- Produces: `spoolkit.web.page.HTML: str`
 
 布局是选定的 B：左右分栏，**右侧待确认面板固定**，不随输出滚走。
 
@@ -1123,7 +1123,7 @@ git commit -m "feat: Web UI 的 HTTP 服务与 SSE 广播"
 
 ```python
 # tests/web/test_page.py
-from agents_dev.web.page import HTML
+from spoolkit.web.page import HTML
 
 
 def test_页面是一个完整的HTML文档() -> None:
@@ -1163,12 +1163,12 @@ def test_页面没有外链资源() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/web/test_page.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.web.page'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.web.page'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/web/page.py
+# src/spoolkit/web/page.py
 """内嵌的单页 HTML。
 
 做成 Python 字符串而不是外置文件：跑起来只有一个东西要分发，也避免
@@ -1183,7 +1183,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agents-dev</title>
+<title>spool</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -1355,7 +1355,7 @@ Expected: PASS（6 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/web/page.py tests/web/test_page.py
+git add src/spoolkit/web/page.py tests/web/test_page.py
 git commit -m "feat: Web UI 的页面（左右分栏，右栏固定待确认面板）"
 ```
 
@@ -1364,18 +1364,18 @@ git commit -m "feat: Web UI 的页面（左右分栏，右栏固定待确认面�
 ## Task 7: CLI 接线
 
 **Files:**
-- Modify: `src/agents_dev/cli/commands/run.py`
-- Create: `src/agents_dev/cli/commands/serve.py`
-- Modify: `src/agents_dev/cli/app.py`
-- Modify: `src/agents_dev/cli/events.py`
+- Modify: `src/spoolkit/cli/commands/run.py`
+- Create: `src/spoolkit/cli/commands/serve.py`
+- Modify: `src/spoolkit/cli/app.py`
+- Modify: `src/spoolkit/cli/events.py`
 - Test: `tests/cli/test_events_mode.py`
 
 **Interfaces:**
 - Consumes: `EventWriter`、`serve`、`settle`
 - Produces:
   - `run --events` 时，stdout 上只有 JSON 行
-  - `agents_dev serve [--host] [--port] [--session]`
-  - `agents_dev.cli.events.settle_with_events(pending, policy, scope, baseline_path, writer, reader) -> str`
+  - `spoolkit serve [--host] [--port] [--session]`
+  - `spoolkit.cli.events.settle_with_events(pending, policy, scope, baseline_path, writer, reader) -> str`
 
 **events 模式下的确认**：策略是 `auto` 且改动在范围内时，仍然自动落盘，**不发 `await`**——UI 只看到 diff 和 `confirm`，没有按钮。其余情况发 `await` 并**从 stdin 读一行**。这跟终端模式的语义完全一致，只是换了输入输出通道。
 
@@ -1387,10 +1387,10 @@ import io
 import json
 from pathlib import Path
 
-from agents_dev.cli.events import EventWriter, settle_with_events
-from agents_dev.policy import ASK, AUTO
-from agents_dev.tools.edit import PendingChanges, write_file_spec
-from agents_dev.web.protocol import AWAIT, CONFIRM, DIFF
+from spoolkit.cli.events import EventWriter, settle_with_events
+from spoolkit.policy import ASK, AUTO
+from spoolkit.tools.edit import PendingChanges, write_file_spec
+from spoolkit.web.protocol import AWAIT, CONFIRM, DIFF
 
 
 def _stage(tmp_path: Path, path: str = "src/a.py") -> PendingChanges:
@@ -1484,11 +1484,11 @@ CONFIRM = "confirm"
 from pathlib import Path
 from typing import Callable, Sequence
 
-from agents_dev.agents.plan import out_of_scope
-from agents_dev.cli.approval import apply_with_audit
-from agents_dev.policy import AUTO
-from agents_dev.tools.edit import PendingChanges
-from agents_dev.web.protocol import AWAIT, CONFIRM, DIFF
+from spoolkit.agents.plan import out_of_scope
+from spoolkit.cli.approval import apply_with_audit
+from spoolkit.policy import AUTO
+from spoolkit.tools.edit import PendingChanges
+from spoolkit.web.protocol import AWAIT, CONFIRM, DIFF
 
 
 def settle_with_events(
@@ -1524,7 +1524,7 @@ def settle_with_events(
     writer.emit(CONFIRM, applied=apply, count=len(changes))
     if apply:
         if baseline_path is not None:
-            from agents_dev.tools.edit import save_baseline
+            from spoolkit.tools.edit import save_baseline
 
             save_baseline(baseline_path, pending.baseline())
         pending.apply()
@@ -1541,7 +1541,7 @@ def settle_with_events(
 import argparse
 from pathlib import Path
 
-from agents_dev.web.server import serve
+from spoolkit.web.server import serve
 
 
 def serve_command(args: argparse.Namespace) -> int:
@@ -1680,8 +1680,8 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
 导入区补上：
 
 ```python
-from agents_dev.cli.events import EventWriter, settle_with_events
-from agents_dev.web.protocol import FINAL, START, USAGE
+from spoolkit.cli.events import EventWriter, settle_with_events
+from spoolkit.web.protocol import FINAL, START, USAGE
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
@@ -1692,7 +1692,7 @@ Expected: PASS（全部）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/cli/ src/agents_dev/web/protocol.py tests/cli/test_events_mode.py
+git add src/spoolkit/cli/ src/spoolkit/web/protocol.py tests/cli/test_events_mode.py
 git commit -m "feat: --events 模式与 serve 命令接线"
 ```
 
@@ -1703,7 +1703,7 @@ git commit -m "feat: --events 模式与 serve 命令接线"
 **Files:**
 - Test: `tests/web/test_failure_paths.py`
 - Create: `tests/web/fake_agent.py`
-- Modify: `src/agents_dev/web/runner.py`（仅在测试暴露问题时改）
+- Modify: `src/spoolkit/web/runner.py`（仅在测试暴露问题时改）
 
 **Interfaces:**
 - Consumes: `Runner`、`build_server`
@@ -1744,8 +1744,8 @@ import sys
 import time
 from pathlib import Path
 
-from agents_dev.web.protocol import FINAL
-from agents_dev.web.runner import Runner
+from spoolkit.web.protocol import FINAL
+from spoolkit.web.runner import Runner
 
 FAKE = Path(__file__).resolve().parent / "fake_agent.py"
 
@@ -1868,13 +1868,13 @@ Expected: PASS。若有失败，先判断是测试写错还是实现缺行为，
 Run: `.venv\Scripts\python.exe -m pytest -q`
 Expected: PASS
 
-Run: `.venv\Scripts\python.exe -m agents_dev.cli.app bench --provider gemini --root .`
+Run: `.venv\Scripts\python.exe -m spoolkit.cli.app bench --provider gemini --root .`
 Expected: 验收通过 10/10（这部分改动理论上不碰内核行为，若回归集掉了，说明事件回调那一步动了不该动的东西）
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add tests/web/test_failure_paths.py src/agents_dev/web/
+git add tests/web/test_failure_paths.py src/spoolkit/web/
 git commit -m "test: Web UI 的错误路径覆盖"
 ```
 
@@ -1884,7 +1884,7 @@ git commit -m "test: Web UI 的错误路径覆盖"
 
 1. `pytest` 全绿，原有 572 个测试不回归。
 2. 回归集仍然 10/10——这条是防止事件回调改动内核行为的守卫。
-3. `agents-dev serve` 起来后，浏览器里能完整跑通：发任务 → 看实时输出 → 看到 diff → 点应用或拒绝 → 看到最终结果。
+3. `spool serve` 起来后，浏览器里能完整跑通：发任务 → 看实时输出 → 看到 diff → 点应用或拒绝 → 看到最终结果。
 4. 四种错误路径都有测试或人工验证记录。
 5. 不新增任何依赖。
 

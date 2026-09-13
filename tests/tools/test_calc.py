@@ -6,7 +6,7 @@
 
 import pytest
 
-from agents_dev.tools.calc import CalcError, calc_spec, evaluate
+from spoolkit.tools.calc import CalcError, calc_spec, evaluate
 
 
 def test_基本算术() -> None:

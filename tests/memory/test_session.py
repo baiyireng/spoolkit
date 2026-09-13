@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from agents_dev.agent.state import TaskState
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.memory.hot import write_hot
-from agents_dev.memory.session import MemorySession
-from agents_dev.memory.store import add_memory, init_memory_schema
-from agents_dev.store.db import open_db
+from spoolkit.agent.state import TaskState
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.memory.hot import write_hot
+from spoolkit.memory.session import MemorySession
+from spoolkit.memory.store import add_memory, init_memory_schema
+from spoolkit.store.db import open_db
 
 
 def _session(tmp_path: Path, window: int = 8000) -> MemorySession:

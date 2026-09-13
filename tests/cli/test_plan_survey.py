@@ -13,9 +13,9 @@ import argparse
 import json
 from pathlib import Path
 
-from agents_dev.cli.commands.plan import _survey, autonomous
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
+from spoolkit.cli.commands.plan import _survey, autonomous
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
 
 
 def _plan(goal: str) -> str:
@@ -110,8 +110,8 @@ def test_拆解要问清这一步谁来做() -> None:
     不写「谁来做」这一维，harness 就等于替所有步骤决定「都自己做」——
     派发的决定权与**独立审查**就都丢了。实测那条路里 `dispatch` 用了 0 次。
     """
-    from agents_dev.agents.plan import SELF, SUBAGENT, parse_plan
-    from agents_dev.context import templates as T
+    from spoolkit.agents.plan import SELF, SUBAGENT, parse_plan
+    from spoolkit.context import templates as T
 
     assert "executor" in T.DECOMPOSE
     plan = parse_plan(

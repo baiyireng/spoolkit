@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from agents_dev.bench import (
+from spoolkit.bench import (
     Task,
     TaskResult,
     load_tasks,
@@ -10,7 +10,7 @@ from agents_dev.bench import (
     run_task,
     verify,
 )
-from agents_dev.bench import DEFAULT_BENCH_ROOT
+from spoolkit.bench import DEFAULT_BENCH_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BENCH_ROOT = REPO_ROOT / DEFAULT_BENCH_ROOT

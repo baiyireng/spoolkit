@@ -4,13 +4,13 @@ from pathlib import Path
 import httpx
 import pytest
 
-from agents_dev.llm.gemini import (
+from spoolkit.llm.gemini import (
     GeminiError,
     GeminiGateway,
     load_env_file,
     to_gemini_schema,
 )
-from agents_dev.llm.types import ChatRequest, Message
+from spoolkit.llm.types import ChatRequest, Message
 
 API_KEY = "test-key-not-real"
 

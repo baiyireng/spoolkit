@@ -1,10 +1,10 @@
 import json
 
-from agents_dev.agent.state import TaskState
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.llm.types import ChatResponse
-from agents_dev.memory.distill import MAX_SPLIT_DEPTH, distill, segments_of
+from spoolkit.agent.state import TaskState
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.llm.types import ChatResponse
+from spoolkit.memory.distill import MAX_SPLIT_DEPTH, distill, segments_of
 
 
 def _model(script: list[str]) -> FakeModel:
@@ -168,7 +168,7 @@ def test_截断时优先分治而不是缩减要求() -> None:
 
 
 def test_分治结果会去重() -> None:
-    from agents_dev.memory.distill import _merge
+    from spoolkit.memory.distill import _merge
 
     merged = _merge(
         [
@@ -185,7 +185,7 @@ def test_分治结果会去重() -> None:
 
 
 def test_合并结果受上限约束() -> None:
-    from agents_dev.memory.distill import _merge
+    from spoolkit.memory.distill import _merge
 
     merged = _merge([[("fact", f"第{i}条", "") for i in range(5)]], 2)
     assert len(merged) == 2

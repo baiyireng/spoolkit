@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.cli import runtime
-from agents_dev.cli.runtime import LoopWiring, assemble_loop
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.edit import PendingChanges
-from agents_dev.tools.types import ToolCall
+from spoolkit.cli import runtime
+from spoolkit.cli.runtime import LoopWiring, assemble_loop
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.edit import PendingChanges
+from spoolkit.tools.types import ToolCall
 
 STUB = '''
 import json, sys

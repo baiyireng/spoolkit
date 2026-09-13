@@ -1,5 +1,5 @@
 [project]
-name = "agents-dev"
+name = "spoolkit"
 version = "0.0.1"
 description = "本地小模型编程特化 Agent：短上下文 + 外置记忆 + 代码索引"
 readme = "README.md"
@@ -19,6 +19,12 @@ dependencies = [
     "httpx>=0.27",
 ]
 
+[project.urls]
+Homepage = "https://github.com/baiyireng/spoolkit"
+Repository = "https://github.com/baiyireng/spoolkit"
+Issues = "https://github.com/baiyireng/spoolkit/issues"
+Documentation = "https://github.com/baiyireng/spoolkit/tree/main/docs"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
@@ -28,14 +34,18 @@ dev = [
 socks = ["httpx[socks]>=0.27"]
 
 [project.scripts]
-agents-dev = "agents_dev.cli.app:main"
+# `spool` 是手敲的那一个；`spoolkit` 是同义的稳妥写法（脚本里、文档里都行）；
+# `agents-dev` 是改名前的旧名，留着免得别人已写好的脚本一朝失效。
+spool = "spoolkit.cli.app:main"
+spoolkit = "spoolkit.cli.app:main"
+agents-dev = "spoolkit.cli.app:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agents_dev"]
+packages = ["src/spoolkit"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

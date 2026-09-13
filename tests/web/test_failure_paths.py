@@ -9,8 +9,8 @@ import sys
 import time
 from pathlib import Path
 
-from agents_dev.web.protocol import FINAL
-from agents_dev.web.runner import Runner
+from spoolkit.web.protocol import FINAL
+from spoolkit.web.runner import Runner
 
 FAKE = Path(__file__).resolve().parent / "fake_agent.py"
 

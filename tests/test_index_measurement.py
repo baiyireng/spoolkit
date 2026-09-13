@@ -2,10 +2,10 @@
 
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project
-from agents_dev.index.repo_map import render_repo_map
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.index.indexer import index_project
+from spoolkit.index.repo_map import render_repo_map
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.store.db import init_schema, open_db
 
 
 def test_地图体积远小于全部文件正文(tmp_path: Path) -> None:

@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from agents_dev.bridge.ws import OP_TEXT, Timeout, WebSocket, encode_frame
+from spoolkit.bridge.ws import OP_TEXT, Timeout, WebSocket, encode_frame
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 

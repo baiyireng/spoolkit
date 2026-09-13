@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from agents_dev.cli.app import main
-from agents_dev.memory.store import init_memory_schema, record_session
-from agents_dev.store.db import open_db
+from spoolkit.cli.app import main
+from spoolkit.memory.store import init_memory_schema, record_session
+from spoolkit.store.db import open_db
 
 
 def _seed(tmp_path: Path, *names: str) -> None:

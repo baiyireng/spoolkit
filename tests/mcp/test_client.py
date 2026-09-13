@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.mcp.client import McpClient, McpError, register_mcp_tools
-from agents_dev.settings import McpServer, load_mcp_servers
-from agents_dev.tools.registry import ToolRegistry
-from agents_dev.tools.types import ToolCall
+from spoolkit.mcp.client import McpClient, McpError, register_mcp_tools
+from spoolkit.settings import McpServer, load_mcp_servers
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.types import ToolCall
 
 STUB = '''
 import json, sys

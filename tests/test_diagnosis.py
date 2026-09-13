@@ -13,17 +13,17 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev import diagnosis
-from agents_dev.cli.commands.diagnose import diagnose_command
-from agents_dev.cli.commands.run import _maybe_file_diagnosis
-from agents_dev.agent.loop import AgentLoop, LoopResult
-from agents_dev.agent.state import TaskState
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.registry import ToolRegistry
-from agents_dev.tools.diagnosis import read_diagnosis_spec, request_diagnosis_spec
-from agents_dev.tools.fs import read_file_spec
+from spoolkit import diagnosis
+from spoolkit.cli.commands.diagnose import diagnose_command
+from spoolkit.cli.commands.run import _maybe_file_diagnosis
+from spoolkit.agent.loop import AgentLoop, LoopResult
+from spoolkit.agent.state import TaskState
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.diagnosis import read_diagnosis_spec, request_diagnosis_spec
+from spoolkit.tools.fs import read_file_spec
 
 
 @pytest.fixture
@@ -310,7 +310,7 @@ def test_事件模式下登记也能走通(tmp_path: Path, key_outside: Path) ->
     排查时看到的是一条 traceback 加一条凭空出现的请求。"""
     import io
 
-    from agents_dev.cli.events import EventWriter
+    from spoolkit.cli.events import EventWriter
 
     root = _root(tmp_path)
     buffer = io.StringIO()

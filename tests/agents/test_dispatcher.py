@@ -3,13 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.agents.dispatcher import plan_dispatch, run_delegated
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.edit import PendingChanges, write_file_spec
-from agents_dev.tools.fs import read_file_spec
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agents.dispatcher import plan_dispatch, run_delegated
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.edit import PendingChanges, write_file_spec
+from spoolkit.tools.fs import read_file_spec
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _turn(final: str) -> str:
@@ -282,7 +282,7 @@ def test_子智能体拿到自动验证(tmp_path: Path) -> None:
 
     def verify(changed=()):
         seen.append(1)
-        from agents_dev.tools.types import ToolResult
+        from spoolkit.tools.types import ToolResult
 
         return ToolResult(ok=True, content="通过")
 
@@ -347,7 +347,7 @@ def test_子角色不覆盖主循环的检查点(tmp_path: Path) -> None:
     实测：长任务里派发一次，主循环的检查点就变成了子智能体的状态——
     崩溃或续跑时读到的会是别人的进度。
     """
-    from agents_dev.agents.runtime import IMPLEMENTER, TaskSpec, run_role
+    from spoolkit.agents.runtime import IMPLEMENTER, TaskSpec, run_role
 
     checkpoint = tmp_path / ".agent" / "tasks" / "task.json"
     checkpoint.parent.mkdir(parents=True)

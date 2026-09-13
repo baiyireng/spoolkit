@@ -7,10 +7,10 @@
 
 from pathlib import Path
 
-from agents_dev.agent.loop import build_workflow
-from agents_dev.tools.fs import list_dir_spec, read_file_spec
-from agents_dev.tools.registry import ToolRegistry
-from agents_dev.tools.search import search_code_spec
+from spoolkit.agent.loop import build_workflow
+from spoolkit.tools.fs import list_dir_spec, read_file_spec
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.search import search_code_spec
 
 
 def _two_dirs(tmp_path: Path) -> tuple[Path, Path]:
@@ -76,7 +76,7 @@ def test_授权之外的目录仍然读不到(tmp_path: Path) -> None:
 
 def test_写入仍然只在工作区内(tmp_path: Path) -> None:
     """只放开读——外面的目录不该能被写。"""
-    from agents_dev.tools.edit import PendingChanges, write_file_spec
+    from spoolkit.tools.edit import PendingChanges, write_file_spec
 
     project, outside = _two_dirs(tmp_path)
     pending = PendingChanges(project)

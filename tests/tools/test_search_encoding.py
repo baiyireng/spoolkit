@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents_dev.tools.search import search_code_spec
+from spoolkit.tools.search import search_code_spec
 
 
 def test_含非GBK字符的文件也能被搜索(tmp_path: Path) -> None:

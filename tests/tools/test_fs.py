@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents_dev.tools.fs import list_dir_spec, read_file_spec
+from spoolkit.tools.fs import list_dir_spec, read_file_spec
 
 
 def test_读取整个文件(tmp_path: Path) -> None:

@@ -8,13 +8,13 @@
 import json
 from pathlib import Path
 
-from agents_dev.agent.loop import REPEAT_BLOCK_AT, AgentLoop, call_signature
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.fs import list_dir_spec, read_file_spec
-from agents_dev.tools.registry import ToolRegistry
-from agents_dev.tools.types import ToolCall
+from spoolkit.agent.loop import REPEAT_BLOCK_AT, AgentLoop, call_signature
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.fs import list_dir_spec, read_file_spec
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.types import ToolCall
 
 
 def _turn(thought: str, calls=None, final=None) -> str:

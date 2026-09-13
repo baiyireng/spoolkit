@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents_dev.policy import (
+from spoolkit.policy import (
     ASK,
     AUTO,
     DEFAULT_POLICY,

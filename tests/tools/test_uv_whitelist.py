@@ -1,4 +1,4 @@
-from agents_dev.tools.exec import validate_command
+from spoolkit.tools.exec import validate_command
 
 
 def test_允许uv_add合法包名() -> None:

@@ -80,11 +80,11 @@
 浏览器
   │  HTTP + SSE
   ▼
-agents-dev serve（标准库 http.server，ThreadingHTTPServer）
+spool serve（标准库 http.server，ThreadingHTTPServer）
   │
   │  POST /run 起子进程；写 y/n 到 stdin
   ▼
-agents-dev run --events（既有 CLI + 事件输出器）
+spool run --events（既有 CLI + 事件输出器）
   │
   ▼
 Agent 内核（一行不改）
@@ -189,12 +189,12 @@ Agent 内核（一行不改）
 
 | 文件 | 职责 |
 |---|---|
-| `src/agents_dev/cli/events.py` | 内核侧的事件输出器（`--events` 用） |
-| `src/agents_dev/web/server.py` | HTTP 服务、路由、SSE 广播 |
-| `src/agents_dev/web/runner.py` | 子进程生命周期与确认写入 |
-| `src/agents_dev/web/protocol.py` | 事件解析与序列化（刻意不叫 events，避免与内核侧同名） |
-| `src/agents_dev/web/page.py` | 内嵌的单页 HTML（字符串常量） |
-| `src/agents_dev/cli/commands/serve.py` | `serve` 命令 |
+| `src/spoolkit/cli/events.py` | 内核侧的事件输出器（`--events` 用） |
+| `src/spoolkit/web/server.py` | HTTP 服务、路由、SSE 广播 |
+| `src/spoolkit/web/runner.py` | 子进程生命周期与确认写入 |
+| `src/spoolkit/web/protocol.py` | 事件解析与序列化（刻意不叫 events，避免与内核侧同名） |
+| `src/spoolkit/web/page.py` | 内嵌的单页 HTML（字符串常量） |
+| `src/spoolkit/cli/commands/serve.py` | `serve` 命令 |
 
 页面内嵌成 Python 字符串，而不是外置 HTML 文件：**这样跑起来只有一个东西要分发**，也避免打包时漏文件。代价是编辑时没有语法高亮，可以接受。
 

@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project
-from agents_dev.index.repo_map import render_neighborhood
-from agents_dev.index.tools import find_callers_spec
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.index.indexer import index_project
+from spoolkit.index.repo_map import render_neighborhood
+from spoolkit.index.tools import find_callers_spec
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.store.db import init_schema, open_db
 
 
 def _project(tmp_path: Path, files: dict[str, str]):

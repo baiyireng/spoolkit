@@ -1,15 +1,15 @@
 from pathlib import Path
 
-from agents_dev.index.graph import (
+from spoolkit.index.graph import (
     callers,
     callees,
     impact,
     resolve_refs,
     unresolved_count,
 )
-from agents_dev.index.indexer import index_project
-from agents_dev.index.refs import extract_refs
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.index.indexer import index_project
+from spoolkit.index.refs import extract_refs
+from spoolkit.store.db import init_schema, open_db
 
 
 def _project(tmp_path: Path, files: dict[str, str]):
@@ -42,7 +42,7 @@ def test_提取同文件函数调用() -> None:
 
 
 def Ref_of(src: str, dst: str):  # noqa: N802 - 测试辅助，保持可读
-    from agents_dev.index.refs import Ref
+    from spoolkit.index.refs import Ref
 
     return Ref(src, dst, "call")
 

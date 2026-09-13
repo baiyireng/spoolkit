@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev import limits
-from agents_dev.config import Config
-from agents_dev.limits import CAPABILITY, SAFETY
+from spoolkit import limits
+from spoolkit.config import Config
+from spoolkit.limits import CAPABILITY, SAFETY
 
 
 def test_默认值来自登记表() -> None:
@@ -69,7 +69,7 @@ def test_预算比例也走覆盖() -> None:
 
     默认值按本机 27B + 8K 窗口实测，换个模型或换个窗口就不该照搬。
     """
-    from agents_dev.context.budget import Budget
+    from spoolkit.context.budget import Budget
 
     plain = Budget(8192)
     wide = Budget(8192, overrides={"soft_trigger_ratio": 0.5, "code_ratio": 0.5})
@@ -84,8 +84,8 @@ def test_热记忆的占比只有一个出处() -> None:
     装配层（budget.quota("hot_memory")）和裁剪层（hot_budget）说的是同一件事；
     只搬一处的话，`limits --set hot_memory_ratio=0.2` 会改一半、留一半。
     """
-    from agents_dev.context.budget import Budget
-    from agents_dev.memory.hot import hot_budget
+    from spoolkit.context.budget import Budget
+    from spoolkit.memory.hot import hot_budget
 
     overrides = {"hot_memory_ratio": 0.2}
     assert hot_budget(8192, overrides=overrides) == int(
@@ -106,7 +106,7 @@ def test_表里列的每一项都真的接上了() -> None:
     """
     sources = [
         path
-        for path in Path("src/agents_dev").rglob("*.py")
+        for path in Path("src/spoolkit").rglob("*.py")
         if path.name != "limits.py"
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in sources)

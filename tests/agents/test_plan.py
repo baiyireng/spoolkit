@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from agents_dev.agents.plan import (
+from spoolkit.agents.plan import (
     DONE,
     FAILED,
     PENDING,
@@ -15,9 +15,9 @@ from agents_dev.agents.plan import (
     save_plan,
     uncovered,
 )
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.llm.types import ChatResponse
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.llm.types import ChatResponse
 
 
 def _gateway(script: list[str]) -> FakeModel:
@@ -217,7 +217,7 @@ def test_步骤数只受limit约束不受输出预算约束() -> None:
 
 
 def test_窗口小就少排几步():
-    from agents_dev.agents.plan import _batch_size
+    from spoolkit.agents.plan import _batch_size
 
     # 不知道窗口：只看预算
     assert _batch_size(3072, "目标", "", "（无）", None, 50) == 21

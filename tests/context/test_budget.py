@@ -1,5 +1,5 @@
-from agents_dev.context.budget import OUTPUT_RESERVE_RATIO, Budget
-from agents_dev.context.sections import Section
+from spoolkit.context.budget import OUTPUT_RESERVE_RATIO, Budget
+from spoolkit.context.sections import Section
 
 
 def test_输出预留被扣除() -> None:

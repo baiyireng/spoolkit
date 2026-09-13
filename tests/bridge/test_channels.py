@@ -9,8 +9,8 @@ import json
 import httpx
 import pytest
 
-from agents_dev.bridge.telegram import TelegramChannel
-from agents_dev.bridge.wecom import WeComChannel, parse_callback
+from spoolkit.bridge.telegram import TelegramChannel
+from spoolkit.bridge.wecom import WeComChannel, parse_callback
 
 
 # --- Telegram ---

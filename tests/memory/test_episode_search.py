@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.memory.session import MemorySession
-from agents_dev.memory.store import add_episode, init_memory_schema, search_episodes
-from agents_dev.store.db import open_db
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.memory.session import MemorySession
+from spoolkit.memory.store import add_episode, init_memory_schema, search_episodes
+from spoolkit.store.db import open_db
 
 
 def _conn(tmp_path: Path):
@@ -60,7 +60,7 @@ def test_数量受上限约束(tmp_path: Path) -> None:
 
 
 def test_召回合并记忆与事件(tmp_path: Path) -> None:
-    from agents_dev.memory.store import add_memory
+    from spoolkit.memory.store import add_memory
 
     conn = _conn(tmp_path)
     add_memory(conn, kind="failure", text="整文件重解析太慢", source="ep#3")

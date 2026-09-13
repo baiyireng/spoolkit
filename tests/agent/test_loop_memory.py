@@ -1,15 +1,15 @@
 import json
 from pathlib import Path
 
-from agents_dev.agent.loop import AgentLoop
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.memory.hot import write_hot
-from agents_dev.memory.session import MemorySession
-from agents_dev.memory.store import init_memory_schema
-from agents_dev.store.db import open_db
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agent.loop import AgentLoop
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.memory.hot import write_hot
+from spoolkit.memory.session import MemorySession
+from spoolkit.memory.store import init_memory_schema
+from spoolkit.store.db import open_db
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _turn(final: str, done: bool = True) -> str:

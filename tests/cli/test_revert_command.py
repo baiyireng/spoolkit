@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from agents_dev.cli.app import main
-from agents_dev.tools.edit import PendingChanges, save_baseline, write_file_spec
+from spoolkit.cli.app import main
+from spoolkit.tools.edit import PendingChanges, save_baseline, write_file_spec
 
 
 def _stage(tmp_path: Path) -> None:

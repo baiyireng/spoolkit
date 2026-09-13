@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from agents_dev.agent.state import TaskState
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.memory.archive import archive_task
-from agents_dev.memory.hot import read_hot, write_hot
-from agents_dev.memory.store import init_memory_schema, list_memories
-from agents_dev.store.db import open_db
+from spoolkit.agent.state import TaskState
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.memory.archive import archive_task
+from spoolkit.memory.hot import read_hot, write_hot
+from spoolkit.memory.store import init_memory_schema, list_memories
+from spoolkit.store.db import open_db
 
 
 def _conn(tmp_path: Path):
@@ -109,7 +109,7 @@ def test_超出预算的条目下沉到冷记忆(tmp_path: Path) -> None:
 
 
 def test_教训被路由到教训库而不是热记忆文件(tmp_path: Path) -> None:
-    from agents_dev.memory.lessons import match_lessons
+    from spoolkit.memory.lessons import match_lessons
 
     conn = _conn(tmp_path)
     archive_task(
@@ -129,7 +129,7 @@ def test_教训被路由到教训库而不是热记忆文件(tmp_path: Path) -> 
 
 
 def test_教训保留来源便于回溯(tmp_path: Path) -> None:
-    from agents_dev.memory.lessons import match_lessons
+    from spoolkit.memory.lessons import match_lessons
 
     conn = _conn(tmp_path)
     archive_task(

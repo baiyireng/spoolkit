@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from agents_dev.tools.edit import PendingChanges, replace_lines_spec
-from agents_dev.tools.exec import run_command_spec
-from agents_dev.tools.trial import copy_project, trial_workspace
+from spoolkit.tools.edit import PendingChanges, replace_lines_spec
+from spoolkit.tools.exec import run_command_spec
+from spoolkit.tools.trial import copy_project, trial_workspace
 
 
 def _project(tmp_path: Path) -> None:

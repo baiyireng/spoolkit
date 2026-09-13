@@ -7,13 +7,13 @@
 
 from pathlib import Path
 
-from agents_dev.tools.edit import (
+from spoolkit.tools.edit import (
     WHOLE_FILE_LINE_LIMIT,
     PendingChanges,
     is_small_project,
     register_edit_tools,
 )
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _registry(tmp_path: Path) -> ToolRegistry:

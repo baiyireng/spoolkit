@@ -24,28 +24,28 @@
 
 | 文件 | 职责 |
 |---|---|
-| `src/agents_dev/store/db.py` | SQLite 连接与 schema |
-| `src/agents_dev/index/symbols.py` | `Symbol` 类型、提取器接口、`ast` 实现 |
-| `src/agents_dev/index/indexer.py` | 全量/增量建索引，清理已删文件 |
-| `src/agents_dev/index/repo_map.py` | L0 / L1 / L2 三层渲染 |
-| `src/agents_dev/index/rank.py` | 相关性排序与自动预取 |
-| `src/agents_dev/index/tools.py` | 索引能力包装成工具 |
-| `src/agents_dev/agent/loop.py` | 主循环接入预取（修改） |
+| `src/spoolkit/store/db.py` | SQLite 连接与 schema |
+| `src/spoolkit/index/symbols.py` | `Symbol` 类型、提取器接口、`ast` 实现 |
+| `src/spoolkit/index/indexer.py` | 全量/增量建索引，清理已删文件 |
+| `src/spoolkit/index/repo_map.py` | L0 / L1 / L2 三层渲染 |
+| `src/spoolkit/index/rank.py` | 相关性排序与自动预取 |
+| `src/spoolkit/index/tools.py` | 索引能力包装成工具 |
+| `src/spoolkit/agent/loop.py` | 主循环接入预取（修改） |
 
 ---
 
 ## Task 1: 存储层
 
 **Files:**
-- Create: `src/agents_dev/store/db.py`
+- Create: `src/spoolkit/store/db.py`
 - Test: `tests/store/__init__.py`, `tests/store/test_db.py`
 
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `agents_dev.store.db.SCHEMA: str`
-  - `agents_dev.store.db.open_db(path: Path) -> sqlite3.Connection`
-  - `agents_dev.store.db.init_schema(conn) -> None`
+  - `spoolkit.store.db.SCHEMA: str`
+  - `spoolkit.store.db.open_db(path: Path) -> sqlite3.Connection`
+  - `spoolkit.store.db.init_schema(conn) -> None`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -58,7 +58,7 @@
 # tests/store/test_db.py
 from pathlib import Path
 
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.store.db import init_schema, open_db
 
 
 def _tables(conn) -> set[str]:
@@ -114,12 +114,12 @@ def test_删除文件记录会级联删除其符号(tmp_path: Path) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/store -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.store.db'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.store.db'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/store/db.py
+# src/spoolkit/store/db.py
 """SQLite 存储层。
 
 索引数据放在独立的 .agent/index.db 中，可随时删除重建——
@@ -180,7 +180,7 @@ Expected: PASS（5 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/store/db.py tests/store/
+git add src/spoolkit/store/db.py tests/store/
 git commit -m "feat: 索引层 SQLite 存储与 schema"
 ```
 
@@ -189,15 +189,15 @@ git commit -m "feat: 索引层 SQLite 存储与 schema"
 ## Task 2: 符号提取
 
 **Files:**
-- Create: `src/agents_dev/index/symbols.py`
+- Create: `src/spoolkit/index/symbols.py`
 - Test: `tests/index/__init__.py`, `tests/index/test_symbols.py`
 
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `agents_dev.index.symbols.Symbol(name, kind, start_line, end_line, signature, parent, doc)`
-  - `agents_dev.index.symbols.SymbolExtractor`（协议，方法 `extract(source: str, path: str) -> list[Symbol]`）
-  - `agents_dev.index.symbols.PythonAstExtractor()`
+  - `spoolkit.index.symbols.Symbol(name, kind, start_line, end_line, signature, parent, doc)`
+  - `spoolkit.index.symbols.SymbolExtractor`（协议，方法 `extract(source: str, path: str) -> list[Symbol]`）
+  - `spoolkit.index.symbols.PythonAstExtractor()`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -210,7 +210,7 @@ git commit -m "feat: 索引层 SQLite 存储与 schema"
 # tests/index/test_symbols.py
 import pytest
 
-from agents_dev.index.symbols import PythonAstExtractor, Symbol
+from spoolkit.index.symbols import PythonAstExtractor, Symbol
 
 
 def _extract(source: str) -> list[Symbol]:
@@ -280,12 +280,12 @@ def test_空文件返回空列表() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/index -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.index.symbols'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.index.symbols'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/index/symbols.py
+# src/spoolkit/index/symbols.py
 """符号提取。
 
 当前实现基于标准库 ast，只支持 Python。接口刻意设计成可替换，
@@ -418,7 +418,7 @@ Expected: PASS（10 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/index/symbols.py tests/index/
+git add src/spoolkit/index/symbols.py tests/index/
 git commit -m "feat: 基于 ast 的 Python 符号提取"
 ```
 
@@ -427,15 +427,15 @@ git commit -m "feat: 基于 ast 的 Python 符号提取"
 ## Task 3: 索引构建与增量更新
 
 **Files:**
-- Create: `src/agents_dev/index/indexer.py`
+- Create: `src/spoolkit/index/indexer.py`
 - Test: `tests/index/test_indexer.py`
 
 **Interfaces:**
 - Consumes: `open_db`、`init_schema`、`SymbolExtractor`、`PythonAstExtractor`
 - Produces:
-  - `agents_dev.index.indexer.SKIP_DIRS: frozenset[str]`
-  - `agents_dev.index.indexer.IndexStats(files_scanned, files_indexed, files_skipped, files_removed, symbols)`
-  - `agents_dev.index.indexer.index_project(root: Path, conn, extractor=None) -> IndexStats`
+  - `spoolkit.index.indexer.SKIP_DIRS: frozenset[str]`
+  - `spoolkit.index.indexer.IndexStats(files_scanned, files_indexed, files_skipped, files_removed, symbols)`
+  - `spoolkit.index.indexer.index_project(root: Path, conn, extractor=None) -> IndexStats`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -445,8 +445,8 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.index.indexer import index_project
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.index.indexer import index_project
+from spoolkit.store.db import init_schema, open_db
 
 
 def _db(tmp_path: Path):
@@ -534,12 +534,12 @@ def test_方法的父子关系被正确写入(tmp_path: Path) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/index/test_indexer.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.index.indexer'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.index.indexer'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/index/indexer.py
+# src/spoolkit/index/indexer.py
 """索引构建与增量更新。
 
 以文件内容哈希为键：内容未变则跳过，只有改动过的文件重新解析。
@@ -553,7 +553,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agents_dev.index.symbols import PythonAstExtractor, SymbolExtractor
+from spoolkit.index.symbols import PythonAstExtractor, SymbolExtractor
 
 SKIP_DIRS = frozenset(
     {
@@ -687,7 +687,7 @@ Expected: PASS（17 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/index/indexer.py tests/index/test_indexer.py
+git add src/spoolkit/index/indexer.py tests/index/test_indexer.py
 git commit -m "feat: 索引构建与按内容哈希增量更新"
 ```
 
@@ -696,15 +696,15 @@ git commit -m "feat: 索引构建与按内容哈希增量更新"
 ## Task 4: 分层渲染（L0 / L1 / L2）
 
 **Files:**
-- Create: `src/agents_dev/index/repo_map.py`
+- Create: `src/spoolkit/index/repo_map.py`
 - Test: `tests/index/test_repo_map.py`
 
 **Interfaces:**
 - Consumes: `TokenCounter`、SQLite 连接
 - Produces:
-  - `agents_dev.index.repo_map.render_repo_map(conn, counter, max_tokens) -> str`（L0）
-  - `agents_dev.index.repo_map.render_file_symbols(conn, path, counter, max_tokens) -> str`（L1）
-  - `agents_dev.index.repo_map.load_symbol_source(root, conn, path, name) -> str | None`（L2）
+  - `spoolkit.index.repo_map.render_repo_map(conn, counter, max_tokens) -> str`（L0）
+  - `spoolkit.index.repo_map.render_file_symbols(conn, path, counter, max_tokens) -> str`（L1）
+  - `spoolkit.index.repo_map.load_symbol_source(root, conn, path, name) -> str | None`（L2）
 
 三个函数都必须保证输出不超过 `max_tokens`；`render_*` 超限时按文件/符号粒度截断并附省略说明。
 
@@ -714,14 +714,14 @@ git commit -m "feat: 索引构建与按内容哈希增量更新"
 # tests/index/test_repo_map.py
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project
-from agents_dev.index.repo_map import (
+from spoolkit.index.indexer import index_project
+from spoolkit.index.repo_map import (
     load_symbol_source,
     render_file_symbols,
     render_repo_map,
 )
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.store.db import init_schema, open_db
 
 
 def _project(tmp_path: Path):
@@ -814,12 +814,12 @@ def test_取不存在的符号返回空(tmp_path: Path) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/index/test_repo_map.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.index.repo_map'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.index.repo_map'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/index/repo_map.py
+# src/spoolkit/index/repo_map.py
 """代码索引的分层渲染。
 
 L0 仓库地图：全部文件路径 + 各文件顶级符号名，用于让模型知道「有什么」。
@@ -833,7 +833,7 @@ L2 符号源码：按行区间取出单个符号的实现。
 import sqlite3
 from pathlib import Path
 
-from agents_dev.llm.tokenizer import TokenCounter
+from spoolkit.llm.tokenizer import TokenCounter
 
 
 def _fit_lines(lines: list[str], suffix_template: str, counter: TokenCounter, limit: int):
@@ -949,7 +949,7 @@ Expected: PASS（25 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/index/repo_map.py tests/index/test_repo_map.py
+git add src/spoolkit/index/repo_map.py tests/index/test_repo_map.py
 git commit -m "feat: 索引的 L0/L1/L2 分层渲染"
 ```
 
@@ -958,15 +958,15 @@ git commit -m "feat: 索引的 L0/L1/L2 分层渲染"
 ## Task 5: 相关性排序与自动预取
 
 **Files:**
-- Create: `src/agents_dev/index/rank.py`
+- Create: `src/spoolkit/index/rank.py`
 - Test: `tests/index/test_rank.py`
 
 **Interfaces:**
 - Consumes: SQLite 连接、`TokenCounter`、`render_file_symbols`
 - Produces:
-  - `agents_dev.index.rank.extract_keywords(text: str) -> list[str]`
-  - `agents_dev.index.rank.rank_files(conn, keywords, limit=5) -> list[str]`
-  - `agents_dev.index.rank.prefetch(conn, task_text, counter, max_tokens) -> str`
+  - `spoolkit.index.rank.extract_keywords(text: str) -> list[str]`
+  - `spoolkit.index.rank.rank_files(conn, keywords, limit=5) -> list[str]`
+  - `spoolkit.index.rank.prefetch(conn, task_text, counter, max_tokens) -> str`
 
 排序思路：符号名或文件路径精确命中关键词得分最高，部分命中次之，
 再叠加「该文件符号数量」作为轻微权重。规则很土，但确定性好、
@@ -978,10 +978,10 @@ git commit -m "feat: 索引的 L0/L1/L2 分层渲染"
 # tests/index/test_rank.py
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project
-from agents_dev.index.rank import extract_keywords, prefetch, rank_files
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.index.indexer import index_project
+from spoolkit.index.rank import extract_keywords, prefetch, rank_files
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.store.db import init_schema, open_db
 
 
 def _project(tmp_path: Path):
@@ -1055,12 +1055,12 @@ def test_无关键词时预取返回空串(tmp_path: Path) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/index/test_rank.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.index.rank'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.index.rank'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/index/rank.py
+# src/spoolkit/index/rank.py
 """相关性排序与自动预取。
 
 模型不擅长决定「下一步该查什么」，所以预取由检索器自动完成：
@@ -1071,8 +1071,8 @@ Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.index.rank'`
 import re
 import sqlite3
 
-from agents_dev.index.repo_map import render_file_symbols
-from agents_dev.llm.tokenizer import TokenCounter
+from spoolkit.index.repo_map import render_file_symbols
+from spoolkit.llm.tokenizer import TokenCounter
 
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,}")
 
@@ -1160,7 +1160,7 @@ Expected: PASS（32 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/index/rank.py tests/index/test_rank.py
+git add src/spoolkit/index/rank.py tests/index/test_rank.py
 git commit -m "feat: 索引相关性排序与自动预取"
 ```
 
@@ -1169,14 +1169,14 @@ git commit -m "feat: 索引相关性排序与自动预取"
 ## Task 6: 索引能力接入工具层
 
 **Files:**
-- Create: `src/agents_dev/index/tools.py`
+- Create: `src/spoolkit/index/tools.py`
 - Test: `tests/index/test_index_tools.py`
 
 **Interfaces:**
 - Consumes: `ToolSpec`、`ToolResult`、`load_symbol_source`、`render_file_symbols`
 - Produces:
-  - `agents_dev.index.tools.find_symbol_spec(root: Path, conn) -> ToolSpec`（参数 `name`，可选 `path`）
-  - `agents_dev.index.tools.file_symbols_spec(conn) -> ToolSpec`（参数 `path`）
+  - `spoolkit.index.tools.find_symbol_spec(root: Path, conn) -> ToolSpec`（参数 `name`，可选 `path`）
+  - `spoolkit.index.tools.file_symbols_spec(conn) -> ToolSpec`（参数 `path`）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1184,9 +1184,9 @@ git commit -m "feat: 索引相关性排序与自动预取"
 # tests/index/test_index_tools.py
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project
-from agents_dev.index.tools import file_symbols_spec, find_symbol_spec
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.index.indexer import index_project
+from spoolkit.index.tools import file_symbols_spec, find_symbol_spec
+from spoolkit.store.db import init_schema, open_db
 
 
 def _project(tmp_path: Path):
@@ -1241,12 +1241,12 @@ def test_列出不存在文件的符号时返回失败(tmp_path: Path) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/index/test_index_tools.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.index.tools'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.index.tools'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/index/tools.py
+# src/spoolkit/index/tools.py
 """把索引能力包装成工具。
 
 模型用这些工具主动深挖：先看符号表，再决定要不要取源码。
@@ -1256,9 +1256,9 @@ Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.index.tools'`
 import sqlite3
 from pathlib import Path
 
-from agents_dev.index.repo_map import load_symbol_source, render_file_symbols
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.types import ToolResult, ToolSpec
+from spoolkit.index.repo_map import load_symbol_source, render_file_symbols
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.types import ToolResult, ToolSpec
 
 SYMBOL_LIST_BUDGET = 600
 MAX_MATCHES = 20
@@ -1343,7 +1343,7 @@ Expected: PASS（37 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/index/tools.py tests/index/test_index_tools.py
+git add src/spoolkit/index/tools.py tests/index/test_index_tools.py
 git commit -m "feat: 索引能力包装为 find_symbol 与 file_symbols 工具"
 ```
 
@@ -1352,7 +1352,7 @@ git commit -m "feat: 索引能力包装为 find_symbol 与 file_symbols 工具"
 ## Task 7: 接入主循环与端到端测量
 
 **Files:**
-- Modify: `src/agents_dev/agent/loop.py`
+- Modify: `src/spoolkit/agent/loop.py`
 - Test: `tests/agent/test_loop_prefetch.py`
 - Create: `tests/test_index_measurement.py`
 
@@ -1372,11 +1372,11 @@ git commit -m "feat: 索引能力包装为 find_symbol 与 file_symbols 工具"
 import json
 from pathlib import Path
 
-from agents_dev.agent.loop import AgentLoop
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agent.loop import AgentLoop
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _turn(final: str) -> str:
@@ -1423,7 +1423,7 @@ Expected: FAIL，`TypeError: __init__() got an unexpected keyword argument 'pref
 
 - [ ] **Step 3: 写最小实现（修改主循环）**
 
-对 `src/agents_dev/agent/loop.py` 做三处修改：
+对 `src/spoolkit/agent/loop.py` 做三处修改：
 
 其一，在文件顶部的导入区加入 `from typing import Callable`（放在
 `from dataclasses import dataclass, field` 之后）。
@@ -1494,10 +1494,10 @@ Expected: FAIL，`TypeError: __init__() got an unexpected keyword argument 'pref
 
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project
-from agents_dev.index.repo_map import render_repo_map
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.index.indexer import index_project
+from spoolkit.index.repo_map import render_repo_map
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.store.db import init_schema, open_db
 
 
 def test_地图体积远小于全部文件正文(tmp_path: Path) -> None:
@@ -1542,7 +1542,7 @@ Run: `.venv\Scripts\python.exe -m pytest -q`
 Expected: PASS（全部，含原有 77 个）
 
 ```bash
-git add src/agents_dev/agent/loop.py tests/agent/test_loop_prefetch.py tests/test_index_measurement.py
+git add src/spoolkit/agent/loop.py tests/agent/test_loop_prefetch.py tests/test_index_measurement.py
 git commit -m "feat: 主循环接入索引预取并量化上下文收益"
 ```
 

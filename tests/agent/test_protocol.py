@@ -1,6 +1,6 @@
 import json
 
-from agents_dev.agent.protocol import AgentTurn, ParseFailure, parse_turn
+from spoolkit.agent.protocol import AgentTurn, ParseFailure, parse_turn
 
 
 def _payload(**overrides) -> str:

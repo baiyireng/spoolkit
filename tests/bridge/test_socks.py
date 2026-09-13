@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from agents_dev.bridge.ws import WebSocket, WebSocketError, _parse_proxy, socks5_connect
+from spoolkit.bridge.ws import WebSocket, WebSocketError, _parse_proxy, socks5_connect
 
 
 class _FakeSocks:
@@ -130,11 +130,11 @@ def test_与本地假服务端真跑一次握手与一帧() -> None:
                     f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
                 ).encode()
             )
-            from agents_dev.bridge.ws import OP_TEXT, encode_frame
+            from spoolkit.bridge.ws import OP_TEXT, encode_frame
 
             conn.sendall(encode_frame(OP_TEXT, _json.dumps({"op": 10}).encode(), mask=False))
             # 等客户端回一帧（我们的客户端会发心跳），再收摊
-            from agents_dev.bridge.ws import read_frame
+            from spoolkit.bridge.ws import read_frame
 
             conn.settimeout(3)
             try:

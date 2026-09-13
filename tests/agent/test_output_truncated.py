@@ -11,13 +11,13 @@
 import json
 from pathlib import Path
 
-from agents_dev.agent.loop import AgentLoop
-from agents_dev.config import Config
-from agents_dev.context.budget import OUTPUT_RESERVE_BOOST_RATIO, Budget
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.fs import list_dir_spec
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agent.loop import AgentLoop
+from spoolkit.config import Config
+from spoolkit.context.budget import OUTPUT_RESERVE_BOOST_RATIO, Budget
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.fs import list_dir_spec
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _turn(thought: str, calls=None, final=None) -> str:

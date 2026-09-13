@@ -1,8 +1,8 @@
 import pytest
 
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.llm.types import ChatRequest, Message
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.llm.types import ChatRequest, Message
 
 
 def _req(text: str) -> ChatRequest:

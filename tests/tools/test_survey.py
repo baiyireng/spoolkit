@@ -9,10 +9,10 @@
 
 from pathlib import Path
 
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.edit import PendingChanges
-from agents_dev.tools.survey import survey_spec
-from agents_dev.tools.types import ToolCall
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.edit import PendingChanges
+from spoolkit.tools.survey import survey_spec
+from spoolkit.tools.types import ToolCall
 
 
 def _dir(tmp_path: Path) -> None:

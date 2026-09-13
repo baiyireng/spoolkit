@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project
-from agents_dev.index.tools import file_symbols_spec, find_symbol_spec
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.index.indexer import index_project
+from spoolkit.index.tools import file_symbols_spec, find_symbol_spec
+from spoolkit.store.db import init_schema, open_db
 
 
 def _project(tmp_path: Path):

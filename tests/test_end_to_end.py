@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from agents_dev.cli.app import build_loop, main
+from spoolkit.cli.app import build_loop, main
 
 
 def test_端到端完成一次读文件并回答(tmp_path: Path) -> None:

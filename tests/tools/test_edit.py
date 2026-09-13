@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents_dev.tools.edit import (
+from spoolkit.tools.edit import (
     PendingChanges,
     make_diff,
     replace_lines_spec,

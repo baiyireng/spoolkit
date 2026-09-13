@@ -1,6 +1,6 @@
-from agents_dev.cli.app import DEFAULT_WINDOW, resolve_window
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
+from spoolkit.cli.app import DEFAULT_WINDOW, resolve_window
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
 
 
 def _gateway(window: int | None = None) -> FakeModel:

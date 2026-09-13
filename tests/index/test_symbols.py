@@ -1,6 +1,6 @@
 import pytest
 
-from agents_dev.index.symbols import PythonAstExtractor, Symbol
+from spoolkit.index.symbols import PythonAstExtractor, Symbol
 
 
 def _extract(source: str) -> list[Symbol]:

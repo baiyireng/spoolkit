@@ -1,14 +1,14 @@
-"""`agents-dev config`：看得到生效值，也看得到它从哪来。"""
+"""`spool config`：看得到生效值，也看得到它从哪来。"""
 
 import argparse
 from pathlib import Path
 
 import pytest
 
-from agents_dev import settings
-from agents_dev.cli.app import main
-from agents_dev.cli.commands.config import config_command
-from agents_dev.cli.runtime import resolve_provider_args
+from spoolkit import settings
+from spoolkit.cli.app import main
+from spoolkit.cli.commands.config import config_command
+from spoolkit.cli.runtime import resolve_provider_args
 
 
 @pytest.fixture()

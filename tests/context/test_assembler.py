@@ -1,10 +1,10 @@
 import pytest
 
-from agents_dev.context.assembler import Assembler
-from agents_dev.context.budget import Budget
-from agents_dev.context.sections import Section
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.llm.types import Message
+from spoolkit.context.assembler import Assembler
+from spoolkit.context.budget import Budget
+from spoolkit.context.sections import Section
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.llm.types import Message
 
 
 def _asm(window: int = 1000) -> Assembler:

@@ -5,7 +5,7 @@
 同时不能误伤那些正确引用的数字。
 """
 
-from agents_dev.check.numbers import (
+from spoolkit.check.numbers import (
     actionable,
     claims_in,
     mismatched,
@@ -13,7 +13,7 @@ from agents_dev.check.numbers import (
     summarize,
     untraceable,
 )
-from agents_dev.tools.types import Fact
+from spoolkit.tools.types import Fact
 
 # 真实运行里工具输出的片段（dir_stats 的结果）
 SOURCES = [

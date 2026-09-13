@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from agents_dev.tools.exec import run_command_spec
-from agents_dev.tools.grant import ALLOWED, ASK, DENIED, Grants, classify, key_of
+from spoolkit.tools.exec import run_command_spec
+from spoolkit.tools.grant import ALLOWED, ASK, DENIED, Grants, classify, key_of
 
 
 def test_白名单内直接放行() -> None:

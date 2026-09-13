@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.llm.gemini import GeminiGateway
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.llamacpp import LlamaCppGateway
-from agents_dev.llm.providers import (
+from spoolkit.llm.gemini import GeminiGateway
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.llamacpp import LlamaCppGateway
+from spoolkit.llm.providers import (
     PROVIDERS,
     ProviderConfig,
     ProviderError,

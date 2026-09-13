@@ -2,14 +2,14 @@
 
 为什么值得一组测试：它决定"第一次用能不能起来"。两条纪律要钉住——
 **只在交互式终端里问**（管道/CI 里弹问题会挂住别人的自动化），
-**密钥不写进配置文件**（配置会被 `agents-dev config` 打印出来）。
+**密钥不写进配置文件**（配置会被 `spool config` 打印出来）。
 """
 
 from pathlib import Path
 
 import pytest
 
-from agents_dev import onboarding, settings
+from spoolkit import onboarding, settings
 
 
 @pytest.fixture()
@@ -63,7 +63,7 @@ def test_选_llamacpp_记下地址_模型可留空(config_file: Path) -> None:
 
 
 def test_选_gemini_密钥写进_env_而不是配置(config_file: Path, tmp_path: Path) -> None:
-    """配置会被 `agents-dev config` 打印出来；密钥写进去等于每次显示一遍。"""
+    """配置会被 `spool config` 打印出来；密钥写进去等于每次显示一遍。"""
     ask, _ = _scripted({"选择": "2", "GEMINI_API_KEY": "sk-secret", "模型名": ""})
     onboarding.run_wizard(tmp_path, ask=ask, say=lambda _line: None)
 

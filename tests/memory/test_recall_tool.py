@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.memory.session import MemorySession
-from agents_dev.memory.store import add_memory, init_memory_schema
-from agents_dev.memory.tools import recall_spec
-from agents_dev.store.db import open_db
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.memory.session import MemorySession
+from spoolkit.memory.store import add_memory, init_memory_schema
+from spoolkit.memory.tools import recall_spec
+from spoolkit.store.db import open_db
 
 
 def _session(tmp_path: Path) -> MemorySession:

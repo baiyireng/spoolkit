@@ -27,24 +27,24 @@
 
 | 文件 | 职责 |
 |---|---|
-| `src/agents_dev/errors.py` | 项目异常类型 |
-| `src/agents_dev/paths.py` | 项目内路径安全解析 |
-| `src/agents_dev/config.py` | 运行配置 |
-| `src/agents_dev/llm/types.py` | `Message` / `ChatRequest` / `ChatResponse` |
-| `src/agents_dev/llm/tokenizer.py` | `TokenCounter` 协议与离线估算实现 |
-| `src/agents_dev/llm/gateway.py` | `ModelGateway` 协议 |
-| `src/agents_dev/llm/fake.py` | 确定性假模型 |
-| `src/agents_dev/context/sections.py` | 上下文区段类型 |
-| `src/agents_dev/context/budget.py` | 分层配额与阈值 |
-| `src/agents_dev/context/assembler.py` | 上下文装配与裁剪 |
-| `src/agents_dev/tools/types.py` | `ToolSpec` / `ToolCall` / `ToolResult` |
-| `src/agents_dev/tools/registry.py` | 工具注册表与参数校验 |
-| `src/agents_dev/tools/fs.py` | 读文件、列目录、按行区间取片段 |
-| `src/agents_dev/tools/search.py` | 基于 `rg` 的代码搜索 |
-| `src/agents_dev/agent/state.py` | 任务状态与检查点读写 |
-| `src/agents_dev/agent/protocol.py` | 模型输出的结构化解析 |
-| `src/agents_dev/agent/loop.py` | 主循环与预算守卫 |
-| `src/agents_dev/cli/app.py` | 最小命令行入口 |
+| `src/spoolkit/errors.py` | 项目异常类型 |
+| `src/spoolkit/paths.py` | 项目内路径安全解析 |
+| `src/spoolkit/config.py` | 运行配置 |
+| `src/spoolkit/llm/types.py` | `Message` / `ChatRequest` / `ChatResponse` |
+| `src/spoolkit/llm/tokenizer.py` | `TokenCounter` 协议与离线估算实现 |
+| `src/spoolkit/llm/gateway.py` | `ModelGateway` 协议 |
+| `src/spoolkit/llm/fake.py` | 确定性假模型 |
+| `src/spoolkit/context/sections.py` | 上下文区段类型 |
+| `src/spoolkit/context/budget.py` | 分层配额与阈值 |
+| `src/spoolkit/context/assembler.py` | 上下文装配与裁剪 |
+| `src/spoolkit/tools/types.py` | `ToolSpec` / `ToolCall` / `ToolResult` |
+| `src/spoolkit/tools/registry.py` | 工具注册表与参数校验 |
+| `src/spoolkit/tools/fs.py` | 读文件、列目录、按行区间取片段 |
+| `src/spoolkit/tools/search.py` | 基于 `rg` 的代码搜索 |
+| `src/spoolkit/agent/state.py` | 任务状态与检查点读写 |
+| `src/spoolkit/agent/protocol.py` | 模型输出的结构化解析 |
+| `src/spoolkit/agent/loop.py` | 主循环与预算守卫 |
+| `src/spoolkit/cli/app.py` | 最小命令行入口 |
 
 测试文件与源码镜像，全部放在 `tests/` 下。
 
@@ -53,15 +53,15 @@
 ## Task 1: 路径安全与异常类型
 
 **Files:**
-- Create: `src/agents_dev/errors.py`
-- Create: `src/agents_dev/paths.py`
+- Create: `src/spoolkit/errors.py`
+- Create: `src/spoolkit/paths.py`
 - Test: `tests/test_paths.py`
 
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `agents_dev.errors.AgentError`、`PathOutsideProjectError`、`ToolArgumentError`
-  - `agents_dev.paths.resolve_within(root: Path, candidate: str) -> Path`
+  - `spoolkit.errors.AgentError`、`PathOutsideProjectError`、`ToolArgumentError`
+  - `spoolkit.paths.resolve_within(root: Path, candidate: str) -> Path`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -71,8 +71,8 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.errors import PathOutsideProjectError
-from agents_dev.paths import resolve_within
+from spoolkit.errors import PathOutsideProjectError
+from spoolkit.paths import resolve_within
 
 
 def test_相对路径解析到项目根之下(tmp_path: Path) -> None:
@@ -106,12 +106,12 @@ def test_空路径被拒绝(tmp_path: Path) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_paths.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.errors'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.errors'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/errors.py
+# src/spoolkit/errors.py
 """项目内共用的异常类型。"""
 
 
@@ -128,7 +128,7 @@ class ToolArgumentError(AgentError):
 ```
 
 ```python
-# src/agents_dev/paths.py
+# src/spoolkit/paths.py
 """项目内路径的安全解析。
 
 所有涉及文件系统的工具都必须经由 resolve_within 取得路径，
@@ -137,7 +137,7 @@ class ToolArgumentError(AgentError):
 
 from pathlib import Path
 
-from agents_dev.errors import PathOutsideProjectError
+from spoolkit.errors import PathOutsideProjectError
 
 
 def resolve_within(root: Path, candidate: str) -> Path:
@@ -166,7 +166,7 @@ Expected: PASS（5 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/errors.py src/agents_dev/paths.py tests/test_paths.py
+git add src/spoolkit/errors.py src/spoolkit/paths.py tests/test_paths.py
 git commit -m "feat: 项目内路径安全解析与异常类型"
 ```
 
@@ -175,20 +175,20 @@ git commit -m "feat: 项目内路径安全解析与异常类型"
 ## Task 2: token 计数
 
 **Files:**
-- Create: `src/agents_dev/llm/tokenizer.py`
+- Create: `src/spoolkit/llm/tokenizer.py`
 - Test: `tests/llm/test_tokenizer.py`
 
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `agents_dev.llm.tokenizer.TokenCounter`（协议，方法 `count(text: str) -> int`）
-  - `agents_dev.llm.tokenizer.OfflineTokenCounter`
+  - `spoolkit.llm.tokenizer.TokenCounter`（协议，方法 `count(text: str) -> int`）
+  - `spoolkit.llm.tokenizer.OfflineTokenCounter`
 
 - [ ] **Step 1: 写失败测试**
 
 ```python
 # tests/llm/test_tokenizer.py
-from agents_dev.llm.tokenizer import OfflineTokenCounter
+from spoolkit.llm.tokenizer import OfflineTokenCounter
 
 
 def test_空字符串为零() -> None:
@@ -219,12 +219,12 @@ def test_同一输入结果稳定() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/llm/test_tokenizer.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.llm.tokenizer'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.llm.tokenizer'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/llm/tokenizer.py
+# src/spoolkit/llm/tokenizer.py
 """token 计数。
 
 真实实现应向 llama.cpp 服务端的 /tokenize 端点查询以获得精确值；
@@ -266,7 +266,7 @@ Expected: PASS（5 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/llm/tokenizer.py tests/llm/test_tokenizer.py
+git add src/spoolkit/llm/tokenizer.py tests/llm/test_tokenizer.py
 git commit -m "feat: 可插拔的 token 计数接口与离线估算实现"
 ```
 
@@ -275,19 +275,19 @@ git commit -m "feat: 可插拔的 token 计数接口与离线估算实现"
 ## Task 3: 消息类型、网关协议与假模型
 
 **Files:**
-- Create: `src/agents_dev/llm/types.py`
-- Create: `src/agents_dev/llm/gateway.py`
-- Create: `src/agents_dev/llm/fake.py`
+- Create: `src/spoolkit/llm/types.py`
+- Create: `src/spoolkit/llm/gateway.py`
+- Create: `src/spoolkit/llm/fake.py`
 - Test: `tests/llm/test_fake.py`
 
 **Interfaces:**
-- Consumes: `agents_dev.llm.tokenizer.TokenCounter`
+- Consumes: `spoolkit.llm.tokenizer.TokenCounter`
 - Produces:
-  - `agents_dev.llm.types.Message(role: str, content: str, name: str | None = None)`
-  - `agents_dev.llm.types.ChatRequest(messages: tuple[Message, ...], max_tokens: int, grammar: str | None = None)`
-  - `agents_dev.llm.types.ChatResponse(text: str, prompt_tokens: int, completion_tokens: int)`
-  - `agents_dev.llm.gateway.ModelGateway`（协议，方法 `chat(request: ChatRequest) -> ChatResponse`）
-  - `agents_dev.llm.fake.FakeModel(script: Sequence[str], tokenizer: TokenCounter)`，含 `.chat()`、`.requests`、`.remaining`
+  - `spoolkit.llm.types.Message(role: str, content: str, name: str | None = None)`
+  - `spoolkit.llm.types.ChatRequest(messages: tuple[Message, ...], max_tokens: int, grammar: str | None = None)`
+  - `spoolkit.llm.types.ChatResponse(text: str, prompt_tokens: int, completion_tokens: int)`
+  - `spoolkit.llm.gateway.ModelGateway`（协议，方法 `chat(request: ChatRequest) -> ChatResponse`）
+  - `spoolkit.llm.fake.FakeModel(script: Sequence[str], tokenizer: TokenCounter)`，含 `.chat()`、`.requests`、`.remaining`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -295,9 +295,9 @@ git commit -m "feat: 可插拔的 token 计数接口与离线估算实现"
 # tests/llm/test_fake.py
 import pytest
 
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.llm.types import ChatRequest, Message
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.llm.types import ChatRequest, Message
 
 
 def _req(text: str) -> ChatRequest:
@@ -344,12 +344,12 @@ def test_剩余条数可查() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/llm/test_fake.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.llm.fake'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.llm.fake'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/llm/types.py
+# src/spoolkit/llm/types.py
 """模型交互的基础数据类型。"""
 
 from dataclasses import dataclass
@@ -383,12 +383,12 @@ class ChatResponse:
 ```
 
 ```python
-# src/agents_dev/llm/gateway.py
+# src/spoolkit/llm/gateway.py
 """模型网关协议。"""
 
 from typing import Protocol
 
-from agents_dev.llm.types import ChatRequest, ChatResponse
+from spoolkit.llm.types import ChatRequest, ChatResponse
 
 
 class ModelGateway(Protocol):
@@ -404,7 +404,7 @@ class ModelGateway(Protocol):
 ```
 
 ```python
-# src/agents_dev/llm/fake.py
+# src/spoolkit/llm/fake.py
 """确定性假模型。
 
 用途有二：一是在无 GPU 时驱动开发与测试；二是在自动化测试中精确
@@ -414,8 +414,8 @@ class ModelGateway(Protocol):
 
 from typing import Sequence
 
-from agents_dev.llm.tokenizer import TokenCounter
-from agents_dev.llm.types import ChatRequest, ChatResponse
+from spoolkit.llm.tokenizer import TokenCounter
+from spoolkit.llm.types import ChatRequest, ChatResponse
 
 
 class FakeModel:
@@ -456,7 +456,7 @@ Expected: PASS（5 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/llm/types.py src/agents_dev/llm/gateway.py src/agents_dev/llm/fake.py tests/llm/test_fake.py
+git add src/spoolkit/llm/types.py src/spoolkit/llm/gateway.py src/spoolkit/llm/fake.py tests/llm/test_fake.py
 git commit -m "feat: 模型网关协议、消息类型与确定性假模型"
 ```
 
@@ -465,18 +465,18 @@ git commit -m "feat: 模型网关协议、消息类型与确定性假模型"
 ## Task 4: 上下文区段与分层配额
 
 **Files:**
-- Create: `src/agents_dev/context/sections.py`
-- Create: `src/agents_dev/context/budget.py`
+- Create: `src/spoolkit/context/sections.py`
+- Create: `src/spoolkit/context/budget.py`
 - Test: `tests/context/test_budget.py`
 
 **Interfaces:**
-- Consumes: `agents_dev.llm.tokenizer.TokenCounter`
+- Consumes: `spoolkit.llm.tokenizer.TokenCounter`
 - Produces:
-  - `agents_dev.context.sections.Section(name: str, text: str, priority: int, mandatory: bool = False)`
-  - `agents_dev.context.budget.OUTPUT_RESERVE_RATIO = 0.15`
-  - `agents_dev.context.budget.FLEX_QUOTAS: dict[str, float]`
-  - `agents_dev.context.budget.FIXED_QUOTAS: dict[str, int]`
-  - `agents_dev.context.budget.Budget(window: int)`，含 `.effective()`、`.quota(name)`、`.output_reserve()`、`.soft_limit()`、`.hard_limit()`
+  - `spoolkit.context.sections.Section(name: str, text: str, priority: int, mandatory: bool = False)`
+  - `spoolkit.context.budget.OUTPUT_RESERVE_RATIO = 0.15`
+  - `spoolkit.context.budget.FLEX_QUOTAS: dict[str, float]`
+  - `spoolkit.context.budget.FIXED_QUOTAS: dict[str, int]`
+  - `spoolkit.context.budget.Budget(window: int)`，含 `.effective()`、`.quota(name)`、`.output_reserve()`、`.soft_limit()`、`.hard_limit()`
 
 配额分两类：固定配额（与窗口无关，如系统提示）与比例配额（按有效预算折算）。
 
@@ -484,8 +484,8 @@ git commit -m "feat: 模型网关协议、消息类型与确定性假模型"
 
 ```python
 # tests/context/test_budget.py
-from agents_dev.context.budget import OUTPUT_RESERVE_RATIO, Budget
-from agents_dev.context.sections import Section
+from spoolkit.context.budget import OUTPUT_RESERVE_RATIO, Budget
+from spoolkit.context.sections import Section
 
 
 def test_输出预留被扣除() -> None:
@@ -526,12 +526,12 @@ def test_输出预留比例符合设计() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/context/test_budget.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.context.budget'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.context.budget'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/context/sections.py
+# src/spoolkit/context/sections.py
 """上下文区段。
 
 装配器把上下文切成若干区段分别核算配额。priority 越小越先被保留；
@@ -552,7 +552,7 @@ class Section:
 ```
 
 ```python
-# src/agents_dev/context/budget.py
+# src/spoolkit/context/budget.py
 """上下文预算与分层配额。
 
 术语：有效预算 = 上下文窗口 − 输出预留。
@@ -622,7 +622,7 @@ Expected: PASS（7 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/context/sections.py src/agents_dev/context/budget.py tests/context/test_budget.py
+git add src/spoolkit/context/sections.py src/spoolkit/context/budget.py tests/context/test_budget.py
 git commit -m "feat: 上下文区段与分层配额"
 ```
 
@@ -631,15 +631,15 @@ git commit -m "feat: 上下文区段与分层配额"
 ## Task 5: 上下文装配器
 
 **Files:**
-- Create: `src/agents_dev/context/assembler.py`
+- Create: `src/spoolkit/context/assembler.py`
 - Test: `tests/context/test_assembler.py`
 
 **Interfaces:**
 - Consumes: `TokenCounter`、`Budget`、`Section`、`Message`
 - Produces:
-  - `agents_dev.context.assembler.Assembler(tokenizer, budget)`
+  - `spoolkit.context.assembler.Assembler(tokenizer, budget)`
     - `.assemble(sections: Sequence[Section], recent_turns: Sequence[Message] = ()) -> AssembleResult`
-  - `agents_dev.context.assembler.AssembleResult(messages, total_tokens, demand_tokens, dropped, window)`
+  - `spoolkit.context.assembler.AssembleResult(messages, total_tokens, demand_tokens, dropped, window)`
     - `.ratio` 属性返回 `total_tokens / window`
 
 **关键概念：`total_tokens` 是实际装进去的量，`demand_tokens` 是未裁剪前想要的量。**
@@ -652,11 +652,11 @@ git commit -m "feat: 上下文区段与分层配额"
 # tests/context/test_assembler.py
 import pytest
 
-from agents_dev.context.assembler import Assembler
-from agents_dev.context.budget import Budget
-from agents_dev.context.sections import Section
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.llm.types import Message
+from spoolkit.context.assembler import Assembler
+from spoolkit.context.budget import Budget
+from spoolkit.context.sections import Section
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.llm.types import Message
 
 
 def _asm(window: int = 1000) -> Assembler:
@@ -728,12 +728,12 @@ def test_装配结果报告占用比例() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/context/test_assembler.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.context.assembler'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.context.assembler'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/context/assembler.py
+# src/spoolkit/context/assembler.py
 """上下文装配器。
 
 职责：把若干区段按优先级与配额拼装成最终消息序列，超限时从最低
@@ -746,10 +746,10 @@ Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.context.assem
 from dataclasses import dataclass
 from typing import Sequence
 
-from agents_dev.context.budget import Budget
-from agents_dev.context.sections import Section
-from agents_dev.llm.tokenizer import TokenCounter
-from agents_dev.llm.types import Message
+from spoolkit.context.budget import Budget
+from spoolkit.context.sections import Section
+from spoolkit.llm.tokenizer import TokenCounter
+from spoolkit.llm.types import Message
 
 TRUNCATION_MARKER = "\n…（内容已裁剪）"
 
@@ -858,7 +858,7 @@ Expected: PASS（8 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/context/assembler.py tests/context/test_assembler.py
+git add src/spoolkit/context/assembler.py tests/context/test_assembler.py
 git commit -m "feat: 上下文装配器与分级裁剪"
 ```
 
@@ -867,24 +867,24 @@ git commit -m "feat: 上下文装配器与分级裁剪"
 ## Task 6: 工具类型与注册表
 
 **Files:**
-- Create: `src/agents_dev/tools/types.py`
-- Create: `src/agents_dev/tools/registry.py`
+- Create: `src/spoolkit/tools/types.py`
+- Create: `src/spoolkit/tools/registry.py`
 - Test: `tests/tools/test_registry.py`
 
 **Interfaces:**
 - Consumes: 无（仅标准库）
 - Produces:
-  - `agents_dev.tools.types.ToolSpec(name, description, parameters, handler)`
-  - `agents_dev.tools.types.ToolCall(name, arguments)`
-  - `agents_dev.tools.types.ToolResult(ok, content)`
-  - `agents_dev.tools.registry.ToolRegistry()`，含 `.register()`、`.get()`、`.names()`、`.invoke()`、`.describe()`
+  - `spoolkit.tools.types.ToolSpec(name, description, parameters, handler)`
+  - `spoolkit.tools.types.ToolCall(name, arguments)`
+  - `spoolkit.tools.types.ToolResult(ok, content)`
+  - `spoolkit.tools.registry.ToolRegistry()`，含 `.register()`、`.get()`、`.names()`、`.invoke()`、`.describe()`
 
 - [ ] **Step 1: 写失败测试**
 
 ```python
 # tests/tools/test_registry.py
-from agents_dev.tools.registry import ToolRegistry
-from agents_dev.tools.types import ToolCall, ToolResult, ToolSpec
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.types import ToolCall, ToolResult, ToolSpec
 
 SCHEMA = {
     "type": "object",
@@ -967,12 +967,12 @@ def test_描述文本包含工具名与参数名() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/tools/test_registry.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.tools.registry'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.tools.registry'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/tools/types.py
+# src/spoolkit/tools/types.py
 """工具层数据类型。"""
 
 from dataclasses import dataclass, field
@@ -1006,7 +1006,7 @@ class ToolCall:
 ```
 
 ```python
-# src/agents_dev/tools/registry.py
+# src/spoolkit/tools/registry.py
 """工具注册表与参数校验。
 
 所有工具调用都必须经 invoke 进入，参数校验失败会被拦在这里，
@@ -1017,7 +1017,7 @@ properties / additionalProperties / enum。不使用完整实现，以免引入�
 
 from typing import Any
 
-from agents_dev.tools.types import ToolCall, ToolResult, ToolSpec
+from spoolkit.tools.types import ToolCall, ToolResult, ToolSpec
 
 _TYPE_MAP: dict[str, type | tuple[type, ...]] = {
     "string": str,
@@ -1109,7 +1109,7 @@ Expected: PASS（8 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/tools/types.py src/agents_dev/tools/registry.py tests/tools/test_registry.py
+git add src/spoolkit/tools/types.py src/spoolkit/tools/registry.py tests/tools/test_registry.py
 git commit -m "feat: 工具注册表与参数校验"
 ```
 
@@ -1118,17 +1118,17 @@ git commit -m "feat: 工具注册表与参数校验"
 ## Task 7: 文件与搜索工具
 
 **Files:**
-- Create: `src/agents_dev/tools/fs.py`
-- Create: `src/agents_dev/tools/search.py`
+- Create: `src/spoolkit/tools/fs.py`
+- Create: `src/spoolkit/tools/search.py`
 - Test: `tests/tools/test_fs.py`
 - Test: `tests/tools/test_search.py`
 
 **Interfaces:**
 - Consumes: `resolve_within`、`ToolSpec`、`ToolResult`
 - Produces:
-  - `agents_dev.tools.fs.read_file_spec(root: Path) -> ToolSpec`（参数 `path`，可选 `start_line`、`end_line`）
-  - `agents_dev.tools.fs.list_dir_spec(root: Path) -> ToolSpec`（参数 `path`）
-  - `agents_dev.tools.search.search_code_spec(root: Path) -> ToolSpec`（参数 `pattern`，可选 `path`、`max_results`）
+  - `spoolkit.tools.fs.read_file_spec(root: Path) -> ToolSpec`（参数 `path`，可选 `start_line`、`end_line`）
+  - `spoolkit.tools.fs.list_dir_spec(root: Path) -> ToolSpec`（参数 `path`）
+  - `spoolkit.tools.search.search_code_spec(root: Path) -> ToolSpec`（参数 `pattern`，可选 `path`、`max_results`）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1136,7 +1136,7 @@ git commit -m "feat: 工具注册表与参数校验"
 # tests/tools/test_fs.py
 from pathlib import Path
 
-from agents_dev.tools.fs import list_dir_spec, read_file_spec
+from spoolkit.tools.fs import list_dir_spec, read_file_spec
 
 
 def test_读取整个文件(tmp_path: Path) -> None:
@@ -1199,7 +1199,7 @@ def test_列目录遇到非目录返回失败(tmp_path: Path) -> None:
 # tests/tools/test_search.py
 from pathlib import Path
 
-from agents_dev.tools.search import search_code_spec
+from spoolkit.tools.search import search_code_spec
 
 
 def test_搜索命中并返回文件名(tmp_path: Path) -> None:
@@ -1227,12 +1227,12 @@ def test_搜索不逃出项目根(tmp_path: Path) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/tools/test_fs.py tests/tools/test_search.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.tools.fs'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.tools.fs'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/tools/fs.py
+# src/spoolkit/tools/fs.py
 """文件系统工具。
 
 所有路径都经 resolve_within 处理，模型无法逃出项目根目录。
@@ -1241,9 +1241,9 @@ Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.tools.fs'`
 
 from pathlib import Path
 
-from agents_dev.errors import PathOutsideProjectError
-from agents_dev.paths import resolve_within
-from agents_dev.tools.types import ToolResult, ToolSpec
+from spoolkit.errors import PathOutsideProjectError
+from spoolkit.paths import resolve_within
+from spoolkit.tools.types import ToolResult, ToolSpec
 
 
 def _read_file(root: Path, args: dict) -> ToolResult:
@@ -1331,7 +1331,7 @@ def list_dir_spec(root: Path) -> ToolSpec:
 ```
 
 ```python
-# src/agents_dev/tools/search.py
+# src/spoolkit/tools/search.py
 """代码搜索工具，基于 ripgrep。
 
 未安装 rg 时返回失败结果并给出明确提示，不静默降级。
@@ -1341,9 +1341,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from agents_dev.errors import PathOutsideProjectError
-from agents_dev.paths import resolve_within
-from agents_dev.tools.types import ToolResult, ToolSpec
+from spoolkit.errors import PathOutsideProjectError
+from spoolkit.paths import resolve_within
+from spoolkit.tools.types import ToolResult, ToolSpec
 
 DEFAULT_MAX_RESULTS = 50
 TIMEOUT_SECONDS = 20
@@ -1421,7 +1421,7 @@ Expected: PASS（11 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/tools/fs.py src/agents_dev/tools/search.py tests/tools/test_fs.py tests/tools/test_search.py
+git add src/spoolkit/tools/fs.py src/spoolkit/tools/search.py tests/tools/test_fs.py tests/tools/test_search.py
 git commit -m "feat: 文件读取、目录列举与代码搜索工具"
 ```
 
@@ -1430,16 +1430,16 @@ git commit -m "feat: 文件读取、目录列举与代码搜索工具"
 ## Task 8: 任务状态与检查点
 
 **Files:**
-- Create: `src/agents_dev/agent/state.py`
+- Create: `src/spoolkit/agent/state.py`
 - Test: `tests/agent/test_state.py`
 
 **Interfaces:**
 - Consumes: `TokenCounter`
 - Produces:
-  - `agents_dev.agent.state.StateDelta(done_added, current, verify, excluded_added, hypothesis)`
-  - `agents_dev.agent.state.TaskState(task_id, goal, done, current, verify, excluded, hypothesis, step)`
+  - `spoolkit.agent.state.StateDelta(done_added, current, verify, excluded_added, hypothesis)`
+  - `spoolkit.agent.state.TaskState(task_id, goal, done, current, verify, excluded, hypothesis, step)`
     - `.render() -> str`、`.token_cost(counter) -> int`、`.apply(delta)`、`.step_forward()`
-  - `agents_dev.agent.state.save_state(state, path)`、`load_state(path) -> TaskState | None`
+  - `spoolkit.agent.state.save_state(state, path)`、`load_state(path) -> TaskState | None`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1447,8 +1447,8 @@ git commit -m "feat: 文件读取、目录列举与代码搜索工具"
 # tests/agent/test_state.py
 from pathlib import Path
 
-from agents_dev.agent.state import StateDelta, TaskState, load_state, save_state
-from agents_dev.llm.tokenizer import OfflineTokenCounter
+from spoolkit.agent.state import StateDelta, TaskState, load_state, save_state
+from spoolkit.llm.tokenizer import OfflineTokenCounter
 
 
 def _state() -> TaskState:
@@ -1516,12 +1516,12 @@ def test_步数可递增() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/agent/test_state.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.agent.state'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.agent.state'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/agent/state.py
+# src/spoolkit/agent/state.py
 """任务状态与检查点。
 
 任务状态是「我做到哪了」的结构化表达，每轮注入上下文，
@@ -1532,7 +1532,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from agents_dev.llm.tokenizer import TokenCounter
+from spoolkit.llm.tokenizer import TokenCounter
 
 
 @dataclass
@@ -1616,7 +1616,7 @@ Expected: PASS（7 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/agent/state.py tests/agent/test_state.py
+git add src/spoolkit/agent/state.py tests/agent/test_state.py
 git commit -m "feat: 任务状态与检查点读写"
 ```
 
@@ -1625,16 +1625,16 @@ git commit -m "feat: 任务状态与检查点读写"
 ## Task 9: 结构化输出协议
 
 **Files:**
-- Create: `src/agents_dev/agent/protocol.py`
+- Create: `src/spoolkit/agent/protocol.py`
 - Test: `tests/agent/test_protocol.py`
 
 **Interfaces:**
 - Consumes: `ToolCall`、`StateDelta`
 - Produces:
-  - `agents_dev.agent.protocol.TURN_SCHEMA: dict`
-  - `agents_dev.agent.protocol.AgentTurn(thought, tool_calls, state_delta, final)`
-  - `agents_dev.agent.protocol.ParseFailure(reason)`
-  - `agents_dev.agent.protocol.parse_turn(text: str) -> AgentTurn | ParseFailure`
+  - `spoolkit.agent.protocol.TURN_SCHEMA: dict`
+  - `spoolkit.agent.protocol.AgentTurn(thought, tool_calls, state_delta, final)`
+  - `spoolkit.agent.protocol.ParseFailure(reason)`
+  - `spoolkit.agent.protocol.parse_turn(text: str) -> AgentTurn | ParseFailure`
 
 模型每轮必须输出一个 JSON 对象：`{"thought": str, "tool_calls": [...], "state": {...}|null, "final": str|null}`。解析失败返回 `ParseFailure`，由主循环作为反馈回灌，不抛异常。
 
@@ -1644,7 +1644,7 @@ git commit -m "feat: 任务状态与检查点读写"
 # tests/agent/test_protocol.py
 import json
 
-from agents_dev.agent.protocol import AgentTurn, ParseFailure, parse_turn
+from spoolkit.agent.protocol import AgentTurn, ParseFailure, parse_turn
 
 
 def _payload(**overrides) -> str:
@@ -1726,12 +1726,12 @@ def test_状态块含未知字段返回失败() -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/agent/test_protocol.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.agent.protocol'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.agent.protocol'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/agent/protocol.py
+# src/spoolkit/agent/protocol.py
 """模型输出的结构化协议。
 
 每轮输出必须是一个 JSON 对象，字段固定。解析失败不抛异常，而是返回
@@ -1745,8 +1745,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from agents_dev.agent.state import StateDelta
-from agents_dev.tools.types import ToolCall
+from spoolkit.agent.state import StateDelta
+from spoolkit.tools.types import ToolCall
 
 TURN_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -1873,7 +1873,7 @@ Expected: PASS（11 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/agent/protocol.py tests/agent/test_protocol.py
+git add src/spoolkit/agent/protocol.py tests/agent/test_protocol.py
 git commit -m "feat: 模型输出的结构化协议与解析"
 ```
 
@@ -1882,16 +1882,16 @@ git commit -m "feat: 模型输出的结构化协议与解析"
 ## Task 10: 主循环与预算守卫
 
 **Files:**
-- Create: `src/agents_dev/config.py`
-- Create: `src/agents_dev/agent/loop.py`
+- Create: `src/spoolkit/config.py`
+- Create: `src/spoolkit/agent/loop.py`
 - Test: `tests/agent/test_loop.py`
 
 **Interfaces:**
 - Consumes: `ModelGateway`、`TokenCounter`、`Assembler`、`Budget`、`ToolRegistry`、`TaskState`、`parse_turn`
 - Produces:
-  - `agents_dev.config.Config(project_root, context_window=8192, max_steps=10, state_dir_name=".agent")`，含 `.state_dir`、`.task_path(task_id)`
-  - `agents_dev.agent.loop.AgentLoop(gateway, tokenizer, registry, config)`，含 `.run(goal, task_id="task") -> LoopResult`
-  - `agents_dev.agent.loop.LoopResult(finished, final, state, steps, resets, trace)`
+  - `spoolkit.config.Config(project_root, context_window=8192, max_steps=10, state_dir_name=".agent")`，含 `.state_dir`、`.task_path(task_id)`
+  - `spoolkit.agent.loop.AgentLoop(gateway, tokenizer, registry, config)`，含 `.run(goal, task_id="task") -> LoopResult`
+  - `spoolkit.agent.loop.LoopResult(finished, final, state, steps, resets, trace)`
 
 每轮流程：装配 → 预算守卫（软触发整理、硬触发重置）→ 请求模型 → 解析 → 执行工具 → 更新状态 → 保存检查点。
 
@@ -1902,12 +1902,12 @@ git commit -m "feat: 模型输出的结构化协议与解析"
 import json
 from pathlib import Path
 
-from agents_dev.agent.loop import AgentLoop
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.fs import read_file_spec
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agent.loop import AgentLoop
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.fs import read_file_spec
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _turn(thought: str, calls=None, state=None, final=None) -> str:
@@ -2001,12 +2001,12 @@ def test_轨迹记录每一步(tmp_path: Path) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/agent/test_loop.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.agent.loop'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.agent.loop'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/config.py
+# src/spoolkit/config.py
 """运行配置。"""
 
 from dataclasses import dataclass
@@ -2031,7 +2031,7 @@ class Config:
 ```
 
 ```python
-# src/agents_dev/agent/loop.py
+# src/spoolkit/agent/loop.py
 """Agent 主循环。
 
 设计要点：任务状态每轮注入，对话历史只保留最近若干轮，
@@ -2043,16 +2043,16 @@ class Config:
 
 from dataclasses import dataclass, field
 
-from agents_dev.agent.protocol import ParseFailure, parse_turn
-from agents_dev.agent.state import TaskState, save_state
-from agents_dev.config import Config
-from agents_dev.context.assembler import Assembler
-from agents_dev.context.budget import Budget
-from agents_dev.context.sections import Section
-from agents_dev.llm.gateway import ModelGateway
-from agents_dev.llm.tokenizer import TokenCounter
-from agents_dev.llm.types import ChatRequest, Message
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agent.protocol import ParseFailure, parse_turn
+from spoolkit.agent.state import TaskState, save_state
+from spoolkit.config import Config
+from spoolkit.context.assembler import Assembler
+from spoolkit.context.budget import Budget
+from spoolkit.context.sections import Section
+from spoolkit.llm.gateway import ModelGateway
+from spoolkit.llm.tokenizer import TokenCounter
+from spoolkit.llm.types import ChatRequest, Message
+from spoolkit.tools.registry import ToolRegistry
 
 SYSTEM_PROMPT = """你是本地运行的编程助手。每轮只做一件事。
 必须输出一个 JSON 对象，字段为 thought、tool_calls、state、final。
@@ -2174,7 +2174,7 @@ Expected: PASS（7 passed）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/config.py src/agents_dev/agent/loop.py tests/agent/test_loop.py
+git add src/spoolkit/config.py src/spoolkit/agent/loop.py tests/agent/test_loop.py
 git commit -m "feat: Agent 主循环与上下文预算守卫"
 ```
 
@@ -2183,14 +2183,14 @@ git commit -m "feat: Agent 主循环与上下文预算守卫"
 ## Task 11: 最小命令行与端到端验证
 
 **Files:**
-- Create: `src/agents_dev/cli/app.py`
+- Create: `src/spoolkit/cli/app.py`
 - Test: `tests/test_end_to_end.py`
 
 **Interfaces:**
 - Consumes: `AgentLoop`、`Config`、`ToolRegistry`、`FakeModel`
 - Produces:
-  - `agents_dev.cli.app.build_loop(project_root: Path, script: list[str], window: int = 4096) -> AgentLoop`
-  - `agents_dev.cli.app.main(argv: list[str] | None = None) -> int`
+  - `spoolkit.cli.app.build_loop(project_root: Path, script: list[str], window: int = 4096) -> AgentLoop`
+  - `spoolkit.cli.app.main(argv: list[str] | None = None) -> int`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -2199,7 +2199,7 @@ git commit -m "feat: Agent 主循环与上下文预算守卫"
 import json
 from pathlib import Path
 
-from agents_dev.cli.app import build_loop, main
+from spoolkit.cli.app import build_loop, main
 
 
 def test_端到端完成一次读文件并回答(tmp_path: Path) -> None:
@@ -2282,12 +2282,12 @@ def test_脚本文件不存在时返回非零(tmp_path: Path) -> None:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_end_to_end.py -v`
-Expected: FAIL，`ModuleNotFoundError: No module named 'agents_dev.cli.app'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'spoolkit.cli.app'`
 
 - [ ] **Step 3: 写最小实现**
 
 ```python
-# src/agents_dev/cli/app.py
+# src/spoolkit/cli/app.py
 """最小命令行入口。
 
 当前阶段用脚本化假模型驱动，因此整个闭环在无 GPU 环境下即可运行。
@@ -2299,13 +2299,13 @@ import json
 import sys
 from pathlib import Path
 
-from agents_dev.agent.loop import AgentLoop
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.fs import list_dir_spec, read_file_spec
-from agents_dev.tools.registry import ToolRegistry
-from agents_dev.tools.search import search_code_spec
+from spoolkit.agent.loop import AgentLoop
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.fs import list_dir_spec, read_file_spec
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.search import search_code_spec
 
 
 def build_loop(project_root: Path, script: list[str], window: int = 4096) -> AgentLoop:
@@ -2348,7 +2348,7 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="agents-dev")
+    parser = argparse.ArgumentParser(prog="spool")
     sub = parser.add_subparsers(dest="command", required=True)
 
     run_parser = sub.add_parser("run", help="运行一次任务")
@@ -2374,7 +2374,7 @@ Expected: PASS（全部）
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/agents_dev/cli/app.py tests/test_end_to_end.py
+git add src/spoolkit/cli/app.py tests/test_end_to_end.py
 git commit -m "feat: 最小命令行入口与端到端验证"
 ```
 
@@ -2385,7 +2385,7 @@ git commit -m "feat: 最小命令行入口与端到端验证"
 全部任务完成后应满足：
 
 1. `pytest` 全绿，覆盖路径安全、token 计数、假模型、预算配额、装配裁剪、工具校验、文件与搜索工具、任务状态、协议解析、主循环、端到端。
-2. `.venv\Scripts\python.exe -m agents_dev.cli.app run --goal "..." --script s.json` 能在无 GPU 环境下跑通完整闭环。
+2. `.venv\Scripts\python.exe -m spoolkit.cli.app run --goal "..." --script s.json` 能在无 GPU 环境下跑通完整闭环。
 3. 主循环在上下文**需求**触达硬触发线时能重置且不丢失任务状态，此行为有测试覆盖。
 4. 不引入 `httpx` 之外的运行时依赖。
 

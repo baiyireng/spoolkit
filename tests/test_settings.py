@@ -9,13 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev import settings
+from spoolkit import settings
 
 
 @pytest.fixture()
 def config_file(tmp_path: Path, monkeypatch) -> Path:
     path = tmp_path / "config.toml"
-    monkeypatch.setenv("AGENTS_DEV_CONFIG", str(path))
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
     return path
 
 
@@ -66,10 +66,19 @@ def test_来源要说得出文件路径(config_file: Path) -> None:
     assert str(config_file) in source
 
 
-def test_配置文件不在工作区里() -> None:
-    """工作区是要提交、要分享的，不该承载某台机器的默认值。"""
+def test_配置文件不在工作区里(monkeypatch) -> None:
+    """工作区是要提交、要分享的，不该承载某台机器的默认值。
+
+    这条原来断言的是"路径里有应用名"，而它一直靠**测试自己传的临时目录名**
+    碰巧通过（`...\\agents-dev-pytest\\user-config\\config.toml`）；改名之后
+    临时目录名对不上就红了。所以这里改成盯**默认位置**本身：先把两个
+    环境变量清掉，再看算出来的路径长什么样。
+    """
+    monkeypatch.delenv("SPOOLKIT_CONFIG", raising=False)
+    monkeypatch.delenv("AGENTS_DEV_CONFIG", raising=False)
     path = settings.config_path()
-    assert "agents-dev" in str(path)
+    assert path.name == "config.toml"
+    assert "spoolkit" in str(path)
     assert ".agent" not in str(path)
 
 

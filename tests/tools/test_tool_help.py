@@ -7,10 +7,10 @@
 
 from pathlib import Path
 
-from agents_dev.agents.runtime import REVIEWER, restrict
-from agents_dev.tools.help import tool_help_spec
-from agents_dev.tools.registry import ToolRegistry
-from agents_dev.tools.types import ToolCall, ToolResult, ToolSpec
+from spoolkit.agents.runtime import REVIEWER, restrict
+from spoolkit.tools.help import tool_help_spec
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.types import ToolCall, ToolResult, ToolSpec
 
 
 def _tool(name: str, description: str, brief: str = "", group: str = "其它", **params):

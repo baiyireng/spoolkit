@@ -12,10 +12,10 @@ import argparse
 import json
 from pathlib import Path
 
-from agents_dev.agents.plan import DONE, Plan, PlanStep, extend_plan, reflect_progress
-from agents_dev.cli.commands.plan import autonomous
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
+from spoolkit.agents.plan import DONE, Plan, PlanStep, extend_plan, reflect_progress
+from spoolkit.cli.commands.plan import autonomous
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
 
 
 def _plan(goals: list[tuple[str, str]]) -> str:
@@ -120,7 +120,7 @@ def test_没有完成的步骤时不问(tmp_path: Path) -> None:
 
 def test_回头看解析不出来也不挡住推进() -> None:
     """格式坏了退回「摘要=原文、教训为空」——回头看不能把整次运行停在这。"""
-    from agents_dev.agents.plan import _parse_reflection
+    from spoolkit.agents.plan import _parse_reflection
 
     assert _parse_reflection("不是 JSON 的一段总结") == ("不是 JSON 的一段总结", [])
     summary, lessons = _parse_reflection(
@@ -131,7 +131,7 @@ def test_回头看解析不出来也不挡住推进() -> None:
 
 
 def test_教训最多留两条() -> None:
-    from agents_dev.agents.plan import _parse_reflection
+    from spoolkit.agents.plan import _parse_reflection
 
     payload = json.dumps(
         {
@@ -153,9 +153,9 @@ def test_回头看得来的教训进库_并能被后面的同类任务命中(tmp
 
     回头看写下的教训存进教训库，之后**同类任务开局就会被主动推送**。
     """
-    from agents_dev.cli.commands.plan import _keep_lessons
-    from agents_dev.cli.runtime import build_memory
-    from agents_dev.memory.lessons import match_lessons
+    from spoolkit.cli.commands.plan import _keep_lessons
+    from spoolkit.cli.runtime import build_memory
+    from spoolkit.memory.lessons import match_lessons
 
     memory = build_memory(tmp_path, 4096, "cli")
     stored = _keep_lessons(
@@ -173,7 +173,7 @@ def test_回头看得来的教训进库_并能被后面的同类任务命中(tmp
 
 def test_没有记忆会话时教训不落库(tmp_path: Path) -> None:
     """不写记忆的运行不该偷偷留下状态。"""
-    from agents_dev.cli.commands.plan import _keep_lessons
+    from spoolkit.cli.commands.plan import _keep_lessons
 
     assert _keep_lessons([("甲", "a")], None) == 0
 

@@ -11,8 +11,8 @@ scratch、基线），不是用户的代码。
 import argparse
 from pathlib import Path
 
-from agents_dev.agents.plan import PlanStep
-from agents_dev.cli.commands.plan import _effective_scope
+from spoolkit.agents.plan import PlanStep
+from spoolkit.cli.commands.plan import _effective_scope
 
 
 def test_范围里总是带上_agent() -> None:

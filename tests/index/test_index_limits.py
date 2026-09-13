@@ -7,15 +7,15 @@
 
 from pathlib import Path
 
-from agents_dev.cli.runtime import attach_index
-from agents_dev.index.indexer import (
+from spoolkit.cli.runtime import attach_index
+from spoolkit.index.indexer import (
     MAX_INDEX_FILES,
     index_project,
     iter_source_files,
 )
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.store.db import init_schema, open_db
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.store.db import init_schema, open_db
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _many(tmp_path: Path, count: int) -> None:

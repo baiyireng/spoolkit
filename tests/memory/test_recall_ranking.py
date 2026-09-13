@@ -1,14 +1,14 @@
 from pathlib import Path
 
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.memory.session import MemorySession
-from agents_dev.memory.store import (
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.memory.session import MemorySession
+from spoolkit.memory.store import (
     add_memory,
     init_memory_schema,
     search_memories,
     touch_memory,
 )
-from agents_dev.store.db import open_db
+from spoolkit.store.db import open_db
 
 
 def _conn(tmp_path: Path):
@@ -83,7 +83,7 @@ def test_没召回到的记忆不被计数(tmp_path: Path) -> None:
 
 
 def test_打分权重可解释() -> None:
-    from agents_dev.memory.store import FREQUENCY_WEIGHT, RECENCY_WEIGHT
+    from spoolkit.memory.store import FREQUENCY_WEIGHT, RECENCY_WEIGHT
 
     assert FREQUENCY_WEIGHT + RECENCY_WEIGHT == 1.0
 

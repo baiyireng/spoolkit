@@ -11,8 +11,8 @@ import queue
 import time
 from pathlib import Path
 
-from agents_dev.agents.plan import DONE, parse_plan, plan_path, save_plan
-from agents_dev.mcp.server import McpServer, serve_stdio
+from spoolkit.agents.plan import DONE, parse_plan, plan_path, save_plan
+from spoolkit.mcp.server import McpServer, serve_stdio
 
 
 class 假Runner:
@@ -58,7 +58,7 @@ class 假Runner:
     def push(self, type_: str, **data) -> None:
         self._log_seq += 1
         self._events.append({"seq": self._log_seq, "type": type_, **data})
-        from agents_dev.web.protocol import Event
+        from spoolkit.web.protocol import Event
 
         for listener in list(self._listeners):
             listener.put(Event(type_, data))
@@ -96,7 +96,7 @@ def test_initialize_报出协议版本与服务名(tmp_path: Path) -> None:
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
     )["result"]
     assert result["protocolVersion"]
-    assert result["serverInfo"]["name"] == "agents-dev"
+    assert result["serverInfo"]["name"] == "spool"
     assert "tools" in result["capabilities"]
 
 

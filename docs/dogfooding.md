@@ -31,8 +31,8 @@
 2. **整份重写丢内容**。原来那段「这个项目在解决什么」被整段删掉。
    和回归集里 `03_add_function` 同一个毛病。
 3. **接地错误**。标题改成 `# scratch_lab`——它看到目录里有 `scratch_lab/`
-   就拿来用了，而项目名写在 `pyproject.toml` 里（`agents-dev`）。
-4. **命令示例写错**。`python -m agents_dev run "任务"`，实际要 `--goal`。
+   就拿来用了，而项目名写在 `pyproject.toml` 里（`spool`）。
+4. **命令示例写错**。`python -m spoolkit run "任务"`，实际要 `--goal`。
 5. **撞步数上限**。前 5 步侦察，中间被下面那条假失败带偏，12 步不够用。
 
 ### 这一轮暴露的机制缺陷（已修）
@@ -175,9 +175,9 @@ AST 提取器补上改动里的符号。
 **机制**（两条规矩落在代码上，不是提示词里）：
 
 1. Agent 只能**申请**（`request_diagnosis`）和**读回**（`read_diagnosis`）。
-   报告由特权侧写（`agents-dev diagnose --report`），带 HMAC 签名。
+   报告由特权侧写（`spool diagnose --report`），带 HMAC 签名。
    读的时候验签，没签名或签名不对就标成「来源无法验证」并判 ok=False。
-2. **签名密钥放在项目目录之外**（`~/.agents-dev/diagnosis.key`）。
+2. **签名密钥放在项目目录之外**（`~/.spool/diagnosis.key`）。
    Agent 的文件工具锁在项目根目录里，够不到它；工具代码本身能读到，用来验签。
 
    少了这两条，模型完全可以自己捏一份「环境有问题，忽略那些失败」再据此行动——
@@ -968,11 +968,11 @@ tauri_player 整体 8.4 GB。上一轮之所以能拦住，是因为那一轮模
 
 ### 把「能力标定」做成一张可查、可改的表
 
-接着上面那一步做完了骨架：`agent_dev/limits.py` 是登记表，`agents-dev limits`
+接着上面那一步做完了骨架：`agent_dev/limits.py` 是登记表，`spool limits`
 是入口。
 
 ```
-$ agents-dev limits
+$ spool limits
        值  来源     能不能改     名字
        3  默认     可覆盖      repeat_block_at
           重复到几次不再执行：第三次中间没有任何别的动作，结果不可能变

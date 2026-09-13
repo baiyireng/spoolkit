@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from agents_dev.agents.plan import out_of_scope, parse_plan, path_in_scope
-from agents_dev.cli.approval import apply_with_audit, review_and_apply
-from agents_dev.tools.edit import PendingChanges, write_file_spec
+from spoolkit.agents.plan import out_of_scope, parse_plan, path_in_scope
+from spoolkit.cli.approval import apply_with_audit, review_and_apply
+from spoolkit.tools.edit import PendingChanges, write_file_spec
 
 
 def test_目录前缀视为范围内() -> None:
@@ -36,20 +36,20 @@ def test_范围随计划一起解析() -> None:
                 {
                     "goal": "改索引",
                     "acceptance": "测试通过",
-                    "scope": ["src/agents_dev/index"],
+                    "scope": ["src/spoolkit/index"],
                 }
             ]
         },
         ensure_ascii=False,
     )
     plan = parse_plan(raw, "目标")
-    assert plan.steps[0].scope == ("src/agents_dev/index",)
+    assert plan.steps[0].scope == ("src/spoolkit/index",)
 
 
 def test_范围可持久化(tmp_path: Path) -> None:
     import json
 
-    from agents_dev.agents.plan import load_plan, plan_path, save_plan
+    from spoolkit.agents.plan import load_plan, plan_path, save_plan
 
     raw = json.dumps(
         {"steps": [{"goal": "g", "acceptance": "a", "scope": ["src"]}]},
@@ -71,7 +71,7 @@ def _stage(tmp_path: Path) -> PendingChanges:
 
 
 def test_自动落盘仍然打印差异与记录基线(tmp_path: Path) -> None:
-    from agents_dev.tools.edit import load_baseline
+    from spoolkit.tools.edit import load_baseline
 
     pending = _stage(tmp_path)
     baseline_path = tmp_path / ".agent" / "last_change.json"

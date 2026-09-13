@@ -7,7 +7,7 @@
 import json
 from pathlib import Path
 
-from agents_dev.bench import (
+from spoolkit.bench import (
     Task,
     load_tasks,
     prepare_together,

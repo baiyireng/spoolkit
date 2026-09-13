@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.store.db import init_schema, open_db
 
 
 def _tables(conn) -> set[str]:

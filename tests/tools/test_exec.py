@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from agents_dev.tools.exec import (
+from spoolkit.tools.exec import (
     MAX_OUTPUT_CHARS,
     resolve_argv,
     run_command_spec,

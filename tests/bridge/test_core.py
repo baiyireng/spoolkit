@@ -2,9 +2,9 @@
 
 import pytest
 
-from agents_dev.bridge.channel import Incoming
-from agents_dev.bridge.core import Bridge
-from agents_dev.bridge.fake import FakeChannel
+from spoolkit.bridge.channel import Incoming
+from spoolkit.bridge.core import Bridge
+from spoolkit.bridge.fake import FakeChannel
 
 
 def _bridge(**kwargs):

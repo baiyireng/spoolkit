@@ -9,14 +9,14 @@
 
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project, iter_source_files
-from agents_dev.index.symbols import (
+from spoolkit.index.indexer import index_project, iter_source_files
+from spoolkit.index.symbols import (
     extractor_for,
     indexed_suffixes,
     language_name,
 )
-from agents_dev.index.tools import find_callers_spec
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.index.tools import find_callers_spec
+from spoolkit.store.db import init_schema, open_db
 
 
 def _names(source: str, path: str) -> list[tuple[str, str]]:

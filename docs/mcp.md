@@ -11,8 +11,8 @@
 ```json
 {
   "mcpServers": {
-    "agents-dev": {
-      "command": "agents-dev",
+    "spool": {
+      "command": "spool",
       "args": ["mcp", "--root", "D:\\你的项目", "--scope", "src", "--policy", "auto"]
     }
   }
@@ -20,7 +20,7 @@
 ```
 
 `--root` 是工作区；`--scope` 是允许**自动落盘**的范围（越界照样退回确认）；
-`--policy` 决定子进程的授权策略。供应商/地址走用户级配置（`agents-dev config`），
+`--policy` 决定子进程的授权策略。供应商/地址走用户级配置（`spool config`），
 也可以在 args 里给 `--provider` / `--base-url`。
 
 ## 信任模型
@@ -91,7 +91,7 @@ MCP 的一次 `tools/call` 是请求/响应，而这里的任务可以跑几十�
 
 ## 怎么配
 
-写进用户配置（`agents-dev config --path` 打印的就是它）：
+写进用户配置（`spool config --path` 打印的就是它）：
 
 ```toml
 [[mcp]]
@@ -102,15 +102,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", 'D:\work']
 
 > **Windows 路径注意**：TOML 里反斜杠要写双份（`"D:\\work"`），或者用单引号
 > 字面字符串（`'D:\work'`）。写错一个反斜杠整份配置都读不出来——所以
-> `agents-dev config` / `mcp-servers` 现在会把解析错误直接说出来，而不是
+> `spool config` / `mcp-servers` 现在会把解析错误直接说出来，而不是
 > 假装"没有配置"。
 
 配好之后：
 
 ```powershell
-agents-dev mcp-servers --check     # 真连一遍：连得上吗、提供哪些工具、挂成什么名字
-agents-dev run --goal "..."        # 正常跑就是，外挂工具自动在工具表里
-agents-dev run --no-mcp --goal "..."   # 怀疑是外挂在捣乱时，临时排除
+spool mcp-servers --check     # 真连一遍：连得上吗、提供哪些工具、挂成什么名字
+spool run --goal "..."        # 正常跑就是，外挂工具自动在工具表里
+spool run --no-mcp --goal "..."   # 怀疑是外挂在捣乱时，临时排除
 ```
 
 ## 挂进来之后长什么样

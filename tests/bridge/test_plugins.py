@@ -8,7 +8,7 @@
 import sys
 from pathlib import Path
 
-from agents_dev.bridge.plugins import ENTRY_POINT_GROUP, load_channel_factories
+from spoolkit.bridge.plugins import ENTRY_POINT_GROUP, load_channel_factories
 
 
 def _write_plugin(tmp_path: Path) -> None:
@@ -16,7 +16,7 @@ def _write_plugin(tmp_path: Path) -> None:
         "\n".join(
             [
                 '"""一个最小的通道插件：证明装载这条路是通的。"""',
-                "from agents_dev.bridge.channel import Incoming",
+                "from spoolkit.bridge.channel import Incoming",
                 "",
                 "class MyChannel:",
                 '    name = "my"',
@@ -84,7 +84,7 @@ def test_装载不了的插件跳过_不拖垮其它的(tmp_path: Path, monkeypa
 
 def test_没配就没有插件(monkeypatch) -> None:
     monkeypatch.delenv("AGENTS_DEV_CHANNEL_PLUGINS", raising=False)
-    assert ENTRY_POINT_GROUP == "agents_dev.channels"
+    assert ENTRY_POINT_GROUP == "spoolkit.channels"
     # 本仓库没有装任何通道插件，所以这里应当是空的（entry point 那条路
     # 由发布出去的插件包负责，测试里不假装装了一个）。
     assert load_channel_factories() == {}
@@ -96,7 +96,7 @@ def test_插件通道能接进桥(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setenv("AGENTS_DEV_CHANNEL_PLUGINS", "my_channel:build")
 
-    from agents_dev.bridge.core import Bridge
+    from spoolkit.bridge.core import Bridge
 
     channel = load_channel_factories()["my_channel"]({"name": "my"})
     bridge = Bridge(channel, lambda text: f"收到：{text}", access="open")

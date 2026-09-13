@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents_dev.memory.lessons import (
+from spoolkit.memory.lessons import (
     INITIAL_CONFIDENCE,
     MIN_SAMPLES,
     PRUNE_THRESHOLD,
@@ -11,8 +11,8 @@ from agents_dev.memory.lessons import (
     record_outcome,
     recompute_confidence,
 )
-from agents_dev.memory.store import init_memory_schema
-from agents_dev.store.db import open_db
+from spoolkit.memory.store import init_memory_schema
+from spoolkit.store.db import open_db
 
 
 def _conn(tmp_path: Path):

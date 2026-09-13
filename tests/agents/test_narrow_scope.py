@@ -1,4 +1,4 @@
-from agents_dev.agents.plan import narrow_scope
+from spoolkit.agents.plan import narrow_scope
 
 
 def test_范围内的提议被接受() -> None:

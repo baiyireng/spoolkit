@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.bench import load_tasks, prepare, verify
+from spoolkit.bench import load_tasks, prepare, verify
 
 ROOT = Path(__file__).resolve().parents[2]
 

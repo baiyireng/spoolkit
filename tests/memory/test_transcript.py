@@ -1,14 +1,14 @@
 from pathlib import Path
 
-from agents_dev.memory.store import init_memory_schema
-from agents_dev.memory.transcript import (
+from spoolkit.memory.store import init_memory_schema
+from spoolkit.memory.transcript import (
     ASSISTANT,
     USER,
     recent_messages,
     record_message,
     render_transcript,
 )
-from agents_dev.store.db import open_db
+from spoolkit.store.db import open_db
 
 
 def _conn(tmp_path: Path):

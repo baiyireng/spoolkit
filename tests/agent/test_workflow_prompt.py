@@ -1,15 +1,15 @@
 from pathlib import Path
 
-from agents_dev.agent.loop import build_workflow
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.memory.session import MemorySession
-from agents_dev.memory.store import init_memory_schema
-from agents_dev.memory.tools import recall_spec
-from agents_dev.store.db import open_db
-from agents_dev.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
-from agents_dev.tools.fs import read_file_spec
-from agents_dev.tools.registry import ToolRegistry
-from agents_dev.index.tools import find_callers_spec, find_symbol_spec
+from spoolkit.agent.loop import build_workflow
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.memory.session import MemorySession
+from spoolkit.memory.store import init_memory_schema
+from spoolkit.memory.tools import recall_spec
+from spoolkit.store.db import open_db
+from spoolkit.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
+from spoolkit.tools.fs import read_file_spec
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.index.tools import find_callers_spec, find_symbol_spec
 
 
 def _full_registry(tmp_path: Path) -> ToolRegistry:
@@ -37,7 +37,7 @@ def test_有写工具时给出改动方式(tmp_path: Path) -> None:
 
 
 def test_有索引工具时给出查符号优先规则(tmp_path: Path) -> None:
-    from agents_dev.store.db import init_schema
+    from spoolkit.store.db import init_schema
 
     registry = ToolRegistry()
     registry.register(read_file_spec(tmp_path))
@@ -52,7 +52,7 @@ def test_有索引工具时给出查符号优先规则(tmp_path: Path) -> None:
 
 def test_有写工具时才提动手改(tmp_path: Path) -> None:
     """只读角色看到「动手改」只会浪费步数去试它没有的工具。"""
-    from agents_dev.store.db import init_schema
+    from spoolkit.store.db import init_schema
 
     registry = ToolRegistry()
     registry.register(read_file_spec(tmp_path))

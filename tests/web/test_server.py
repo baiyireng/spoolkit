@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.web.runner import Runner
-from agents_dev.web.server import build_server
+from spoolkit.web.runner import Runner
+from spoolkit.web.server import build_server
 
 
 @pytest.fixture

@@ -7,7 +7,7 @@
 
 import json
 
-from agents_dev.agents.supervisor import (
+from spoolkit.agents.supervisor import (
     EXTEND,
     MAX_GRANT,
     REDIRECT,

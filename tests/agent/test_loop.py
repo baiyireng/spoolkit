@@ -1,13 +1,13 @@
 import json
 from pathlib import Path
 
-from agents_dev.agent.loop import AgentLoop
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.fs import read_file_spec
-from agents_dev.tools.fs import list_dir_spec
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agent.loop import AgentLoop
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.fs import read_file_spec
+from spoolkit.tools.fs import list_dir_spec
+from spoolkit.tools.registry import ToolRegistry
 
 
 def _turn(thought: str, calls=None, state=None, final=None, done=None) -> str:
@@ -118,9 +118,9 @@ def test_服务端说提示词超长时丢掉历史重发(tmp_path: Path) -> Non
     实测那条拒绝曾经变成未捕获异常，直接把整个运行打断——一次上下文
     估算偏差不该让任务崩掉。
     """
-    from agents_dev.errors import ContextOverflowError
-    from agents_dev.llm.gateway import ModelGateway
-    from agents_dev.llm.types import ChatResponse
+    from spoolkit.errors import ContextOverflowError
+    from spoolkit.llm.gateway import ModelGateway
+    from spoolkit.llm.types import ChatResponse
 
     class OverflowOnce:
         """第一次说超长，第二次正常。"""

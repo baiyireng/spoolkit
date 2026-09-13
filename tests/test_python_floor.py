@@ -13,12 +13,12 @@ import importlib
 import pkgutil
 import sys
 
-import agents_dev
+import spoolkit
 
 
 def test_每个模块都能导入() -> None:
     failures: list[str] = []
-    modules = list(pkgutil.walk_packages(agents_dev.__path__, "agents_dev."))
+    modules = list(pkgutil.walk_packages(spoolkit.__path__, "spoolkit."))
     for item in modules:
         try:
             importlib.import_module(item.name)

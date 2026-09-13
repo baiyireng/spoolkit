@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from agents_dev.errors import PathOutsideProjectError
-from agents_dev.paths import resolve_within
+from spoolkit.errors import PathOutsideProjectError
+from spoolkit.paths import resolve_within
 
 
 def test_相对路径解析到项目根之下(tmp_path: Path) -> None:

@@ -8,14 +8,14 @@ schema，而不是提示词里写了什么。
 import json
 from pathlib import Path
 
-from agents_dev.agent.loop import NO_EDIT_LIMIT, AgentLoop
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
-from agents_dev.tools.fs import read_file_spec
-from agents_dev.tools.registry import ToolRegistry
-from agents_dev.tools.types import ToolResult
+from spoolkit.agent.loop import NO_EDIT_LIMIT, AgentLoop
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
+from spoolkit.tools.fs import read_file_spec
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.types import ToolResult
 
 
 def _turn(thought: str, calls=None, final=None) -> str:

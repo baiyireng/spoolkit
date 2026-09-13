@@ -12,12 +12,12 @@
 import json
 from pathlib import Path
 
-from agents_dev.agent.loop import AgentLoop, _is_repeat_output
-from agents_dev.config import Config
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.tools.fs import read_file_spec
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agent.loop import AgentLoop, _is_repeat_output
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.fs import read_file_spec
+from spoolkit.tools.registry import ToolRegistry
 
 长正文 = "def average(values):\n    return sum(values) / len(values)\n" + "# 填充\n" * 60
 

@@ -1,4 +1,4 @@
-from agents_dev.llm.tokenizer import OfflineTokenCounter
+from spoolkit.llm.tokenizer import OfflineTokenCounter
 
 
 def test_空字符串为零() -> None:

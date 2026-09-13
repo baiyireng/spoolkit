@@ -7,7 +7,7 @@
 
 from pathlib import Path
 
-from agents_dev.bridge import credentials
+from spoolkit.bridge import credentials
 
 
 def _env_file(root: Path, text: str) -> None:

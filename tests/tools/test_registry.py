@@ -1,5 +1,5 @@
-from agents_dev.tools.registry import ToolRegistry
-from agents_dev.tools.types import ToolCall, ToolResult, ToolSpec
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.types import ToolCall, ToolResult, ToolSpec
 
 SCHEMA = {
     "type": "object",

@@ -3,14 +3,14 @@ import json
 import httpx
 import pytest
 
-from agents_dev.llm.llamacpp import (
+from spoolkit.llm.llamacpp import (
     LlamaCppError,
     LlamaCppGateway,
     LlamaCppTokenCounter,
     proxy_for,
 )
-from agents_dev.errors import ContextOverflowError
-from agents_dev.llm.types import ChatRequest, Message
+from spoolkit.errors import ContextOverflowError
+from spoolkit.llm.types import ChatRequest, Message
 
 
 def _completion(text: str = '{"thought":"t","tool_calls":[],"done":true,"final":"好"}') -> dict:
@@ -179,7 +179,7 @@ def test_本机地址不走代理() -> None:
 
 def test_非本机地址仍按系统代理走() -> None:
     """不写死「永远不用代理」——远程的 llama-server 该走代理还是走。"""
-    import agents_dev.llm.llamacpp as module
+    import spoolkit.llm.llamacpp as module
 
     original = module.system_proxy
     module.system_proxy = lambda: "http://127.0.0.1:7890"

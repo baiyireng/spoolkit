@@ -1,17 +1,17 @@
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project
-from agents_dev.index.rank import (
+from spoolkit.index.indexer import index_project
+from spoolkit.index.rank import (
     extract_keywords,
     prefetch,
     prefetch_contents,
     prefetch_scope,
     rank_files,
 )
-from agents_dev.index.tools import find_symbol_spec
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.store.db import init_schema, open_db
-from agents_dev.tools.types import ToolCall
+from spoolkit.index.tools import find_symbol_spec
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.store.db import init_schema, open_db
+from spoolkit.tools.types import ToolCall
 
 
 def _project(tmp_path: Path):

@@ -1,4 +1,4 @@
-from agents_dev.web.protocol import (
+from spoolkit.web.protocol import (
     AWAIT,
     CONFIRM,
     DIFF,

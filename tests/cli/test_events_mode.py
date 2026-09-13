@@ -3,12 +3,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from agents_dev.cli.commands.run import _report_numbers
-from agents_dev.cli.events import EventWriter, settle_with_events
-from agents_dev.policy import ASK, AUTO
-from agents_dev.tools.sources import SourceLog
-from agents_dev.tools.edit import PendingChanges, write_file_spec
-from agents_dev.web.protocol import AWAIT, CONFIRM, DIFF, NOTE
+from spoolkit.cli.commands.run import _report_numbers
+from spoolkit.cli.events import EventWriter, settle_with_events
+from spoolkit.policy import ASK, AUTO
+from spoolkit.tools.sources import SourceLog
+from spoolkit.tools.edit import PendingChanges, write_file_spec
+from spoolkit.web.protocol import AWAIT, CONFIRM, DIFF, NOTE
 
 
 def _stage(tmp_path: Path, path: str = "src/a.py") -> PendingChanges:

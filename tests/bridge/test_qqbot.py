@@ -15,8 +15,8 @@ import time
 import httpx
 import pytest
 
-from agents_dev.bridge.qqbot import QQBotChannel, parse_event
-from agents_dev.bridge.ws import OP_TEXT, Timeout as WSTimeout, WebSocket, encode_frame, read_frame
+from spoolkit.bridge.qqbot import QQBotChannel, parse_event
+from spoolkit.bridge.ws import OP_TEXT, Timeout as WSTimeout, WebSocket, encode_frame, read_frame
 
 
 # --- HTTP 那一半 ---

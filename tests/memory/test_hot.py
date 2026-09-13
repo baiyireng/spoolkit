@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.memory.hot import (
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.memory.hot import (
     DEMOTE_ORDER,
     HOT_TITLE,
     hot_budget,

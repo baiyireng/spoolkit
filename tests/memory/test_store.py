@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents_dev.memory.store import (
+from spoolkit.memory.store import (
     Memory,
     add_episode,
     add_memory,
@@ -9,7 +9,7 @@ from agents_dev.memory.store import (
     normalize_for_fts,
     search_memories,
 )
-from agents_dev.store.db import open_db
+from spoolkit.store.db import open_db
 
 
 def _conn(tmp_path: Path):

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents_dev.cli.settle import (
+from spoolkit.cli.settle import (
     AUTO_APPLIED,
     CONFIRMED,
     DECLINED,
@@ -8,8 +8,8 @@ from agents_dev.cli.settle import (
     NONE,
     settle,
 )
-from agents_dev.policy import ASK, AUTO, DENY
-from agents_dev.tools.edit import PendingChanges, load_baseline, write_file_spec
+from spoolkit.policy import ASK, AUTO, DENY
+from spoolkit.tools.edit import PendingChanges, load_baseline, write_file_spec
 
 
 def _stage(tmp_path: Path, path: str = "src/a.py") -> PendingChanges:

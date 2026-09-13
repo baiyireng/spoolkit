@@ -1,12 +1,12 @@
 from pathlib import Path
 
-from agents_dev.agent.loop import SYSTEM_PROMPT, build_workflow
-from agents_dev.agents.dispatcher import PLAN_PROMPT
-from agents_dev.agents.plan import DECOMPOSE_PROMPT
-from agents_dev.context import templates as T
-from agents_dev.memory.distill import GROUP_TITLES, PROMPT
-from agents_dev.tools.fs import read_file_spec
-from agents_dev.tools.registry import ToolRegistry
+from spoolkit.agent.loop import SYSTEM_PROMPT, build_workflow
+from spoolkit.agents.dispatcher import PLAN_PROMPT
+from spoolkit.agents.plan import DECOMPOSE_PROMPT
+from spoolkit.context import templates as T
+from spoolkit.memory.distill import GROUP_TITLES, PROMPT
+from spoolkit.tools.fs import read_file_spec
+from spoolkit.tools.registry import ToolRegistry
 
 
 def test_模板带版本号() -> None:

@@ -8,7 +8,7 @@
 import json
 from pathlib import Path
 
-from agents_dev.bridge.agent_runner import AgentRunner
+from spoolkit.bridge.agent_runner import AgentRunner
 
 
 def _turn(final: str) -> str:

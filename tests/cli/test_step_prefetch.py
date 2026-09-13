@@ -14,9 +14,9 @@ import argparse
 import json
 from pathlib import Path
 
-from agents_dev.cli.commands.plan import autonomous
-from agents_dev.llm.fake import FakeModel
-from agents_dev.llm.tokenizer import OfflineTokenCounter
+from spoolkit.cli.commands.plan import autonomous
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
 
 
 def _plan() -> str:

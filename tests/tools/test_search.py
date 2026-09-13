@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents_dev.tools.search import search_code_spec
+from spoolkit.tools.search import search_code_spec
 
 
 def test_搜索命中并返回文件名(tmp_path: Path) -> None:

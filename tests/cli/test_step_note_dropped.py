@@ -11,12 +11,12 @@
 import argparse
 from pathlib import Path
 
-from agents_dev.cli.commands.plan import record_step
-from agents_dev.agents.plan import Plan, PlanStep, load_plan, plan_path, save_plan
-from agents_dev.cli.commands.plan import StepRun
-from agents_dev.tools.edit import PendingChanges
-from agents_dev.agent.loop import LoopResult
-from agents_dev.agent.state import TaskState
+from spoolkit.cli.commands.plan import record_step
+from spoolkit.agents.plan import Plan, PlanStep, load_plan, plan_path, save_plan
+from spoolkit.cli.commands.plan import StepRun
+from spoolkit.tools.edit import PendingChanges
+from spoolkit.agent.loop import LoopResult
+from spoolkit.agent.state import TaskState
 
 
 def _args(tmp_path: Path) -> argparse.Namespace:
@@ -43,15 +43,15 @@ def test_越界被丢弃会写进这一步的记录(tmp_path: Path) -> None:
                 index=1,
                 goal="新增 CLI 子命令",
                 acceptance="跑通",
-                scope=("src/agents_dev/cli/commands/bridge.py",),
+                scope=("src/spoolkit/cli/commands/bridge.py",),
             )
         ],
     )
     save_plan(plan_path(tmp_path), plan)
     pending = PendingChanges(tmp_path)
-    (tmp_path / "src" / "agents_dev" / "cli").mkdir(parents=True)
-    (tmp_path / "src" / "agents_dev" / "cli" / "app.py").write_text("x = 1\n", encoding="utf-8")
-    pending.propose("src/agents_dev/cli/app.py", "x = 2\n")
+    (tmp_path / "src" / "spoolkit" / "cli").mkdir(parents=True)
+    (tmp_path / "src" / "spoolkit" / "cli" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    pending.propose("src/spoolkit/cli/app.py", "x = 2\n")
 
     ctx = StepRun(
         args=_args(tmp_path),
@@ -60,12 +60,12 @@ def test_越界被丢弃会写进这一步的记录(tmp_path: Path) -> None:
         plan=plan,
         non_interactive=True,
     )
-    record_step(ctx, plan.steps[0], _result(), pending, scope=("src/agents_dev/cli/commands/bridge.py",))
+    record_step(ctx, plan.steps[0], _result(), pending, scope=("src/spoolkit/cli/commands/bridge.py",))
 
     note = load_plan(plan_path(tmp_path)).steps[0].note
     assert "超出本步范围被丢弃" in note
     assert "cli/app.py" in note
-    assert not (tmp_path / "src" / "agents_dev" / "cli" / "app.py").read_text(
+    assert not (tmp_path / "src" / "spoolkit" / "cli" / "app.py").read_text(
         encoding="utf-8"
     ) == "x = 2\n"  # 真的没落盘
 

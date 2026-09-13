@@ -7,8 +7,8 @@
 
 from pathlib import Path
 
-from agents_dev.tools.edit import PendingChanges
-from agents_dev.tools.verify import (
+from spoolkit.tools.edit import PendingChanges
+from spoolkit.tools.verify import (
     condense_test_output,
     detect_test_command,
     exit_code,
@@ -18,7 +18,7 @@ from agents_dev.tools.verify import (
     mentions_workspace,
     scope_for_change,
 )
-from agents_dev.tools.types import ToolResult
+from spoolkit.tools.types import ToolResult
 
 FAILING = "import mod\n\n\ndef test_v():\n    assert mod.VALUE == 2\n"
 
@@ -274,7 +274,7 @@ def test_环境问题与代码问题给出不同反馈(tmp_path: Path) -> None:
         "import mod\n\n\ndef test_v():\n    assert mod.VALUE == 2\n", encoding="utf-8"
     )
 
-    import agents_dev.tools.verify as module
+    import spoolkit.tools.verify as module
 
     original = module.run_once
     pending = PendingChanges(tmp_path)
@@ -313,7 +313,7 @@ def test_环境坏了之后不再重跑(tmp_path: Path) -> None:
     (tmp_path / "test_mod.py").write_text(
         "import mod\n\n\ndef test_v():\n    assert mod.VALUE == 2\n", encoding="utf-8"
     )
-    import agents_dev.tools.verify as module
+    import spoolkit.tools.verify as module
 
     calls = []
     original = module.run_once

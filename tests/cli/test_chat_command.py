@@ -12,8 +12,8 @@ import argparse
 import json
 from pathlib import Path
 
-from agents_dev.cli.commands.chat import chat_command
-from agents_dev.llm.fake import FakeModel
+from spoolkit.cli.commands.chat import chat_command
+from spoolkit.llm.fake import FakeModel
 
 
 def _turn(final: str) -> str:

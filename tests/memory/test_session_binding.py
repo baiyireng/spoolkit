@@ -1,13 +1,13 @@
 import sqlite3
 from pathlib import Path
 
-from agents_dev.memory.store import (
+from spoolkit.memory.store import (
     check_binding,
     get_session,
     init_memory_schema,
     record_session,
 )
-from agents_dev.store.db import open_db
+from spoolkit.store.db import open_db
 
 
 def _conn(tmp_path: Path) -> sqlite3.Connection:

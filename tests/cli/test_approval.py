@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from agents_dev.cli.approval import review_and_apply
-from agents_dev.tools.edit import PendingChanges, write_file_spec
+from spoolkit.cli.approval import review_and_apply
+from spoolkit.tools.edit import PendingChanges, write_file_spec
 
 
 def _stage(tmp_path: Path) -> PendingChanges:

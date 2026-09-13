@@ -1,4 +1,4 @@
-# agents-dev
+# spool
 
 一个面向**本地小模型**（llama.cpp）的编程特化 Agent。
 
@@ -38,7 +38,7 @@ uv venv --python 3.12
 uv pip install -e ".[dev]"      # 开发；只要用的话去掉 [dev]
 ```
 
-装好后有 `agents-dev` 命令（`agents-dev --version` 能验证）。
+装好后有 `spool` 命令（`spool --version` 能验证）。
 
 ### 2. 起一个本地模型服务
 
@@ -54,24 +54,24 @@ llama-server.exe -m <模型.gguf> --host 127.0.0.1 --port 8080 -c 8192 -ngl 99 -
 
 ```powershell
 # 先把默认值固定下来（只做一次），以后不用每次打 --provider/--base-url
-agents-dev config --set provider=llamacpp --set base_url=http://127.0.0.1:8080
-agents-dev config            # 看生效值，以及每一项是从哪来的
+spool config --set provider=llamacpp --set base_url=http://127.0.0.1:8080
+spool config            # 看生效值，以及每一项是从哪来的
 
 # 一题一跑：给目标，它在当前工作区里做完
-agents-dev run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测试"
+spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测试"
 
 # 长任务：自己拆解、逐步做完（--scope 是允许自动落盘的范围，必须由你给）
-agents-dev run --autonomous --scope "**" --policy auto --limit 20 `
+spool run --autonomous --scope "**" --policy auto --limit 20 `
     --goal "把这个工作区里的题目都做对"
 ```
 
-改动默认只产出 diff；`--policy auto` 才会在授权范围内自动落盘。`agents-dev revert`
+改动默认只产出 diff；`--policy auto` 才会在授权范围内自动落盘。`spool revert`
 可以回滚上一次写入。
 
 ### 4. 网页壳
 
 ```powershell
-agents-dev serve                 # 供应商/地址取用户级配置，也可以用命令行覆盖
+spool serve                 # 供应商/地址取用户级配置，也可以用命令行覆盖
 # 打开 http://127.0.0.1:8765/
 ```
 
@@ -81,7 +81,7 @@ agents-dev serve                 # 供应商/地址取用户级配置，也可�
 也可以直接在终端里多轮地聊：
 
 ```powershell
-agents-dev chat                  # 一行一句，共用同一个会话；/history、/exit
+spool chat                  # 一行一句，共用同一个会话；/history、/exit
 ```
 
 ### 5. 让别的 agent 用它（MCP）
@@ -90,7 +90,7 @@ agents-dev chat                  # 一行一句，共用同一个会话；/histo
 可以扮演用户下发编排任务，由这个 agent 在工作区里实施，事件与结论按协议交回。
 
 ```json
-{"command": "agents-dev", "args": ["mcp", "--root", "D:\\你的项目", "--scope", "**"]}
+{"command": "spool", "args": ["mcp", "--root", "D:\\你的项目", "--scope", "**"]}
 ```
 
 工具、信任模型与调用序列见 [`docs/mcp.md`](docs/mcp.md)。
@@ -102,7 +102,7 @@ agents-dev chat                  # 一行一句，共用同一个会话；/histo
 `wecom`（企业微信自建应用）。
 
 ```powershell
-agents-dev bridge --channel fake --provider llamacpp --policy auto --scope "**" --allow-user me
+spool bridge --channel fake --provider llamacpp --policy auto --scope "**" --allow-user me
 ```
 
 白名单按用户判（不给就等于谁都能驱动这个工作区），`--policy`/`--scope` 原样转给
@@ -111,7 +111,7 @@ agent，越界照样退回确认。**个人微信/QQ 没有官方接口**（第�
 [`docs/bridge.md`](docs/bridge.md)。
 
 反过来也成立：**它自己能调别的 MCP 服务**（外面现成的工具不用重写一遍）。
-在用户配置里加一段即可，加完用 `agents-dev mcp-servers --check` 验一遍：
+在用户配置里加一段即可，加完用 `spool mcp-servers --check` 验一遍：
 
 ```toml
 [[mcp]]
@@ -127,34 +127,34 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", 'D:\work']
 
 | 配什么 | 在哪 | 怎么用 |
 |---|---|---|
-| 供应商 / 模型 / 服务地址 | 用户级默认 | `agents-dev config --set provider=llamacpp --set base_url=<地址>`；`agents-dev config` 看现值与来源 |
+| 供应商 / 模型 / 服务地址 | 用户级默认 | `spool config --set provider=llamacpp --set base_url=<地址>`；`spool config` 看现值与来源 |
 | 同上，临时改一次 | 命令行 | `--provider llamacpp --model <名> --base-url <地址>`（优先于配置文件）|
 | 同上，只在这个 shell 生效 | 环境变量 | `AGENTS_DEV_PROVIDER` / `AGENTS_DEV_BASE_URL` / `AGENTS_DEV_MODEL` / `AGENTS_DEV_PROXY` |
 | Gemini 密钥 | 项目根 `.env` | `GEMINI_API_KEY=...`（本地模型不需要任何密钥）|
-| 能力标定值（预算、超时、上限） | `.agent/limits.json` | `agents-dev limits --set 名字=值`，`agents-dev limits` 看现值与来源 |
-| 授权策略 | `.agent/policy.json` | `agents-dev policy --set auto`（三档：ask/auto/deny）|
+| 能力标定值（预算、超时、上限） | `.agent/limits.json` | `spool limits --set 名字=值`，`spool limits` 看现值与来源 |
+| 授权策略 | `.agent/policy.json` | `spool policy --set auto`（三档：ask/auto/deny）|
 | 额外可读目录 | 命令行 | `--allow-read D:\别的地方`（只放开读，写入仍限工作区）|
 
 能力标定值全部可覆盖、可回退：默认值是按本机 27B + 8K 窗口实测出来的，
-换模型或换机器就该改，`agents-dev limits` 会告诉你每个值"现在是多少、从哪来"。
+换模型或换机器就该改，`spool limits` 会告诉你每个值"现在是多少、从哪来"。
 
 ## 常用命令
 
 | 命令 | 做什么 |
 |---|---|
-| `agents-dev run --goal …` | 跑一次任务 |
-| `agents-dev run --autonomous --scope … --goal …` | 自主拆解并逐步做完 |
-| `agents-dev run --plan` | 推进已有计划的下一个待办步骤 |
-| `agents-dev run --resume` | 接着上次未完成的检查点继续 |
-| `agents-dev plan --goal …` | 只拆解、落盘计划，不执行 |
-| `agents-dev serve` | 起 Web UI |
-| `agents-dev chat` | 对话式使用：多轮、共用同一个会话 |
-| `agents-dev mcp` | 以 MCP 服务运行，供别的 agent 调用（见 docs/mcp.md）|
-| `agents-dev mcp-servers --check` | 看/验自己配的外挂 MCP 服务 |
-| `agents-dev bridge --channel fake` | 用聊天消息驱动它（本地可跑；telegram / wecom 见 docs/bridge.md）|
-| `agents-dev config` | 查看/设置用户级默认配置（provider、地址、模型…）|
-| `agents-dev bench --limit N` | 跑回归任务集（可复现的测量）|
-| `agents-dev limits` / `policy` / `session` / `revert` | 标定值 / 授权 / 会话 / 回滚 |
+| `spool run --goal …` | 跑一次任务 |
+| `spool run --autonomous --scope … --goal …` | 自主拆解并逐步做完 |
+| `spool run --plan` | 推进已有计划的下一个待办步骤 |
+| `spool run --resume` | 接着上次未完成的检查点继续 |
+| `spool plan --goal …` | 只拆解、落盘计划，不执行 |
+| `spool serve` | 起 Web UI |
+| `spool chat` | 对话式使用：多轮、共用同一个会话 |
+| `spool mcp` | 以 MCP 服务运行，供别的 agent 调用（见 docs/mcp.md）|
+| `spool mcp-servers --check` | 看/验自己配的外挂 MCP 服务 |
+| `spool bridge --channel fake` | 用聊天消息驱动它（本地可跑；telegram / wecom 见 docs/bridge.md）|
+| `spool config` | 查看/设置用户级默认配置（provider、地址、模型…）|
+| `spool bench --limit N` | 跑回归任务集（可复现的测量）|
+| `spool limits` / `policy` / `session` / `revert` | 标定值 / 授权 / 会话 / 回滚 |
 
 ## 已知限制
 

@@ -3,7 +3,7 @@ import sys
 import time
 from pathlib import Path
 
-from agents_dev.web.runner import Runner
+from spoolkit.web.runner import Runner
 
 
 def _runner(tmp_path: Path, *extra: str) -> Runner:
@@ -13,7 +13,7 @@ def _runner(tmp_path: Path, *extra: str) -> Runner:
 def test_命令拼装包含事件模式(tmp_path: Path) -> None:
     command = _runner(tmp_path).command("看看代码")
     assert command[0] == sys.executable
-    assert "agents_dev.cli.app" in command
+    assert "spoolkit.cli.app" in command
     assert "run" in command
     assert "--events" in command
     assert "--goal" in command
@@ -32,9 +32,9 @@ def test_状态里带上会话历史(tmp_path: Path) -> None:
     它**只是给人看的**：模型上下文不受它影响。两者混为一谈会得出
     "把历史塞回上下文"的结论，而那会把这个项目的支点（短上下文）推翻。
     """
-    from agents_dev.memory.store import init_memory_schema
-    from agents_dev.memory.transcript import ASSISTANT, USER, record_message
-    from agents_dev.store.db import open_db
+    from spoolkit.memory.store import init_memory_schema
+    from spoolkit.memory.transcript import ASSISTANT, USER, record_message
+    from spoolkit.store.db import open_db
 
     db = tmp_path / ".agent" / "memory.db"
     conn = open_db(db)

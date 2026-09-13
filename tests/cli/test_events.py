@@ -1,8 +1,8 @@
 import io
 import json
 
-from agents_dev.cli.events import EventWriter
-from agents_dev.web.protocol import FINAL, parse_line
+from spoolkit.cli.events import EventWriter
+from spoolkit.web.protocol import FINAL, parse_line
 
 
 def test_输出一行JSON() -> None:

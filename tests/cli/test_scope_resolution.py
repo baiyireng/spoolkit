@@ -1,8 +1,8 @@
 import argparse
 from pathlib import Path
 
-from agents_dev.cli.app import resolve_policy, resolve_scope
-from agents_dev.policy import ASK, AUTO, policy_path, save_policy
+from spoolkit.cli.app import resolve_policy, resolve_scope
+from spoolkit.policy import ASK, AUTO, policy_path, save_policy
 
 
 def _args(scope: str = "", policy: str = "") -> argparse.Namespace:
@@ -31,7 +31,7 @@ def test_计划步骤未声明范围时回退成空() -> None:
 
 
 def test_计划步骤未声明范围时不会自动放行(tmp_path: Path) -> None:
-    from agents_dev.agents.plan import path_in_scope
+    from spoolkit.agents.plan import path_in_scope
 
     scope = resolve_scope(_args(), default=())
     assert path_in_scope("anything.py", scope) is False

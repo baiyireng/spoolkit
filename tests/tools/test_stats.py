@@ -6,7 +6,7 @@ Agent 原先只能一个一个看，没有"量一下"的能力。问到「哪个
 
 from pathlib import Path
 
-from agents_dev.tools.stats import dir_stats_spec
+from spoolkit.tools.stats import dir_stats_spec
 
 
 def _tree(tmp_path: Path) -> Path:
@@ -58,7 +58,7 @@ def test_不是目录时拒绝(tmp_path: Path) -> None:
 
 def test_撞到预算时明说不完整(tmp_path: Path) -> None:
     """不完整的统计被当成完整的用，比没有统计更糟。"""
-    from agents_dev.tools.stats import _collect, _render
+    from spoolkit.tools.stats import _collect, _render
 
     root = _tree(tmp_path)
     # 用负数而不是 0.0：判定是 `elapsed > seconds`，而 Windows 上 time.time()

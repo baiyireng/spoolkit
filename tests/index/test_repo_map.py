@@ -1,13 +1,13 @@
 from pathlib import Path
 
-from agents_dev.index.indexer import index_project
-from agents_dev.index.repo_map import (
+from spoolkit.index.indexer import index_project
+from spoolkit.index.repo_map import (
     load_symbol_source,
     render_file_symbols,
     render_repo_map,
 )
-from agents_dev.llm.tokenizer import OfflineTokenCounter
-from agents_dev.store.db import init_schema, open_db
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.store.db import init_schema, open_db
 
 
 def _project(tmp_path: Path):
