@@ -46,6 +46,27 @@ OP_IDENTIFY = 2
 OP_HEARTBEAT = 1
 OP_RESUME = 6
 
+# QQ 对单条消息的内容有上限（按**字节**算，中文一个字 3 字节）。超了我们这边
+# 拿不到任何回应——用户那边就是"看不见结论"。所以长答复要分条发。
+# 取 3000 字节：比常见的 4000 字节上限留足余量，又不至于把一条正常结论切碎。
+MAX_CONTENT_BYTES = 3000
+
+
+def _split_for_qq(text: str, limit: int = MAX_CONTENT_BYTES) -> list[str]:
+    """把长文本切成若干条，按字节算、不切坏字符。"""
+    chunks: list[str] = []
+    current = ""
+    size = 0
+    for char in text:
+        width = len(char.encode("utf-8"))
+        if size + width > limit and current:
+            chunks.append(current)
+            current, size = "", 0
+        current += char
+        size += width
+    chunks.append(current)
+    return chunks
+
 # 心跳**提前**这么多秒发。刚好卡在间隔边界上有风险：平台那边也在数秒，
 # 网络抖一下就成了"这一轮没心跳"。提前一点点不影响规矩（平台只查有没有按时）。
 HEARTBEAT_MARGIN = 1.0
@@ -150,13 +171,23 @@ class QQBotChannel:
             url = f"/v2/groups/{openid}/messages"
         else:
             url = f"/v2/channels/{openid}/messages"
+        headers = {"Authorization": f"QQBot {self.access_token()}"}
+        chunks = _split_for_qq(text)
+        if len(chunks) > 1:
+            self._note(f"答复太长（{len(text)} 字），分 {len(chunks)} 条发")
+        for index, chunk in enumerate(chunks, start=1):
+            self._send_one(url, chunk, kind, index, headers)
+
+    def _send_one(
+        self, url: str, text: str, kind: str, seq: int, headers: dict
+    ) -> None:
+        """发一条（不切分）。被动回复被拒时退一步试主动推送。"""
         payload: dict[str, Any] = {
             "content": text,
             "msg_type": 0,
         }
-        passive = self._passive_fields(kind)
+        passive = self._passive_fields(kind, seq)
         payload.update(passive)
-        headers = {"Authorization": f"QQBot {self.access_token()}"}
         response = self._client.post(url, json=payload, headers=headers)
         try:
             _raise_for_error(response, "发消息")
@@ -335,11 +366,15 @@ class QQBotChannel:
         self._queue.extend(messages)
         return messages
 
-    def _passive_fields(self, kind: str) -> dict:
-        """被动回复的字段：带上 msg_id 才算"回复那条消息"（有 5 分钟窗口）。"""
+    def _passive_fields(self, kind: str, seq: int = 1) -> dict:
+        """被动回复的字段：带上 msg_id 才算"回复那条消息"（有 5 分钟窗口）。
+
+        `msg_seq` 是**同一条消息的第几条回复**：分条发的时候必须递增，否则平台
+        会把后面的当重复消息丢掉（真机上试出来过 `40054005 消息被去重`）。
+        """
         if not self._last_event_id or kind == "channel":
             return {}
-        fields = {"msg_id": self._last_event_id, "msg_seq": 1}
+        fields = {"msg_id": self._last_event_id, "msg_seq": seq}
         return fields
 
 

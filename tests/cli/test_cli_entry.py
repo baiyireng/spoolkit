@@ -15,6 +15,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_包里能拿到版本号() -> None:
+    """`spoolkit.__version__` 必须存在——它是**每个子进程**的启动条件。
+
+    踩过：`src/spoolkit/__init__.py` 被误写成一个空壳（只剩一行注释），症状是所有
+    子进程都起不来（`from spoolkit import __version__` → ImportError），而当时
+    唯一能发现它的测试是"起一个子进程跑 --version"——慢、且在 pytest 里排得靠后。
+    这条在进程内直接看一眼，失败信息也直指病根。
+    """
+    import spoolkit
+
+    assert isinstance(spoolkit.__version__, str)
+    assert spoolkit.__version__
+
+
 def _env_without_io_encoding() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k != "PYTHONIOENCODING"}
     env["PYTHONPATH"] = str(ROOT / "src")

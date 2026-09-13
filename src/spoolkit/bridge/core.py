@@ -62,6 +62,12 @@ class Bridge:
         self._note = on_note or (lambda text: None)
         self.pairings = pairings
         self.access = access
+        self._last_conversation = ""
+        # 长任务跑完要能补一条消息回来：把"回给最近这个会话"的能力交给 runner。
+        # 只有 AgentRunner 认这个接口，别的 runner（测试里的假货）不受影响。
+        setter = getattr(runner, "set_notify", None)
+        if callable(setter):
+            setter(lambda text: self._send(text, self._last_conversation))
 
     def handle(self, message: Incoming) -> Reply:
         """处理一条消息。任何一条都不该让桥崩掉。"""
@@ -97,6 +103,7 @@ class Bridge:
         "名单为空就谁都能用"，那在公网通道上是不可接受的。
         """
         user = message.user
+        self._last_conversation = message.conversation or self._last_conversation
         if user in self.allowed_users:
             return None
         if self.access == OPEN:

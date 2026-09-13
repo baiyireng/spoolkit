@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Sequence
@@ -39,6 +40,7 @@ class AgentRunner:
         timeout: float = 900.0,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        notify: Callable[[str], None] | None = None,
     ) -> None:
         self.project_root = project_root
         self.session = session
@@ -47,17 +49,29 @@ class AgentRunner:
         self._clock = clock
         self._sleep = sleep
         self._runner: Runner | None = None
+        # 超时之后**结果还要送回来**：聊天通道里"等超时就丢掉结论"等于这个任务
+        # 白跑了。notify 由桥注入（它知道回给哪个会话）。
+        self.notify = notify
 
     # --- 给桥用的接口 ---
+
+    def set_notify(self, notify: Callable[[str], None] | None) -> None:
+        """桥用它把"补发一条消息"的能力挂上来（见 `_watch_later`）。"""
+        self.notify = notify
 
     def __call__(self, message: str) -> str:
         reply = self._confirmation_answer(message)
         if reply is not None:
             return reply
-        runner = Runner(
-            self.project_root, session=self.session, extra_args=self.extra_args
-        )
-        self._runner = runner
+        # **复用同一个 Runner**。原先每条消息都新建一个：`start()` 里那句
+        # "已有运行在跑就拒绝"只认自己那一个实例，于是你连着发两条，第二个
+        # agent 会在同一个工作区里同时跑起来（记忆、检查点、进度文件一起写）。
+        runner = self._runner
+        if runner is None:
+            runner = Runner(
+                self.project_root, session=self.session, extra_args=self.extra_args
+            )
+            self._runner = runner
         if not runner.start(message):
             return "上一轮还在跑，等它结束再发。"
         deadline = self._clock() + self.timeout
@@ -68,11 +82,39 @@ class AgentRunner:
             if snapshot.get("finished"):
                 return self._final_text(snapshot)
             if self._clock() >= deadline:
+                self._watch_later(runner)
                 return (
                     f"这一轮超过 {int(self.timeout)} 秒还没结束，我先不等了——"
-                    "它还在后台跑，等会儿问它进度（或者直接去看工作区）。"
+                    "它还在后台跑，跑完我会把结论发给你。"
                 )
             self._sleep(POLL_SECONDS)
+
+    def _watch_later(self, runner: Runner) -> None:
+        """超时之后守着这一轮：它跑完（或被确认）就把结论补发出去。
+
+        为什么要有：聊天通道里长任务是常态，而桥不可能一直等着。原先的做法是
+        回一句"不等了"就**把结论丢掉**——从用户那边看，就是"指挥它干了活，
+        然后没有然后了"。
+        """
+        if self.notify is None:
+            return
+
+        def watch() -> None:
+            while True:
+                snapshot = runner.snapshot()
+                if snapshot.get("finished"):
+                    text = self._final_text(snapshot)
+                    try:
+                        self.notify(f"（这一轮跑完了）\n{text}")
+                    except Exception:  # noqa: BLE001 - 补发失败不该影响谁
+                        pass
+                    return
+                if not snapshot.get("running"):
+                    # 既没在跑也没给结局：子进程没了，别再等了。
+                    return
+                self._sleep(POLL_SECONDS)
+
+        threading.Thread(target=watch, daemon=True).start()
 
     def _confirmation_answer(self, message: str) -> str | None:
         """正在等授权时，`y`/`n` 是**回答**，不是新任务。
