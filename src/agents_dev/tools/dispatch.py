@@ -130,17 +130,20 @@ def dispatch_spec(
         if problem is not None:
             return ToolResult(ok=False, content=f"不能派发：{problem}")
 
-        if len(spec.targets) > max_targets:
+        if len(spec.targets) > review_limit:
             return ToolResult(
                 ok=False,
                 content=(
                     f"不能派发：这次带了 {len(spec.targets)} 件，超出一次能派的上限"
-                    f"（{max_targets} 件）。子智能体的步数预算是一轮 "
-                    f"{config.subagent_steps} 步，而一件活平均要 2～3 步——"
-                    "派大了它只会烧光预算、交回一个半成品。"
-                    f"而且超过 {review_limit} 件时**审查那一步就容易给不出结论**"
-                    "（实测 8 件那次：活全做对了，审查没结论）。"
-                    "拆成几批再派，或者自己先做掉一部分。"
+                    f"（{review_limit} 件）。"
+                    # 这条上限是**审出来的**，不是拍的：批量派发的实测里，
+                    # 「做」没问题（8 件两次都全做对），**审查**三次都没给出
+                    # 结论——8 处改动要在一个上下文里核对。
+                    "**限制它的不是「做不完」，是「审不完」**：三次批量派发的"
+                    "实测里，活都做对了（其中两次客观验收全过），而审查三次都"
+                    "没给出结论。拆成几批再派，或者自己先做掉一部分。"
+                    "（这个数是能力标定值：`limits --set review_limit=8` 可以调大，"
+                    f"绝对上限 {max_targets} 件。）"
                 ),
             )
 
@@ -180,17 +183,7 @@ def dispatch_spec(
                 ),
                 usage=outcome.usage,
             )
-        content = _render(outcome)
-        if len(spec.targets) > review_limit:
-            # 结果里说，而不是只在描述里说：这一刻它刚看到「这批能不能被审出
-            # 结论」，而这是它决定下一批派多少的唯一时机。
-            content += (
-                f"\n\n⚠ 这批带了 {len(spec.targets)} 件，超过 {review_limit} 件："
-                "审查者要在一个上下文里核对这么多处，很容易给不出结论"
-                "（实测 8 件那次就是：活全做对了，审查没结论）。"
-                f"下一批拆到 {review_limit} 件以内。"
-            )
-        return ToolResult(ok=True, content=content, usage=outcome.usage)
+        return ToolResult(ok=True, content=_render(outcome), usage=outcome.usage)
 
     # 战绩附录进「怎么用这个工具」的说明里：模型调 tool_help("dispatch")
     # 的那一刻，正是它准备做派发决定的那一刻——钱花在这里最值。

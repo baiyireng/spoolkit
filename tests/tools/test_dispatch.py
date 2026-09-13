@@ -263,11 +263,12 @@ def test_不说清目标就派不了(tmp_path: Path) -> None:
     assert "targets" in result.content
 
 
-def test_超过五件不拦但要看得到风险(tmp_path: Path) -> None:
-    """审查的瓶颈比「做」低：8 件那次活全做对了，审查却没结论。
+def test_超过上限当场拦下并说明理由(tmp_path: Path) -> None:
+    """限制它的不是「做不完」，是「审不完」——这是三次实测逼出来的。
 
-    拦死太硬（n=1 的证据），但必须在**结果里**说——那一刻是它决定
-    下一批派多少的唯一时机；只写在描述里没用（描述已经证明是软的）。
+    三次批量派发（8 件）里，活都做对了（其中两次客观验收全过），而**审查
+    三次都没给出结论**：8 处改动要在一个上下文里核对。所以上限从「提醒」
+    改成硬拦——软的那些实测不管用（必填生效了，告警没影响它派 9 件）。
     """
     loop, _ = _build(
         tmp_path,
@@ -285,27 +286,17 @@ def test_超过五件不拦但要看得到风险(tmp_path: Path) -> None:
                     }
                 ],
             ),
-            _turn(
-                "写文件",
-                [
-                    {
-                        "name": "write_file",
-                        "arguments": {"path": "a.py", "content": "x = 1\n"},
-                    }
-                ],
-            ),
-            _turn("写完了", [], final="改好了"),
-            _turn("看过了", [], final="没问题"),
-            json.dumps({"verdict": "pass", "reasons": ["符合验收标准"]}),
-            _turn("收到", [], final="派发完成"),
+            _turn("自己做", [], final="我自己来"),
         ],
     )
     loop.run("改 8 处")
     fed_back = "\n".join(
         message.content for message in loop.gateway.requests[-1].messages
     )
-    assert "超过 5 件" in fed_back
-    assert "审查" in fed_back
+    assert "超出一次能派的上限" in fed_back
+    assert "审不完" in fed_back or "审查三次都没给出结论" in fed_back
+    # 想放宽有旋钮，不是写死的
+    assert "review_limit" in fed_back
 
 
 def test_两个上限是配置而不是写死的常量(tmp_path: Path) -> None:
