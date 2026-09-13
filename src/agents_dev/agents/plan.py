@@ -276,9 +276,15 @@ def render_step_prompt(plan: Plan, step: PlanStep) -> str:
     done = "、".join(
         item.goal for item in plan.steps if item.status == DONE
     ) or "无"
+    # 把这一步的 scope 交出去。**它本来就有**（拆解时 schema 要求每步声明范围，
+    # 那道闸门还用它决定自动落盘边界），但执行时没给执行者看——实测后果很实在：
+    # 模型不知道要改哪个文件，于是每步先花一轮 survey 自己翻（每任务 3 轮 vs
+    # 单题模式的 2 轮），而那一轮把后续几轮的提示词也一起撑大了。
+    scope = "、".join(step.scope) if step.scope else "（没声明）"
     return (
         f"项目目标：{plan.goal}\n"
         f"已完成：{done}\n"
+        f"涉及：{scope}\n"
         f"本次只做这一步：{step.goal}\n"
         f"验收标准：{step.acceptance}\n"
         "不要顺手做后面步骤的事。"

@@ -178,6 +178,8 @@ def run_task(
             for line in result.trace:
                 print(f"        {line}")
             print(f"      产出：{(result.final or '')[:300]}")
+            # 时间拆成模型/工具两笔：这是「为什么这次慢」唯一能查的东西。
+            print(f"      用量：{result.usage()}")
 
         passed, detail = verify(task, workspace)
         if verbose and not passed:

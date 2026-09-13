@@ -229,6 +229,11 @@ class LoopResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     model_calls: int = 0
+    # 时间花在哪两笔上。**必须分开**：「等模型生成」和「跑工具」的优化方向
+    # 完全不同——前者靠拆小任务/换模型，后者靠少起进程、少拷副本。
+    # 只有总耗时的话，两种编排差一倍也看不出该动哪边。
+    model_seconds: float = 0.0
+    tool_seconds: float = 0.0
     lessons_pushed: tuple[int, ...] = ()
     # 这次运行里确认过「失败是环境造成的」。任务没做成时，它是决定
     # 要不要替 Agent 登记诊断请求的依据之一。
@@ -238,7 +243,8 @@ class LoopResult:
         """一行用量摘要，用于比较不同配置的实际成本。"""
         return (
             f"步数 {self.steps}，模型调用 {self.model_calls}，"
-            f"输入 {self.prompt_tokens} token，输出 {self.completion_tokens} token"
+            f"输入 {self.prompt_tokens} token，输出 {self.completion_tokens} token，"
+            f"模型 {self.model_seconds:.1f}s / 工具 {self.tool_seconds:.1f}s"
         )
 
 
@@ -380,6 +386,8 @@ class AgentLoop:
         prompt_tokens = 0
         completion_tokens = 0
         model_calls = 0
+        model_seconds = 0.0
+        tool_seconds = 0.0
         prefetched = self.prefetch(goal) if self.prefetch is not None else ""
         hot = self.memory.hot_text() if self.memory is not None else ""
         # 「原地打转」检测：连续相同的调用计数。跨步骤累计，
@@ -494,6 +502,8 @@ class AgentLoop:
                         prompt_tokens,
                         completion_tokens,
                         model_calls,
+                    model_seconds,
+                    tool_seconds,
                         tuple(item[0] for item in pushed),
                         environment_blocked=self.environment_blocked,
                     )
@@ -560,6 +570,7 @@ class AgentLoop:
                 trace.append(f"step{state.step}: 上下文整理")
 
             try:
+                _call_started = time.time()
                 response = chat_with_escalation(
                     self.gateway,
                     ChatRequest(
@@ -570,7 +581,9 @@ class AgentLoop:
                         ),
                     ),
                 )
+                model_seconds += time.time() - _call_started
             except ContextOverflowError:
+                model_seconds += time.time() - _call_started
                 # 预算用的是**估算**分词器，服务端用的是真实分词；两者偏差大时
                 # （中文/代码混排尤其明显）本地判定会放行、服务端拒绝。
                 # 这不能让它把整个运行打断——丢掉历史重发一次，只重试一次。
@@ -610,6 +623,8 @@ class AgentLoop:
                             prompt_tokens,
                             completion_tokens,
                             model_calls,
+                    model_seconds,
+                    tool_seconds,
                             tuple(item[0] for item in pushed),
                         )
                 else:
@@ -644,6 +659,7 @@ class AgentLoop:
             history.append(Message(role="assistant", content=response.text))
 
             if turn.tool_calls:
+                _tools_started = time.time()
                 outputs = []
                 edited = False
                 # 这一轮改过哪些文件。自动验证靠它判断「该在哪儿验」——
@@ -701,14 +717,17 @@ class AgentLoop:
                     flat = " ".join(result.content.split())
                     detail = "" if result.ok else f": {flat[:400]}"
                     trace.append(f"step{state.step}: 工具 {call.name} -> {status}{detail}")
+                tool_seconds += time.time() - _tools_started
                 history.append(Message(role="tool", content="\n".join(outputs)))
 
                 # 改完就替它验一次。模型不会主动去跑测试——实测 8 条失败里
                 # 一条 run_command 都没有——所以这件事由循环来做，把结果
                 # 当场顶回去，它才有机会发现自己改错了。
                 if edited and self.verify is not None:
+                    _verify_started = time.time()
                     started = time.time()
                     report, passed = self._run_verification(changed)
+                    tool_seconds += time.time() - _verify_started
                     trace.append(
                         f"step{state.step}: 自动验证 -> {'通过' if passed else '失败'}"
                         f"（{len(changed)} 处改动，{time.time() - started:.1f}s）"
@@ -761,6 +780,8 @@ class AgentLoop:
                     prompt_tokens,
                     completion_tokens,
                     model_calls,
+                    model_seconds,
+                    tool_seconds,
                     tuple(item[0] for item in pushed),
                     environment_blocked=self.environment_blocked,
                 )
@@ -781,6 +802,8 @@ class AgentLoop:
             prompt_tokens,
             completion_tokens,
             model_calls,
+            model_seconds,
+            tool_seconds,
             tuple(item[0] for item in pushed),
             environment_blocked=self.environment_blocked,
         )
