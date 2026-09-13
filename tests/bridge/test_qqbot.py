@@ -344,3 +344,64 @@ def test_网关逻辑_心跳不会被读等待顶到后面去() -> None:
     ops = [item["op"] for item in ws.sent]
     assert ops[0] == 2, "第一件事必须是 IDENTIFY（心跳要等 HELLO 给了间隔）"
     assert ops.count(1) >= 2, f"心跳没按时发：{ops}"
+
+
+def test_被动回复被拒时改试主动推送() -> None:
+    """真机上 QQ 回了一句 `code=11001 不支持的调用`，用户那边就是**没反应**。
+
+    被动回复（带 msg_id）是被平台规矩限定的那条路；它被拒时退一步发主动推送，
+    至少把话送到。两条都不行才报错，并且把两次的原因都带上。
+    """
+    def handler(request, body):
+        if request.url.path.endswith("/getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
+        if "msg_id" in body:
+            return httpx.Response(500, json={"code": 11001, "message": "不支持的调用"})
+        return httpx.Response(200, json={"id": "m1"})
+
+    channel, calls = _channel(handler)
+    channel._default_to = ("c2c", "OPENID")
+    channel._last_event_id = "MSG1"
+
+    channel.send("你好")  # 不抛
+
+    sends = [call for call in calls if call["path"].endswith("/messages")]
+    assert len(sends) == 2, "应当先被动、再主动各试一次"
+    assert "msg_id" in sends[0]["json"]
+    assert "msg_id" not in sends[1]["json"]
+
+
+def test_被动与主动都不行时要把两次原因都说出来() -> None:
+    def handler(request, body):
+        if request.url.path.endswith("/getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
+        return httpx.Response(500, json={"code": 11001, "message": "不支持的调用"})
+
+    channel, _ = _channel(handler)
+    channel._default_to = ("c2c", "OPENID")
+    channel._last_event_id = "MSG1"
+
+    with pytest.raises(RuntimeError, match="主动推送也不行"):
+        channel.send("你好")
+
+
+def test_每条事件都留痕() -> None:
+    """排查"手机发了消息没反应"时，最需要的就是这一行——当时日志里什么都没有。"""
+    notes: list[str] = []
+    channel = QQBotChannel(app_id="A", secret="S", on_note=notes.append)
+
+    channel.feed_event(
+        {
+            "op": 0,
+            "t": "C2C_MESSAGE_CREATE",
+            "d": {
+                "id": "m1",
+                "content": "在吗",
+                "author": {"user_openid": "OPENID"},
+            },
+        }
+    )
+    channel.feed_event({"op": 0, "t": "SOMETHING_ELSE", "d": {}})
+
+    assert any("C2C_MESSAGE_CREATE" in item for item in notes)
+    assert any("SOMETHING_ELSE" in item for item in notes)

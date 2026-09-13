@@ -77,17 +77,17 @@ class Bridge:
                 f"这条消息有 {len(text)} 字，超过上限 {self.max_chars} 字，"
                 "没有交给 agent。请拆短一点再发。"
             )
-            self.channel.send(reply, message.conversation)
+            self._send(reply, message.conversation)
             return Reply(user=message.user, text=reply, accepted=False, reason="超长")
 
         try:
             answer = self.runner(text)
         except Exception as exc:  # noqa: BLE001 - 桥不该被 agent 的异常带崩
             answer = f"这一轮没跑起来：{type(exc).__name__}: {exc}"
-            self.channel.send(answer, message.conversation)
+            self._send(answer, message.conversation)
             return Reply(user=message.user, text=answer, accepted=False, reason="runner 异常")
 
-        self.channel.send(answer or "（没有产出）", message.conversation)
+        self._send(answer or "（没有产出）", message.conversation)
         return Reply(user=message.user, text=answer, accepted=True)
 
     def _admit(self, message: Incoming) -> Reply | None:
@@ -110,10 +110,29 @@ class Bridge:
             return None
         code = self.pairings.ensure_code(user)
         reply = PAIRING_REPLY.format(code=code)
-        self.channel.send(reply, message.conversation)
+        self._send(reply, message.conversation)
         self._note(f"有人要配对：{user}（码 {code}）")
         return Reply(user=user, text=reply, accepted=False, reason="待配对")
 
+    def _send(self, text: str, conversation: str) -> None:
+        """发一条消息出去。**发不出去不能把桥打死**。
+
+        真踩过：QQ 那边回了一句 `code=11001 不支持的调用`，异常一路抛到顶层，
+        整个桥进程**直接退出**——于是"手机上发了消息没人理"变成了永久状态，
+        而现场只剩下一个崩栈。发失败是可能发生的事（平台没开通这个能力、被动
+        回复窗口过期、消息太长……），它该是一条日志，不是一次自杀。
+        """
+        try:
+            self.channel.send(text, conversation)
+        except Exception as exc:  # noqa: BLE001 - 通道各异，这里只要"别死"
+            self._note(f"回复发送失败（{type(exc).__name__}）：{exc}")
+
     def run_once(self) -> list[Reply]:
         """把当前能取到的消息都处理一遍。"""
-        return [self.handle(message) for message in self.channel.poll()]
+        replies: list[Reply] = []
+        for message in self.channel.poll():
+            try:
+                replies.append(self.handle(message))
+            except Exception as exc:  # noqa: BLE001 - 一条坏消息不该终止长驻进程
+                self._note(f"处理消息失败（{type(exc).__name__}）：{exc}")
+        return replies

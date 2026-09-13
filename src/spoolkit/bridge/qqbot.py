@@ -147,10 +147,33 @@ class QQBotChannel:
         }
         passive = self._passive_fields(kind)
         payload.update(passive)
-        response = self._client.post(
-            url, json=payload, headers={"Authorization": f"QQBot {self.access_token()}"}
+        headers = {"Authorization": f"QQBot {self.access_token()}"}
+        response = self._client.post(url, json=payload, headers=headers)
+        try:
+            _raise_for_error(response, "发消息")
+            return
+        except RuntimeError as exc:
+            # 注意：`except ... as exc` 出了这个块，名字就被删掉了（Python 的
+            # 规矩），所以必须先存下来再往下用——否则报的是 UnboundLocalError，
+            # 离真正的失败原因十万八千里。
+            passive_error = exc
+            if not passive:
+                raise
+            # 被动回复被拒时退一步试**主动推送**（不带 msg_id）。真机上遇到过
+            # `code=11001 不支持的调用`：哪天被动那条路被平台关了，主动这条
+            # 至少还能把话送到；两条都不行才报错，并且把两次的原因都带上。
+            self._note(f"被动回复被拒（{passive_error}），改试主动推送")
+        active = self._client.post(
+            url,
+            json={"content": text, "msg_type": 0},
+            headers=headers,
         )
-        _raise_for_error(response, "发消息")
+        try:
+            _raise_for_error(active, "发消息（主动）")
+        except RuntimeError as second:
+            raise RuntimeError(
+                f"{passive_error}；改试主动推送也不行：{second}"
+            ) from second
 
     def poll(self) -> list[Incoming]:
         """取走网关线程攒下的消息。**不阻塞**——没有就返回空列表。"""
@@ -286,8 +309,15 @@ class QQBotChannel:
     def feed_event(self, event: dict) -> list[Incoming]:
         """处理一条网关事件，把消息放进队列。返回这次解析出来的消息。"""
         messages = parse_event(event)
+        # 每一条事件都留痕。真机上排查过一次"手机发了消息没反应"：当时日志里
+        # 只有"网关已连上"，既看不到事件到没到、也看不到事件是什么类型，
+        # 只能靠猜。一行日志的成本换掉一小时的猜测。
+        kind = str(event.get("t") or "(无类型)")
         if messages:
-            kind = str(event.get("t") or "")
+            self._note(f"收到 {kind}：{messages[-1].user} 说 {messages[-1].text[:40]!r}")
+        elif kind not in ("READY",):
+            self._note(f"收到 {kind}（这条事件没有解析成消息，原样略过）")
+        if messages:
             latest = messages[-1]
             # 群事件回群里，私聊回私聊——回错了人比不回更糟。
             self._default_to = (
