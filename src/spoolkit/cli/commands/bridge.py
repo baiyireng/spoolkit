@@ -74,7 +74,8 @@ def _build_channel(args, log) -> object:
                 f"  1) 写进 {root}\\.env（推荐，已被 .gitignore 排除）：\n"
                 "       QQ_AppID=102xxxxxx\n"
                 "       QQ_AppSecret=xxxxxxxx\n"
-                "  2) 设环境变量 AGENTS_DEV_QQ_APPID / AGENTS_DEV_QQ_SECRET\n"
+                "  2) 设环境变量 SPOOLKIT_QQ_APPID / SPOOLKIT_QQ_SECRET"
+                "（改名前的 AGENTS_DEV_* 也认）\n"
                 "  3) 命令行 --appid / --secret\n"
                 "（在 QQ 机器人开放平台建应用后能看到；沙箱加 --sandbox）"
             )
