@@ -238,7 +238,9 @@ class _ScriptedWS:
     def send_text(self, text: str) -> None:
         self.sent.append(json.loads(text))
 
-    def recv(self):
+    def recv(self, timeout=None):
+        # 真 socket 的 recv 会阻塞到超时；假 ws 也得认这个参数，
+        # 不然"按心跳时刻算等待长度"这条根本测不到。
         if not self.incoming:
             return None
         item = self.incoming.pop(0)
@@ -307,3 +309,38 @@ def test_网关逻辑_对端关闭就退出() -> None:
     channel = _channel_with(ws)
     channel._run_gateway_once()  # 不抛、直接返回
     assert ws.closed is True
+
+
+class _IdleWS(_ScriptedWS):
+    """不吐事件、读起来就像真 socket：阻塞到给定的等待长度才超时。"""
+
+    def recv(self, timeout=None):
+        if self.incoming:
+            return _ScriptedWS.recv(self)
+        # 队列空了才是"干等"：IDENTIFY 必须已经发出去（心跳得等 HELLO 给间隔）。
+        assert self.sent and self.sent[0]["op"] == 2, f"IDENTIFY 之前发了别的：{self.sent}"
+        if timeout is None:
+            timeout = 20.0
+        time.sleep(timeout)
+        raise WSTimeout()
+
+
+def test_网关逻辑_心跳不会被读等待顶到后面去() -> None:
+    """真机上的一条硬教训：连接每 ~60 秒被平台掐断。
+
+    心跳间隔 41.25s，而 `recv` 一次阻塞 20s——心跳只在两次 recv 之间检查，于是
+    它总要等到 60 秒才发得出去，平台直接断线。这里用 0.3s 的间隔把这个时序
+    放大：等待长度必须**服从下一次心跳的时刻**，1 秒里至少该发出 2 次心跳。
+    不修的话，这条会一次心跳都收不到（阻塞在 20s 的读上）。
+    """
+    ws = _IdleWS([{"op": 10, "d": {"heartbeat_interval": 300}}])
+    channel = _channel_with(ws)
+    worker = threading.Thread(target=channel._run_gateway_once)
+    worker.start()
+    time.sleep(1.2)
+    channel._stop.set()
+    worker.join(timeout=3)
+
+    ops = [item["op"] for item in ws.sent]
+    assert ops[0] == 2, "第一件事必须是 IDENTIFY（心跳要等 HELLO 给了间隔）"
+    assert ops.count(1) >= 2, f"心跳没按时发：{ops}"

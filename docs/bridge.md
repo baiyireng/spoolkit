@@ -44,6 +44,32 @@ AppSecret：C73***Kj（D:\workSpace\agents_dev\.env 里的 QQ_AppSecret）
 （上面最后一行是真实的：**QQ 机器人开放平台有"IP 白名单"**，把调用方的公网
 IP 填进那个应用的白名单里才行。凭据本身是对的——否则换不到 access_token。）
 
+### IP 白名单：借一台云主机出去（推荐）
+
+家里那条宽带的出口 IP 会变，填进白名单就得天天改。**借一台固定 IP 的云主机
+出去**更省事——白名单只填主机那一个 IP：
+
+```bash
+# 在云主机上（或经它的 Cloudflare Tunnel）拿到一条 SSH 通路
+ssh -D 1080 root@<云主机>          # 本地 1080 就是一个 SOCKS5
+
+# 本机这条命令让**通道**走那条 SOCKS，agent 与工作区都还在本机
+agents-dev bridge --channel qqbot --bridge-proxy socks5://127.0.0.1:1080 --policy ask
+```
+
+于是腾讯看到的是云主机的 IP（填它进白名单），本机的 agent 照常读写本地工作区。
+
+两点注意：
+
+- **`--bridge-proxy` 和 `--proxy` 不是一回事**：前者管通道自己出网，后者管模型
+  供应商（比如 Gemini 要走代理）。两个都可能在用，所以分开。
+- HTTP 那一半走 SOCKS 需要 `httpx[socks]`（可选加装）：`uv pip install "httpx[socks]"`。
+  网关那一半（WebSocket）用的是我们自己的 SOCKS5 握手，不需要额外依赖。
+- `ssh -D` 需要**服务端允许端口转发**。有些加固过的机器上
+  `/etc/ssh/sshd_config.d/99-hardening.conf` 里写着 `AllowTcpForwarding no`，
+  症状是 `ssh -D` 连上、但本地 1080 端口谁也连不通。改成 `local` 即可
+  （`local` 只允许本地转发，比 `yes` 收得紧），改完 `sshd -t && systemctl reload sshd`。
+
 ```powershell
 # 本地跑通（不需要任何外部服务）
 agents-dev bridge --channel fake --provider llamacpp --policy auto --scope "**" --user me --allow-user me
@@ -127,6 +153,24 @@ agents-dev bridge --channel wecom --allow-user zhangsan --policy ask
 > 代码都没有，通道全是外部插件。它还教会一件事——**默认配对而不是默认放行**
 > （它自己的文档写着微信插件 2.4.8 的访问控制在名单为空时会放行任何发送者，
 > 那正是这个默认要避免的）。
+
+## 长连接的时序：两条真机上踩到的坑
+
+两条都不是"网络不稳"，都是我们自己的时序错，而且**单测全绿、只有真机会露出来**：
+
+1. **心跳迟了 20 秒，平台每 60 秒掐一次线。** QQ 给的心跳间隔是 41.25s，而我们
+   只在两次 `recv` 之间检查"该不该发心跳"，`recv` 一阻塞就是 20s——心跳总要拖到
+   60 秒才发得出去，平台据此判掉线。日志看着像"连上→断开→重连"的死循环。
+   修法：读等待**服从下一次心跳的时刻**（`recv(timeout=...)` 只影响这一次调用），
+   心跳还提前 1 秒发。132 秒真机挂测（跨 3 个心跳周期）不再断开。
+2. **握手时多读到的字节被丢掉。** 服务端把握手响应和第一个数据帧写进同一个 TCP
+   段是正常的，读握手那次 `recv` 会把两样一起读回来；当时只取了 `\r\n\r\n`
+   前面的头部，后面的帧字节被扔了——`recv()` 于是去等一个**已经到了**的帧，
+   直到对端关闭才返回 `None`。症状是"偶发连不上"：单跑测试必过，全量跑（机器更忙）
+   才炸。修法：把多读到的字节留在缓冲区里，下次读先吐它。
+
+第 2 条被固定成了确定性用例（`tests/bridge/test_ws.py`：让假服务端**故意**把两样
+写进同一次 `sendall`）——偶发问题不固定成用例，就修不住。
 
 ## 已知边界
 

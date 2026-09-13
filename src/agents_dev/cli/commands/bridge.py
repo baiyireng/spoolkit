@@ -63,7 +63,9 @@ def _build_channel(args, log) -> object:
             secret=args.secret,
             sandbox=args.sandbox,
             root=root,
+            proxy=args.bridge_proxy,
             transport=None,
+            on_note=log,
         )
         if not (channel.app_id and channel.secret):
             raise SystemExit(

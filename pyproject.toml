@@ -23,6 +23,9 @@ dependencies = [
 dev = [
     "pytest>=8.3",
 ]
+# 通道走 SOCKS 代理时需要它（httpx 的 SOCKS 支持在可选的 socksio 里）。
+# 不放进主依赖：默认直连的人不该为此多装一个包。
+socks = ["httpx[socks]>=0.27"]
 
 [project.scripts]
 agents-dev = "agents_dev.cli.app:main"

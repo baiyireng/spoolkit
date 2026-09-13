@@ -46,6 +46,19 @@ OP_IDENTIFY = 2
 OP_HEARTBEAT = 1
 OP_RESUME = 6
 
+# 心跳**提前**这么多秒发。刚好卡在间隔边界上有风险：平台那边也在数秒，
+# 网络抖一下就成了"这一轮没心跳"。提前一点点不影响规矩（平台只查有没有按时）。
+HEARTBEAT_MARGIN = 1.0
+
+
+def _heartbeat_delay(interval: float) -> float:
+    """下一次心跳等多久：比间隔提前 `HEARTBEAT_MARGIN` 秒。
+
+    提前量不能超过间隔的一半——测试用的是 0.3s 这种放大过的间隔，
+    若一律"提前 1 秒"就变成负数了。
+    """
+    return max(interval * 0.5, interval - HEARTBEAT_MARGIN)
+
 
 class QQBotChannel:
     """一个 QQ 机器人 = 这条通道。"""
@@ -61,9 +74,11 @@ class QQBotChannel:
         token_url: str = TOKEN_URL,
         api: str = "",
         transport: httpx.BaseTransport | None = None,
+        proxy: str = "",
         timeout: float = 20.0,
         clock=time.monotonic,
         ws_factory=None,
+        on_note=None,
     ) -> None:
         # 凭据来源要能说出来（用户可能写在 .env 里，也可能挂在环境变量上）。
         self.app_id, self.app_id_source = _resolve(app_id, root, credentials.QQ_APP_ID)
@@ -73,11 +88,19 @@ class QQBotChannel:
         self._api = api or (SANDBOX_API if sandbox else DEFAULT_API)
         # base_url 必须给：不然 `/gateway`、`/v2/...` 这些相对路径会被 httpx
         # 当成非法 URL（"unknown url type"），而那个报错完全看不出是缺了 base_url。
+        # 代理是可选的：平台侧有 IP 白名单，借一台云主机出去（ssh -D 给的
+        # SOCKS5）就能把白名单固定成那台主机的 IP。
+        # 注意 httpx 走 SOCKS 需要 `httpx[socks]`（可选的加装，不是主包依赖）。
         self._client = httpx.Client(
-            base_url=self._api, timeout=timeout, transport=transport
+            base_url=self._api,
+            timeout=timeout,
+            transport=transport,
+            proxy=proxy or None,
         )
         self._clock = clock
-        self._ws_factory = ws_factory or (lambda url: WebSocket(url, timeout=timeout))
+        self._ws_factory = ws_factory or (
+            lambda url: WebSocket(url, timeout=timeout, proxy=proxy or None)
+        )
         self._token = ""
         self._token_expire_at = 0.0
         self._queue: list[Incoming] = []
@@ -89,6 +112,7 @@ class QQBotChannel:
         self._seq = 0
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._note = on_note or (lambda text: None)
 
     # --- 通道协议 ---
 
@@ -172,28 +196,46 @@ class QQBotChannel:
         while not self._stop.is_set():
             try:
                 self._run_gateway_once()
-            except (WebSocketError, OSError, RuntimeError):
+                self._note("QQ 网关断开，5 秒后重连")
+            except (WebSocketError, OSError, RuntimeError) as exc:
                 # 网络抖动不该把通道打死：退一步重连（resume 留给下一步优化——
                 # 断了之后 QQ 会把没收到的事件按 op 0 重发一段时间）。
-                self._stop.wait(5.0)
+                self._note(f"QQ 网关出错（{type(exc).__name__}: {exc}），5 秒后重连")
+            # 两句提示都写着"5 秒后重连"，但当初只有出错那条真的等了——正常返回
+            # 那条会**立刻**重连，撞上平台侧的限流就更连不上。等待挪到这里。
+            self._stop.wait(5.0)
 
     def _run_gateway_once(self) -> None:
         ws = self._ws_factory(self.gateway_url())
         ws.connect()
-        heartbeat_at = 0.0
+        # 单次收数据的等待上限。为什么不只是个常数：见下面算 `wait` 的地方。
+        read_wait = float(getattr(ws, "timeout", 20.0) or 20.0)
+        # 心跳必须**等 HELLO 给了间隔**再开始——在那之前发没有任何依据，
+        # 而"建连接时立刻发一发"曾经真的发生过（`heartbeat_at` 初值是 0）。
+        heartbeat_at: float | None = None
         interval = 30.0
         try:
             while not self._stop.is_set():
-                # 先按时间心跳，再收下一帧；两者都用带超时的 socket。
-                if self._clock() >= heartbeat_at:
+                if heartbeat_at is not None and self._clock() >= heartbeat_at:
                     ws.send_text(json.dumps({"op": OP_HEARTBEAT, "d": self._seq or None}))
-                    heartbeat_at = self._clock() + interval
+                    heartbeat_at = self._clock() + _heartbeat_delay(interval)
+                # 关键：**等到下一次心跳之前就要醒**。
+                # 真机踩过的坑：心跳间隔 41.25s，而 recv 一次要阻塞 20s，心跳只在
+                # 两次 recv 之间检查——于是它总在 60s 左右才发出去，平台直接掐线，
+                # 表现成"每 60 秒断一次、反复重连"，看着像网络问题，其实是自己的时序。
+                if heartbeat_at is None:
+                    wait = read_wait
+                else:
+                    wait = min(read_wait, max(0.05, heartbeat_at - self._clock()))
                 try:
-                    text = ws.recv()
+                    text = ws.recv(timeout=wait)
                 except WebSocketTimeout:
                     # 长连接上几十秒没有事件是正常的：接着等，别当断开重连。
                     continue
                 if text is None:
+                    # 断开的原因要留痕：没有它，"为什么断"只能靠猜。
+                    detail = getattr(ws, "close_info", "") or "对端直接断开（没给关闭帧）"
+                    self._note(f"QQ 网关被关闭：{detail}")
                     return
                 payload = json.loads(text)
                 op = payload.get("op")
@@ -202,11 +244,18 @@ class QQBotChannel:
                 if op == OP_HELLO:
                     interval = float((payload.get("d") or {}).get("heartbeat_interval", 30000)) / 1000
                     ws.send_text(json.dumps(self._identify_payload()))
-                    heartbeat_at = self._clock() + interval
+                    # 连上就说一声：真机排查时唯一能看到的"在线"信号。
+                    self._note(f"QQ 网关已连上（心跳 {interval:.0f}s，intents={INTENT_GROUP_AND_C2C}）")
+                    # 识别之后立刻发一次心跳（各家客户端都这样），之后按间隔来。
+                    heartbeat_at = self._clock()
                 elif op == 0:
                     # 注意传**整个**事件：`t`（事件类型）在外层，
                     # `parse_event` 靠它分辨私聊/群聊——只传 `d` 会认不出来。
                     self.feed_event(payload)
+                elif op in (7, 9):
+                    # 7 = 服务端要求重连，9 = 会话无效（token 或 intents 不对）
+                    self._note(f"QQ 平台要求重连（op={op}）：请检查 AppID/凭据与 intents")
+                    return
         finally:
             ws.close()
 

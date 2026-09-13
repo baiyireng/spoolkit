@@ -44,6 +44,46 @@ class Timeout(Exception):
     """
 
 
+def socks5_connect(
+    proxy_host: str, proxy_port: int, host: str, port: int, timeout: float = 15.0
+) -> socket.socket:
+    """经 SOCKS5 连到目标，返回已经打通的 socket。
+
+    为什么需要它：QQ 官方机器人的平台侧有 **IP 白名单**（`code=11298`），
+    而家里那条宽带的出口 IP 会变。借一台云主机出去（`ssh -D` 给的 SOCKS5），
+    腾讯看到的就是那台主机的固定 IP——白名单只需要填一次。
+
+    这里不用第三方库：SOCKS5 的无认证握手只有几行，而为了它在主包里拖一个
+    依赖不划算（httpx 那边要 SOCKS 才需要 `httpx[socks]`，那是可选加装）。
+    """
+    sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
+    try:
+        sock.sendall(b"\x05\x01\x00")
+        if sock.recv(2) != b"\x05\x00":
+            raise WebSocketError("代理不接受无认证的 SOCKS5")
+        try:
+            packed = socket.inet_aton(host)
+            request = b"\x05\x01\x00\x01" + packed + port.to_bytes(2, "big")
+        except OSError:
+            name = host.encode()
+            request = (
+                b"\x05\x01\x00\x03" + bytes([len(name)]) + name + port.to_bytes(2, "big")
+            )
+        sock.sendall(request)
+        head = sock.recv(4)
+        if len(head) < 4 or head[1] != 0:
+            raise WebSocketError(f"SOCKS5 拒绝连接：码 {head[1] if len(head) > 1 else '?'}")
+        # 把 BND.ADDR/BND.PORT 读掉，否则会混进后面的数据流。
+        kind = head[3]
+        extra = 4 if kind == 1 else 16 if kind == 4 else 0
+        if extra:
+            sock.recv(extra + 2)
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
 def encode_frame(opcode: int, payload: bytes, mask: bool = True) -> bytes:
     """编一个帧。客户端发出的帧**必须**加掩码（RFC 6455 §5.3）。
 
@@ -118,6 +158,38 @@ def _read_exactly(sock, count: int) -> bytes | None:
     return bytes(chunks)
 
 
+class _Buffered:
+    """先吐出手握时**多读**到的字节，再落到真 socket 上。
+
+    为什么需要：服务端可能把握手响应和第一个数据帧写进同一个 TCP 段，`connect()`
+    里那次 `recv(4096)` 会把两段一起读回来。当初只取了 `\\r\\n\\r\\n` 前面的头部，
+    跟在后面的帧字节被悄悄扔掉——`recv()` 于是去等一个**已经到了**的帧，一直等到
+    对端关闭才返回 None。症状是"偶发连不上"：单跑测试必过，全量跑（机器更忙、
+    更容易合并成一段）才炸。
+    """
+
+    def __init__(self, sock, pending: bytes = b"") -> None:
+        self._sock = sock
+        self._pending = bytearray(pending)
+
+    def recv(self, count: int) -> bytes:
+        if self._pending:
+            chunk = bytes(self._pending[:count])
+            del self._pending[:count]
+            return chunk
+        return self._sock.recv(count)
+
+    def sendall(self, data) -> None:
+        self._sock.sendall(data)
+
+    def close(self) -> None:
+        self._sock.close()
+
+    def __getattr__(self, name: str):
+        # 其余方法（settimeout 之类）直接借真 socket 的。
+        return getattr(self._sock, name)
+
+
 class WebSocket:
     """连上、收、发。用它的人负责重连与会话状态。"""
 
@@ -128,6 +200,7 @@ class WebSocket:
         timeout: float = 30.0,
         ssl_context: ssl.SSLContext | None = None,
         on_ping: Callable[[], None] | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.url = url
         self.headers = dict(headers or {})
@@ -136,6 +209,10 @@ class WebSocket:
         self._sock = None
         self._buffer: list[str] = []
         self.on_ping = on_ping
+        # 对端发关闭帧时记下它的码（排错时"为什么断的"全靠它）。
+        self.close_info: str = ""
+        # 形如 "socks5://127.0.0.1:1080"（或 "127.0.0.1:1080"）。
+        self.proxy = proxy
 
     # --- 生命周期 ---
 
@@ -149,7 +226,11 @@ class WebSocket:
         if parsed.query:
             path = f"{path}?{parsed.query}"
 
-        raw = socket.create_connection((host, port), timeout=self.timeout)
+        if self.proxy:
+            proxy_host, proxy_port = _parse_proxy(self.proxy)
+            raw = socks5_connect(proxy_host, proxy_port, host, port, self.timeout)
+        else:
+            raw = socket.create_connection((host, port), timeout=self.timeout)
         if parsed.scheme == "wss":
             raw = self.ssl_context.wrap_socket(raw, server_hostname=host)
         key = base64.b64encode(os.urandom(16)).decode()
@@ -170,7 +251,8 @@ class WebSocket:
             if not chunk:
                 raise WebSocketError("握手期间连接被关闭")
             response += chunk
-        head = response.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+        head_bytes, _, leftover = response.partition(b"\r\n\r\n")
+        head = head_bytes.decode("latin-1")
         status = head.splitlines()[0]
         if "101" not in status:
             raise WebSocketError(f"握手失败：{status}")
@@ -179,7 +261,9 @@ class WebSocket:
         ).decode()
         if f"sec-websocket-accept: {expected}".lower() not in head.lower():
             raise WebSocketError("握手回来的 Sec-WebSocket-Accept 对不上")
-        self._sock = raw
+        # 握手多读到的字节**必须**留着（见 `_Buffered` 的注释）。
+        self._sock = _Buffered(raw, leftover)
+
 
     def send_text(self, text: str) -> None:
         self._send(OP_TEXT, text.encode("utf-8"))
@@ -187,11 +271,29 @@ class WebSocket:
     def send_close(self, code: int = 1000) -> None:
         self._send(OP_CLOSE, struct.pack("!H", code))
 
-    def recv(self) -> str | None:
+    def recv(self, timeout: float | None = None) -> str | None:
         """收一条**文本**消息。对端关闭时返回 None。
 
-        分片按 FIN 拼起来；心跳在这里就地回答（不回它，对端会认为我们掉线）。
+        `timeout` 只对这一次调用生效（不传就用建连接时的）。为什么需要它：
+        用的人往往有"过一会儿必须做点别的事"的需求（比如按时发心跳），而单靠
+        建连接时的那个固定超时，这件事做不准——真机上就是这么被平台掐线的。
         """
+        if timeout is None:
+            return self._recv_text()
+        sock = self._sock
+        restore = sock.gettimeout()
+        sock.settimeout(timeout)
+        try:
+            return self._recv_text()
+        finally:
+            if sock is self._sock:
+                try:
+                    sock.settimeout(restore)
+                except OSError:
+                    pass
+
+    def _recv_text(self) -> str | None:
+        """分片按 FIN 拼起来；心跳在这里就地回答（不回它，对端会认为我们掉线）。"""
         buffer = bytearray()
         while True:
             frame = read_frame(self._sock)
@@ -206,6 +308,7 @@ class WebSocket:
             if opcode == OP_PONG:
                 continue
             if opcode == OP_CLOSE:
+                self.close_info = _close_text(payload)
                 return None
             buffer += payload
             if fin:
@@ -227,3 +330,28 @@ class WebSocket:
         if self._sock is None:
             raise WebSocketError("连接没起来")
         self._sock.sendall(encode_frame(opcode, payload))
+
+
+def _close_text(payload: bytes) -> str:
+    """把关闭帧的负载翻成人话：前两字节是码，其余是原因。"""
+    if len(payload) < 2:
+        return "对端没给关闭码"
+    code = struct.unpack("!H", payload[:2])[0]
+    reason = payload[2:].decode("utf-8", errors="replace")
+    return f"code={code}" + (f" {reason}" if reason else "")
+
+
+def _parse_proxy(proxy: str) -> tuple[str, int]:
+    """把 `socks5://host:port` 拆开。写在文件末尾是因为它当初插在类中间，
+    把后面几个方法**吞进了它自己的函数体**（缩进还在，于是它们成了
+    `_parse_proxy` 里永远执行不到的内部函数）——症状是 `WebSocket` 上
+    没有 `send_text`，而单测看不出来，真机一跑就炸。
+    """
+    text = proxy.strip()
+    for prefix in ("socks5h://", "socks5://", "socks://"):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+    host, _, port = text.partition(":")
+    if not host or not port:
+        raise WebSocketError(f"代理地址看不懂：{proxy}（要写成 socks5://host:port）")
+    return host, int(port)

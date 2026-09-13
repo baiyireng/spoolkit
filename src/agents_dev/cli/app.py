@@ -463,6 +463,16 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--timeout", type=float, default=900.0, help="一轮任务最多等多少秒"
     )
+    parser.add_argument(
+        "--bridge-proxy",
+        default="",
+        metavar="地址",
+        help=(
+            "**通道自己**出网走哪个代理（如 socks5://127.0.0.1:1080）。"
+            "QQ 平台有 IP 白名单：借一台云主机出去（ssh -D 给的 SOCKS5），"
+            "白名单就固定成那台主机的 IP。注意这和 --proxy（模型供应商用）不是一回事"
+        ),
+    )
     parser.add_argument("--token", default="", help="Telegram bot token（或用环境变量）")
     parser.add_argument("--appid", default="", help="QQ 机器人的 AppID（或用环境变量）")
     parser.add_argument("--secret", default="", help="QQ 机器人的 AppSecret（或用环境变量）")
