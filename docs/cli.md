@@ -184,3 +184,15 @@ Cursor 扮演用户下发任务）。工具、信任模型、调用序列见 [`m
 | `--policy` / `--scope` / `--session` | 原样转给 agent |
 
 详见 [`bridge.md`](bridge.md)。
+
+## 联网取用参数（`run` / `chat` / `mcp` / `serve` / `bridge` 都有）
+
+| 参数 | 说明 |
+|---|---|
+| `--web` | 打开联网取用：`web_fetch`（抓一页、给目录）+ `web_read`（按需取一块）。**默认关** |
+| `--web-allow 域名` | 只允许抓这些域名（可重复）。不给 = 允许任何公网域名 |
+| `--web-deny 域名` | 禁止抓这些域名（可重复，优先于 allow） |
+| `--proxy` | 抓取也走它；不给就用系统代理 |
+
+内网/环回/保留地址**默认硬拦**，与 allow 无关。细节与已知短板见
+[`manual.md`](manual.md#联网取用--web默认关)。

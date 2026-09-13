@@ -24,6 +24,7 @@ from spoolkit.cli.runtime import (
     LoopWiring,
     assemble_loop,
     build_approver,
+    web_access,
     build_lessons,
     open_memory,
     provider_gateway,
@@ -198,6 +199,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             lessons=build_lessons(memory) if memory is not None else None,
             on_event=writer.handle,
             read_roots=_resolve_read_roots(args, project_root)[0],
+            web=web_access(args, project_root),
             mcp=not getattr(args, "no_mcp", False),
         ),
     )
@@ -270,6 +272,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             grants=grants,
             lessons=build_lessons(memory) if memory is not None else None,
             read_roots=read_roots,
+            web=web_access(args, project_root),
             mcp=not getattr(args, "no_mcp", False),
         ),
     )

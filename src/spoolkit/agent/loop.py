@@ -193,6 +193,11 @@ def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
             )
         )
 
+    if registry.get("web_fetch") is not None:
+        # 紧跟"可读目录"：两者都是"工作区之外的输入"，而网页那条多一层
+        # 不可信的边界，必须紧挨着说。
+        lines.append(T.WORKFLOW_WEB)
+
     if registry.get("dir_stats") is not None:
         lines.append(T.WORKFLOW_STATS)
 

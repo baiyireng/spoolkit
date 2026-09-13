@@ -29,6 +29,13 @@ def serve_command(args: argparse.Namespace) -> int:
             extra += [flag, value]
     for root in getattr(args, "allow_read", []) or []:
         extra += ["--allow-read", root]
+    # 联网取用也要转发：网页壳里点着按钮查资料时，子进程得有这两个工具。
+    if getattr(args, "web", False):
+        extra += ["--web"]
+    for domain in getattr(args, "web_allow", []) or []:
+        extra += ["--web-allow", domain]
+    for domain in getattr(args, "web_deny", []) or []:
+        extra += ["--web-deny", domain]
 
     serve(
         Path(args.root).resolve(),

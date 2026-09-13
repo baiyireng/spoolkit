@@ -210,6 +210,7 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
             "用户、再把回答写回来）。不给就是无人值守，一律拒绝"
         ),
     )
+    _add_web_args(parser)
     parser.add_argument(
         "--allow-read",
         action="append",
@@ -221,6 +222,35 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         ),
     )
     parser.set_defaults(func=run)
+
+
+def _add_web_args(parser: argparse.ArgumentParser) -> None:
+    """联网取用（web_fetch / web_read）。
+
+    **默认关**：它是唯一会把外部不可信内容带进上下文的入口——网页里的"指令"
+    可以诱使 agent 去写文件、跑命令（间接提示注入）。要不要开，由调用方明说。
+    白名单/黑名单/上限一律由调用方给，这里不写死（内网地址是硬拦的，见
+    fetch/client.py）。
+    """
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="允许联网取用：web_fetch（抓一页给目录）+ web_read（按需取某一块）",
+    )
+    parser.add_argument(
+        "--web-allow",
+        action="append",
+        default=[],
+        metavar="域名",
+        help="只允许抓这些域名（可重复；不给=允许任何公网域名，内网仍拦）",
+    )
+    parser.add_argument(
+        "--web-deny",
+        action="append",
+        default=[],
+        metavar="域名",
+        help="禁止抓这些域名（可重复，优先于 --web-allow）",
+    )
 
 
 def _add_plan_command(sub: argparse._SubParsersAction) -> None:
@@ -307,6 +337,7 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
         metavar="目录",
         help="授权额外可读目录（可重复），转发给子进程",
     )
+    _add_web_args(parser)
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.set_defaults(func=serve_command)
 
@@ -382,6 +413,7 @@ def _add_chat_command(sub: argparse._SubParsersAction) -> None:
     )
     parser.add_argument("--scope", default="", help="auto 策略下允许自动落盘的路径")
     parser.add_argument("--session", default="chat", help="会话名。不同时段/目的的活分开记")
+    _add_web_args(parser)
     parser.add_argument("--history", type=int, default=6)
     parser.add_argument(
         "--allow-read",
@@ -412,6 +444,7 @@ def _add_mcp_command(sub: argparse._SubParsersAction) -> None:
         help="允许自动落盘的范围。外部 agent 的确认等于用户确认，边界靠它收窄",
     )
     parser.add_argument("--session", default="mcp", help="会话名")
+    _add_web_args(parser)
     parser.add_argument(
         "--allow-read",
         action="append",
@@ -494,6 +527,7 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
         "--sandbox", action="store_true", help="QQ 机器人用沙箱环境（sandbox.api.sgroup.qq.com）"
     )
     _add_provider_args(parser, default="")
+    _add_web_args(parser)
     parser.add_argument("--script", default="", help="假模型脚本 JSON")
     parser.add_argument(
         "--policy", choices=POLICIES, default="", help="子进程的授权策略"

@@ -27,6 +27,7 @@ from spoolkit.cli.runtime import (
     open_memory,
     show_history,
     settle_lessons,
+    web_access,
 )
 from spoolkit.config import Config
 from spoolkit.memory.distill import distill
@@ -143,6 +144,7 @@ def _turn(args, project_root, gateway, window, memory) -> int:
             grants=grants,
             lessons=build_lessons(memory) if memory is not None else None,
             read_roots=read_roots,
+            web=web_access(args, project_root),
             mcp=not getattr(args, "no_mcp", False),
         ),
     )

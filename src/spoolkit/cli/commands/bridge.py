@@ -226,6 +226,13 @@ def run_extra_args(args: argparse.Namespace, project_root: Path) -> list[str]:
     # `--ask-on-stdin`：events 模式默认"无人可问就拒绝"，桥这边有人可问
     # （用户就在聊天里），所以要显式打开。
     extra: list[str] = ["--ask-on-stdin"]
+    if getattr(args, "web", False):
+        # 聊天通道也能开联网：用户在手机上让它查资料是常见场景。
+        extra += ["--web"]
+    for domain in getattr(args, "web_allow", []) or []:
+        extra += ["--web-allow", domain]
+    for domain in getattr(args, "web_deny", []) or []:
+        extra += ["--web-deny", domain]
     for flag, value in (
         ("--provider", getattr(args, "provider", "")),
         ("--model", getattr(args, "model", "")),

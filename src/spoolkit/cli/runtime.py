@@ -38,6 +38,9 @@ from spoolkit.tools.diagnosis import (
     request_diagnosis_spec,
 )
 from spoolkit.tools.fs import list_dir_spec, read_file_spec
+from spoolkit.tools.webfetch import web_fetch_spec, web_read_spec
+from spoolkit.fetch.client import WebPolicy
+from spoolkit.tools.webfetch import WebAccess
 from spoolkit.tools.grant import Grants
 from spoolkit.tools.help import tool_help_spec
 from spoolkit.tools.registry import ToolRegistry
@@ -106,6 +109,9 @@ class LoopWiring:
     # 要不要挂用户配置里的 MCP 外挂工具。默认挂——配了就是要用；
     # `--no-mcp` 用来临时排除它们（排查"是不是外挂工具在捣乱"时用）。
     mcp: bool = True
+    # 联网取用（web_fetch / web_read）。**默认关**：它是唯一会把外部不可信内容
+    # 带进上下文的入口，要不要开由调用方明说。见 fetch/ 与 tools/webfetch.py。
+    web: object | None = None
 
 
 def resolve_provider_args(args) -> dict[str, str]:
@@ -358,6 +364,9 @@ def assemble_loop(
     registry.register(search_code_spec(project_root, parts.pending, parts.read_roots))
     registry.register(dir_stats_spec(project_root, parts.read_roots))
     registry.register(calc_spec())
+    if getattr(parts, "web", None) is not None:
+        registry.register(web_fetch_spec(parts.web))
+        registry.register(web_read_spec(parts.web))
     # 索引里只写「名字 + 参数名 + 一句干什么」，完整说明按需从这里取。
     # 注册在最后：它绑定的是这个注册表本身，而注册表是逐个长起来的。
     registry.register(tool_help_spec(registry))
@@ -456,6 +465,24 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
         # 假模型没有判断力：它的「续期」只是把脚本里下一条当成结论。
         # 这条路是离线演示与测试用的，督导在这里只会有害。
         config=Config(project_root=project_root, context_window=window, supervise=False),
+    )
+
+
+def web_access(args, project_root: Path) -> WebAccess | None:
+    """按命令行参数构造联网取用能力；没开 `--web` 就返回 None（默认关）。
+
+    代理沿用 `--proxy`，没给就用系统代理——和模型供应商那条保持一致，
+    不要求用户配第二遍。
+    """
+    if not getattr(args, "web", False):
+        return None
+    return WebAccess(
+        root=project_root,
+        policy=WebPolicy(
+            allow=tuple(getattr(args, "web_allow", []) or ()),
+            deny=tuple(getattr(args, "web_deny", []) or ()),
+            proxy=(getattr(args, "proxy", "") or "") or system_proxy(),
+        ),
     )
 
 
