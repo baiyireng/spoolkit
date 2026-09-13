@@ -15,7 +15,7 @@ from agents_dev.llm.tokenizer import OfflineTokenCounter
 from agents_dev.tools.edit import looks_like_path
 from agents_dev.tools.types import ToolResult, ToolSpec
 from agents_dev.tools.view import WorkspaceView
-from agents_dev.index.symbols import PythonAstExtractor
+from agents_dev.index.symbols import PythonAstExtractor, extractor_for
 
 SYMBOL_LIST_BUDGET = 600
 MAX_MATCHES = 20
@@ -30,16 +30,13 @@ def _pending_symbols(view: WorkspaceView, name: str):
     """
     if view is None:
         return []
-    engine = PythonAstExtractor()
     found = []
     for path in view.overridden:
-        if not path.endswith(".py"):
-            continue
         text = view.overridden_text(path)
         if not text:
             continue
         try:
-            symbols = engine.extract(text, path)
+            symbols = extractor_for(path).extract(text, path)
         except SyntaxError:
             continue
         for sym in symbols:
@@ -96,16 +93,25 @@ def _find_symbol(root: Path, conn: sqlite3.Connection, args: dict, view=None) ->
 
 def _source_from_text(text: str, name: str) -> str | None:
     """从一段源码文本里取出某个符号的源码（按行号切）。"""
-    engine = PythonAstExtractor()
-    try:
-        symbols = engine.extract(text, "inline")
-    except SyntaxError:
-        return None
+    symbols = _symbols_from_text(text, "inline")
     lines = text.splitlines()
     for sym in symbols:
         if sym.name == name:
             return "\n".join(lines[sym.start_line - 1 : sym.end_line])
     return None
+
+
+def _symbols_from_text(text: str, path: str):
+    """从文本里取符号：先按 Python 试，不成再按路径的语言试。
+
+    两条都试是因为这里没有可靠的后缀信息（可能是刚写出来的文件内容）。
+    Python 那条最准，先用它；失败就当它是别的语言，交给声明扫描。
+    """
+    engine = PythonAstExtractor()
+    try:
+        return engine.extract(text, path)
+    except SyntaxError:
+        return extractor_for(path).extract(text, path)
 
 
 def _file_symbols(conn: sqlite3.Connection, args: dict, view=None) -> ToolResult:
@@ -124,11 +130,7 @@ def _file_symbols(conn: sqlite3.Connection, args: dict, view=None) -> ToolResult
 
 def _render_symbols_from_text(text: str, path: str) -> str:
     """用改动后的文本渲染一份符号表，格式与 render_file_symbols 一致。"""
-    engine = PythonAstExtractor()
-    try:
-        symbols = engine.extract(text, path)
-    except SyntaxError:
-        return ""
+    symbols = _symbols_from_text(text, path)
     if not symbols:
         return ""
     lines = [f"{path}:"]
@@ -183,6 +185,33 @@ def file_symbols_spec(conn: sqlite3.Connection, pending=None) -> ToolSpec:
     )
 
 
+def _refs_caveat(conn: sqlite3.Connection, name: str, path: str | None) -> str:
+    """非 Python 的符号加一句口径说明。
+
+    引用边是从 AST 里抽的，只对 Python 成立。别的语言上"没找到调用方"
+    是**没查**，不是"没有"——这两件事混起来，使用者会以为改这里安全。
+    """
+    sql = (
+        "SELECT f.path AS path, f.lang AS lang FROM symbol s"
+        " JOIN file f ON f.id = s.file_id WHERE s.name = ?"
+    )
+    params: list = [name]
+    if path:
+        sql += " AND f.path = ?"
+        params.append(path)
+    langs = {
+        row["lang"] for row in conn.execute(sql, params).fetchall()
+    }
+    non_python = sorted(lang for lang in langs if lang and lang != "python")
+    if not non_python:
+        return ""
+    return (
+        f"\n（注意：这个符号在 {('、'.join(non_python))} 里。"
+        "引用图只对 Python 成立——这里的「没有调用方」等于「没查」，不等于「没有」。"
+        "要看别的语言的关系，只能用 search_code 自己看证据。）"
+    )
+
+
 def _find_callers(
     conn: sqlite3.Connection, args: dict, counter: OfflineTokenCounter, view=None
 ) -> ToolResult:
@@ -192,6 +221,10 @@ def _find_callers(
     # 索引是按磁盘内容建的。改动没落盘时，新符号查不到、旧引用还在，
     # 所以先用改动后的文本补一份定义与引用。
     defs, pending_refs = _pending_mentions(view, name)
+
+    # 引用图只对 Python 成立。非 Python 的文件里"没有调用方"是**没查**，
+    # 不是"没有"——这两件事混起来，使用者会以为改这里安全。
+    caveat = _refs_caveat(conn, name, path)
 
     sql = (
         "SELECT s.id AS id, f.path AS path FROM symbol s"
@@ -207,7 +240,7 @@ def _find_callers(
         if defs:
             return ToolResult(
                 ok=True,
-                content=_pending_only_report(name, defs, pending_refs),
+                content=_pending_only_report(name, defs, pending_refs) + caveat,
             )
         return ToolResult(ok=False, content=f"找不到符号: {name}")
     if len(rows) > 1:
@@ -237,7 +270,7 @@ def _find_callers(
         parts.append(
             "尚未落盘的改动里还引用了它：" + "、".join(pending_refs)
         )
-    return ToolResult(ok=True, content="\n".join(parts))
+    return ToolResult(ok=True, content="\n".join(parts) + caveat)
 
 
 def _pending_only_report(name: str, defs: list[str], refs: list[str]) -> str:
@@ -259,17 +292,14 @@ def _pending_mentions(view, name: str) -> tuple[list[str], list[str]]:
     """
     if view is None:
         return [], []
-    engine = PythonAstExtractor()
     defs: list[str] = []
     refs: list[str] = []
     for path in view.overridden:
-        if not path.endswith(".py"):
-            continue
         text = view.overridden_text(path)
         if not text:
             continue
         try:
-            symbols = engine.extract(text, path)
+            symbols = extractor_for(path).extract(text, path)
         except SyntaxError:
             continue
         for sym in symbols:

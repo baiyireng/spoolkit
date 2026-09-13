@@ -12,7 +12,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agents_dev.index.symbols import PythonAstExtractor, SymbolExtractor
+from agents_dev.index.symbols import (
+    SymbolExtractor,
+    code_suffixes,
+    extractor_for,
+    indexed_suffixes,
+    language_name,
+)
 from agents_dev.index.refs import extract_refs
 from agents_dev.index.graph import resolve_refs, store_refs
 
@@ -58,17 +64,33 @@ def _hash(text: str) -> str:
 
 
 def iter_source_files(root: Path):
-    """遍历需要索引的 Python 文件。
+    """遍历需要索引的源码文件。
 
     必须在遍历时剪枝。原先用 rglob 再过滤：它会先把整棵树走一遍，
     跳过 .venv / node_modules 的名单等于没生效——只在读文件那一步省。
     实测 40 万文件的树，仅遍历就 4.4 秒，其中绝大多数是被跳过的目录。
+
+    后缀名单与提取器同源（`symbols.LANGUAGES`）：只认 .py 的时候，
+    一个 JS/Go/Rust 的工作区索引里什么都没有，而"没有"会被读成"不存在"。
+
+    顺序也是刻意的：**代码文件先出**。文件数上限是硬的，md/json 这类
+    文本只在还有余量时进索引——它们的价值是路径命中，不是符号。
     """
+    wanted = indexed_suffixes()
+    code = code_suffixes()
+    later: list[Path] = []
     for current, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(name for name in dirnames if name not in SKIP_DIRS)
         for name in sorted(filenames):
-            if name.endswith(".py"):
-                yield Path(current) / name
+            suffix = Path(name).suffix.lower()
+            if suffix not in wanted:
+                continue
+            path = Path(current) / name
+            if suffix in code:
+                yield path
+            else:
+                later.append(path)
+    yield from later
 
 
 def _store_symbols(conn: sqlite3.Connection, file_id: int, symbols) -> int:
@@ -104,8 +126,12 @@ def index_project(
     max_files: int = MAX_INDEX_FILES,
     seconds: float = INDEX_SECONDS,
 ) -> IndexStats:
-    """扫描并增量更新索引。超过上限就停下，并在 stats.stopped 里说明原因。"""
-    engine = extractor or PythonAstExtractor()
+    """扫描并增量更新索引。超过上限就停下，并在 stats.stopped 里说明原因。
+
+    `extractor` 只在测试里显式给（要固定一种提取器时）；正常路径按后缀
+    逐个文件挑——多语言工作的入口就在这里。
+    """
+    engine = extractor
     stats = IndexStats()
     seen: set[str] = set()
     started = time.time()
@@ -132,7 +158,8 @@ def index_project(
             continue
 
         try:
-            symbols = engine.extract(source, rel)
+            # 按后缀挑提取器：Python 走 AST，其它语言走声明扫描。
+            symbols = (engine or extractor_for(rel)).extract(source, rel)
         except SyntaxError:
             stats.files_failed += 1
             continue
@@ -150,7 +177,7 @@ def index_project(
             cursor = conn.execute(
                 "INSERT INTO file(path, lang, content_hash, mtime, indexed_at)"
                 " VALUES (?,?,?,?,?)",
-                (rel, "python", digest, mtime, now),
+                (rel, language_name(rel), digest, mtime, now),
             )
             file_id = cursor.lastrowid
 
