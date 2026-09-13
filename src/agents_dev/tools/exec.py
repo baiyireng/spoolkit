@@ -281,6 +281,30 @@ def _usage_problem(argv: list[str]) -> str | None:
     return None
 
 
+def _translate_cd(argv: list[str]) -> tuple[str, list[str]] | None:
+    """把 `cd X && <命令>` 翻译成「在 X 里执行 <命令>」。
+
+    这是**翻译，不是放行**：后面的命令仍走同一套白名单与授权，`cd` 本身
+    没有任何权限含义。实测模型会反复用 shell 写法（`["cd","X","&&","python",...]`），
+    即使报错已经告诉它该用 cwd——它在别处学到的习惯比提示词强。
+
+    代价很实在：一次这样的翻车（连撞三次 + 重试）能吃掉整轮 27% 的 token。
+    与其继续提醒，不如把它的意思翻对。
+    """
+    if len(argv) < 4:
+        return None
+    if argv[0].strip().lower() not in ("cd", "chdir"):
+        return None
+    if argv[2].strip() not in ("&&", ";", "&"):
+        return None
+    target, rest = argv[1].strip(), argv[3:]
+    if not target or not rest:
+        return None
+    if target in (".", "./") or target.startswith(("-", "/", "\\")) or ":" in target:
+        return None  # 相对目录之外的形式不猜
+    return target, list(rest)
+
+
 def _run(
     root: Path,
     args: dict,
@@ -293,6 +317,12 @@ def _run(
     max_timeout: int = MAX_TIMEOUT,
 ) -> ToolResult:
     argv = list(args["command"])
+    original = list(argv)
+    translated = _translate_cd(argv)
+    if translated is not None:
+        target, rest = translated
+        args = {**args, "command": rest, "cwd": target}
+        argv = rest
     usage = _usage_problem(argv)
     if usage is not None:
         return ToolResult(ok=False, content=usage)
@@ -314,9 +344,10 @@ def _run(
         if not allowed:
             return ToolResult(ok=False, content=message)
 
-    # 回显模型自己写的那份命令，而不是换算后的。把解释器全路径暴露出去，
-    # 模型会把它当成参数再传回来，实测里演变成了 "can't open file <解释器路径>"。
-    requested = " ".join(argv)
+    # 回显**模型自己写的那份**命令：被翻译过的时候，它要能看到「我要的」和
+    # 「实际跑的」对应得上；而换算后的解释器全路径不能暴露（实测模型会把它
+    # 当成参数再传回来，演变成 "can't open file <解释器路径>"）。
+    requested = " ".join(original)
 
     timeout = args.get("timeout", default_timeout)
     if not 1 <= timeout <= max_timeout:

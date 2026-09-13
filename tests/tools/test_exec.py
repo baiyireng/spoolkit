@@ -86,6 +86,31 @@ def test_cd这类shell内建要说清正确写法(tmp_path: Path) -> None:
         assert "需要用户批准" not in result.content
 
 
+def test_cd_带命令的写法被翻译成cwd(tmp_path: Path) -> None:
+    """`cd X && <命令>` → 「在 X 里执行 <命令>」。翻译，不是放行。
+
+    实测模型会反复用这种 shell 写法，即使报错已经告诉它该用 cwd——它在别处
+    学到的习惯比提示词强。一次这样的翻车（连撞三次加重试）能吃掉整轮 27% 的
+    token，所以与其继续提醒，不如把它的意思翻对。
+    """
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "hello.py").write_text("print('在子目录里跑')\n", encoding="utf-8")
+    result = _run(
+        tmp_path, command=["cd", "sub", "&&", "python", "hello.py"]
+    )
+    assert result.ok is True, result.content
+    assert "在子目录里跑" in result.content
+    # 回显的是模型自己写的那份命令，不是换算后的
+    assert "cd sub && python hello.py" in result.content
+
+
+def test_裸cd仍然要它用cwd(tmp_path: Path) -> None:
+    """只写 `cd X` 没有后续命令——那不构成一件事，照旧告诉它怎么写。"""
+    result = _run(tmp_path, command=["cd", "sub"])
+    assert result.ok is False
+    assert "cwd" in result.content
+
+
 def test_用绝对路径当cwd时说清该写相对路径(tmp_path: Path) -> None:
     result = _run(
         tmp_path, command=["python", "-m", "pytest", "-q"], cwd="/workspace"

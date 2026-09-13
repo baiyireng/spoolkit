@@ -22,6 +22,7 @@ from agents_dev.agents.plan import (
     render_step_prompt,
     save_plan,
 )
+from agents_dev import limits
 from agents_dev.cli.options import (
     report_policy,
     resolve_policy,
@@ -56,6 +57,38 @@ def _survey(project_root: Path, goal: str, tokenizer) -> str:
     再给检索到的相关代码片段——都不多，够它对齐名字即可。
     """
     lines: list[str] = []
+    # 任务材料：说「要做什么」的那些文件（TASK/README/*.md）与验收测试。
+    #
+    # 这一段是**效率的关键**：拆解时读不到它们，步骤就只能写成
+    # 「修复 02_empty_input 中的空输入处理缺陷」这种笼统的话（实测就是这样），
+    # 于是每个执行者都得自己去翻一遍——每题多一轮 survey，而每轮还要把后续
+    # 提示词一起撑大。契约在这里读一次，比在每个子任务里读一遍便宜得多。
+    material_budget = int(limits.resolve("decompose_material_budget", {})[0])
+    material: list[str] = []
+    used = 0
+    for home in sorted(p for p in project_root.iterdir() if p.is_dir()):
+        if home.name == ".agent":
+            continue
+        for item in sorted(home.iterdir()):
+            if not item.is_file():
+                continue
+            name = item.name.lower()
+            is_material = name.endswith(".md") or name.startswith("test_")
+            if not is_material:
+                continue
+            try:
+                body = item.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                continue
+            block = f"### {home.name}/{item.name}\n{body}"
+            cost = tokenizer.count(block)
+            if used + cost > material_budget:
+                material.append(f"（还有材料没放下：{home.name}/{item.name}）")
+                break
+            material.append(block)
+            used += cost
+    if material:
+        lines.append("各题目的材料（题目说明与验收测试）：\n" + "\n\n".join(material))
     try:
         entries = sorted(
             item.name + ("/" if item.is_dir() else "")

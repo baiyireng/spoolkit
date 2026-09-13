@@ -40,6 +40,7 @@ PLAN_SCHEMA: dict[str, Any] = {
                     "goal": {"type": "string"},
                     "acceptance": {"type": "string"},
                     "scope": {"type": "array", "items": {"type": "string"}},
+                    "contract": {"type": "string"},
                     "executor": {"type": "string", "enum": ["self", "subagent"]},
                 },
                 "required": ["goal", "acceptance", "scope", "executor"],
@@ -59,6 +60,10 @@ class PlanStep:
     index: int
     goal: str
     acceptance: str
+    # 这一步**不能动的接口 / 必须满足的断言**，从验收测试里读出来。
+    # 它存在的理由只有一个：让执行者不必自己再读一遍测试。实测里那一步
+    # 每次要多花一轮（3 轮 vs 2 轮），而轮数是这块成本的主体。
+    contract: str = ""
     scope: tuple[str, ...] = ()
     # 这一步**谁来做**。拆解时就要定：不写这一维，harness 就等于替所有步骤
     # 决定「都自己做」——那正是「按步注入」被诟病的地方：每一步都按派发契约
@@ -140,6 +145,7 @@ def parse_plan(text: str, goal: str, limit: int = 10) -> Plan:
                 index=len(steps) + 1,
                 goal=step_goal,
                 acceptance=acceptance,
+                contract=str(item.get("contract") or "").strip(),
                 scope=tuple(
                     str(item).strip()
                     for item in (item.get("scope") or [])
@@ -281,11 +287,13 @@ def render_step_prompt(plan: Plan, step: PlanStep) -> str:
     # 模型不知道要改哪个文件，于是每步先花一轮 survey 自己翻（每任务 3 轮 vs
     # 单题模式的 2 轮），而那一轮把后续几轮的提示词也一起撑大了。
     scope = "、".join(step.scope) if step.scope else "（没声明）"
+    contract = f"契约（不能动的接口与必须满足的断言）：{step.contract}\n" if step.contract else ""
     return (
         f"项目目标：{plan.goal}\n"
         f"已完成：{done}\n"
         f"涉及：{scope}\n"
         f"本次只做这一步：{step.goal}\n"
+        f"{contract}"
         f"验收标准：{step.acceptance}\n"
         "不要顺手做后面步骤的事。"
     )

@@ -152,6 +152,11 @@ KNOBS: tuple[Knob, ...] = (
         "prefetch_content_budget", 1000, CAPABILITY,
         "开局预取还带上多少 token 的代码片段",
     ),
+    Knob(
+        "decompose_material_budget", 3000, CAPABILITY,
+        "拆解时最多读多少 token 的任务材料（题目说明与验收测试）——"
+        "在这里读一次比在每个子任务里各读一遍便宜得多",
+    ),
     Knob("command_timeout", 180, MECHANICAL, "单条命令的默认超时"),
     Knob("max_command_timeout", 600, SAFETY, "命令超时上限：防止挂死"),
     Knob(
