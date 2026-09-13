@@ -89,6 +89,9 @@ $env:SPOOLKIT_QQ_APPID  = "102xxxxxx"
 $env:SPOOLKIT_QQ_SECRET = "xxxxxxxx"
 spool bridge --channel qqbot --policy auto --scope "src"     # 沙箱加 --sandbox
 
+# 借云主机出口（白名单只填那台主机）——2026-09-13 真机验证过这条命令
+spool bridge --channel qqbot --bridge-proxy socks5://127.0.0.1:1080 --policy ask --scope "src"
+
 # 接企业微信（自建应用）
 $env:SPOOLKIT_WECOM_CORP_ID = "ww...."
 $env:SPOOLKIT_WECOM_SECRET  = "..."
