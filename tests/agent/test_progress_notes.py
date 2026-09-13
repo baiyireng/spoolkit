@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from spoolkit.agent.loop import MAX_DONE_NOTES, AgentLoop
+from spoolkit import session_state
 from spoolkit.config import Config
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
@@ -110,14 +111,16 @@ def test_状态块只列最近几条但记录不丢(tmp_path: Path) -> None:
     assert len(result.state.done) == total
     assert any("f0.py" in item for item in result.state.done)
     # 块里只列最近几条，但说清了总数与完整清单在哪
-    block = result.state.render()
+    # 按主循环的做法渲染：把**本会话**的清单路径传进去（不传就退回旧默认值，
+    # 那正是模型会去读别人文件的写法）。
+    block = result.state.render(progress_hint=session_state.hint(tmp_path, "cli"))
     assert f"已完成 {total} 项" in block
     assert f"只列最近 {MAX_DONE_NOTES} 项" in block
-    assert ".agent/progress.md" in block
+    assert session_state.hint(tmp_path, "cli") in block
     assert "f0.py" not in block
     assert f"f{total - 1}.py" in block
     # 清单落盘，模型需要细节时可以读
-    progress = (tmp_path / ".agent" / "progress.md").read_text(encoding="utf-8")
+    progress = session_state.progress_path(tmp_path, "cli").read_text(encoding="utf-8")
     assert "f0.py" in progress and f"f{total - 1}.py" in progress
 
 
@@ -129,7 +132,7 @@ def test_进度写进检查点(tmp_path: Path) -> None:
     result = _loop(tmp_path, script + ["不是 JSON"] * 5).run("做一半")
     assert result.finished is False
     data = json.loads(
-        (tmp_path / ".agent" / "tasks" / "task.json").read_text(encoding="utf-8")
+        session_state.task_path(tmp_path, "cli", "task").read_text(encoding="utf-8")
     )
     assert any("write_file" in item for item in data["done"])
 

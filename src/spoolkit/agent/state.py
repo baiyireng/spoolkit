@@ -44,10 +44,13 @@ class TaskState:
     # 实际列几条由渲染方按本次运行的覆盖决定。
     DONE_INLINE = int(_limits.knob("done_inline").default)
 
-    def render(self, done_inline: int | None = None) -> str:
+    def render(self, done_inline: int | None = None, progress_hint: str = "") -> str:
         """渲染成紧凑文本供注入。刻意省略空字段以节省 token。
 
-        done_inline 由调用方按本次运行的标定值给（默认用登记表的默认值）。
+        done_inline 由调用方按本次运行的标定值给（默认用登记表的默认值）；
+        progress_hint 是那份全量清单**这次实际所在的位置**（会话级，见
+        session_state.py）——写死成 `.agent/progress.md` 会让模型去读一个
+        别的会话留下的文件。
         """
         limit = self.DONE_INLINE if done_inline is None else max(1, done_inline)
         lines = [f"目标: {self.goal}"]
@@ -58,7 +61,7 @@ class TaskState:
                 head += f"（只列最近 {len(recent)} 项）"
             lines.append(f"{head}: " + " | ".join(recent))
             if len(self.done) > len(recent):
-                lines.append("完整清单: .agent/progress.md")
+                lines.append(f"完整清单: {progress_hint or '.agent/progress.md'}")
         if self.current:
             lines.append(f"当前: {self.current}")
         if self.verify:

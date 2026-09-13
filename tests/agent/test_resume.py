@@ -3,6 +3,7 @@ from pathlib import Path
 
 from spoolkit.agent.loop import AgentLoop
 from spoolkit.agent.state import TaskState, save_state
+from spoolkit import session_state
 from spoolkit.config import Config
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
@@ -29,7 +30,7 @@ def _loop(tmp_path: Path, script: list[str]) -> AgentLoop:
 def test_不恢复时从零开始(tmp_path: Path) -> None:
     save_state(
         TaskState(task_id="task", goal="旧任务", done=["第一步"], step=3),
-        tmp_path / ".agent" / "tasks" / "task.json",
+        session_state.task_path(tmp_path, "cli", "task"),
     )
     result = _loop(tmp_path, [_turn("完成")]).run("新任务")
     # goal 来自参数，而不是检查点
@@ -39,7 +40,7 @@ def test_不恢复时从零开始(tmp_path: Path) -> None:
 def test_恢复时沿用检查点里的目标与进度(tmp_path: Path) -> None:
     save_state(
         TaskState(task_id="task", goal="未完成的任务", done=["第一步"], step=3),
-        tmp_path / ".agent" / "tasks" / "task.json",
+        session_state.task_path(tmp_path, "cli", "task"),
     )
     result = _loop(tmp_path, [_turn("完成")]).run("被忽略的新目标", resume=True)
     assert result.state.goal == "未完成的任务"
@@ -51,7 +52,7 @@ def test_恢复时沿用检查点里的目标与进度(tmp_path: Path) -> None:
 def test_恢复时提示里说明是接着做(tmp_path: Path) -> None:
     save_state(
         TaskState(task_id="task", goal="旧任务", step=2),
-        tmp_path / ".agent" / "tasks" / "task.json",
+        session_state.task_path(tmp_path, "cli", "task"),
     )
     loop = _loop(tmp_path, [_turn("完成")])
     loop.run("旧任务", resume=True)
@@ -67,14 +68,14 @@ def test_没有检查点时恢复等于新建(tmp_path: Path) -> None:
 
 def test_成功后检查点被清掉(tmp_path: Path) -> None:
     _loop(tmp_path, [_turn("完成")]).run("做完")
-    assert not (tmp_path / ".agent" / "tasks" / "task.json").exists()
+    assert not (session_state.task_path(tmp_path, "cli", "task")).exists()
 
 
 def test_未完成时检查点被保留(tmp_path: Path) -> None:
     loop = _loop(tmp_path, ["不是 JSON"] * 10)
     result = loop.run("做不完")
     assert result.finished is False
-    path = tmp_path / ".agent" / "tasks" / "task.json"
+    path = session_state.task_path(tmp_path, "cli", "task")
     assert path.exists()
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["goal"] == "做不完"

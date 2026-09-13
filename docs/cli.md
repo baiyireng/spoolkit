@@ -77,7 +77,10 @@ spool --help
 ## spool plan
 
 只拆解、把计划落盘，不执行。参数同上里相关的那些：`--goal`（必给）、`--limit`、
-`--cover`、供应商与 `--root`。
+`--cover`、`--session`、供应商与 `--root`。
+
+计划是**会话级**的（`.agent/sessions/<会话>/plan.json`），`--session` 默认 `cli`，
+与 `spool run` 一致——`spool run --plan` 读的就是同一个会话那份。
 
 ## spool chat
 

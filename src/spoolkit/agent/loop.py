@@ -371,7 +371,10 @@ class AgentLoop:
                 name="task_state",
                 # 「已完成」列几条是能力标定值：强模型可以多列几条，
                 # 但那是每个请求的税，所以由本次运行的覆盖决定。
-                text=state.render(int(self.config.limit("done_inline"))),
+                text=state.render(
+                    int(self.config.limit("done_inline")),
+                    progress_hint=self.config.progress_hint,
+                ),
                 priority=30,
             )
         )
@@ -943,7 +946,7 @@ class AgentLoop:
             step=state.step,
             limit=limit,
             ceiling=ceiling,
-            state=state.render(),
+            state=state.render(progress_hint=self.config.progress_hint),
             trace=tuple(trace),
             edits=edits,
             calls=calls,
@@ -1070,7 +1073,9 @@ class AgentLoop:
         """
         if not state.done:
             return
-        path = self.config.project_root / ".agent" / "progress.md"
+        # 会话级：`.agent/sessions/<会话>/progress.md`。写在工作区根上会让下一个
+        # 会话读到上一个会话"做过什么"（真出过事，见 session_state.py）。
+        path = self.config.progress_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             body = ["# 这次任务里做过的事（由循环记录，不是模型自述）", ""]

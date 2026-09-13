@@ -211,9 +211,12 @@ def make_plan(args: argparse.Namespace) -> int:
         print("没有拆出任何带验收标准的步骤。", file=sys.stderr)
         return 1
 
-    save_plan(plan_path(project_root), plan)
+    # 会话名从 `ctx.args` 拿（这个函数只收 ctx，没有独立的 args）。
+    save_plan(
+        plan_path(project_root, getattr(ctx.args, "session", "cli")), plan
+    )
     print(plan.render())
-    print(f"\n计划已保存到 {plan_path(project_root)}")
+    print(f"\n计划已保存到 {plan_path(project_root, getattr(args, "session", "cli"))}")
     return 0
 
 
@@ -259,6 +262,7 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
             context_window=window,
             max_steps=args.max_steps,
             subagent_steps=args.subagent_steps,
+            session=getattr(args, "session", "cli"),
         ),
         wiring=LoopWiring(
             memory=memory,
@@ -382,12 +386,13 @@ def record_step(ctx: StepRun, step, result, pending, scope: Sequence[str]) -> No
                        + "、".join(dropped[:3])
                        + ("…" if len(dropped) > 3 else "") + "）")[:200]
     plan.mark(step.index, DONE if result.finished else FAILED, note=note)
-    save_plan(plan_path(project_root), plan)
+    # `record_step` 只收 ctx，没有独立的 args——会话名从 ctx.args 拿。
+    save_plan(plan_path(project_root, getattr(ctx.args, "session", "cli")), plan)
 
 
 def advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
     """执行计划中下一个待办步骤，并记录结果。"""
-    plan = load_plan(plan_path(project_root))
+    plan = load_plan(plan_path(project_root, getattr(args, "session", "cli")))
     if plan is None:
         print("还没有计划，请先用 `plan --goal` 生成。", file=sys.stderr)
         return 2
@@ -469,7 +474,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
     if not plan.steps:
         print("没能拆出任何带验收标准的步骤。", file=sys.stderr)
         return 1
-    save_plan(plan_path(project_root), plan)
+    save_plan(plan_path(project_root, getattr(args, "session", "cli")), plan)
     print(f"授权范围：{'、'.join(granted)}")
     print(plan.render())
 
@@ -533,7 +538,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         for step in fresh:
             step.index = len(plan.steps) + 1
             plan.steps.append(step)
-        save_plan(plan_path(project_root), plan)
+        save_plan(plan_path(project_root, getattr(args, "session", "cli")), plan)
         print(plan.render())
 
     print(plan.render())

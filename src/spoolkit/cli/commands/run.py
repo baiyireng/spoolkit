@@ -183,6 +183,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             step_ceiling=args.step_ceiling,
             # 能力标定：工作区的覆盖 + 命令行显式给的那两个
             overrides=overrides,
+            session=args.session,
         ),
         wiring=LoopWiring(
             memory=memory,
@@ -259,6 +260,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             supervise=not args.no_supervise,
             step_ceiling=args.step_ceiling,
             overrides=overrides,
+            session=args.session,
         ),
         wiring=LoopWiring(
             memory=memory,
@@ -335,6 +337,7 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
             context_window=window,
             max_steps=args.max_steps,
             subagent_steps=args.subagent_steps,
+            session=args.session,
         ),
         artifacts=artifacts,
         verify=make_verifier(project_root, pending),

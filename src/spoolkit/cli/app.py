@@ -226,6 +226,9 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
 def _add_plan_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("plan", help="把目标拆成可验收的步骤序列")
     parser.add_argument("--goal", required=True)
+    # 计划是会话级的（见 session_state.py）：这里的默认值必须与 `run` 一致，
+    # 否则 `spool plan` 排的计划，`spool run --plan` 找不到。
+    parser.add_argument("--session", default="cli", help="会话名，默认与 run 一致")
     _add_provider_args(parser, default="gemini")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument(

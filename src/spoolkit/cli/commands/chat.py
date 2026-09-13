@@ -133,6 +133,7 @@ def _turn(args, project_root, gateway, window, memory) -> int:
             supervise=not args.no_supervise,
             step_ceiling=args.step_ceiling,
             overrides=overrides,
+            session=args.session,
         ),
         wiring=LoopWiring(
             memory=memory,

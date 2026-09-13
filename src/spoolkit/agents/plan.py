@@ -21,6 +21,7 @@ from spoolkit.llm.gateway import ModelGateway
 from spoolkit.llm.types import ChatRequest, Message
 from spoolkit.context import templates as T
 from spoolkit import limits
+from spoolkit import session_state
 
 PENDING = "pending"
 DONE = "done"
@@ -524,8 +525,13 @@ def _parse_batch(text: str, goal: str, limit: int) -> tuple[list[PlanStep], bool
     return steps, bool(payload.get("done"))
 
 
-def plan_path(project_root: Path) -> Path:
-    return project_root / ".agent" / "plan.json"
+def plan_path(project_root: Path, session: str = session_state.DEFAULT_SESSION) -> Path:
+    """这个**会话**的计划文件位置（见 session_state.py）。
+
+    原先固定是 `.agent/plan.json`（工作区级）：换个会话读到的还是上一个会话的
+    计划——QQ 那轮就是这样读到别的任务、最后答非所问的。
+    """
+    return session_state.plan_path(project_root, session)
 
 
 def save_plan(path: Path, plan: Plan) -> None:

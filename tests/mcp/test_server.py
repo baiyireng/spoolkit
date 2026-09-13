@@ -198,7 +198,9 @@ def test_workspace_status_报计划进度(tmp_path: Path) -> None:
         "目标",
     )
     plan.steps[0].status = DONE
-    save_plan(plan_path(tmp_path), plan)
+    # 计划是**会话级**的（见 session_state.py）：写入的会话必须与 server 读的
+    # 那个一致，否则"外部 agent 看到的进度"会永远是空的。
+    save_plan(plan_path(tmp_path, "mcp"), plan)
 
     server, _ = _server(tmp_path)
     payload = json.loads(_call(server, "workspace_status")["content"][0]["text"])

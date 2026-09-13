@@ -273,7 +273,9 @@ class McpServer:
         return _text("已应用" if apply else "已丢弃")
 
     def _workspace(self) -> dict:
-        plan_file = plan_path(self.project_root)
+        # 计划是**会话级**的（见 session_state.py）：这里读的必须是这个 runner
+        # 那个会话的计划，否则外部 agent 看到的是别人的进度。
+        plan_file = plan_path(self.project_root, getattr(self.runner, "session", "mcp"))
         plan = load_plan(plan_file) if plan_file.is_file() else None
         progress = None
         if plan is not None:

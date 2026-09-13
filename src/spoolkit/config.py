@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from spoolkit import limits
+from spoolkit import session_state
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,9 @@ class Config:
     # 取用一律走 `limit()`，不要在别处再读这个字典——那样来源就说不清了。
     overrides: dict[str, float] = field(default_factory=dict)
     state_dir_name: str = ".agent"
+    # 会话名：计划、进度、检查点都跟着它走（见 session_state.py）。
+    # 原先是工作区级，于是换一个会话会读到上一个会话的计划——真出过事。
+    session: str = session_state.DEFAULT_SESSION
 
     def limit(self, name: str) -> float:
         """取一个标定值。默认值来自 `limits.KNOBS`，可被本次运行的覆盖改写。"""
@@ -43,8 +47,18 @@ class Config:
 
     @property
     def state_dir(self) -> Path:
-        return self.project_root / self.state_dir_name
+        """**这个会话**的状态目录（不是整个工作区的 `.agent`）。"""
+        return session_state.dir_for(self.project_root, self.session)
 
     def task_path(self, task_id: str) -> Path:
-        return self.state_dir / "tasks" / f"{task_id}.json"
+        return self.state_dir / "tasks" / f"{session_state.safe(task_id)}.json"
+
+    @property
+    def progress_path(self) -> Path:
+        return self.state_dir / "progress.md"
+
+    @property
+    def progress_hint(self) -> str:
+        """给模型看的路径（状态块里那句"完整清单在…"）。"""
+        return self.progress_path.relative_to(self.project_root).as_posix()
 

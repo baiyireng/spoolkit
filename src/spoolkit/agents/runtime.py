@@ -204,6 +204,7 @@ def run_role(
             # 父级关了督导、子智能体却还在自动续期，是最难查的那类不一致。
             supervise=config.supervise,
             step_ceiling=config.step_ceiling,
+            session=config.session,
         ),
         prefetch=None,
         memory=None,
