@@ -111,3 +111,24 @@ def test_config_与_policy_不调用模型(tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out
     assert "配置文件：" in out
     assert "当前授权策略" in out
+
+
+def test_会话里看得见配对请求也能就地批准(tmp_path: Path, capsys) -> None:
+    """用户问过的场景：本机正开着会话，手机那边来了配对请求——我在会话里看得见吗？
+
+    原先看不见（码只写在桥自己的终端上）。现在开局会提示，并且 `/approve <码>`
+    就地放行；这条测试同时盯住"批完就不再提示"（否则每次进来都喊一遍）。
+    """
+    from spoolkit.bridge.pairing import Pairings
+
+    (tmp_path / ".agent").mkdir(parents=True, exist_ok=True)
+    code = Pairings(tmp_path / ".agent" / "bridge-pairings.json").ensure_code("openid-9")
+    script = _script(tmp_path, [_turn("答复")])
+    args = _args(tmp_path, script, [f"/approve {code}", "/exit"])
+
+    assert chat_command(args) == 0
+
+    out = capsys.readouterr().out
+    assert "待批准的通道配对请求" in out
+    assert code in out
+    assert "已批准 openid-9" in out

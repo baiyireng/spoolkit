@@ -42,6 +42,7 @@ HELP = """\
 /history   看这个会话最近几轮（给人看的，不进入模型上下文）
 /config    看当前用的供应商/模型/地址，以及它们从哪来
 /policy    看授权策略（写操作怎么放行）
+/approve   处理聊天通道的配对请求：/approve <码>、--list、--revoke <用户>
 /help      这一页
 /exit      退出
 """
@@ -79,6 +80,36 @@ def _show_config() -> None:
         effective[key] = value
         effective[f"{key}_source"] = source
     print(_render(effective, settings_module.config_path()))
+
+
+def _show_pairings(project_root: Path, argument: str) -> None:
+    """`/approve …`：把聊天通道的配对**在你人在的这个会话里**处理掉。
+
+    原先配对码只出现在桥自己的终端上；你在另一个窗口跑 chat，什么都看不到。
+    """
+    from spoolkit.cli.commands.bridge import (
+        approve_command,
+        forget_command,
+        list_pairings,
+        revoke_command,
+    )
+
+    parts = argument.split()
+    if not parts:
+        print(
+            "用法：/approve <码>（批准）、/approve --list（看全部）、"
+            "/approve --revoke <用户>（解绑）、/approve --forget <码>（丢掉）"
+        )
+        return
+    first = parts[0]
+    if first == "--list":
+        list_pairings(project_root)
+    elif first == "--revoke" and len(parts) > 1:
+        revoke_command(project_root, parts[1])
+    elif first == "--forget" and len(parts) > 1:
+        forget_command(project_root, parts[1])
+    else:
+        approve_command(project_root, first)
 
 
 def _turn(args, project_root, gateway, window, memory) -> int:
@@ -158,6 +189,14 @@ def chat_command(args: argparse.Namespace) -> int:
     print(_status_line(args, project_root, window, policy, scope))
     print("进入对话模式（/help 看提示，/exit 退出）。每轮独立：历史不塞回模型。")
 
+    # 正开着桥时，"有人要配对"原先只写在桥自己的终端上。这里补一条，
+    # 让消息出现在你人正在的这个会话里（并且能就地批准）。
+    from spoolkit.cli.commands.bridge import pending_notice
+
+    notice = pending_notice(project_root)
+    if notice:
+        print(notice)
+
     # reader 只在测试里给：直接喂几行进去，测"多轮 + /exit"这条链。
     reader = getattr(args, "reader", None)
     while True:
@@ -187,6 +226,9 @@ def chat_command(args: argparse.Namespace) -> int:
             print(f"当前授权策略：{policy}（范围 {('、'.join(scope) or '（无）')}）")
             print("改当前会话：重启 chat 时加 --policy ask|auto|deny 与 --scope；")
             print("改长期默认：spool policy --set auto")
+            continue
+        if text == "/approve" or text.startswith("/approve "):
+            _show_pairings(project_root, text[len("/approve") :])
             continue
         args.goal = text
         _turn(args, project_root, gateway, window, memory)

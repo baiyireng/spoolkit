@@ -511,8 +511,15 @@ def _add_approve_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser(
         "approve", help="批准一个配对码（等价于 bridge --approve）"
     )
-    parser.add_argument("code", metavar="配对码")
+    parser.add_argument("code", metavar="配对码", nargs="?", default="")
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
+    parser.add_argument("--list", action="store_true", help="看放行了谁、还有谁在等")
+    parser.add_argument(
+        "--revoke", default="", metavar="用户", help="撤销某个人的放行（解绑）"
+    )
+    parser.add_argument(
+        "--forget", default="", metavar="配对码", help="丢掉一个还没批准的码"
+    )
     parser.set_defaults(func=approve_entry)
 
 

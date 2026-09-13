@@ -141,7 +141,78 @@ def approve_command(root: Path, code: str) -> int:
 
 def approve_entry(args: argparse.Namespace) -> int:
     """`spool approve <码>` 的入口（顶层快捷方式，见 app.py）。"""
-    return approve_command(Path(args.root).resolve(), args.code)
+    root = Path(args.root).resolve()
+    if getattr(args, "list", False):
+        return list_pairings(root)
+    if getattr(args, "revoke", ""):
+        return revoke_command(root, args.revoke)
+    if getattr(args, "forget", ""):
+        return forget_command(root, args.forget)
+    if not args.code:
+        print("给个配对码，或者用 --list / --revoke <用户>。", file=sys.stderr)
+        return 2
+    return approve_command(root, args.code)
+
+
+def list_pairings(root: Path) -> int:
+    """看这个工作区的通道放行了谁、还有谁在等。"""
+    pairings = pairings_for(root)
+    print(f"工作区：{Path(root).resolve()}")
+    print(f"配对文件：{pairings.path}")
+    approved = pairings.approved
+    print(f"\n已放行（{len(approved)}）：")
+    for user in approved:
+        print(f"  {user}")
+    if not approved:
+        print("  （没有）")
+    pending = pairings.pending
+    print(f"\n等批准的码（{len(pending)}）：")
+    for code, user in pending:
+        print(f"  {code}  ←  {user}")
+    if not pending:
+        print("  （没有）")
+    if pending:
+        print("\n批准：spool approve <码>      丢掉这个码：spool approve --forget <码>")
+    if approved:
+        print("撤销某人的放行：spool approve --revoke <用户>")
+    return 0
+
+
+def revoke_command(root: Path, user: str) -> int:
+    pairings = pairings_for(root)
+    if not pairings.revoke(user):
+        print(f"这个人本来就不在放行名单里：{user}", file=sys.stderr)
+        return 2
+    print(f"已撤销 {user}（{pairings.path}）")
+    print("他再发消息会重新拿到一个配对码。")
+    return 0
+
+
+def forget_command(root: Path, code: str) -> int:
+    pairings = pairings_for(root)
+    if not pairings.forget_code(code):
+        print(f"没有这个待批准的码：{code}", file=sys.stderr)
+        return 2
+    print(f"已丢掉这个码：{code}（谁都没被放行）")
+    return 0
+
+
+def pending_notice(root: Path) -> str:
+    """有配对请求在等时给一行提示（会话里也看得见）。
+
+    为什么要它：配对码原先只出现在**桥自己的终端**上。而你可能正在另一个窗口
+    跑 `spool chat`——那边什么都不知道，于是"有人要配对"这件事就悄无声息地
+    过去了（真问过这个问题）。这一行把消息送到你人在的地方。
+    """
+    pending = pairings_for(root).pending
+    if not pending:
+        return ""
+    lines = [f"⚠ 有 {len(pending)} 个待批准的通道配对请求（来自手机/聊天通道）："]
+    for code, user in pending:
+        lines.append(f"    {code}  ←  {user}")
+    lines.append("  批准：/approve <码>（或在本机任意目录敲 spool approve <码>）")
+    lines.append("  丢掉：/approve --forget <码>      看全部：/approve --list")
+    return "\n".join(lines)
 
 
 def bridge_command(args: argparse.Namespace) -> int:

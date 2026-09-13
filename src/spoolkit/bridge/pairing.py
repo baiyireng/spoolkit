@@ -106,6 +106,30 @@ class Pairings:
         self._save()
         return user
 
+    def revoke(self, user: str) -> bool:
+        """撤销某个人的放行。返回这次是不是真的撤掉了。
+
+        为什么必须有它：`approve` 只进不出的话，"这条通道谁能用"就成了一份
+        只能增不能减的名单——手机换人、openid 换号、你想收紧一点，都没有出口。
+        """
+        user = str(user)
+        if user not in self._approved:
+            return False
+        self._approved.discard(user)
+        for code, owner in list(self._codes.items()):
+            if owner == user:
+                self._codes.pop(code, None)
+        self._save()
+        return True
+
+    def forget_code(self, code: str) -> bool:
+        """丢掉一个还没被批准的码（不给理由，也不放行谁）。"""
+        dropped = self._codes.pop(str(code).strip().upper(), "")
+        if not dropped:
+            return False
+        self._save()
+        return True
+
     @property
     def approved(self) -> tuple[str, ...]:
         return tuple(sorted(self._approved))

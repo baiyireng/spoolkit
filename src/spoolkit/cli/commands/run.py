@@ -88,6 +88,13 @@ def run(args: argparse.Namespace) -> int:
 
     if not args.events:
         report_policy(resolve_policy(args, project_root), resolve_scope(args))
+        # 有人来敲门时要看得见：`--events` 模式下 stdout 只能有 JSON 行，
+        # 所以只在散文模式提示（网页壳那条路自己会显示待确认）。
+        from spoolkit.cli.commands.bridge import pending_notice
+
+        notice = pending_notice(project_root)
+        if notice:
+            print(notice)
     pending = PendingChanges(project_root)
     if args.events:
         return _events_mode(args, project_root, gateway, window, pending)
