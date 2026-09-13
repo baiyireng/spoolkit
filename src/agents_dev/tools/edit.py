@@ -7,6 +7,8 @@
 所以全部写操作先进入 PendingChanges，由用户确认后才真正落盘。
 """
 
+from __future__ import annotations
+
 import difflib
 import json
 from typing import Any, Sequence

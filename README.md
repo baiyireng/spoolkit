@@ -1,23 +1,125 @@
-# agents_dev
+# agents-dev
 
 一个面向**本地小模型**（llama.cpp）的编程特化 Agent。
 
-核心命题：在 4K–8K 的有效上下文预算下，用 7B 级本地模型完成真实的中小型代码修改任务。
+核心命题：在 4K–8K 的有效上下文预算下，用 7B–27B 级本地模型完成真实的中小型
+编程任务。小模型做 Agent 的瓶颈不是"不够聪明"，而是三件事：上下文一塞满质量
+就断崖式下跌、多步规划能力弱、以及爱编造。所以整套架构只有一个目标——
+**让模型每一步面对的上下文都尽可能小、精确、可承载**。
 
-## 这个项目在解决什么
+实现手段是把状态外置（计划、进度、记忆都在文件与 SQLite 里，历史可以随时丢），
+再用代码索引保证"精确取用"而不是"整份塞入"。
 
-小模型做 Agent 的瓶颈不是「不够聪明」，而是三件事：上下文一塞满质量就断崖式下跌、多步规划能力弱、以及爱编造。所以整套架构只有一个目标——**让模型每一步面对的上下文都尽可能小、精确、可承载**。
+现状：**可用但仍是实验品**（0.0.1）。实测在同一批 50 道题上：单题逐条 6.5 分钟
+50/50，自主编排（自己拆解、自己执行、自己验收）16 分钟 50/50。数字与测量方法
+都在 [`docs/`](docs/) 里，不在 README 里复述。
 
-实现手段是把状态外置，让历史变成可以随时丢弃的东西；再用代码索引层保证「精确取用」而不是「整份塞入」。
+## 它能做什么
 
-## 当前状态
+- **本地小模型驱动**：llama.cpp（含多模态模型的接口位）、Gemini 两个供应商，
+  按供应商提供专属模型装载器；上下文窗口与分词都向服务端问，不写死。
+- **长任务自主编排**：把大目标拆成带验收标准的步骤（排不完就分批续排），
+  逐步执行、逐步验收、可断点续跑（`plan.json` + `progress.md`）。
+- **子智能体**：一步可以派给独立上下文的实现者，再由另一个独立上下文审查。
+- **代码索引**：符号表 + 引用图 + 邻域检索，用来做"精确取用"；
+  预取按步骤声明的范围锚定。
+- **分级授权**：写操作默认只产出 diff，按 `ask / auto / deny` 三档处理；
+  越界自动退回确认，白名单外的命令可以申请（无人值守时不会静默放行）。
+- **自我验证**：改完自动跑验收并把结果顶回给模型；它报"做完了"不算数，
+  验收命令的退出码才算数。
 
-设计阶段。完整设计文档见 [`docs/superpowers/specs/`](docs/superpowers/specs/)。
+## 快速开始
 
-## 开发环境
+### 1. 装
 
 ```powershell
-uv venv --python 3.14
-uv sync --extra dev
+uv venv --python 3.12
+uv pip install -e ".[dev]"      # 开发；只要用的话去掉 [dev]
 ```
 
+装好后有 `agents-dev` 命令（`agents-dev --version` 能验证）。
+
+### 2. 起一个本地模型服务
+
+```powershell
+llama-server.exe -m <模型.gguf> --host 127.0.0.1 --port 8080 -c 8192 -ngl 99 --reasoning off
+```
+
+两个注意点（都踩过）：带思考的模型要加 `--reasoning off`，否则推理内容会把输出
+预算吃光、表现为"模型返回空内容"；窗口 `-c` 要按你的显存给，Agent 会向服务端
+询问真实窗口，不写死。
+
+### 3. 跑第一条任务
+
+```powershell
+# 一题一跑：给目标，它在当前工作区里做完
+agents-dev run --provider llamacpp --base-url http://127.0.0.1:8080 `
+    --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测试"
+
+# 长任务：自己拆解、逐步做完（--scope 是允许自动落盘的范围，必须由你给）
+agents-dev run --provider llamacpp --base-url http://127.0.0.1:8080 `
+    --autonomous --scope "**" --policy auto --limit 20 `
+    --goal "把这个工作区里的题目都做对"
+```
+
+改动默认只产出 diff；`--policy auto` 才会在授权范围内自动落盘。`agents-dev revert`
+可以回滚上一次写入。
+
+### 4. 网页壳
+
+```powershell
+agents-dev serve --provider llamacpp --base-url http://127.0.0.1:8080
+# 打开 http://127.0.0.1:8765/
+```
+
+页面里能发目标、看步骤与工具调用、看 diff，并在越界时点"应用/拒绝"。
+
+## 配置
+
+| 配什么 | 在哪 | 怎么用 |
+|---|---|---|
+| 供应商 / 模型 / 服务地址 | 命令行 | `--provider llamacpp --model <名> --base-url <地址>` |
+| Gemini 密钥 | 项目根 `.env` | `GEMINI_API_KEY=...`（本地模型不需要任何密钥）|
+| 能力标定值（预算、超时、上限） | `.agent/limits.json` | `agents-dev limits --set 名字=值`，`agents-dev limits` 看现值与来源 |
+| 授权策略 | `.agent/policy.json` | `agents-dev policy --set auto`（三档：ask/auto/deny）|
+| 额外可读目录 | 命令行 | `--allow-read D:\别的地方`（只放开读，写入仍限工作区）|
+
+能力标定值全部可覆盖、可回退：默认值是按本机 27B + 8K 窗口实测出来的，
+换模型或换机器就该改，`agents-dev limits` 会告诉你每个值"现在是多少、从哪来"。
+
+## 常用命令
+
+| 命令 | 做什么 |
+|---|---|
+| `agents-dev run --goal …` | 跑一次任务 |
+| `agents-dev run --autonomous --scope … --goal …` | 自主拆解并逐步做完 |
+| `agents-dev run --plan` | 推进已有计划的下一个待办步骤 |
+| `agents-dev run --resume` | 接着上次未完成的检查点继续 |
+| `agents-dev plan --goal …` | 只拆解、落盘计划，不执行 |
+| `agents-dev serve` | 起 Web UI |
+| `agents-dev bench --limit N` | 跑回归任务集（可复现的测量）|
+| `agents-dev limits` / `policy` / `session` / `revert` | 标定值 / 授权 / 会话 / 回滚 |
+
+## 已知限制
+
+- **索引以 Python 为主**：符号提取目前是 AST（Python）+ 通用声明扫描（其它语言），
+  引用图与 `find_callers` 只对 Python 准确；其它语言请自己看证据，别全信。
+- **多模态未接**：供应商抽象里留了位置，还没有可用的图文输入路径。
+- **单机单人**：单 GPU、串行执行，没有并发与多用户设计。
+- **模型越弱，越依赖这套脚手架**：能力标定值就是为弱模型准备的；强模型上它们
+  是上限而不是保护，该往大调。
+
+## 开发
+
+```powershell
+uv venv --python 3.12
+uv sync --extra dev
+uv run pytest -q
+```
+
+设计与测量记录在 [`docs/`](docs/)：`benchmarking.md`（怎么量、量到什么）、
+`dogfooding.md`（每次改动的原因与结果）、`superpowers/specs/`（设计文档）。
+
+## License
+
+MIT

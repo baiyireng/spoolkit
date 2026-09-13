@@ -61,6 +61,9 @@ def test_撞到预算时明说不完整(tmp_path: Path) -> None:
     from agents_dev.tools.stats import _collect, _render
 
     root = _tree(tmp_path)
-    data = _collect(root, seconds=0.0)
+    # 用负数而不是 0.0：判定是 `elapsed > seconds`，而 Windows 上 time.time()
+    # 的精度按 Python 版本不同（3.12 上第一次迭代可能还是 0.0 秒），
+    # 用 0.0 会让这条断言变成"看时钟精度"。
+    data = _collect(root, seconds=-1.0)
     assert data["truncated"] is True
     assert "不完整" in _render(root, data, 5)

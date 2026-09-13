@@ -9,7 +9,9 @@
 """
 
 import argparse
+import sys
 
+from agents_dev import __version__
 from agents_dev.bench import DEFAULT_BENCH_ROOT
 from agents_dev.cli.commands.bench import bench
 from agents_dev.cli.commands.plan import make_plan
@@ -287,8 +289,34 @@ def _add_limits_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=limits_command)
 
 
+def configure_stdio() -> None:
+    """把标准输出/错误固定成 UTF-8，且**永不因为一个字符崩掉整个运行**。
+
+    为什么必须有：Windows 上默认编码是 cp936，而输出一旦被重定向或走管道
+    （`agents-dev run … > log.txt`、任何子进程捕获、Web 壳），Python 就按
+    locale 编码写字节——进度块里的 `✓` 编不出来，于是
+    `UnicodeEncodeError: 'gbk' codec can't encode character '\\u2713'`
+    直接把整个运行打断。它已经在一次 50 题的长跑里真发生过。
+
+    控制台直连时 Python 走的是控制台 API，所以这个坑只在重定向/管道里现身——
+    而脚本化、录日志、Web 壳全都走管道。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # pragma: no cover - 少数被包装过的流
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    configure_stdio()
     parser = argparse.ArgumentParser(prog="agents-dev")
+    parser.add_argument(
+        "--version", action="version", version=f"agents-dev {__version__}"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     _add_run_command(sub)
     _add_plan_command(sub)
