@@ -49,6 +49,7 @@ from agents_dev.cli.runtime import (
 from agents_dev.cli.settle import settle
 from agents_dev.tools.edit import PendingChanges
 from agents_dev.tools.grant import Grants
+from agents_dev.memory.lessons import record_lesson
 
 
 def _survey(project_root: Path, goal: str, tokenizer) -> str:
@@ -462,6 +463,18 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         plan=plan,
         non_interactive=True,
     )
+    # 教训要写进记忆库：分批推进的"回头看"只有存下来，才能在后面的同类任务里
+    # 被主动推送（那才是"在任务中成长"）。--no-memory 时不建，也不留状态。
+    lesson_memory = (
+        None
+        if getattr(args, "no_memory", False)
+        else open_memory(
+            project_root,
+            resolve_window(gateway, getattr(args, "window", 0)),
+            getattr(args, "session", "cli"),
+            model=f"{getattr(args, 'provider', '')}:{getattr(args, 'model', '') or '默认'}",
+        )
+    )
     # 分批推进：先做一批 → 回头看一眼 → 再排下一批。
     #
     # 这样每一批都能吃到前一批的**实际结果**（某个接口不是那样、某个约束
@@ -480,9 +493,12 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         if not rolling or completed >= int(getattr(args, "limit", 0) or 0):
             break
         # 这一批做完了：回头看一眼，再排下一批。
-        reflection = reflect_progress(gateway, plan.goal, plan.steps)
+        reflection, lessons = reflect_progress(gateway, plan.goal, plan.steps)
         if reflection:
             print(f"\n回头看这一批：{reflection}")
+        stored = _keep_lessons(lessons, lesson_memory)
+        if stored:
+            print(f"（记下 {stored} 条教训——后面同类任务会主动推给它）")
         fresh = extend_plan(
             gateway,
             plan,
@@ -505,6 +521,27 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
     print(plan.render())
     print(f"\n自主运行结束：完成 {completed}/{len(plan.steps)} 步。")
     return 0 if completed == len(plan.steps) else 1
+
+
+def _keep_lessons(lessons, memory) -> int:
+    """把回头看得来的教训写进教训库，返回写了几条。
+
+    没有记忆会话（`--no-memory`）时就丢掉——这是刻意的：不写记忆的运行
+    不该偷偷留下状态。
+
+    教训的**触发词**由模型给（"什么时候该把这条推出来"）。没有它这条教训
+    永远不会被推送，所以解析时已经把没触发词的丢掉了。
+    """
+    if not lessons or memory is None:
+        return 0
+    for rule, trigger in lessons:
+        record_lesson(
+            memory._conn,
+            rule,
+            trigger,
+            source="分批推进的回头看",
+        )
+    return len(lessons)
 
 
 def _run_one_step(ctx, granted: tuple[str, ...], step, plan) -> bool:

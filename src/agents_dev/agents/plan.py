@@ -352,21 +352,47 @@ def uncovered(plan: Plan, names: Sequence[str]) -> list[str]:
 
 REFLECT_MAX_CHARS = 300  # 回头看那三句话的上限（它是提示词，不是文档）
 
+# 回头看的输出形状：一段摘要 + 至多两条可迁移的教训。
+REFLECT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "lessons": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "rule": {"type": "string"},
+                    "trigger": {"type": "string"},
+                },
+                "required": ["rule", "trigger"],
+            },
+        },
+    },
+    "required": ["summary"],
+}
+
+MAX_REFLECT_LESSONS = 2
+
 
 def reflect_progress(
     gateway: ModelGateway,
     goal: str,
     steps: Sequence[PlanStep],
-    max_tokens: int = 400,
-) -> str:
-    """把刚做完的这一批总结成三句话。失败就返回空串（不挡推进）。
+) -> tuple[str, list[tuple[str, str]]]:
+    """回头看一眼：返回（摘要, 教训列表）。
 
     输入只有**已完成步骤的目标 + 实际结果**（note 是循环记的第一行产出），
     所以它不会被自己的计划复述带偏——它看的是事实。
+
+    摘要给下一批拆解用；教训进教训库，**在后面的任务里主动推送**——
+    这是"让它在任务中成长"最直接的一条落地。
+
+    解析不出来时退回「摘要=原文、教训为空」：**回头看不能挡住推进**。
     """
     done = [step for step in steps if step.status == DONE]
     if not done:
-        return ""
+        return "", []
     results = "\n".join(
         f"- {step.goal}｜结果：{step.note or '（没记结果）'}" for step in done
     )
@@ -378,10 +404,35 @@ def reflect_progress(
                     content=REFLECT_PROMPT.format(goal=goal, results=results),
                 ),
             ),
-            max_tokens=max_tokens,
+            max_tokens=500,
+            response_schema=REFLECT_SCHEMA,
         )
     )
-    return response.text.strip()[:REFLECT_MAX_CHARS]
+    return _parse_reflection(response.text)
+
+
+def _parse_reflection(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """解析回头看。**宽容**：格式坏了也不能让整次运行停在这里。"""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text.strip()[:REFLECT_MAX_CHARS], []
+    if not isinstance(payload, dict):
+        return text.strip()[:REFLECT_MAX_CHARS], []
+    summary = str(payload.get("summary") or "").strip()[:REFLECT_MAX_CHARS]
+    lessons: list[tuple[str, str]] = []
+    for item in payload.get("lessons") or []:
+        if not isinstance(item, dict):
+            continue
+        rule = str(item.get("rule") or "").strip()
+        trigger = str(item.get("trigger") or "").strip()
+        if not rule or not trigger:
+            # 没有触发词的教训永远不会被推出来——存了等于没存。
+            continue
+        lessons.append((rule, trigger))
+        if len(lessons) >= MAX_REFLECT_LESSONS:
+            break
+    return summary, lessons
 
 
 def extend_plan(
