@@ -95,6 +95,19 @@ agents-dev chat                  # 一行一句，共用同一个会话；/histo
 
 工具、信任模型与调用序列见 [`docs/mcp.md`](docs/mcp.md)。
 
+反过来也成立：**它自己能调别的 MCP 服务**（外面现成的工具不用重写一遍）。
+在用户配置里加一段即可，加完用 `agents-dev mcp-servers --check` 验一遍：
+
+```toml
+[[mcp]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", 'D:\work']
+```
+
+挂进来的工具长这样：`mcp__filesystem__read_text_file`（名字带出处），
+在工具表里单独一组「外挂」，只给主循环用。细节见 [`docs/mcp.md`](docs/mcp.md)。
+
 ## 配置
 
 | 配什么 | 在哪 | 怎么用 |
@@ -122,6 +135,7 @@ agents-dev chat                  # 一行一句，共用同一个会话；/histo
 | `agents-dev serve` | 起 Web UI |
 | `agents-dev chat` | 对话式使用：多轮、共用同一个会话 |
 | `agents-dev mcp` | 以 MCP 服务运行，供别的 agent 调用（见 docs/mcp.md）|
+| `agents-dev mcp-servers --check` | 看/验自己配的外挂 MCP 服务 |
 | `agents-dev config` | 查看/设置用户级默认配置（provider、地址、模型…）|
 | `agents-dev bench --limit N` | 跑回归任务集（可复现的测量）|
 | `agents-dev limits` / `policy` / `session` / `revert` | 标定值 / 授权 / 会话 / 回滚 |

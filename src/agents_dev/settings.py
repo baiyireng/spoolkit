@@ -20,6 +20,7 @@
 import os
 import sys
 import tomllib
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # 能配置的键。写成一个白名单而不是"想存什么存什么"：
@@ -44,18 +45,42 @@ def config_path() -> Path:
 
 def load(path: Path | None = None) -> dict[str, str]:
     """读配置。文件不存在或读坏了都返回空——配置是增强，不该挡住启动。"""
-    target = path or config_path()
-    if not target.is_file():
-        return {}
-    try:
-        payload = tomllib.loads(target.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return {}
+    payload, _ = read_config(path)
     return {
         key: str(payload[key])
         for key in KEYS
         if isinstance(payload.get(key), (str, int, float))
     }
+
+
+def read_config(path: Path | None = None) -> tuple[dict, str]:
+    """读整个配置文件，返回（内容, 错误说明）。
+
+    **错误要能说出口**。原先解析失败一律返回空，症状是"我明明配了却没生效"
+    ——而人只会怀疑代码。TOML 里最常踩的坑正是 Windows 路径：
+    `command = "D:\\tools\\x.exe"` 少一个反斜杠就整份读不出来。
+    """
+    target = path or config_path()
+    if not target.is_file():
+        return {}, ""
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {}, f"读不了 {target}：{exc}"
+    try:
+        return tomllib.loads(text), ""
+    except tomllib.TOMLDecodeError as exc:
+        return {}, (
+            f"{target} 解析失败：{exc}\n"
+            "提示：Windows 路径里的反斜杠要写成双反斜杠（D:\\\\tools\\\\x.exe）"
+            "或者用单引号字符串（'D:\\tools\\x.exe'）。"
+        )
+
+
+def _quote(value: str) -> str:
+    """写进 TOML 的字符串要转义——反斜杠不转义就会把整份配置写坏。"""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def save(values: dict[str, str], path: Path | None = None) -> Path:
@@ -69,7 +94,7 @@ def save(values: dict[str, str], path: Path | None = None) -> Path:
     ]
     for key in KEYS:
         if key in values and values[key] != "":
-            lines.append(f'{key} = "{values[key]}"')
+            lines.append(f"{key} = {_quote(values[key])}")
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
 
@@ -86,3 +111,42 @@ def resolve(key: str, flag: str = "", env: dict[str, str] | None = None) -> tupl
     if table.get(key):
         return table[key], f"配置文件 {config_path()}"
     return "", "未设置"
+
+
+@dataclass(frozen=True)
+class McpServer:
+    """一个外部 MCP 服务。配置写在用户配置文件的 `[[mcp]]` 里。
+
+    为什么放在用户配置而不是工作区：它是"这台机器上有哪些外挂工具"，
+    与人、与机器有关，与项目无关；而且工作区配置会跟着仓库提交，
+    等于把某人的工具链塞给别人。
+    """
+
+    name: str
+    command: str
+    args: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
+
+
+def load_mcp_servers(path: Path | None = None) -> list[McpServer]:
+    """读 `[[mcp]]` 段。读不到、读坏了都返回空——外挂工具是增强，不该挡住启动。"""
+    payload, _ = read_config(path)
+    servers: list[McpServer] = []
+    for item in payload.get("mcp") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        command = str(item.get("command") or "").strip()
+        if not name or not command:
+            continue
+        args = item.get("args") or []
+        env = item.get("env") or {}
+        servers.append(
+            McpServer(
+                name=name,
+                command=command,
+                args=tuple(str(part) for part in args),
+                env={str(k): str(v) for k, v in env.items()},
+            )
+        )
+    return servers

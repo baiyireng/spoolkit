@@ -4,6 +4,7 @@
 命令行各条路径都从这里取，差别只在传什么参数。
 """
 
+import atexit
 import json
 import sys
 from dataclasses import dataclass
@@ -102,6 +103,9 @@ class LoopWiring:
     # 关键词排序会被步骤提示词里的噪音带偏，实测能把两个正文名额
     # 全给测试文件，而真正要改的文件一个都进不来。
     prefetch_anchors: tuple[str, ...] = ()
+    # 要不要挂用户配置里的 MCP 外挂工具。默认挂——配了就是要用；
+    # `--no-mcp` 用来临时排除它们（排查"是不是外挂工具在捣乱"时用）。
+    mcp: bool = True
 
 
 def resolve_provider_args(args) -> dict[str, str]:
@@ -285,6 +289,45 @@ def _no_index(reason: str):
     return explain
 
 
+# 外挂的 MCP 服务在进程里只起一次：自主编排每一步都会重新装配一次注册表，
+# 每步各起一遍的话，50 步就是 50 个外部进程。
+_MCP_CLIENTS: list = []
+
+
+def attach_mcp(registry: ToolRegistry, announce=None) -> list:
+    """把用户配置里的 MCP 服务挂成工具。没配就是空操作。
+
+    连不上的服务**跳过并说出来**：悄悄降级的结果是模型找不到工具、
+    开始自己造轮子，而人以为配好了。
+    """
+    from agents_dev import settings
+    from agents_dev.mcp.client import McpClient, McpError, register_mcp_tools
+
+    global _MCP_CLIENTS
+    if not settings.load_mcp_servers():
+        return []
+    if not _MCP_CLIENTS:
+        for config in settings.load_mcp_servers():
+            client = McpClient(config)
+            try:
+                client.start()
+            except McpError as exc:
+                if announce is not None:
+                    announce(f"外部工具 {config.name} 连不上：{exc}（已跳过）")
+                continue
+            _MCP_CLIENTS.append(client)
+        atexit.register(_close_mcp_clients)
+    if _MCP_CLIENTS:
+        register_mcp_tools(registry, _MCP_CLIENTS, announce=announce)
+    return list(_MCP_CLIENTS)
+
+
+def _close_mcp_clients() -> None:
+    for client in _MCP_CLIENTS:
+        client.close()
+    _MCP_CLIENTS.clear()
+
+
 def assemble_loop(
     project_root: Path,
     gateway: ModelGateway,
@@ -353,6 +396,9 @@ def assemble_loop(
     registry.register(
         dispatch_spec(gateway, registry, settings, tokenizer, verify=verifier)
     )
+    # 外挂的 MCP 工具（如果用户配过）。放在这里而不是更早：它要往同一个
+    # 注册表里加东西，而 tool_help 绑的是这个注册表，晚加一样能查到。
+    mcp_clients = attach_mcp(registry, announce=print) if parts.mcp else []
     # 「收齐这一处该看的」是一个**动作**，不是一个必经阶段：模型自己决定
     # 何时用、看哪一处。它省的是步数——原先要「列目录 → 猜文件名 → 读 →
     # 猜错了再换」，实测模型猜错过文件名，那一步就白花了。

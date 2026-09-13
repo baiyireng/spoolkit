@@ -191,10 +191,19 @@ def index_project(
                 (file_id,),
             ).fetchall()
         }
-        try:
-            refs = extract_refs(source)
-        except SyntaxError:
-            refs = []
+        # 引用边只对 Python 成立。别的语言拿去 ast.parse 不只是白跑：
+        # 它偶尔会**解析成功**（JS 的 `foo()` 在 Python 眼里是合法表达式），
+        # 于是往图里塞进一批凭空的引用边——那比"没有"更坏，因为
+        # `find_callers` 会拿它当证据。
+        #
+        # （这是追一条 SyntaxWarning 追出来的：索引把 config.toml 当 Python 解析。
+        # 警告只是症状，真正的问题是"谁在拿别的语言喂 Python 语法树"。）
+        refs = []
+        if language_name(rel) == "python":
+            try:
+                refs = extract_refs(source)
+            except SyntaxError:
+                refs = []
         store_refs(conn, file_id, refs, id_by_qualified)
         stats.files_indexed += 1
 

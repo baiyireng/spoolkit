@@ -147,6 +147,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             lessons=build_lessons(memory) if memory is not None else None,
             on_event=writer.handle,
             read_roots=_resolve_read_roots(args, project_root)[0],
+            mcp=not getattr(args, "no_mcp", False),
         ),
     )
     result = loop.run(args.goal, resume=args.resume)
@@ -217,6 +218,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             grants=grants,
             lessons=build_lessons(memory) if memory is not None else None,
             read_roots=read_roots,
+            mcp=not getattr(args, "no_mcp", False),
         ),
     )
     checkpoint = loop.config.task_path("task")

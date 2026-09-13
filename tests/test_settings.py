@@ -71,3 +71,27 @@ def test_配置文件不在工作区里() -> None:
     path = settings.config_path()
     assert "agents-dev" in str(path)
     assert ".agent" not in str(path)
+
+
+def test_写进去的反斜杠能被读回来(config_file: Path) -> None:
+    """Windows 路径不转义就会把整份配置写坏——那是最难查的一种。"""
+    script = r"D:\tools\我的脚本.json"
+    settings.save({"script": script})
+    assert settings.load() == {"script": script}
+
+
+def test_配置解析失败要说得出来(config_file: Path) -> None:
+    """原先解析失败一律返回空，症状是"我明明配了却没生效"。"""
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text('command = "D:\\tools\\x.exe"\n', encoding="utf-8")
+    payload, problem = settings.read_config()
+    assert payload == {}
+    assert problem
+    assert "反斜杠" in problem
+
+
+def test_读_mcp_段失败时也能说出原因(config_file: Path) -> None:
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text("[[mcp]\n", encoding="utf-8")
+    assert settings.load_mcp_servers() == []
+    assert settings.read_config()[1]

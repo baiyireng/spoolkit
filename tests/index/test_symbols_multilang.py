@@ -172,6 +172,35 @@ def test_非Python符号的引用口径要说清楚(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_非Python文件不抽引用边(tmp_path: Path) -> None:
+    """`foo()` 在 Python 眼里是合法表达式，但它是 JS 的调用。
+
+    拿别的语言喂 Python 语法树，偶尔会**解析成功**，于是引用图里多出一批
+    凭空的边——而 find_callers 会拿它当证据。比"没有"更坏。
+    （这条是追一条 SyntaxWarning 追出来的：索引把 config.toml 当 Python 解析。）
+    """
+    (tmp_path / "a.js").write_text("function f() {}\nf();\n", encoding="utf-8")
+    (tmp_path / "b.toml").write_text('command = "D:\\tools\\x.exe"\n', encoding="utf-8")
+    (tmp_path / "c.py").write_text(
+        "def g():\n    pass\n\n\ndef h():\n    g()\n", encoding="utf-8"
+    )
+    conn = open_db(tmp_path / "index.db")
+    init_schema(conn)
+
+    index_project(tmp_path, conn)
+
+    rows = conn.execute(
+        "SELECT f.path AS path, COUNT(r.id) AS n FROM file f"
+        " LEFT JOIN symbol s ON s.file_id = f.id"
+        " LEFT JOIN ref r ON r.src_symbol_id = s.id GROUP BY f.path"
+    ).fetchall()
+    counts = {row["path"]: row["n"] for row in rows}
+    assert counts["c.py"] >= 1  # Python 照抽
+    assert counts["a.js"] == 0
+    assert counts["b.toml"] == 0
+    conn.close()
+
+
 def test_Python符号不加那段口径(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("def greet():\n    pass\n", encoding="utf-8")
     conn = open_db(tmp_path / "index.db")

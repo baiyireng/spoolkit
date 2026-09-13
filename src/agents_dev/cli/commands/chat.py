@@ -111,6 +111,7 @@ def _turn(args, project_root, gateway, window, memory) -> int:
             grants=grants,
             lessons=build_lessons(memory) if memory is not None else None,
             read_roots=read_roots,
+            mcp=not getattr(args, "no_mcp", False),
         ),
     )
     if memory is not None:

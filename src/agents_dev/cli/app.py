@@ -27,6 +27,7 @@ from agents_dev.cli.commands.limits import limits_command
 from agents_dev.cli.commands.config import config_command
 from agents_dev.cli.commands.chat import chat_command
 from agents_dev.cli.commands.mcp import mcp_command
+from agents_dev.cli.commands.mcp_servers import mcp_servers_command
 from agents_dev.cli.options import (
     DEFAULT_WINDOW,
     report_policy,
@@ -97,6 +98,11 @@ def _add_provider_args(parser: argparse.ArgumentParser, default: str) -> None:
         "--no-setup",
         action="store_true",
         help="第一次运行时不要弹配置向导（脚本/CI 里用）",
+    )
+    parser.add_argument(
+        "--no-mcp",
+        action="store_true",
+        help="不挂用户配置里的 MCP 外挂工具（排查「是不是外挂在捣乱」时用）",
     )
 
 
@@ -387,6 +393,13 @@ def _add_mcp_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=mcp_command)
 
 
+def _add_mcp_servers_command(sub: argparse._SubParsersAction) -> None:
+    """看/验用户配的外挂 MCP 服务。"""
+    parser = sub.add_parser("mcp-servers", help="查看外挂 MCP 服务（--check 连一遍）")
+    parser.add_argument("--check", action="store_true", help="真的连一遍，列出它们提供哪些工具")
+    parser.set_defaults(func=mcp_servers_command)
+
+
 def configure_stdio() -> None:
     """把标准输出/错误固定成 UTF-8，且**永不因为一个字符崩掉整个运行**。
 
@@ -428,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_config_command(sub)
     _add_chat_command(sub)
     _add_mcp_command(sub)
+    _add_mcp_servers_command(sub)
 
     args = parser.parse_args(argv)
     # 第一次用（没配过供应商）且人在终端前：先向导，再干活。

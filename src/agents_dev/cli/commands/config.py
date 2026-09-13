@@ -30,6 +30,9 @@ def _render(effective: dict[str, str], path) -> str:
 
 def config_command(args: argparse.Namespace) -> int:
     path = settings.config_path()
+    _, problem = settings.read_config(path)
+    if problem:
+        print(problem, file=sys.stderr)
     table = settings.load(path)
     changed = False
 
