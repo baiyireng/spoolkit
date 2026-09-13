@@ -22,6 +22,7 @@ from spoolkit.bridge.core import Bridge
 from spoolkit.bridge.fake import FakeChannel
 from spoolkit.bridge.pairing import ALLOWLIST, OPEN, PAIRING, POLICIES, Pairings
 from spoolkit.bridge.plugins import load_channel_factories
+from spoolkit import readroots
 
 
 def _build_channel(args, log) -> object:
@@ -215,6 +216,31 @@ def pending_notice(root: Path) -> str:
     return "\n".join(lines)
 
 
+def run_extra_args(args: argparse.Namespace, project_root: Path) -> list[str]:
+    """每一轮子进程要带的参数。
+
+    单独拎出来是为了能测：**聊天里 `/allow-read` 记下的目录必须出现在这里**——
+    否则那条授权只在被批准的那一刻有效，而用户以为它一直有效。
+    """
+    # `--ask-on-stdin`：events 模式默认"无人可问就拒绝"，桥这边有人可问
+    # （用户就在聊天里），所以要显式打开。
+    extra: list[str] = ["--ask-on-stdin"]
+    for flag, value in (
+        ("--provider", getattr(args, "provider", "")),
+        ("--model", getattr(args, "model", "")),
+        ("--base-url", getattr(args, "base_url", "")),
+        ("--script", getattr(args, "script", "")),
+        ("--proxy", getattr(args, "proxy", "")),
+        ("--policy", getattr(args, "policy", "")),
+        ("--scope", getattr(args, "scope", "")),
+    ):
+        if value:
+            extra += [flag, value]
+    for directory in readroots.existing(project_root):
+        extra += ["--allow-read", str(directory)]
+    return extra
+
+
 def bridge_command(args: argparse.Namespace) -> int:
     project_root = Path(args.root).resolve()
     pairings = pairings_for(project_root)
@@ -250,18 +276,7 @@ def bridge_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    extra: list[str] = []
-    for flag, value in (
-        ("--provider", args.provider),
-        ("--model", args.model),
-        ("--base-url", args.base_url),
-        ("--script", args.script),
-        ("--proxy", args.proxy),
-        ("--policy", args.policy),
-        ("--scope", args.scope),
-    ):
-        if value:
-            extra += [flag, value]
+    extra = run_extra_args(args, project_root)
 
     runner = AgentRunner(
         project_root,
@@ -278,6 +293,7 @@ def bridge_command(args: argparse.Namespace) -> int:
         on_note=lambda text: print(f"· {text}", file=sys.stderr),
         pairings=pairings,
         access=access,
+        root=project_root,
     )
 
     if args.channel == "fake":

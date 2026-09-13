@@ -36,7 +36,8 @@ from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.distill import distill
 from spoolkit.memory.transcript import ASSISTANT, USER, record_message
 from spoolkit.tools.edit import PendingChanges
-from spoolkit.web.protocol import FINAL, NOTE, START, USAGE
+from spoolkit.tools.grant import Grants
+from spoolkit.web.protocol import AWAIT, CONFIRM, FINAL, NOTE, START, USAGE
 
 
 def _overrides(args: argparse.Namespace, project_root: Path) -> dict[str, float]:
@@ -103,6 +104,41 @@ def run(args: argparse.Namespace) -> int:
     return _standard(args, project_root, gateway, window, pending)
 
 
+def _events_approver(writer: EventWriter, reader=None):
+    """events 模式下的命令授权询问器：**把问题发出去，再从 stdin 读回答**。
+
+    为什么必须补这个：原先 events 模式（= 网页壳与聊天桥）**没有 approver**，
+    工具于是回模型一句"当前无人可询问（无人值守运行）"。真实后果在 QQ 那轮里
+    看得很清楚——它想跑一条 `find` 找文件，被拒 → 换个写法再试 → 连续四次
+    之后触发重复保护、整轮收尾，**任务在原地死掉**，而用户那边只看到
+    "任务没做完"。
+
+    没人回答时（`--ask-on-stdin` 没给）仍然是拒绝：这里绝不在没有人的地方干等。
+    """
+    source = reader if reader is not None else sys.stdin
+
+    def approver(argv, reason: str) -> str:
+        command = " ".join(argv)
+        writer.emit(AWAIT, count=1, command=command, reason=reason)
+        answer = ""
+        try:
+            answer = (source.readline() or "").strip().lower()
+        except (OSError, ValueError):  # pragma: no cover - 流关了就当拒绝
+            answer = ""
+        once = ("y", "o", "yes", "ok")
+        always = ("a", "s", "always")
+        writer.emit(CONFIRM, applied=answer in once + always, count=1, command=command)
+        if answer in once:
+            return "once"
+        if answer in always:
+            return "always"
+        if answer == "b":
+            return "block"
+        return "deny"
+
+    return approver
+
+
 def _events_mode(args, project_root, gateway, window, pending) -> int:
     """`--events` 模式：stdout 上只有 JSON 行。
 
@@ -151,6 +187,13 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
         wiring=LoopWiring(
             memory=memory,
             pending=pending,
+            # 命令权限申请也要能问出去：桥/网页壳给了 --ask-on-stdin 时，把问题
+            # 作为事件发出去、从 stdin 读回答（用户那边就是"回 y 允许这一次"）。
+            # 不给就保持原样——无人值守一律拒绝，绝不在没有人的地方等。
+            approver=_events_approver(writer) if getattr(args, "ask_on_stdin", False) else None,
+            grants=Grants(project_root / ".agent" / "grants.json")
+            if getattr(args, "ask_on_stdin", False)
+            else None,
             lessons=build_lessons(memory) if memory is not None else None,
             on_event=writer.handle,
             read_roots=_resolve_read_roots(args, project_root)[0],

@@ -27,6 +27,16 @@ POLL_SECONDS = 0.5
 # "应用 / 丢弃"怎么回答。中英文都给：用户在手机上打字，越短越顺手。
 YES_WORDS = frozenset({"y", "yes", "是", "好", "可以", "应用", "1"})
 NO_WORDS = frozenset({"n", "no", "不", "否", "丢弃", "不要", "0"})
+# 命令授权比"是/否"多两档：始终允许（记进本工作区）、本轮全拒。
+# 压成两态就等于把这两个选项从聊天里删掉了。
+ALWAYS_WORDS = frozenset({"a", "always", "始终", "总是", "一直", "2"})
+BLOCK_WORDS = frozenset({"b", "block", "全拒", "都拒绝", "别再问", "3"})
+ANSWERS = {
+    **{word: "y" for word in YES_WORDS},
+    **{word: "n" for word in NO_WORDS},
+    **{word: "a" for word in ALWAYS_WORDS},
+    **{word: "b" for word in BLOCK_WORDS},
+}
 
 
 class AgentRunner:
@@ -124,7 +134,7 @@ class AgentRunner:
         的那一轮一直卡着。这类"看起来在工作、其实答非所问"最难查。
         """
         word = message.strip().lower()
-        if word not in YES_WORDS and word not in NO_WORDS:
+        if word not in ANSWERS:
             return None
         runner = self._runner
         if runner is None:
@@ -135,6 +145,18 @@ class AgentRunner:
             return None
         if not snapshot.get("awaiting"):
             return None
+        detail = snapshot.get("awaiting_detail") or {}
+        if detail.get("command"):
+            # 命令授权：四档原样回给子进程。
+            answer = ANSWERS[word]
+            writer = getattr(runner, "answer", None)
+            if callable(writer) and writer(answer):
+                return {
+                    "y": "已允许这一次。",
+                    "a": "已始终允许（记在这个工作区）。",
+                    "b": "本轮不再询问这类命令。",
+                }.get(answer, "已拒绝。")
+            return "现在没有待确认的授权请求。"
         return self.confirm(word in YES_WORDS)
 
     def confirm(self, apply: bool) -> str:
@@ -154,6 +176,17 @@ class AgentRunner:
         return "这一轮没有产出结论，去工作区里看一眼吧。"
 
     def _pending_text(self, snapshot: dict) -> str:
+        detail = snapshot.get("awaiting_detail") or {}
+        if detail.get("command"):
+            # 命令授权和"改动要落盘"是两件事，话得分开说：一个是在问"能不能跑"，
+            # 一个是在问"要不要写入"。混成一句话，用户点 y 之前根本不知道在批什么。
+            return (
+                "它想执行一条白名单外的命令：\n"
+                f"  {detail['command']}\n"
+                f"原因：{detail.get('reason') or '未说明'}\n"
+                "回 y 允许这一次、a 始终允许（本工作区）、"
+                "n 拒绝、b 这类命令本轮别再问。"
+            )
         count = int(snapshot.get("awaiting") or 0)
         paths = [str(item.get("path") or "?") for item in snapshot.get("diffs") or []]
         listing = "、".join(paths[:5]) + ("…" if len(paths) > 5 else "")

@@ -203,6 +203,14 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         help="以 JSON 行输出事件，供 Web UI 消费；此模式下不打印散文",
     )
     parser.add_argument(
+        "--ask-on-stdin",
+        action="store_true",
+        help=(
+            "events 模式下允许在 stdin 上问授权（桥/网页壳用：它们会把问题转给"
+            "用户、再把回答写回来）。不给就是无人值守，一律拒绝"
+        ),
+    )
+    parser.add_argument(
         "--allow-read",
         action="append",
         default=[],

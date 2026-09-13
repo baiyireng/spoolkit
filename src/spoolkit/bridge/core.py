@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from spoolkit.bridge.channel import Channel, Incoming
+from spoolkit.bridge.commands import handle as handle_command
 from spoolkit.bridge.pairing import ALLOWLIST, OPEN, PAIRING, Pairings
 
 DEFAULT_MAX_CHARS = 4000
@@ -54,6 +56,7 @@ class Bridge:
         on_note: Callable[[str], None] | None = None,
         pairings: Pairings | None = None,
         access: str = PAIRING,
+        root: Path | str = ".",
     ) -> None:
         self.channel = channel
         self.runner = runner
@@ -62,6 +65,8 @@ class Bridge:
         self._note = on_note or (lambda text: None)
         self.pairings = pairings
         self.access = access
+        # 斜杠命令要改的是"这个工作区的额外可读目录"，所以桥得知道工作区在哪。
+        self.root = Path(root)
         self._last_conversation = ""
         # 长任务跑完要能补一条消息回来：把"回给最近这个会话"的能力交给 runner。
         # 只有 AgentRunner 认这个接口，别的 runner（测试里的假货）不受影响。
@@ -78,6 +83,11 @@ class Bridge:
         text = message.text.strip()
         if not text:
             return Reply(user=message.user, text="", accepted=False, reason="空消息")
+        # 斜杠命令由桥自己处理（**在准入判定之后**：陌生人连 /help 都不该拿到）。
+        command = handle_command(text, self.root)
+        if command is not None:
+            self._send(command, message.conversation)
+            return Reply(user=message.user, text=command, accepted=True)
         if len(text) > self.max_chars:
             reply = (
                 f"这条消息有 {len(text)} 字，超过上限 {self.max_chars} 字，"

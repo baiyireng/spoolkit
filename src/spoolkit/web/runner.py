@@ -59,6 +59,8 @@ class Runner:
         self._listeners: list[queue.Queue] = []
         self._goal = ""
         self._awaiting = 0
+        # 在等什么：等确认的 diff，还是等一条命令的授权。桥要据此把话说明白。
+        self._await_detail: dict = {}
         self._usage: dict = {}
         self._final: dict | None = None
         self._finished = False
@@ -107,6 +109,7 @@ class Runner:
                 return False
             self._goal = goal
             self._awaiting = 0
+            self._await_detail = {}
             self._usage = {}
             self._final = None
             self._finished = False
@@ -133,12 +136,21 @@ class Runner:
 
     def confirm(self, apply: bool) -> bool:
         """把用户的决定写进子进程的 stdin。"""
+        return self.answer("y" if apply else "n")
+
+    def answer(self, word: str) -> bool:
+        """把用户的一句话**原样**写回子进程的 stdin。
+
+        为什么需要它：命令授权有四档（本次允许 / 始终允许 / 拒绝 / 本轮全拒），
+        而 `confirm()` 只有是/否两态。压成两态的结果是"始终允许"这个选项在
+        聊天通道上根本用不了——用户想长期放开一条命令，只能去改文件。
+        """
         with self._lock:
             if self._awaiting <= 0 or self._process is None:
                 return False
             if self._process.stdin is None:
                 return False
-            self._process.stdin.write("y\n" if apply else "n\n")
+            self._process.stdin.write(f"{word}\n")
             self._process.stdin.flush()
             self._awaiting = 0
             return True
@@ -167,6 +179,7 @@ class Runner:
                 "running": self.running,
                 "finished": self._finished,
                 "awaiting": self._awaiting,
+                "awaiting_detail": dict(self._await_detail),
                 "goal": self._goal,
                 "usage": dict(self._usage),
                 "final": dict(self._final) if self._final else None,
@@ -220,15 +233,18 @@ class Runner:
             del self._log[:-EVENT_LOG]
             if event.type == AWAIT:
                 self._awaiting = int(event.data.get("count", 1))
+                self._await_detail = dict(event.data)
             elif event.type == DIFF:
                 self._diffs.append(dict(event.data))
             elif event.type == CONFIRM:
                 self._diffs = []
+                self._await_detail = {}
             elif event.type == USAGE:
                 self._usage = dict(event.data)
             elif event.type == FINAL:
                 self._final = dict(event.data)
                 self._awaiting = 0
+                self._await_detail = {}
                 self._diffs = []
 
     def events(self, since: int = 0) -> list[dict]:
@@ -250,6 +266,7 @@ class Runner:
         with self._lock:
             self._finished = True
             self._awaiting = 0
+            self._await_detail = {}
             code = process.returncode
             fallback = None
             if self._final is None:
