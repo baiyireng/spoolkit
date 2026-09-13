@@ -257,12 +257,19 @@ def attach_index(
             anchored, spent, covered = prefetch_scope(
                 project_root, anchors, tokenizer, max_tokens=content_budget
             )
-        symbols = prefetch_text(
-            conn,
-            goal,
-            tokenizer,
-            int(limits.resolve("prefetch_budget", overrides)[0]),
-        )
+        # 有锚定时**不再给符号表**：锚定给的是"这一步要改的那个文件 + 它旁边
+        # 有什么"，而符号表是按关键词在整段提示词上猜出来的——在 50 题那轮里
+        # 它猜出来的是两个测试文件，真正要改的 main.py 排第三。
+        # 两者重叠时留着符号表，等于每轮多付一份猜错的名单。
+        # 需要"还有谁调用它"时，那是 find_callers 的活（模型可以自己问）。
+        symbols = ""
+        if not anchored:
+            symbols = prefetch_text(
+                conn,
+                goal,
+                tokenizer,
+                int(limits.resolve("prefetch_budget", overrides)[0]),
+            )
         contents = prefetch_contents(
             conn,
             project_root,
