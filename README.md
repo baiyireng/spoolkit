@@ -119,6 +119,7 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 
 | 文档 | 讲什么 |
 |---|---|
+| [`docs/roadmap.md`](docs/roadmap.md) | **后续开发计划与交接说明**（给接手的 agent：任务、验收、纪律、踩过的坑） |
 | [`docs/getting-started.md`](docs/getting-started.md) | 装、配、第一个任务、常见故障 |
 | [`docs/cli.md`](docs/cli.md) | 每条命令与参数 |
 | [`docs/manual.md`](docs/manual.md) | 使用手册：工作区／权限／记忆／长任务／通道／排错 |
