@@ -238,11 +238,14 @@ class StepRun:
 
 def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants=None):
     """执行一个计划步骤，返回（结果，待落盘改动）。"""
+    from spoolkit.cli.commands.run import _resolve_read_roots
+
     args, project_root, gateway = ctx.args, ctx.project_root, ctx.gateway
     plan = ctx.plan
     report_policy(resolve_policy(args, project_root), scope)
     window = resolve_window(gateway, args.window)
-    pending = PendingChanges(project_root)
+    read_roots, _ = _resolve_read_roots(args, project_root)
+    pending = PendingChanges(project_root, extra_roots=read_roots)
     memory = (
         None
         if args.no_memory
@@ -270,6 +273,7 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
             approver=approver,
             grants=grants,
             lessons=build_lessons(memory) if memory is not None else None,
+            read_roots=read_roots,
             # 这一步要动哪儿由计划声明，执行时把它交给预取——
             # 否则预取只能靠整段提示词里的关键词猜，实测会猜偏到测试文件上。
             prefetch_anchors=tuple(step.scope or scope),

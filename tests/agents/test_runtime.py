@@ -5,6 +5,7 @@ import pytest
 
 from spoolkit.agents.runtime import (
     IMPLEMENTER,
+    RESEARCHER,
     REVIEWER,
     ROLES,
     TaskSpec,
@@ -90,7 +91,24 @@ def test_实现者有写权限() -> None:
 
 
 def test_角色登记表包含两个角色() -> None:
-    assert set(ROLES) == {"implementer", "reviewer"}
+    assert set(ROLES) == {"implementer", "reviewer", "researcher"}
+
+
+def test_研究会话的工具表里没有写工具() -> None:
+    """T2 验收：研究会话物理上碰不到工作区。网页里藏着提示注入也只能产出错话。"""
+    assert RESEARCHER.can_write is False
+    forbidden = {
+        "write_file",
+        "replace_lines",
+        "replace_text",
+        "run_command",
+        "dispatch",
+        "research",
+    }
+    assert forbidden.isdisjoint(RESEARCHER.tools)
+    assert "web_fetch" in RESEARCHER.tools
+    assert "web_read" in RESEARCHER.tools
+    assert "web_search" in RESEARCHER.tools
 
 
 def test_裁剪工具集只保留角色允许的(tmp_path: Path) -> None:

@@ -74,8 +74,8 @@ def test_授权之外的目录仍然读不到(tmp_path: Path) -> None:
     assert result.ok is False
 
 
-def test_写入仍然只在工作区内(tmp_path: Path) -> None:
-    """只放开读——外面的目录不该能被写。"""
+def test_没挂上关联目录时写入仍然只在工作区内(tmp_path: Path) -> None:
+    """读授权和写授权是同一份名单：没挂上 PendingChanges 就写不到外面。"""
     from spoolkit.tools.edit import PendingChanges, write_file_spec
 
     project, outside = _two_dirs(tmp_path)
@@ -87,13 +87,36 @@ def test_写入仍然只在工作区内(tmp_path: Path) -> None:
     assert not (outside / "new.txt").exists()
 
 
-def test_提示词里会说明可读范围(tmp_path: Path) -> None:
+def test_关联目录可以提出改动但确认前不落盘(tmp_path: Path) -> None:
+    from spoolkit.tools.edit import PendingChanges, write_file_spec
+
+    project, outside = _two_dirs(tmp_path)
+    pending = PendingChanges(project, extra_roots=(outside,))
+    result = write_file_spec(project, pending).handler(
+        {"path": str(outside / "new.txt"), "content": "x\n"}
+    )
+    assert result.ok is True
+    assert "尚未写入" in result.content or "需用户确认" in result.content
+    assert not (outside / "new.txt").exists()
+    written = pending.apply()
+    assert (outside / "new.txt").read_text(encoding="utf-8") == "x\n"
+    assert written
+
+
+def test_提示词里会说明关联目录(tmp_path: Path) -> None:
     project, outside = _two_dirs(tmp_path)
     text = build_workflow(ToolRegistry(), (outside,))
     assert str(outside) in text
-    assert "只读" in text
+    assert "确认" in text
+
+
+def test_远程通道也会把已关联目录写进工作方式(tmp_path: Path) -> None:
+    project, outside = _two_dirs(tmp_path)
+    text = build_workflow(ToolRegistry(), (outside,), from_channel=True)
+    assert str(outside) in text
+    assert "聊天通道" in text
 
 
 def test_没有授权时不提这件事() -> None:
     text = build_workflow(ToolRegistry())
-    assert "只读，不能写入" not in text
+    assert "关联目录" not in text

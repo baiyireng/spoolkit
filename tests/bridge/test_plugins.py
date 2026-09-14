@@ -105,7 +105,9 @@ def test_插件通道能接进桥(tmp_path: Path, monkeypatch) -> None:
     replies = bridge.run_once()
 
     assert replies[0].accepted is True
-    assert channel.sent == [("", "收到：做点事")]
+    assert len(channel.sent) == 2
+    assert "工作区" in channel.sent[0][1]
+    assert channel.sent[1] == ("", "收到：做点事")
 
 
 def test_模块能重复导入(tmp_path: Path, monkeypatch) -> None:

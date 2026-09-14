@@ -9,12 +9,15 @@
 
 切块按字符预算走，但**优先在标题处断开**：标题是天然的语义边界，
 按它切出来的块才有资格进目录（"第 3 块：安装"比"第 3 块"有用得多）。
+同一节按字符切开后标题会撞车——T1 量过：三块都叫 "Reading directories"
+时模型点了第一块，没读到 `Path.walk`。所以撞车的块会在目录里补一个锚。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -94,7 +97,53 @@ def split(text: str, chunk_chars: int = DEFAULT_CHUNK_CHARS) -> list[tuple[str, 
     if not chunks:
         chunks = [("", text.strip())]
     del counter  # 切块按字符算；token 由调用方一处统一估算
-    return chunks
+    return _disambiguate(chunks)
+
+
+# Python 文档抽完后方法行是 `Path.walk(...)¶` / `classmethodPath.from_uri(...)¶`，
+# 不是 `#` 标题。目录要靠这个把同节切块分开。
+_API_NAME = re.compile(r"(?:classmethod|staticmethod)?([A-Za-z_][\w.]*)\(")
+
+
+def _anchor(body: str) -> str:
+    """从一块正文里抽出能写进目录的锚：优先带点的 API 名，否则第一行。"""
+    dotted: list[str] = []
+    plain: list[str] = []
+    for match in _API_NAME.finditer(body):
+        name = match.group(1)
+        if name in dotted or name in plain:
+            continue
+        (dotted if "." in name else plain).append(name)
+    names = dotted or plain
+    if len(names) == 1:
+        return names[0]
+    if len(names) >= 2:
+        return f"{names[0]} … {names[-1]}"
+    for line in body.splitlines():
+        text = line.strip().lstrip("#").strip().rstrip("¶").strip()
+        if text and not text.startswith("```"):
+            return text[:48]
+    return ""
+
+
+def _disambiguate(chunks: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """同标题的块必须能从目录里分开，否则按需取用等于没给目录。"""
+    counts: dict[str, int] = {}
+    for heading, _ in chunks:
+        counts[heading] = counts.get(heading, 0) + 1
+    out: list[tuple[str, str]] = []
+    used: dict[str, int] = {}
+    for heading, body in chunks:
+        label = heading
+        if counts.get(heading, 0) > 1:
+            hint = _anchor(body)
+            label = f"{heading} · {hint}" if hint else f"{heading}（续）"
+        n = used.get(label, 0)
+        used[label] = n + 1
+        if n:
+            label = f"{label}（续）"
+        out.append((label, body))
+    return out
 
 
 def save(root: Path | str, url: str, title: str, text: str,

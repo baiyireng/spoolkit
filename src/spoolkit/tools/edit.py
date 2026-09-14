@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from spoolkit.errors import PathOutsideProjectError
-from spoolkit.paths import resolve_within
+from spoolkit.paths import resolve_readable
 from spoolkit.tools.types import ToolResult, ToolSpec
 from spoolkit.check.constraints import check_source, format_violations
 
@@ -186,8 +186,9 @@ class PendingChange:
 class PendingChanges:
     """本次运行中提出、尚未落盘的修改集合。"""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, extra_roots: Sequence[Path] = ()) -> None:
         self._root = root.resolve()
+        self._extra_roots = tuple(Path(item).resolve() for item in extra_roots)
         self._changes: dict[str, PendingChange] = {}
 
     def __len__(self) -> int:
@@ -196,14 +197,31 @@ class PendingChanges:
     def items(self) -> list[PendingChange]:
         return list(self._changes.values())
 
+    def disk_path(self, stored: str) -> Path:
+        """待确认记录里的路径 → 磁盘上的绝对路径。
+
+        工作区内记相对路径；关联目录记绝对路径。
+        """
+        raw = Path(stored)
+        if raw.is_absolute():
+            return raw
+        return self._root / stored
+
+    def is_linked(self, stored: str) -> bool:
+        """这条改动是不是关联目录里的（不走自动落盘）。"""
+        return Path(stored).is_absolute()
+
     def path_of(self, candidate: str) -> str:
-        """把用户给的路径解析成项目内相对路径。"""
-        target = resolve_within(self._root, candidate)
-        return target.relative_to(self._root).as_posix()
+        """把用户给的路径解析成待确认记录用的键。"""
+        target = resolve_readable(self._root, candidate, self._extra_roots)
+        try:
+            return target.relative_to(self._root).as_posix()
+        except ValueError:
+            return str(target)
 
     def propose(self, path: str, new_text: str) -> PendingChange:
         """登记一处修改。同一路径重复提出时以最后一次为准。"""
-        target = self._root / path
+        target = self.disk_path(path)
         old_text = target.read_text(encoding="utf-8") if target.exists() else ""
         change = PendingChange(path=path, old_text=old_text, new_text=new_text)
         self._changes[path] = change
@@ -217,7 +235,7 @@ class PendingChanges:
         """
         written: list[str] = []
         for change in self._changes.values():
-            target = self._root / change.path
+            target = self.disk_path(change.path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(change.new_text, encoding="utf-8")
             written.append(change.path)
@@ -303,7 +321,7 @@ def revert(root: Path, baseline: Baseline) -> list[str]:
     """
     touched: list[str] = []
     for entry in baseline.entries:
-        target = root / entry.path
+        target = Path(entry.path) if Path(entry.path).is_absolute() else root / entry.path
         if entry.old_text is None:
             if target.exists():
                 target.unlink()
@@ -324,11 +342,11 @@ def _propose(
     两者都是字符串，结果成功路径被误判成失败——用异常区分才不会有歧义。
     """
     try:
-        relative = pending.path_of(args["path"])
+        stored = pending.path_of(args["path"])
     except PathOutsideProjectError as exc:
         return ToolResult(ok=False, content=str(exc))
 
-    target = root / relative
+    target = pending.disk_path(stored)
     old_text = target.read_text(encoding="utf-8") if target.exists() else ""
     try:
         new_text = transform(old_text)
@@ -341,17 +359,17 @@ def _propose(
         # 什么也换不来。同时也要让模型知道：这一写没产生改动，
         # 别以为自己已经改好了。
         return ToolResult(
-            ok=True, content=f"{relative} 的内容与现有完全一致，没有产生改动。"
+            ok=True, content=f"{stored} 的内容与现有完全一致，没有产生改动。"
         )
 
-    change = pending.propose(relative, new_text)
+    change = pending.propose(stored, new_text)
     verb = "新建" if change.is_new_file else "修改"
     body = f"已生成{verb}预览（尚未写入，需用户确认）：\n{change.diff}"
 
     # 测试文件是验收标准。改它不会让验证通过（验证按原始内容判定），
     # 但模型不知道这件事——实测它会把测试改成 assert True 然后宣布完成，
     # 白烧四步。与其事后拦，不如在它动手时说清楚。
-    if is_test_path(relative):
+    if is_test_path(stored):
         body = (
             "注意：这是测试文件。验证按测试的原始内容判定，"
             "改它不会让验证通过——测试失败说明代码不对。\n\n" + body
@@ -359,7 +377,7 @@ def _propose(
 
     # 写完立刻检查结构约束。这是「软要求变硬反馈」的落点：
     # 模型不需要记住规则，只需要对具体违反项作出反应。
-    feedback = format_violations(check_source(new_text, relative))
+    feedback = format_violations(check_source(new_text, stored))
     if feedback:
         body = f"{body}\n\n{feedback}"
     return ToolResult(ok=True, content=body)

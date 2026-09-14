@@ -44,6 +44,27 @@ spool --help
 在 `spool chat` 里可以就地做同样的事：`/approve <码>`、`/approve --list`、
 `/approve --revoke <用户>`。
 
+## spool extra
+
+在**本机**关联工作区外的目录。读放开，写要确认后才落盘；聊天里加不了。
+名单在工作区 `.agent/read-roots.json`。
+
+```bash
+spool extra add D:\某目录
+spool extra remove D:\某目录
+spool extra              # 列出
+```
+
+| 参数 | 说明 |
+|---|---|
+| `add` / `remove` / `list` | 写入配置、删掉、查看（不带 action 就是 list） |
+| `path` | `add` / `remove` 时要给的目录 |
+| `--root` | 工作区路径（默认自动找） |
+
+关联目录不是换绑工作区：记忆、索引、检查点仍挂主工作区。`run_command` 的
+工作目录仍锁在主工作区。即使 `--policy auto --scope **`，关联目录也不自动落盘。
+一次性叠加仍可用 `spool run --allow-read`（不写进配置）。
+
 ## spool run
 
 跑一次任务。最常用的几条：

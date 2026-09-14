@@ -220,12 +220,14 @@ def pending_notice(root: Path) -> str:
 def run_extra_args(args: argparse.Namespace, project_root: Path) -> list[str]:
     """每一轮子进程要带的参数。
 
-    单独拎出来是为了能测：**聊天里 `/allow-read` 记下的目录必须出现在这里**——
-    否则那条授权只在被批准的那一刻有效，而用户以为它一直有效。
+    `--from-channel`：远程聊天通道默认只碰当前工作区；本机 `spool extra add`
+    过的关联目录会转成 `--allow-read` 带下去。聊天里的 `/allow-read` 加不了目录。
     """
     # `--ask-on-stdin`：events 模式默认"无人可问就拒绝"，桥这边有人可问
     # （用户就在聊天里），所以要显式打开。
-    extra: list[str] = ["--ask-on-stdin"]
+    extra: list[str] = ["--ask-on-stdin", "--from-channel"]
+    for item in readroots.existing(project_root):
+        extra += ["--allow-read", str(item)]
     if getattr(args, "web", False):
         # 聊天通道也能开联网：用户在手机上让它查资料是常见场景。
         extra += ["--web"]
@@ -244,8 +246,6 @@ def run_extra_args(args: argparse.Namespace, project_root: Path) -> list[str]:
     ):
         if value:
             extra += [flag, value]
-    for directory in readroots.existing(project_root):
-        extra += ["--allow-read", str(directory)]
     return extra
 
 

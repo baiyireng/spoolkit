@@ -54,7 +54,7 @@ def tool_help_spec(registry: ToolRegistry) -> ToolSpec:
         name="tool_help",
         description=(
             "查看工具的完整说明与参数含义。参数给工具名（如 read_file）、"
-            "类别名（看 / 改 / 跑 / 量 / 核 / 记），或者 \"*\" 要全部。"
+            "类别名（看 / 查 / 改 / 跑 / 量 / 核 / 记），或者 \"*\" 要全部。"
             "拿不准某个工具怎么用、该带哪些参数时用它，不要靠猜。"
         ),
         parameters={

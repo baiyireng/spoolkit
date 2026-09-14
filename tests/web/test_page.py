@@ -45,3 +45,23 @@ def test_页面能按快照重建待确认面板() -> None:
     """断线重连时事件已经漏掉了，只能按快照补上。"""
     assert "state.diffs" in HTML
     assert "showPending" in HTML
+
+
+def test_页面按快照显示待批准的配对码() -> None:
+    """给人看的一行，不进模型上下文。不能复用「应用/拒绝」——那是落盘确认。"""
+    assert "pairings" in HTML
+    assert "showPairings" in HTML
+    assert "spool approve" in HTML
+    assert 'id="pairing"' in HTML
+    assert "/state" in HTML
+
+
+def test_脚本里没有会被浏览器当成标签的小于号() -> None:
+    """真踩过：注释写成 spool approve <码>，浏览器把 <码> 当标签，整段脚本不跑。"""
+    start = HTML.find("<script>")
+    end = HTML.rfind("</script>")
+    assert start != -1 and end > start
+    script = HTML[start + len("<script>") : end]
+    assert "<" not in script
+    # Python 三引号里写 '\n 会变成 JS 单引号字符串中间的真换行，整段脚本同样不跑。
+    assert "\n（点" not in script

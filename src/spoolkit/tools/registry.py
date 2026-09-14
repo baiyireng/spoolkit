@@ -19,7 +19,7 @@ OTHER_GROUP = "其它"
 # 先知道工具叫什么，才知道有哪些能力。
 # 「外挂」是 MCP 服务提供的工具：它们不在本项目的工作区授权范围内，
 # 单独成组是为了让模型和人一眼看出"这几个不是它自己的手"。
-GROUP_ORDER = ("看", "改", "跑", "量", "核", "诊", "记", "外挂", OTHER_GROUP)
+GROUP_ORDER = ("看", "查", "改", "跑", "量", "核", "诊", "记", "派", "外挂", OTHER_GROUP)
 
 _TYPE_MAP: dict[str, type | tuple[type, ...]] = {
     "string": str,

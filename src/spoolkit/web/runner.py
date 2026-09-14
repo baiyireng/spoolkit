@@ -18,6 +18,7 @@ import threading
 from pathlib import Path
 from typing import Sequence
 
+from spoolkit.bridge.pairing import Pairings
 from spoolkit.memory.transcript import recent_messages
 from spoolkit.web.protocol import (
     AWAIT,
@@ -177,9 +178,11 @@ class Runner:
 
         快照必须在锁内取完整的一份：分几次取的话，中间可能有事件进来，
         你会拿到一个自相矛盾的状态（比如「运行中」但已经给出了 final）。
+
+        配对请求读磁盘、不进模型上下文：锁外读，别让文件 I/O 堵住确认按钮。
         """
         with self._lock:
-            return {
+            data = {
                 "running": self.running,
                 "finished": self._finished,
                 "awaiting": self._awaiting,
@@ -191,6 +194,15 @@ class Runner:
                 "session": self.session,
                 "messages": self._transcript(),
             }
+        data["pairings"] = self._pending_pairings()
+        return data
+
+    def _pending_pairings(self) -> list[dict]:
+        """待批准的配对码。给人看的，不进模型上下文。"""
+        pending = Pairings(
+            self.project_root / ".agent" / "bridge-pairings.json"
+        ).pending
+        return [{"code": code, "user": user} for code, user in pending]
 
     def _transcript(self) -> list[dict]:
         """这个会话之前的往来——**给人看的**，不进入模型上下文。

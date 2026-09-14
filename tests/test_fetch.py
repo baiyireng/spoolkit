@@ -43,6 +43,43 @@ def test_按标题切块_目录带小标题(tmp_path: Path) -> None:
     assert entry.tokens > 0
 
 
+def test_同标题切开后目录要能看出是哪一段(tmp_path: Path) -> None:
+    """Python 文档一个 h2 下面好几个方法，按字符切开后标题会撞车。
+
+    T1 量过：三块都叫 Reading directories，模型点了第一块，没读到 Path.walk。
+    """
+    filler = "word " * 80
+    text = (
+        "## Reading directories\n\n"
+        f"Path.iterdir()¶\n{filler}\n\n"
+        f"Path.walk(top_down=True)¶\nUnlike os.walk(), Path.walk() lists "
+        f"symlinks in filenames.\n{filler}\n"
+    )
+    entry = save(
+        tmp_path, "https://example.com/pathlib", "pathlib", text, chunk_chars=200
+    )
+    assert entry.count >= 2
+    catalog_text = catalog(entry)
+    assert "iterdir" in catalog_text
+    assert "walk" in catalog_text
+    headings = [chunk.heading for chunk in entry.chunks]
+    assert len(set(headings)) == len(headings)
+
+
+def test_标题不重复时目录不加消歧(tmp_path: Path) -> None:
+    """消歧只在标题撞车时动手；各写各的标题时目录保持原样。"""
+    entry = save(
+        tmp_path,
+        "https://example.com/guide",
+        "安装指南",
+        extract(PAGE)[1],
+        chunk_chars=60,
+    )
+    headings = [chunk.heading for chunk in entry.chunks]
+    assert "验证" in headings
+    assert all(" · " not in h and "（续）" not in h for h in headings)
+
+
 def test_缓存按_URL_定位_不存索引表(tmp_path: Path) -> None:
     entry = save(tmp_path, "https://example.com/a", "A", "# A\n正文")
     again = load(tmp_path, "https://example.com/a")

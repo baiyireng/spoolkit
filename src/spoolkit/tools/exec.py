@@ -388,6 +388,8 @@ def _restore_originals(work_root: Path, pending, paths: object) -> None:
     for change in pending.items():
         if change.path not in wanted:
             continue
+        if Path(change.path).is_absolute():
+            continue
         target = work_root / change.path
         if change.is_new_file:
             if target.exists():

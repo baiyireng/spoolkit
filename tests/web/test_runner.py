@@ -93,8 +93,35 @@ def test_没有待确认时确认请求被拒绝(tmp_path: Path) -> None:
 
 def test_快照包含关键字段(tmp_path: Path) -> None:
     snapshot = _runner(tmp_path).snapshot()
-    for key in ("running", "finished", "awaiting", "goal", "usage", "final"):
+    for key in ("running", "finished", "awaiting", "goal", "usage", "final", "pairings"):
         assert key in snapshot
+
+
+def test_快照带上待批准的配对码(tmp_path: Path) -> None:
+    """网页壳用户看不到桥终端，配对请求只能靠快照送上来。不进模型上下文。"""
+    from spoolkit.bridge.pairing import Pairings
+
+    code = Pairings(tmp_path / ".agent" / "bridge-pairings.json").ensure_code(
+        "openid-web"
+    )
+    snapshot = _runner(tmp_path).snapshot()
+    assert snapshot["pairings"] == [{"code": code, "user": "openid-web"}]
+
+
+def test_没有待批准时配对列表是空的(tmp_path: Path) -> None:
+    assert _runner(tmp_path).snapshot()["pairings"] == []
+
+
+def test_批准之后快照里配对码消失(tmp_path: Path) -> None:
+    from spoolkit.bridge.pairing import Pairings
+
+    path = tmp_path / ".agent" / "bridge-pairings.json"
+    pairings = Pairings(path)
+    code = pairings.ensure_code("openid-web")
+    runner = _runner(tmp_path)
+    assert runner.snapshot()["pairings"]
+    pairings.approve_code(code)
+    assert runner.snapshot()["pairings"] == []
 
 
 def test_开始后快照记录目标(tmp_path: Path) -> None:

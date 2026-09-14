@@ -53,6 +53,9 @@ def trial_workspace(root: Path, changes: Sequence[PendingChange]) -> Iterator[Pa
     try:
         copy_project(root, copy_root)
         for change in changes:
+            if Path(change.path).is_absolute():
+                # 关联目录的改动不进试跑副本：副本只代表主工作区。
+                continue
             target = copy_root / change.path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(change.new_text, encoding="utf-8")

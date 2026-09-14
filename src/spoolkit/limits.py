@@ -163,6 +163,26 @@ KNOBS: tuple[Knob, ...] = (
         "一批（每批按 140 token/步折算）。实测 2048 在第十八步被截断，"
         "五十步的计划于是整体解析失败",
     ),
+    Knob(
+        "research_page_limit", 3, CAPABILITY,
+        "一次 research 最多看几页。按本机 27B 标定：T1 一页就够，3 是给"
+        "「先搜再读」留的余地；强模型/远程 API 可以调大",
+    ),
+    Knob(
+        "research_output_budget", 800, CAPABILITY,
+        "research 交回主循环最多多少 token。主循环上下文最贵，网页目录动辄"
+        "上千 token，所以只交短结论+引用；要核对用 web_read（缓存几乎免费）",
+    ),
+    Knob(
+        "research_steps", 8, CAPABILITY,
+        "研究会话每一页（以及最后一次合并）的步数。T1 答对的题是 3 步，"
+        "取错块打转会烧到上限——所以这是能力标定，不是写死的安全线",
+    ),
+    Knob(
+        "search_result_limit", 3, CAPABILITY,
+        "一次网页搜索最多几条。和 research_page_limit 对齐：先搜再读时"
+        "一条结果一页，多了合并步会变重；强模型/远程 API 可以调大",
+    ),
     Knob("command_timeout", 180, MECHANICAL, "单条命令的默认超时"),
     Knob("max_command_timeout", 600, SAFETY, "命令超时上限：防止挂死"),
     Knob(

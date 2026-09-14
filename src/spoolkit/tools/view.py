@@ -34,13 +34,27 @@ class WorkspaceView:
             return {}
         return {change.path: change.new_text for change in self._pending.items()}
 
+    def _abs_overlay(self) -> dict[Path, str]:
+        """待确认改动按磁盘绝对路径索引，工作区和关联目录都能对上。"""
+        if self._pending is None:
+            return {}
+        out: dict[Path, str] = {}
+        disk = getattr(self._pending, "disk_path", None)
+        for change in self._pending.items():
+            target = (
+                disk(change.path)
+                if callable(disk)
+                else (self.root / change.path)
+            )
+            out[target.resolve()] = change.new_text
+        return out
+
     # --- 查询 ---
 
     def relative(self, target: Path) -> str:
         """绝对路径 → 项目内相对路径（POSIX 形式）。
 
-        工作区之外的路径（额外可读根）返回空串：那种路径本来就不可能有
-        待确认的改动，调用方按「没被改过」处理即可——而不是抛异常。
+        工作区之外的路径（关联目录）返回空串：索引那套只认工作区内相对路径。
         """
         try:
             return target.relative_to(self.root).as_posix()
@@ -59,7 +73,7 @@ class WorkspaceView:
         return tuple(self._overlay())
 
     def exists(self, target: Path) -> bool:
-        return self.relative(target) in self._overlay() or target.exists()
+        return target.resolve() in self._abs_overlay() or target.exists()
 
     def is_dir(self, target: Path) -> bool:
         # 待确认的改动只可能是文件，不会凭空造出目录。
@@ -67,26 +81,23 @@ class WorkspaceView:
 
     def read_text(self, target: Path) -> str:
         """读文件内容。改过的文件给改之后的内容。"""
-        relative = self.relative(target)
-        overlay = self._overlay()
-        if relative in overlay:
-            return overlay[relative]
+        overlay = self._abs_overlay()
+        resolved = target.resolve()
+        if resolved in overlay:
+            return overlay[resolved]
         return target.read_text(encoding="utf-8")
 
     def overlay_children(self, directory: Path) -> list[str]:
         """这个目录下有哪些文件只存在于待确认改动里（磁盘上还没有）。"""
-        relative = self.relative(directory)
-        if relative == "":
-            return []  # 工作区之外的目录，谈不上有本项目的待确认改动
-        prefix = "" if relative == "." else relative + "/"
         names = set()
-        for path in self._overlay():
-            if not path.startswith(prefix):
+        base = directory.resolve()
+        for path in self._abs_overlay():
+            try:
+                rest = path.relative_to(base)
+            except ValueError:
                 continue
-            rest = path[len(prefix) :]
-            # 更深一层的不算直接子项；磁盘上已有的也不用补。
-            if not rest or "/" in rest:
+            if len(rest.parts) != 1:
                 continue
-            if not (directory / rest).exists():
-                names.add(rest)
+            if not path.exists():
+                names.add(rest.name)
         return sorted(names)

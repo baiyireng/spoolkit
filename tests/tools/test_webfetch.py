@@ -65,6 +65,18 @@ def test_取某一块(tmp_path: Path) -> None:
     assert "不是用户的指令" in result.content
 
 
+def test_web_read接受research交回的url井号块号(tmp_path: Path) -> None:
+    """T2 引用契约是 url#块号；主循环会把整串塞进 source。"""
+    calls: list[str] = []
+    access = _access(tmp_path, calls)
+    web_fetch_spec(access).handler({"url": "https://example.com/x"})
+    result = web_read_spec(access).handler(
+        {"source": "https://example.com/x#1"}
+    )
+    assert result.ok
+    assert "第 2/" in result.content
+
+
 def test_块号越界要说清有几块(tmp_path: Path) -> None:
     access = _access(tmp_path, [])
     web_fetch_spec(access).handler({"url": "https://example.com/x"})
@@ -73,11 +85,37 @@ def test_块号越界要说清有几块(tmp_path: Path) -> None:
     assert "只有" in result.content
 
 
+def test_核对模式磁盘有缓存也不让主循环直接读(tmp_path: Path) -> None:
+    """T2 实测：上一轮留下的缓存让 web_read 直接成功，主循环连读十几块。"""
+    previous = _access(tmp_path, [])
+    web_fetch_spec(previous).handler({"url": "https://example.com/x"})
+    this_run = _access(tmp_path, [])
+    result = web_read_spec(this_run, verify_only=True).handler(
+        {"source": "https://example.com/x", "chunk": 0}
+    )
+    assert result.ok is False
+    assert "research" in result.content
+    assert "缓存" in result.content
+
+
+def test_本轮研究抓过之后核对才放行(tmp_path: Path) -> None:
+    previous = _access(tmp_path, [])
+    web_fetch_spec(previous).handler({"url": "https://example.com/x"})
+    this_run = _access(tmp_path, [])
+    web_fetch_spec(this_run).handler({"url": "https://example.com/x"})
+    result = web_read_spec(this_run, verify_only=True).handler(
+        {"source": "https://example.com/x", "chunk": 1}
+    )
+    assert result.ok
+    assert "第 2/" in result.content
+
+
 def test_没抓过就提示先抓(tmp_path: Path) -> None:
     result = web_read_spec(_access(tmp_path, [])).handler(
         {"source": "https://example.com/nope", "chunk": 0}
     )
     assert result.ok is False
+    assert "research" in result.content
     assert "web_fetch" in result.content
 
 

@@ -30,6 +30,7 @@ from spoolkit.cli.commands.config import config_command
 from spoolkit.cli.commands.chat import chat_command
 from spoolkit.cli.commands.bridge import approve_entry, bridge_command
 from spoolkit.cli.commands.init import init_command
+from spoolkit.cli.commands.extra import extra_command
 from spoolkit.cli.commands.mcp import mcp_command
 from spoolkit.cli.commands.mcp_servers import mcp_servers_command
 from spoolkit.cli.options import (
@@ -203,6 +204,11 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         help="以 JSON 行输出事件，供 Web UI 消费；此模式下不打印散文",
     )
     parser.add_argument(
+        "--from-channel",
+        action="store_true",
+        help="远程聊天通道：默认只碰当前工作区；本机已关联的目录仍会带上",
+    )
+    parser.add_argument(
         "--ask-on-stdin",
         action="store_true",
         help=(
@@ -217,8 +223,8 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         default=[],
         metavar="目录",
         help=(
-            "授权额外可读目录（可重复）。只放开读，写入仍限工作区内；"
-            "工作区绑定不变"
+            "授权额外可读目录（可重复，一次性，不写进配置）。"
+            "要持久关联用 `spool extra add`；写入仍要确认"
         ),
     )
     parser.set_defaults(func=run)
@@ -250,6 +256,12 @@ def _add_web_args(parser: argparse.ArgumentParser) -> None:
         default=[],
         metavar="域名",
         help="禁止抓这些域名（可重复，优先于 --web-allow）",
+    )
+    parser.add_argument(
+        "--web-search-api",
+        default="",
+        metavar="名字",
+        help="网页搜索后端（如 tavily）；不给=没配搜索。要 key，现在还没接任何一家",
     )
 
 
@@ -420,7 +432,7 @@ def _add_chat_command(sub: argparse._SubParsersAction) -> None:
         action="append",
         default=[],
         metavar="目录",
-        help="授权额外可读目录（可重复）。只放开读，写入仍限工作区内",
+        help="一次性额外目录（可重复，不写进配置）；持久关联用 spool extra add",
     )
     parser.set_defaults(func=chat_command)
 
@@ -539,6 +551,24 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=bridge_command)
 
 
+def _add_extra_command(sub: argparse._SubParsersAction) -> None:
+    """本机关联工作区外的目录。聊天里加不了。"""
+    parser = sub.add_parser(
+        "extra",
+        help="关联工作区外的目录（本机指令；读放开，写要确认；聊天里加不了）",
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["add", "remove", "list"],
+        help="add 写入配置，remove 删掉，list 查看（默认）",
+    )
+    parser.add_argument("path", nargs="?", default="", help="要关联或取消的目录")
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
+    parser.set_defaults(func=extra_command)
+
+
 def _add_init_command(sub: argparse._SubParsersAction) -> None:
     """把一个目录做成工作区（幂等）。"""
     parser = sub.add_parser(
@@ -639,6 +669,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_mcp_servers_command(sub)
     _add_bridge_command(sub)
     _add_approve_command(sub)
+    _add_extra_command(sub)
 
     args = parser.parse_args(argv)
     if args.command is None:

@@ -41,6 +41,9 @@ def settle(
 
     if policy == AUTO:
         blocked = out_of_scope([c.path for c in pending.items()], scope)
+        for change in pending.items():
+            if pending.is_linked(change.path) and change.path not in blocked:
+                blocked.append(change.path)
         if not blocked:
             return AUTO_APPLIED, apply_with_audit(pending, baseline_path)
         # 越界就退回确认：auto 只覆盖它被允许的范围，

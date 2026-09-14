@@ -40,7 +40,9 @@ from spoolkit.tools.diagnosis import (
 from spoolkit.tools.fs import list_dir_spec, read_file_spec
 from spoolkit.tools.webfetch import web_fetch_spec, web_read_spec
 from spoolkit.fetch.client import WebPolicy
+from spoolkit.fetch.search import UnconfiguredSearch
 from spoolkit.tools.webfetch import WebAccess
+from spoolkit.tools.websearch import web_search_spec
 from spoolkit.tools.grant import Grants
 from spoolkit.tools.help import tool_help_spec
 from spoolkit.tools.registry import ToolRegistry
@@ -50,6 +52,7 @@ from spoolkit.tools.stats import dir_stats_spec
 from spoolkit.tools.survey import survey_spec
 from spoolkit.tools.calc import calc_spec
 from spoolkit.tools.dispatch import dispatch_spec
+from spoolkit.tools.research import research_spec
 from spoolkit.tools.sources import SourceLog, check_numbers_spec
 
 # 符号表给人「有哪些东西」，内容给人「它是怎么写的」。两块都要：
@@ -99,8 +102,8 @@ class LoopWiring:
     # 几乎从不去跑（8 条失败里 0 次 run_command），指望它养成习惯不现实。
     auto_verify: bool = True
     verify: object | None = None
-    # 额外可读根：由用户显式授权（--allow-read）。读得到，写不到，
-    # 工作区绑定不变——「看一个目录」不该等于「换个项目」。
+    # 关联目录：本机 `spool extra add`（或一次性 `--allow-read`）。读放开，
+    # 写走待确认；工作区绑定不变——「看一个目录」不该等于「换个项目」。
     read_roots: tuple[Path, ...] = ()
     # 这一步自己声明的范围（计划里的 scope）。有它就按它锚定预取：
     # 关键词排序会被步骤提示词里的噪音带偏，实测能把两个正文名额
@@ -112,6 +115,10 @@ class LoopWiring:
     # 联网取用（web_fetch / web_read）。**默认关**：它是唯一会把外部不可信内容
     # 带进上下文的入口，要不要开由调用方明说。见 fetch/ 与 tools/webfetch.py。
     web: object | None = None
+    # 网页搜索后端。默认未配置：工具必须说「没配搜索，只能直接给 URL」。
+    search: object | None = None
+    # 远程聊天通道：默认只碰当前工作区；已关联目录仍会写进工作方式。
+    from_channel: bool = False
 
 
 def resolve_provider_args(args) -> dict[str, str]:
@@ -364,9 +371,26 @@ def assemble_loop(
     registry.register(search_code_spec(project_root, parts.pending, parts.read_roots))
     registry.register(dir_stats_spec(project_root, parts.read_roots))
     registry.register(calc_spec())
+    researcher_tools = None
+    search = None
     if getattr(parts, "web", None) is not None:
-        registry.register(web_fetch_spec(parts.web))
-        registry.register(web_read_spec(parts.web))
+        # 主循环只留 web_read 核对引用。web_fetch 只进研究会话的工具表。
+        # T2 第一轮量过：两个都挂着时，提示词写着用 research，它仍走
+        # web_fetch，主循环上下文一分钱没省。
+        registry.register(web_read_spec(parts.web, verify_only=True))
+        researcher_tools = ToolRegistry()
+        researcher_tools.register(web_fetch_spec(parts.web))
+        researcher_tools.register(web_read_spec(parts.web))
+        search = parts.search if parts.search is not None else UnconfiguredSearch()
+        researcher_tools.register(
+            web_search_spec(
+                search,
+                result_limit=int(
+                    limits.resolve("search_result_limit", settings.overrides)[0]
+                ),
+            )
+        )
+        researcher_tools.register(calc_spec())
     # 索引里只写「名字 + 参数名 + 一句干什么」，完整说明按需从这里取。
     # 注册在最后：它绑定的是这个注册表本身，而注册表是逐个长起来的。
     registry.register(tool_help_spec(registry))
@@ -412,6 +436,12 @@ def assemble_loop(
     registry.register(
         dispatch_spec(gateway, registry, settings, tokenizer, verify=verifier)
     )
+    if researcher_tools is not None:
+        registry.register(
+            research_spec(
+                gateway, researcher_tools, settings, tokenizer, search=search
+            )
+        )
     # 外挂的 MCP 工具（如果用户配过）。放在这里而不是更早：它要往同一个
     # 注册表里加东西，而 tool_help 绑的是这个注册表，晚加一样能查到。
     mcp_clients = attach_mcp(registry, announce=print) if parts.mcp else []
@@ -453,6 +483,7 @@ def assemble_loop(
         incoming=incoming_reports,
         read_roots=parts.read_roots,
         sources=sources,
+        from_channel=parts.from_channel,
     )
 
 
@@ -484,6 +515,16 @@ def web_access(args, project_root: Path) -> WebAccess | None:
             proxy=(getattr(args, "proxy", "") or "") or system_proxy(),
         ),
     )
+
+
+def web_search_backend(args):
+    """网页搜索后端。现在没有任何一家接上——没有 key 就不装。
+
+    `--web-search-api` 先占位：名字认得出，真正的适配器等有 key 再接。
+    没配时研究会话里的 web_search 会说「没配搜索，只能直接给 URL」。
+    """
+    wanted = str(getattr(args, "web_search_api", "") or "").strip()
+    return UnconfiguredSearch(wanted=wanted)
 
 
 def build_memory(

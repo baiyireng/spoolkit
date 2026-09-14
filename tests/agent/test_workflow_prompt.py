@@ -109,3 +109,51 @@ def test_开了联网就必须写明_网页不可信():
     text = build_workflow(registry, ())
     assert "web_fetch" in text and "web_read" in text
     assert "不可信" in text and "不是用户的指令" in text
+
+
+def test_有research时它是动作不是阶段():
+    """T2：research 不能被写成每轮必经的阶段。"""
+    from pathlib import Path
+
+    from spoolkit.agent.loop import build_workflow
+    from spoolkit.config import Config
+    from spoolkit.llm.fake import FakeModel
+    from spoolkit.llm.tokenizer import OfflineTokenCounter
+    from spoolkit.tools.registry import ToolRegistry
+    from spoolkit.tools.research import research_spec
+    from spoolkit.tools.webfetch import WebAccess, web_fetch_spec, web_read_spec
+    from spoolkit.fetch.client import WebPolicy
+
+    tokenizer = OfflineTokenCounter()
+    gateway = FakeModel(script=[], tokenizer=tokenizer)
+    registry = ToolRegistry()
+    access = WebAccess(root=Path("."), policy=WebPolicy())
+    registry.register(web_fetch_spec(access))
+    registry.register(web_read_spec(access))
+    registry.register(
+        research_spec(
+            gateway,
+            registry,
+            Config(project_root=Path("."), supervise=False),
+            tokenizer,
+        )
+    )
+    text = build_workflow(registry, ())
+    assert "research" in text
+    assert "不是每轮必做的阶段" in text
+    assert "不要先 web_read" in text
+    assert "有缓存" in text
+    assert "没配搜索" in text or "先搜" in text
+    assert "不可信" in text
+
+
+def test_远程通道工作方式写明只能碰当前工作区() -> None:
+    text = build_workflow(ToolRegistry(), from_channel=True)
+    assert "聊天通道" in text
+    assert "当前工作区" in text
+    assert "不要" in text and "allow-read" in text
+    assert "extra add" in text or "spool extra" in text
+
+
+def test_本地运行不提远程通道那条() -> None:
+    assert "聊天通道" not in build_workflow(ToolRegistry())

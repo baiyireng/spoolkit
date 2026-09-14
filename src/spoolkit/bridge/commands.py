@@ -1,15 +1,15 @@
 """聊天通道里的斜杠命令。
 
 为什么要有这一层：**聊天是唯一的交互面**时，有些事得能在聊天里做，而不是让
-用户回去开终端。最早缺的就是`授权读目录`——用户在 QQ 里说"我在这里授权你访问
-那个目录也不行吗"，而当时的答案是"不行"（只能重启桥加 `--allow-read`）。
+用户回去开终端。
 
 规矩：
 
 - **只有被放行的人能用**。命令处理放在准入判定**之后**，陌生人连 `/help` 都
   不该拿到——否则一个公网通道就有了一个免鉴权的操作面。
-- **命令只做"管理"，不做"干活"**：改的是桥自己的状态（可读目录、看现状），
-  不碰工作区里的东西，也不替模型做决定。
+- **命令只做"管理"，不做"干活"**：看现状、说明边界，不替模型做决定。
+- **聊天里加不了关联目录。** 要碰工作区外的目录，只能由主人在服务器上
+  `spool extra add`。小模型分不清危险操作，远程通道不开放授权口。
 """
 
 from __future__ import annotations
@@ -18,12 +18,38 @@ from pathlib import Path
 
 from spoolkit import readroots
 
-HELP = """\
-可以直接说要做的事；这些是桥自己处理的命令：
 
-/allow-read <目录>            放开读取某个目录（只读，写不到；下一轮生效）
-/allow-read                   看当前放开了哪些
-/allow-read --remove <目录>   撤销
+def workspace_scope_notice(root: Path | str) -> str:
+    """远程通道给人看的工作区边界。不进模型上下文。"""
+    here = Path(root).resolve()
+    extras = readroots.existing(root)
+    lines = [
+        f"这条是远程聊天通道：默认只能读写当前工作区（{here}）里的文件。"
+    ]
+    if extras:
+        listed = "、".join(str(item) for item in extras)
+        lines.append(
+            f"主人在服务器上还关联了：{listed}。"
+            "这些目录可以读，写要等人确认。"
+        )
+    else:
+        lines.append(
+            "别的盘、桌面、下载目录、没说在哪的文件，这边够不到。"
+        )
+    lines.append(
+        "不会在聊天里开放新的目录——远程通道上小模型分不清危险操作。"
+        "要关联目录，在服务器上用 `spool extra add <目录>`。"
+    )
+    return "\n".join(lines)
+
+
+HELP = """\
+可以直接说要做的事。
+
+这条通道默认只能读写**当前工作区**里的文件，聊天里不开放授权口
+（别的盘 / 桌面 / 下载 / 没说在哪的文件，除非主人已在服务器上
+`spool extra add` 关联过）。
+
 /status                       看这个工作区现在什么状态
 /help                         这一页
 （另：agent 有改动等你确认时，回 y 应用、n 丢弃）
@@ -40,35 +66,19 @@ def handle(text: str, root: Path) -> str | None:
     if name in ("/help", "/?"):
         return HELP
     if name == "/allow-read":
-        return _allow_read(parts[1:], root)
+        return workspace_scope_notice(root)
     if name == "/status":
         return _status(root)
     return f"不认识的命令：{parts[0]}（/help 看有哪些）"
 
 
-def _allow_read(parts: list[str], root: Path) -> str:
-    if not parts:
-        return readroots.render(root)
-    if parts[0] in ("--remove", "-r", "--forget"):
-        if len(parts) < 2:
-            return "用法：/allow-read --remove <目录>"
-        _, message = readroots.remove(root, parts[1])
-        return f"{message}\n{readroots.render(root)}"
-    _, message = readroots.add(root, parts[0])
-    return f"{message}\n{readroots.render(root)}"
-
-
 def _status(root: Path) -> str:
     from spoolkit import workspace
 
-    lines = [f"工作区：{Path(root).resolve()}"]
-    roots = readroots.load(root)
-    lines.append(f"额外可读目录：{len(roots)} 个")
-    for item in roots:
-        mark = "" if Path(item).is_dir() else "（已不存在）"
-        lines.append(f"  {item}{mark}")
-    registry = workspace.registry_path()
-    lines.append(f"工作区登记表：{registry}")
+    lines = [workspace_scope_notice(root), "", f"工作区：{Path(root).resolve()}"]
+    lines.append(readroots.render(root))
     pairing = Path(root) / ".agent" / "bridge-pairings.json"
     lines.append(f"配对文件：{pairing}")
+    registry = workspace.registry_path()
+    lines.append(f"工作区登记表：{registry}")
     return "\n".join(lines)

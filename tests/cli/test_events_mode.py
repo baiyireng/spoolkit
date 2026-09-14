@@ -75,6 +75,24 @@ def test_范围内自动落盘时不发await(tmp_path: Path) -> None:
     assert (tmp_path / "src" / "a.py").exists()
 
 
+def test_关联目录即使auto也不自动落盘(tmp_path: Path) -> None:
+    buffer = io.StringIO()
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "docs"
+    workspace.mkdir()
+    outside.mkdir()
+    pending = PendingChanges(workspace, extra_roots=(outside,))
+    write_file_spec(workspace, pending).handler(
+        {"path": str(outside / "a.txt"), "content": "x\n"}
+    )
+    settle_with_events(
+        pending, AUTO, ("**",), None, EventWriter(buffer), io.StringIO("n\n")
+    )
+    kinds = [line["type"] for line in _lines(buffer)]
+    assert AWAIT in kinds
+    assert not (outside / "a.txt").exists()
+
+
 def test_没有改动时不输出任何事件(tmp_path: Path) -> None:
     buffer = io.StringIO()
     settle_with_events(

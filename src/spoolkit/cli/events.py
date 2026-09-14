@@ -57,9 +57,10 @@ def settle_with_events(
         writer.emit(DIFF, path=change.path, text=change.diff)
 
     if policy == AUTO and not out_of_scope([c.path for c in changes], scope):
-        written = apply_with_audit(pending, baseline_path)
-        writer.emit(CONFIRM, applied=True, auto=True, count=len(written))
-        return "auto"
+        if not any(pending.is_linked(c.path) for c in changes):
+            written = apply_with_audit(pending, baseline_path)
+            writer.emit(CONFIRM, applied=True, auto=True, count=len(written))
+            return "auto"
 
     writer.emit(AWAIT, count=len(changes))
     source = reader if reader is not None else sys.stdin

@@ -22,6 +22,7 @@ from typing import Callable
 
 from spoolkit.bridge.channel import Channel, Incoming
 from spoolkit.bridge.commands import handle as handle_command
+from spoolkit.bridge.commands import workspace_scope_notice
 from spoolkit.bridge.pairing import ALLOWLIST, OPEN, PAIRING, Pairings
 
 DEFAULT_MAX_CHARS = 4000
@@ -65,9 +66,11 @@ class Bridge:
         self._note = on_note or (lambda text: None)
         self.pairings = pairings
         self.access = access
-        # 斜杠命令要改的是"这个工作区的额外可读目录"，所以桥得知道工作区在哪。
+        # 斜杠命令要改的是桥自己的状态，所以桥得知道工作区在哪。
+        # 远程通道只说明工作区边界，不在聊天里开放工作区外的读权限。
         self.root = Path(root)
         self._last_conversation = ""
+        self._scoped: set[str] = set()
         # 长任务跑完要能补一条消息回来：把"回给最近这个会话"的能力交给 runner。
         # 只有 AgentRunner 认这个接口，别的 runner（测试里的假货）不受影响。
         setter = getattr(runner, "set_notify", None)
@@ -97,6 +100,10 @@ class Bridge:
             return Reply(user=message.user, text=reply, accepted=False, reason="超长")
 
         try:
+            if self._announce_scope(message):
+                self._send(
+                    workspace_scope_notice(self.root), message.conversation
+                )
             answer = self.runner(text)
         except Exception as exc:  # noqa: BLE001 - 桥不该被 agent 的异常带崩
             answer = f"这一轮没跑起来：{type(exc).__name__}: {exc}"
@@ -105,6 +112,14 @@ class Bridge:
 
         self._send(answer or "（没有产出）", message.conversation)
         return Reply(user=message.user, text=answer, accepted=True)
+
+    def _announce_scope(self, message: Incoming) -> bool:
+        """每个会话只说一次工作区边界。斜杠命令自己会写，这里只管交给 agent 的话。"""
+        key = message.conversation or message.user
+        if key in self._scoped:
+            return False
+        self._scoped.add(key)
+        return True
 
     def _admit(self, message: Incoming) -> Reply | None:
         """准入判定。返回 None 表示放行，否则返回一条"不放行"的回复。

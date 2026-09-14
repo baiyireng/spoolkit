@@ -3,7 +3,9 @@
 做成 Python 字符串而不是外置文件：跑起来只有一个东西要分发，也避免
 打包时漏文件。代价是编辑时没有语法高亮，可以接受。
 
-这里刻意做得很薄——不持有状态、不做业务判断，只渲染事件和发三个请求。
+这里刻意做得很薄——不持有状态、不做业务判断，只渲染事件、发三个请求，
+以及把快照里的待批准配对码画成横幅。配对不进模型上下文，也不能点
+「应用/拒绝」来批准——那两个按钮是落盘确认。
 前端出错只能靠人看出来，所以它必须小到一眼能看完。
 
 布局是左右分栏：右侧的待确认面板固定，不随输出滚走。要判断的时候
@@ -49,6 +51,9 @@ HTML = """<!DOCTYPE html>
   #reject { background:#30363d; color:#c9d1d9; }
   #conn { position:fixed; right:12px; bottom:10px; color:#c96a6a;
           display:none; }
+  #pairing { display:none; padding:8px 14px; background:#3d2a00; color:#f0c674;
+             border-bottom:1px solid #5c4300; }
+  #pairing .code { font-weight:700; letter-spacing:0.06em; }
 </style>
 </head>
 <body>
@@ -57,6 +62,7 @@ HTML = """<!DOCTYPE html>
   <input id="goal" placeholder="要 agent 做什么…">
   <button id="start">开始</button>
 </header>
+<div id="pairing"></div>
 <main>
   <div id="stream"></div>
   <div id="side">
@@ -160,6 +166,43 @@ function applyState(state) {
   if (state.awaiting && asking.command) { showCommandAsk(asking); }
   if (state.awaiting) { showActions(); } else { actions.style.display = 'none'; }
   drawHistory(state.messages);
+  showPairings(state.pairings);
+}
+
+// 配对码给人看，不进模型上下文。批准发生在另一个进程
+// （本机敲 spool approve 加码），所以还要短轮询 /state，这一行才会自己消失。
+// 不能复用「应用/拒绝」：点应用会走 /confirm 去落盘改动。
+function showPairings(items) {
+  const box = document.getElementById('pairing');
+  if (!items || !items.length) {
+    box.style.display = 'none';
+    box.replaceChildren();
+    return;
+  }
+  box.style.display = 'block';
+  box.replaceChildren();
+  const head = document.createElement('div');
+  head.textContent = '有 ' + items.length +
+    ' 个待批准的通道配对请求（来自手机/聊天通道）。在本机终端批准；点「应用」不会批准配对。';
+  box.appendChild(head);
+  for (const item of items) {
+    const line = document.createElement('div');
+    const cmd = document.createElement('span');
+    cmd.className = 'code';
+    cmd.textContent = 'spool approve ' + item.code;
+    line.appendChild(cmd);
+    line.appendChild(document.createTextNode('  ←  ' + item.user));
+    box.appendChild(line);
+  }
+}
+
+async function refreshPairings() {
+  try {
+    const response = await fetch('/state');
+    if (!response.ok) { return; }
+    const state = await response.json();
+    showPairings(state.pairings);
+  } catch (err) { /* 轮询失败就等下一拍，横幅停在上一帧 */ }
 }
 
 // 「它想跑一条白名单外的命令」——把这句和被问的东西一起摆在按钮上面。
@@ -169,7 +212,7 @@ function showCommandAsk(detail) {
   showPending([{
     path: '要执行：' + detail.command,
     text: '原因：' + (detail.reason || '未说明') +
-          '\n（点「应用」= 允许这一次；要长期允许，去 .agent/grants.json 或用聊天里的 /allow-read）'
+          '\\n（点「应用」= 允许这一次；要长期允许，去 .agent/grants.json）'
   }]);
 }
 
@@ -274,6 +317,7 @@ document.getElementById('apply').onclick = () => decide(true);
 document.getElementById('reject').onclick = () => decide(false);
 
 connect();
+setInterval(refreshPairings, 3000);
 </script>
 </body>
 </html>

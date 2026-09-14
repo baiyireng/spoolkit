@@ -28,6 +28,7 @@ from spoolkit.cli.runtime import (
     show_history,
     settle_lessons,
     web_access,
+    web_search_backend,
 )
 from spoolkit.config import Config
 from spoolkit.memory.distill import distill
@@ -117,8 +118,8 @@ def _turn(args, project_root, gateway, window, memory) -> int:
     """跑一轮：和 `run` 的普通路径同构，只是不退出进程。"""
     overrides = _overrides(args, project_root)
     approver, grants = build_approver(project_root)
-    pending = PendingChanges(project_root)
     read_roots, _ = _resolve_read_roots(args, project_root)
+    pending = PendingChanges(project_root, extra_roots=read_roots)
     distiller = None
     if memory is not None and args.provider != "fake":
         distiller = lambda state, final: distill(gateway, state, final=final)
@@ -145,6 +146,7 @@ def _turn(args, project_root, gateway, window, memory) -> int:
             lessons=build_lessons(memory) if memory is not None else None,
             read_roots=read_roots,
             web=web_access(args, project_root),
+            search=web_search_backend(args),
             mcp=not getattr(args, "no_mcp", False),
         ),
     )

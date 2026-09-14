@@ -106,7 +106,7 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 | 通道凭据 | 项目根 `.env` | `QQ_AppID` / `QQ_AppSecret` / `SPOOLKIT_TELEGRAM_TOKEN`… |
 | 能力标定值（预算、超时、上限） | `.agent/limits.json` | `spool limits --set 名字=值`，`spool limits` 看现值与来源 |
 | 授权策略 | `.agent/policy.json` | `spool policy --set auto`（三档：ask/auto/deny）|
-| 额外可读目录 | 命令行 | `--allow-read D:\别的地方`（只放开读，写入仍限工作区）|
+| 额外关联目录 | 本机指令 | `spool extra add D:\别的地方`（读放开，写要确认；聊天里加不了）。一次性：`--allow-read` |
 
 能力标定值全部可覆盖、可回退：默认值是按本机 27B + 8K 窗口实测出来的，
 换模型或换机器就该改，`spool limits` 会告诉你每个值"现在是多少、从哪来"。

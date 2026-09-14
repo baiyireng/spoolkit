@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -43,6 +43,19 @@ class WebAccess:
     policy: WebPolicy
     fetch: Callable[[str, WebPolicy], Fetched] = fetch_text
     # 抓取器可注入：测试里换成本地假货，不去打真网络。
+    # 本轮研究会话抓过（或命中缓存也算抓过）的来源。磁盘缓存跨会话还在，
+    # 主循环的 web_read 必须看这个集合，不能只看磁盘——T2 量过：只看磁盘
+    # 时它跳过 research，连读十几块。
+    released: set[str] = field(default_factory=set)
+
+    def release(self, *tokens: str) -> None:
+        for token in tokens:
+            text = str(token).strip()
+            if text:
+                self.released.add(text)
+
+    def is_released(self, *tokens: str) -> bool:
+        return any(str(token).strip() in self.released for token in tokens if token)
 
     def entry_for(self, url: str, refresh: bool = False):
         if not refresh:
@@ -79,6 +92,7 @@ def web_fetch_spec(access: WebAccess) -> ToolSpec:
             return ToolResult(ok=False, content=f"没抓成：{exc}")
         catalog_text = catalog(entry)
         first = read_chunk(access.root, entry.key, 0) or ""
+        access.release(entry.url, entry.key, url)
         return ToolResult(
             ok=True,
             content=(
@@ -112,11 +126,26 @@ def web_fetch_spec(access: WebAccess) -> ToolSpec:
     )
 
 
-def web_read_spec(access: WebAccess) -> ToolSpec:
+def _source_and_chunk(args: dict) -> tuple[str, int]:
+    """拆 research 交回的 url#块号。主循环常把整串塞进 source。"""
+    source = str(args.get("source") or "").strip()
+    from_ref = None
+    if "#" in source:
+        base, frag = source.rsplit("#", 1)
+        if base and frag.isdigit():
+            source, from_ref = base, int(frag)
+    raw = args.get("chunk")
+    if raw is None or raw == "":
+        index = 0 if from_ref is None else from_ref
+    else:
+        index = int(raw)
+    return source, index
+
+
+def web_read_spec(access: WebAccess, *, verify_only: bool = False) -> ToolSpec:
     def handler(args: dict) -> ToolResult:
-        source = str(args.get("source") or "").strip()
         try:
-            index = int(args.get("chunk") or 0)
+            source, index = _source_and_chunk(args)
         except (TypeError, ValueError):
             return ToolResult(ok=False, content="chunk 要给块的序号（从 0 开始）。")
         entry = load(access.root, source)
@@ -124,8 +153,18 @@ def web_read_spec(access: WebAccess) -> ToolSpec:
             return ToolResult(
                 ok=False,
                 content=(
-                    f"没有抓过这个来源：{source}。先用 web_fetch 抓一次"
-                    "（URL 与目录里给的 key 都能用来查）。"
+                    f"没有抓过这个来源：{source}。先抓一次再读："
+                    "主循环调 research（question + urls）；"
+                    "研究会话调 web_fetch。"
+                    "（URL 与目录里给的 key 都能用来查。）"
+                ),
+            )
+        if verify_only and not access.is_released(entry.url, entry.key, source):
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"本地有缓存也不行：{entry.url} 还没经本轮 research 交出来。"
+                    "主循环的 web_read 只用来核对引用；先调 research。"
                 ),
             )
         body = read_chunk(access.root, entry.key, index)
@@ -145,13 +184,19 @@ def web_read_spec(access: WebAccess) -> ToolSpec:
     return ToolSpec(
         name="web_read",
         description=(
-            "取之前抓过的某个网页的**某一块**（序号来自 web_fetch 给的目录）。"
+            "取之前抓过的某个网页的**某一块**。"
+            "块号来自 research 交回的引用（url#块号）或 web_fetch 给的目录。"
+            "没抓过的页不要用它开局——主循环先调 research；"
+            "磁盘上有缓存也一样，那只说明以前抓过，不表示本轮已经研究过。"
             "一次一块——整份读回来等于把上下文让给一个网页。"
         ),
         parameters={
             "type": "object",
             "properties": {
-                "source": {"type": "string", "description": "URL 或 web_fetch 给的 key"},
+                "source": {
+                    "type": "string",
+                    "description": "URL、url#块号，或 research/web_fetch 给的 key",
+                },
                 "chunk": {"type": "integer", "description": "块序号，从 0 开始"},
             },
             "required": ["source", "chunk"],

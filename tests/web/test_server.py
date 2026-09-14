@@ -54,7 +54,20 @@ def test_首页返回HTML(server: str) -> None:
 def test_状态接口返回快照(server: str) -> None:
     status, body = _get(server + "/state")
     assert status == 200
-    assert json.loads(body)["running"] is False
+    payload = json.loads(body)
+    assert payload["running"] is False
+    assert payload["pairings"] == []
+
+
+def test_状态接口带上待批准的配对码(server: str, tmp_path: Path) -> None:
+    from spoolkit.bridge.pairing import Pairings
+
+    code = Pairings(tmp_path / ".agent" / "bridge-pairings.json").ensure_code(
+        "openid-web"
+    )
+    status, body = _get(server + "/state")
+    assert status == 200
+    assert json.loads(body)["pairings"] == [{"code": code, "user": "openid-web"}]
 
 
 def test_发起运行返回202(server: str) -> None:

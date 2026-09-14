@@ -25,6 +25,7 @@ from spoolkit.cli.runtime import (
     assemble_loop,
     build_approver,
     web_access,
+    web_search_backend,
     build_lessons,
     open_memory,
     provider_gateway,
@@ -97,7 +98,7 @@ def run(args: argparse.Namespace) -> int:
         notice = pending_notice(project_root)
         if notice:
             print(notice)
-    pending = PendingChanges(project_root)
+    pending = PendingChanges(project_root, extra_roots=read_roots)
     if args.events:
         return _events_mode(args, project_root, gateway, window, pending)
     if args.delegate:
@@ -200,7 +201,9 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             on_event=writer.handle,
             read_roots=_resolve_read_roots(args, project_root)[0],
             web=web_access(args, project_root),
+            search=web_search_backend(args),
             mcp=not getattr(args, "no_mcp", False),
+            from_channel=getattr(args, "from_channel", False),
         ),
     )
     result = loop.run(args.goal, resume=args.resume)
@@ -273,7 +276,9 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             lessons=build_lessons(memory) if memory is not None else None,
             read_roots=read_roots,
             web=web_access(args, project_root),
+            search=web_search_backend(args),
             mcp=not getattr(args, "no_mcp", False),
+            from_channel=getattr(args, "from_channel", False),
         ),
     )
     checkpoint = loop.config.task_path("task")
@@ -408,23 +413,36 @@ def _plain_registry(project_root, pending, read_roots=()):
 
 
 def _resolve_read_roots(args, project_root: Path) -> tuple[tuple[Path, ...], list[str]]:
-    """把 --allow-read 解析成可读根，并剔掉不存在、或就在工作区内的。
+    """把配置里的关联目录和 `--allow-read` 合成可读根。
 
-    授权来自命令行，也就是来自用户——模型自己不能加目录。工作区内的路径
-    本来就读得到，重复授权只会让提示词变长。
+    配置来自本机 `spool extra add`（`.agent/read-roots.json`）；命令行是一次性
+    叠加。模型自己不能加目录。工作区内的路径本来就读得到，重复授权只会
+    让提示词变长。
     """
+    from spoolkit import readroots
+
     roots: list[Path] = []
     bad: list[str] = []
-    for raw in getattr(args, "allow_read", []) or []:
+
+    def _take(raw) -> None:
         target = Path(raw).expanduser()
         if not target.exists() or not target.is_dir():
-            bad.append(raw)
-            continue
+            bad.append(str(raw))
+            return
         resolved = target.resolve()
+        if resolved == project_root or project_root in resolved.parents:
+            return
+        if resolved not in roots:
+            roots.append(resolved)
+
+    for item in readroots.existing(project_root):
+        resolved = item.resolve()
         if resolved == project_root or project_root in resolved.parents:
             continue
         if resolved not in roots:
             roots.append(resolved)
+    for raw in getattr(args, "allow_read", []) or []:
+        _take(raw)
     return tuple(roots), bad
 
 

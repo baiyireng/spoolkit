@@ -229,6 +229,15 @@ def make_verifier(
         # 实测给审查者灌了 50 个 ERROR，它据此写下的结论自然没有意义。
         if not changed:
             changed = [change.path for change in pending.items()]
+        workspace_changed = [
+            path for path in changed if not Path(path).is_absolute()
+        ]
+        if changed and not workspace_changed:
+            return ToolResult(
+                ok=True,
+                content="这一批改动都在关联目录里，工作区测试未跑。",
+            )
+        changed = workspace_changed
         # 一次改多处时逐处验几个范围是能力标定值：本机 27B 上 5 个范围
         # 之后「验证比任务本身还贵」；强模型/快机器上可以多验几个。
         max_scopes = int((overrides or {}).get("max_scopes") or MAX_SCOPES)

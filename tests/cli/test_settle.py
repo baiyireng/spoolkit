@@ -128,6 +128,39 @@ def test_无人值守时越界的丢掉_范围内的照落(tmp_path: Path) -> No
     assert not (tmp_path / "44_merge_counts" / "counter.py").exists()
 
 
+def test_关联目录即使auto加全范围也不自动落盘(tmp_path: Path) -> None:
+    """关联目录的写必须等人确认——`--scope **` 也不能把它变成自动。"""
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "docs"
+    workspace.mkdir()
+    outside.mkdir()
+    pending = PendingChanges(workspace, extra_roots=(outside,))
+    write_file_spec(workspace, pending).handler(
+        {"path": str(outside / "a.txt"), "content": "x\n"}
+    )
+    action, written = settle(
+        pending, AUTO, ("**",), ask=lambda _: "n"
+    )
+    assert action == DECLINED
+    assert written == []
+    assert not (outside / "a.txt").exists()
+
+
+def test_关联目录确认之后落到外面那个目录(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "docs"
+    workspace.mkdir()
+    outside.mkdir()
+    pending = PendingChanges(workspace, extra_roots=(outside,))
+    write_file_spec(workspace, pending).handler(
+        {"path": str(outside / "a.txt"), "content": "hello\n"}
+    )
+    action, written = settle(pending, ASK, (), ask=lambda _: "y")
+    assert action == CONFIRMED
+    assert (outside / "a.txt").read_text(encoding="utf-8") == "hello\n"
+    assert written
+
+
 def test_无人值守时全是越界仍然拒绝(tmp_path: Path) -> None:
     pending = PendingChanges(tmp_path)
     write_file_spec(tmp_path, pending).handler(

@@ -1,17 +1,15 @@
-"""工作区级的"额外可读目录"。
+"""工作区级的关联目录。
 
-`--allow-read` 原本只能**启动时**给：一次运行一个参数。可真实用法是"我临时想
-让你看看 D:\\我的小说 里有什么"——为这个去重启桥、重新配对，代价太高，于是用户
-在聊天里说"我在这里授权你访问那个目录也不行吗"，而当时**确实不行**。
-
-这个文件就是那个记下来的地方：`.agent/read-roots.json`。聊天里
-`/allow-read <目录>` 写进去，之后每一轮都自动把 `--allow-read` 带上。
+记在 `.agent/read-roots.json`。**只能由本机指令写入**（`spool extra add` /
+`spool extra remove`），远程聊天里的 `/allow-read` 加不进去——那边小模型
+分不清危险操作。
 
 两条刻意的边界：
 
-- **只读**。这里记的目录进的是 `--allow-read`（读得到、写不到），不是工作区——
-  工作区身份（记忆、索引、检查点都挂在它上面）不该被一句聊天消息换掉。
-- **只留还存在的目录**。盘符拔了、目录删了，记着也没用，读的时候直接过滤掉。
+- **工作区身份不变。** 记忆、索引、检查点仍挂在主工作区上；关联目录不是换绑。
+- **只留还存在的目录。** 盘符拔了、目录删了，记着也没用，读的时候直接过滤掉。
+- **写走待确认。** 读可以直接做；写进 PendingChanges，确认前不落盘，
+  即使 `--policy auto` 也不自动写关联目录。
 """
 
 from __future__ import annotations
@@ -58,7 +56,7 @@ def _save(root: Path | str, roots: list[str]) -> None:
 
 
 def add(root: Path | str, directory: str) -> tuple[list[str], str]:
-    """加一个可读目录。返回（全部记录, 给人看的一句话）。"""
+    """加一个关联目录。返回（全部记录, 给人看的一句话）。"""
     target = str(Path(directory).expanduser().resolve())
     path = Path(target)
     if not path.is_dir():
@@ -68,7 +66,9 @@ def add(root: Path | str, directory: str) -> tuple[list[str], str]:
         return roots, f"已经在列表里了：{target}"
     roots.append(target)
     _save(root, roots)
-    return roots, f"已允许读取：{target}（只读；下一轮生效）"
+    return roots, (
+        f"已关联：{target}（读放开，写要确认后才落盘；下一轮生效）"
+    )
 
 
 def remove(root: Path | str, directory: str) -> tuple[list[str], str]:
@@ -78,16 +78,19 @@ def remove(root: Path | str, directory: str) -> tuple[list[str], str]:
         return roots, f"列表里没有：{target}"
     roots.remove(target)
     _save(root, roots)
-    return roots, f"已撤销读取：{target}"
+    return roots, f"已取消关联：{target}"
 
 
 def render(root: Path | str) -> str:
     roots = load(root)
     if not roots:
-        return "当前没有额外可读目录。要放开：/allow-read <目录>"
-    lines = ["额外可读目录（只读）："]
+        return (
+            "当前没有关联目录。要放开：在服务器上 `spool extra add <目录>`"
+            "（聊天里加不了）。"
+        )
+    lines = ["关联目录（读放开，写要确认后才落盘）："]
     for item in roots:
         mark = "" if Path(item).is_dir() else "（已不存在）"
         lines.append(f"  {item}{mark}")
-    lines.append("撤销：/allow-read --remove <目录>")
+    lines.append("撤销：spool extra remove <目录>")
     return "\n".join(lines)

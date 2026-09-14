@@ -131,7 +131,9 @@ def _render_lessons(pushed: list[tuple[int, str]]) -> str:
     return "\n".join(lines)
 
 
-def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
+def build_workflow(
+    registry: ToolRegistry, read_roots: tuple = (), *, from_channel: bool = False
+) -> str:
     """按实际注册的工具生成工作方式说明。
 
     只写「什么时候用哪个」，不写工具内部怎么实现——模型不需要知道索引是树
@@ -193,7 +195,10 @@ def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
             )
         )
 
-    if registry.get("web_fetch") is not None:
+    if registry.get("research") is not None:
+        # 有独立研究会话时，主循环不该自己把整页灌进来。不可信边界仍要说。
+        lines.append(T.WORKFLOW_RESEARCH)
+    elif registry.get("web_fetch") is not None:
         # 紧跟"可读目录"：两者都是"工作区之外的输入"，而网页那条多一层
         # 不可信的边界，必须紧挨着说。
         lines.append(T.WORKFLOW_WEB)
@@ -210,6 +215,9 @@ def build_workflow(registry: ToolRegistry, read_roots: tuple = ()) -> str:
         # 放在最后几条之前：它讲的是「怎么把活干完」的选择，
         # 而不是某类工具的用法，跟前面的查询/改动规则并列。
         lines.append(T.WORKFLOW_DISPATCH)
+
+    if from_channel:
+        lines.append(T.WORKFLOW_CHANNEL_SCOPE)
 
     lines.append(T.WORKFLOW_NO_GUESS)
     return "\n".join(lines)
@@ -316,6 +324,7 @@ class AgentLoop:
         sources: Any | None = None,
         persona: str = "",
         on_event: Callable[[str, dict], None] | None = None,
+        from_channel: bool = False,
     ) -> None:
         self.gateway = gateway
         self.tokenizer = tokenizer
@@ -334,6 +343,7 @@ class AgentLoop:
         self.environment_blocked = False
         self.persona = persona
         self.on_event = on_event
+        self.from_channel = from_channel
         # 预算里的每个比例都是能力标定值：走本次运行的覆盖，而不是各写一份常量。
         self._budget = Budget(
             window=config.context_window, overrides=config.overrides
@@ -360,7 +370,9 @@ class AgentLoop:
         assembler = Assembler(tokenizer=self.tokenizer, budget=self._budget)
         system_text = SYSTEM_PROMPT.format(
             tools=self.registry.describe(),
-            workflow=build_workflow(self.registry, self.read_roots),
+            workflow=build_workflow(
+                self.registry, self.read_roots, from_channel=self.from_channel
+            ),
         )
         if self.persona:
             system_text = f"{self.persona}\n\n{system_text}"
@@ -788,14 +800,18 @@ class AgentLoop:
                             f"step{state.step}: 重复调用第 {level} 次：{call.name}"
                         )
                     repeats = level
-                    self._emit(
-                        "tool",
-                        {
-                            "name": call.name,
-                            "ok": result.ok,
-                            "detail": " ".join(result.content.split())[:200],
-                        },
-                    )
+                    payload = {
+                        "name": call.name,
+                        "ok": result.ok,
+                        "detail": " ".join(result.content.split())[:200],
+                    }
+                    if result.usage is not None:
+                        # 派发 / research 自己花的账。总用量把它们加进去了，
+                        # 量「主循环省了多少」时要从这里减回来。
+                        payload["prompt_tokens"] = result.usage.prompt_tokens
+                        payload["completion_tokens"] = result.usage.completion_tokens
+                        payload["calls"] = result.usage.calls
+                    self._emit("tool", payload)
                     status = "成功" if result.ok else "失败"
                     if _is_repeat_output(result.content, prefetched, seen_outputs):
                         # 相同正文仍在提示词里（预取或上一轮），只是不再重复第二遍。
