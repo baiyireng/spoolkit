@@ -1850,5 +1850,352 @@ Web 改成 Cursor 对话页、QQ 发附件，这轮都不做。
 Agent 对这些目录能读、能提写，但写必须待确认；`--policy auto` 也不自动落。
 聊天里 `/allow-read` 仍然加不了。桥把这份名单转成 `--allow-read` 带给子进程。
 
+## 2026-09-15 · `spool hub`：网页壳 + 可选 bridge，模型不通出横幅
+
+别人机器也能用的可观察后台，第一刀只做产品内核：
+
+- `spool hub` 起现有 `serve`；给了 `--channel` 才 Popen 一条 `spool bridge`。
+  退出只杀自己拉起的孩子。llama-server / SOCKS 隧道不进产品、不写死本机路径。
+- `/state` 带 `health.model`（llama.cpp 打 `/props`，3 秒缓存；假模型/Gemini 不探本机端口）。
+  探活失败不得弄挂状态接口。
+- 页面顶部独立红横幅（`#health`），不复用「应用/拒绝」。通↔断时 hub 终端一行。
+
+**没做（当时）**：`spool service` / 配方表；桥给最近聊天发断开通知（默认关）。
+
+全套 **1293 passed**。浏览器（`hub` 18765/18766）：假模型横幅 `display:none`；`--base-url http://127.0.0.1:1` 出现「模型连不上…timed out」，侧栏「应用/拒绝」仍在。hub 终端对应打出「模型通」/「模型不通」。
+
+## 2026-09-15 · `spool service`：本机配方表
+
+第二刀：用户配置 `[[service]]`（name / command / health）。`command` 可空=只探不启。
+`spool service list|start|stop`；pid 记在用户状态目录，停只杀自己拉起的。
+hub / serve 把配方探活放进 `health.services`，不通走同一条横幅和终端一行。
+`spool config --set` 保留 `[[service]]` 与 `[[mcp]]`。
+
+没写表就不探隧道。gguf / ssh 主机仍不进仓库。
+
+浏览器：隔离配置写 `[[service]] name=tunnel health=tcp:127.0.0.1:1`，hub 终端
+`tunnel不通`，页面横幅 `tunnel连不上`，「应用/拒绝」仍在。全套 **1305 passed**。
+
+## 2026-09-15 · 桥断开通知（默认关）
+
+通→断才给**最近一次放过的**聊天发一句。默认关；`--notify-disconnect` 或
+`spool config --set notify_disconnect=true`。开机已经断了的不算，冷却 5 分钟
+不刷屏。没人说过话就不发。全套 **1312 passed**。
+
+## 2026-09-15 · 本机配方真跑：`spool hub --channel qqbot`
+
+用户配置写了 `[[service]]` llama / tunnel（路径和跳板只在本机，不进仓库）。
+旧 `serve` 占着 8765，hub 用 **8767**。`--root` 用已批准 QQ 用户的工作区，
+`--bridge-proxy socks5://127.0.0.1:1080 --notify-disconnect`。
+
+**通的时候**
+
+- `spool service start llama`：已经通了，不重复拉起（本机 llama-server 原先就在 8080）。
+- `spool service start tunnel`：拉起 ssh `-D 1080`；`list` 通。
+- `spool bridge --channel qqbot --check` 走 SOCKS：换到 token、网关 `wss://api.sgroup.qq.com/websocket`。
+- hub 终端：`模型通` / `llama通` / `tunnel通` / `QQ 网关已连上`。
+- 页面 `http://127.0.0.1:8767/`：`#health` `display:none`。`/state` 里 model、llama、tunnel、bridge 全绿。
+
+**人为停隧道**
+
+- 第一次 `spool service stop tunnel`：**pid 文件清了，ssh 还在听 1080**。
+  Windows 上 `os.kill(SIGTERM)` 失败就直接 return，后面的 `taskkill` 走不到；
+  `os.kill(pid, 0)` 还会把活着的 ssh 判成死。后头改成有 pid 就 `taskkill /T /F`。
+- 停掉之后：hub 终端 `tunnel不通`；页面红横幅 `tunnel连不上（127.0.0.1:1080）：timed out`；
+  侧栏「应用/拒绝」还在。
+- 通知：`--notify-disconnect` 开了，打出 `断开了，但还没有最近聊天可通知`。
+  这次进程里没人发过 QQ，按设计不推手机。要真发到最近聊天，得先在 QQ 里说一句再断。
+- QQ 网关随隧道一起断。原先 `httpx.ConnectError` 不在重连捕获里，线程直接死；
+  改成 `except Exception` 之后会 `QQ 网关出错（ConnectError…），5 秒后重连`。
+  隧道再拉起来：`tunnel通`，网关再次 `已连上`，横幅消失。
+
+hub 仍在 8767 跑。没 commit。
+
+## 2026-09-15 · 远程通道只限制文件，不禁查资料
+
+QQ 上问某地近两天天气，agent 回「只能读写本工作区、联网等操作被禁止」。
+这和预期不符：工作区边界只该卡住**文件读写**。
+
+两处叠在一起：
+
+1. 工作方式写成「默认只能碰当前工作区」，首条说明也没把查资料划出去，
+   小模型把天气当成「没说在哪的文件」一刀砍。
+2. `spool hub --channel` 没带 `--web`，通道子进程没有 `research`，更像「被禁」。
+
+改了：措辞改成只限制文件；通道子进程**默认**带 `--web`（`--no-web` 关掉）。
+`spool run` / 网页壳仍然默认关。要生效得重启正在跑的 hub。
+
+随后：限制说明被**发给用户**了。那是错的——边界只该进工作方式。普通消息
+不再先推一段声明；`/help`、`/status`、`/allow-read` 才说明。
+
+## 2026-09-15 · QQ 查天气：结论有了，回消息握手超时
+
+问「最近两天厦门的天气」。agent 收到了、也抓了天气页，但回 QQ 时
+`ConnectTimeout`（SOCKS SSL 握手超时），桥只打日志「回复发送失败」，
+用户一直等。随后隧道断了。
+
+补了：网络类失败把答复留下，通道通了再补发（平台 11001 这类不留）。
+这次那条结论已经丢了，要再问一遍。
+
+## 2026-09-15 · T3 接上 Tavily：先搜，摘要够就停
+
+天气那次没搜索 API，27B 猜 `tianqi.com`，整页夹广告，还按页开研究会话。
+T3 插头一直空着。这一刀接上 **Tavily**（标题+网址+摘要，不抓结果页）。
+
+key：`TAVILY_API_KEY` / `SPOOLKIT_TAVILY_API_KEY` / 工作区 `.env` /
+用户配置 `tavily_api_key`（手写；`spool config --set` 不进白名单，避免打到终端，
+但会保留文件里已有的这一行）。`--web-search-api tavily` 可省：有 key 就装。
+`research` 不给 urls 时先搜，摘要交给**一轮**会话；够就停，不够再抓最相关一页。
+没 key 仍说「没配搜索，只能直接给 URL」。全套 **1332 passed**。
+
+本机还没配 Tavily key，所以这一刀是接上插头，不是天气真跑。
+
+## 2026-09-15 · 三端默认联网：QQ / 网页 / CLI 同一套
+
+原规格里 **三端互通**（网页壳、聊天通道、CLI 都是同一个 `run` 子进程）。
+联网工具当初默认关，是提示注入那一层的保守选择；后来 QQ 查天气把通道
+改成默认开，网页壳和 `spool run` 却还要显式 `--web`——同一套能力在
+三个入口上表现不一样，网页上问天气就会陷入 `tool_help` 空转。
+
+现在 `--web` 全入口默认开，`--no-web` 关掉。`hub` / `serve` / `mcp` /
+`bridge` 都把这个开关转给子进程。网页内容仍按不可信资料处理，内网仍硬拦。
+
+要生效得重启正在跑的 hub。全套 **1336 passed**。
+
+## 2026-09-15 · 通道上下文：蒸馏 + 最近几轮
+
+QQ / 网页每条消息是一次新 `run`。`--events` 原先不跑蒸馏，热记忆空；
+下一句「那天气呢」也对不上上一句「厦门」——完整历史不该塞回窗口，
+但指代需要最近几轮。
+
+改了：`--events` / `chat` 结束也蒸馏（假模型仍不装，脚本不够分）；
+本轮提示拼上截断后的最近往来（当前句不重复）。条数
+`recent_chat_turns`（默认 6），每条 `recent_chat_chars`（默认 240）。
+工具往返仍每轮重置。`recall` 查更早的冷记忆。全套 **1343 passed**。
+
+---
+
+## 2026-09-16 · dogfood：让 Agent 开发网页版贪吃蛇
+
+**任务**：在独立工作区 `D:\workSpace\scratch_snake` 里做一个网页版贪吃蛇
+（单个 `index.html`，内联 CSS+JS，方向键控制，吃食物变长，撞墙 game over，
+能重新开始）。`--autonomous --web --policy auto --scope **`，9 步计划。
+
+**模型**：Qwen3.8-27B-UD-IQ2_S，8K 窗口，35.7 t/s。
+
+**结果：失败。** 9 步只完成第 1 步（骨架），第 2 步陷入 `write_file` 死循环
+被督导收手，agent 退出。`--resume --plan` 阻塞在失败步骤，不自动重试。
+
+**暴露的问题（8 条）**
+
+1. **`--autonomous` 不自动设 `--policy auto`**。第一次没带 `--policy auto`，
+   写操作全被「无人值守运行，且本次运行没有自动授权，已拒绝」，agent 白跑；
+   被拒后直接跳下一步，失败被静默吞掉（不重试、不报告）。autonomous 只管
+   「自动续期步数」，不管「自动授权写操作」，语义割裂。建议 autonomous
+   默认 policy=auto，或至少启动时检测 policy=ask + autonomous 给警告。
+
+2. **`write_file` 死循环（27B 分步编辑的典型问题）**。第 2 步连续 4 次
+   `write_file` 失败，督导收手。根因：模型生成的 patch 格式不匹配，反复
+   用同样方式尝试。单步墙钟 355s（6 分钟），全是模型时间。建议失败 2 次后
+   切换策略（整体重写 vs patch），或给更明确的格式反馈。
+
+3. **增量修改破坏已有代码**。第 2 步重写文件时把第 1 步正确的 CSS 改坏了：
+   `100vh`→`100%`、`400px`→`400`、`2px`→`2`（CSS 单位全丢）。模型整文件
+   重写时没完整保留原有内容。即使后续步骤完成，页面也渲染不对。
+
+4. **步骤失败后无自动重试，resume 阻塞**。第 2 步 failed 后 agent 退出；
+   `--resume --plan` 阻塞在失败步骤，提示「先处理它」，不重试也不跳过。
+   阻塞比盲目跳过好，但缺「重试失败步骤」的选项。
+
+5. **`read_diagnosis` 失败被静默跳过**。第 1 步 `request_diagnosis` 后
+   `read_diagnosis` 失败（「诊断请求还没有报告」），agent 直接跳到完成，
+   没等待或重试。诊断是异步的，read 太快报告还没生成。
+
+6. **distill 产出为 0**（印证 roadmap T6 缺口）。第 1 步归档「提升 0 条，
+   下沉 0 条」。骨架步骤确实没什么值得记，但说明 distill 对简单步骤是空的。
+
+7. **`progress.md` 过于简略**。只记了 `write_file index.html`，没记诊断、
+   失败、死循环。回头看任务历史信息不足。
+
+8. **每步墙钟极长**。第 1 步 30s，第 2 步 355s，全是模型时间。9 步计划
+   顺利也要 5–10 分钟，有失败重试更久。27B + 8K 每子步完整推理，累积慢。
+
+**量到的数**
+- 拆解：1 次调用 / 673 输入 + 1941 输出 token / 53–74s
+- 第 1 步：6 子步 / 12316 输入 + 881 输出 / 30.7s（模型 30.3s）
+- 第 2 步：355.3s（模型 350.1s），4 次 write_file 失败
+- 生成速度：35.7 t/s
+
+**结论**：27B 在「分步编辑单文件」这个场景上不稳——拆得越细，每步都要
+重新读文件 + 生成 patch，patch 格式一错就死循环。贪吃蛇这种小项目，
+「一次写完整个文件」可能比「分 9 步逐步加」更靠谱。后续可对比验证。
+
+---
+
+## 2026-09-16 · dogfood：MCP 协作——外部 agent 扮演用户指挥它干活
+
+**目的**：`spool mcp` 把 agent 挂成 MCP 服务端，让别的 agent 通过 MCP 协议
+扮演用户（下任务 + 审批改动），较真实模拟用户场景。
+
+**做法**：写了 `scripts/mcp_driver.py` 扮演外部 agent，通过 stdio JSON-RPC
+驱动 `spool mcp` 子进程。完整走握手 → 列工具 → `delegate_task` → 轮询
+`task_events` → 遇 `await` 调 `confirm_changes` → 到 `final`。
+
+**两个任务**
+1. 简单（建 hello.txt）：12s，成功。事件流完整可读。
+2. 贪吃蛇（mode=task 一次性完成）：553s（9 分钟），成功写出 175 行 index.html。
+
+**MCP 协作路径验证通过**
+- 5 个工具（`delegate_task`/`task_status`/`task_events`/`confirm_changes`/
+  `workspace_status`）全部可用。
+- 事件数据完整：`start`(session/goal/policy/window)、`step`(n)、
+  `tool`(name/ok/detail)、`usage`(steps/calls/token)、`diff`(path+完整diff)、
+  `await`(count)、`confirm`(applied/count)、`final`(ok/text/settled)。
+- **外部 agent 能看到完整 diff 文本**，据此决定是否 `confirm_changes`——
+  "扮演用户审批"的核心成立。
+- ask 模式下 agent 跑完逻辑才发 diff+await，外部 agent confirm 后任务结束。
+
+**发现的问题**
+
+1. **贪吃蛇代码 bug（27B 代码质量，非框架问题）**：`step()` 里没调 `draw()`，
+   `setInterval(step, 110)` 只更新逻辑不刷新画面——游戏在跑但画面不动。
+   印证 27B 一次写长文件会漏细节。
+
+2. **`task_status` 字段名与直觉不符**：`finished` 而非 `done`，`final.ok`
+   而非 `ok`。外部 agent 不读源码会误判任务状态（我的驱动脚本就中招了，
+   一直显示 `done=False ok=None` 其实任务早成功了）。建议在工具 description
+   里写清返回字段，或加 `done`/`ok` 别名。
+
+3. **对比 autonomous 分步 vs MCP task 模式**：
+   - autonomous 分步：9 步计划，第 2 步 write_file 死循环，**失败**。
+   - MCP task 模式：一次性完成，18 子步，**成功**写出 175 行完整游戏。
+   - 印证上一条结论：27B「一次写完」比「分步加」靠谱。
+
+**量到的数**
+- hello 任务：2 步 / 2 调用 / 2695+82 token / 12s
+- 贪吃蛇：18 子步 / 553s / 4412 字节 175 行 index.html
+
+---
+
+## 2026-09-16 · 修复 dogfood 暴露的 5 个问题
+
+**背景**：上面两轮 dogfood（autonomous 分步贪吃蛇 + MCP 协作）暴露了 11 个
+问题，按优先级修了前 5 个。
+
+**改了什么**
+
+1. **autonomous 自动提权 policy=auto**（`cli/commands/run.py`）
+   `--autonomous` 时若用户没显式给 `--policy`，自动提为 `auto` 并打日志。
+   边界仍由 `--scope` 守。events 模式下不打散文。测试 3 条。
+
+2. **task_status 加 done/ok 顶层别名**（`web/runner.py`）
+   snapshot 里加 `done = finished`、`ok = final.get("ok")`。外部驱动者
+   不读源码就能判断「做完了没」「成功没」。老字段保留不破坏。测试 2 条。
+
+3. **编辑工具连续失败注入格式提示**（`agent/loop.py`）
+   新增 `edit_fail_streak` 计数器（跨步骤累计，成功清零）。≥2 时往工具
+   输出里追加 `_edit_fail_hint`：写清 write_file/replace_text/replace_lines
+   各自的常见错误和正确格式。打断「原样重试」死循环。测试 2 条。
+
+4. **resume 自动重试失败步骤一次**（`cli/commands/plan.py` + `agents/plan.py`）
+   PlanStep 加 `retries: int = 0`。`advance_plan` 遇到 failed 步骤且
+   `retries < 1` 时改回 pending 重跑，retries 递增。再失败才阻塞并报
+   「已自动重试 N 次仍未通过」。测试 3 条。
+
+5. **write_file 描述引导局部修改**（`tools/edit.py`）
+   描述改为：新建文件首选 write_file；改已有文件优先 replace_text/
+   replace_lines——整文件重写容易丢内容（实测 CSS 单位全丢）。测试 1 条。
+
+**量到的数**：全套 **1353 passed**（1 条 service flaky 重跑即过，与改动无关）。
+
+---
+
+## 2026-09-16 · 第二轮修复：任务设计模式对实现的影响
+
+**背景**：上面 5 个修复治的是「症状」（死循环、阻塞、丢内容）。这轮治的是
+「病根」——任务怎么拆、怎么路由、怎么验证，决定了 27B 能不能做对。
+
+**改了什么**
+
+1. **拆解提示词改为「功能单元」粒度**（`context/templates.py`）
+   DECOMPOSE 加两条要求：
+   - 每步是**可独立验证的功能单元**，不是技术切片。给了正反例
+     （贪吃蛇：别拆成「骨架→初始化→移动→…」，拆成「能动的最小游戏→加食物
+     →加 game over」）。
+   - 单文件任务每步优先整文件 write_file 而非 patch——绕开 patch 死循环。
+   测试 3 条。
+
+2. **任务路由：单文件新建走 task 不分步**（`cli/commands/plan.py`）
+   `_looks_like_single_file_task(goal)` 用正则检测「单个 xxx.html」「一个
+   app.py」类目标。命中就跳过拆解，构造单步计划直接执行——一次写完绕开
+   patch。不命中走正常拆解。测试 3 条。
+
+3. **验证降级：JS 抽出来 node --check**（`tools/verify.py` + `tools/exec.py`）
+   `make_verifier` 在没有 pytest 但改了 HTML 文件时，fallback 到 JS 语法
+   检查：从 `<script>` 抽出内联 JS，写临时文件，`node --check`。`exec.py`
+   白名单加 `node --check`（只允许 --check，不允许执行脚本）。测试 8 条。
+   边界：node 不在 PATH 时静默跳过；只查语法不查运行时逻辑。
+
+4. **行数校验防丢内容**（`tools/edit.py`）
+   `_propose` 在整文件重写已有文件时，若新行数 < 旧行数 × 70% 且旧行数
+   > 10，追加警告「从 N 行变成 M 行，确认没丢内容」。新建文件不警告，
+   小幅修改不警告。测试 3 条。
+
+**量到的数**：全套 **1369 passed**（同一条 service flaky 重跑即过）。
+
+**没做的**：
+- **浏览器级验证**（能不能跑起来、画面动不动）：需要 headless 浏览器，
+  重量级，留给下一轮。
+- **运行时逻辑检查**（step() 漏调 draw() 这类）：node --check 查不了，
+  要靠浏览器或 DOM 模拟。
+- **拆解质量评估**（拆得好不好）：没有自动判据，靠 dogfood 人看。
+
+---
+
+## 2026-09-16 · 第三轮修复：验证器惰性化 + 整文件重写硬拦截
+
+**背景**：第二轮修复后重跑贪吃蛇优化任务（改已有文件），暴露两个新问题。
+
+**改了什么**
+
+1. **验证器惰性化**（`tools/verify.py`）
+   `make_verifier` 原来在装配时检查 pending 里有没有 HTML 改动——但装配时
+   pending 是空的（agent 还没动手），所以 JS 验证器永远不被装配。改成：有
+   pytest 返回 pytest 验证器；没有 pytest 但 node 在 PATH 里，返回**惰性
+   JS 验证器**——每次调用时才检查 pending 里有没有 HTML 改动。测试 9 条。
+
+2. **node --check 限制 .js 后缀**（`tools/exec.py`）
+   dogfood 第二轮：agent 直接对 HTML 文件跑 `node --check index.html`，报
+   `ERR_UNKNOWN_FILE_EXTENSION`。白名单加检查：`node --check` 的文件必须
+   `.js` 后缀。HTML 要先提取 JS（验证器会自动做）。测试 2 条。
+
+3. **整文件重写减半硬拦截**（`tools/edit.py`）
+   dogfood 第二轮：175 行 index.html 重写成 117 行，丢了标题、overlay、
+   重启按钮。行数校验（< 70% 警告）是软提示，模型能忽略。加硬拦截：文件
+   > 30 行且新行数 < 旧行数 × 50% 时，返回 `ok=False`，撤销 pending 登记，
+   逼模型用 replace_text/replace_lines 做局部修改。测试 4 条。
+
+4. **提示词告诉 agent 不要自己验**（`context/templates.py`）
+   WORKFLOW_RUN 加一条："改完代码后系统会自动跑验证，你不需要自己提取
+   代码做 node --check——那只会因为试跑副本里没有你写的文件而失败。"
+   测试 1 条。
+
+**量到的数**：全套 **1377 passed**。
+
+**重跑结果**：贪吃蛇优化任务（改已有文件），自动验证触发了（step1/step6
+"自动验证 -> 通过"），"按方向键开始"功能实现了。但 agent 还是跑了
+`node --check index.html`（被白名单拦住），整文件重写被硬拦截后改用
+replace_text。功能达成，代码质量比上一轮好（没丢那么多内容）。
+
+---
+
+## 2026-09-17 · 监测与记忆计划已落盘
+
+计划 `docs/superpowers/plans/2026-09-17-monitor-and-memory.md` 已落盘。
+T6（`episode.summary` + 空 distill 兜底 + FTS OR）与 T7（工具名短环 / 路径振荡 /
+同关键词再搜 → 叫醒督导）代码已合并；T8 本地长文切块仍 **未开工**，不进本记忆计划。
+实测数字留待后续 dogfood 再补。
+
+
 
 

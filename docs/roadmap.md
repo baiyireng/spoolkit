@@ -20,8 +20,8 @@ Start-Process 'D:\llm\llama\cuda\llama-server.exe' -ArgumentList `
 $env:PYTHONIOENCODING='utf-8'
 .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider --basetemp="$env:TEMP\agents-dev-pytest"
 
-# ③ 跑一条任务（联网要显式开 --web）
-spool run --goal "把 D:\workSpace\agentWorkSpace 里的 txt 列出来" --web
+# ③ 跑一条任务（联网默认开，不要就 --no-web）
+spool run --goal "把 D:\workSpace\agentWorkSpace 里的 txt 列出来"
 ```
 
 `spool` 是**全局命令**（`uv tool install --editable .` 装的，指向本仓库源码），
@@ -138,6 +138,30 @@ Bing / Google CSE 任一，要 key）；**不绑死供应商**，没有 key 时�
 本机是 llama.cpp，多模态要用 `llama-mtmd-cli` / `--mmproj` 那条路。
 **建议**：先量"本地能跑哪个视觉模型、显存够不够"，再决定要不要做。
 **注意**：图片进上下文比文字更贵，按本项目的原则，先想清楚"取用"形态。
+
+### T6 · 回复结论落冷记忆（2026-09-17 已落地）
+
+**原缺口**：Agent 回复（`result.final`）不直接进可检索记忆，只经有损 distill；
+空条目时结论蒸发。FTS 整句短语让「刚才厦门多少度」打不中「厦门近两天约 28°C」。
+
+**已落地（见计划 `docs/superpowers/plans/2026-09-17-monitor-and-memory.md`）**：
+- A：`episode.summary` 带截断后的 `final`
+- 空 distill + 非空 final → 兜底一条低置信 fact（不改归纳提示词强迫产条）
+- FTS / episode 检索改为分词 OR
+- **不做 C**（transcript 整库进 recall）
+
+### T7 · 循环监测补强（2026-09-17 已落地）
+
+**目标**：机械层补上精确指纹抓不到的 soft loop 外壳，叫醒督导，不直接 stop。
+**已落地**：工具名短环（`write_file→run_command` 换参）、同路径内容振荡、同关键词再搜。
+**不做**：余弦 embedding、logprobs、完整执行状态机。
+
+### T8 · 本地长文切块通道（未开工，不进本记忆计划）
+
+**问题**：10M 中文小说不是任务记忆失败，是没有「网页同款」的外置语料取用。
+**方向**：复用 `fetch/store.py`（按标题切块 + 目录锚 + 按需读一块）到本地大文件；
+读过之后才允许 distill 几条 fact，source 指向块。向量库以后再说。
+**边界**：不进本记忆计划，也不把长文塞进热 `memory.md`——那是独立取用通道，需另开计划。
 
 ## 5. 已知问题 / 开放问题（别当它们是 bug 去瞎改）
 
