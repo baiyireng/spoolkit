@@ -73,6 +73,7 @@ class MemorySession:
         state: TaskState,
         outcome: str = "success",
         promote: Sequence[tuple[str, str]] = (),
+        final: str = "",
     ) -> ArchiveResult:
         """归档一次已结束的任务。"""
         return archive_task(
@@ -85,4 +86,5 @@ class MemorySession:
             outcome=outcome,
             promote=promote,
             overrides=self._overrides,
+            final=final,
         )

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from spoolkit import limits
 from spoolkit.agent.state import TaskState
 from spoolkit.llm.tokenizer import TokenCounter
 from spoolkit.memory.hot import hot_budget, read_hot, trim_to_budget, write_hot
@@ -29,10 +30,19 @@ class ArchiveResult:
     demoted: list[str] = field(default_factory=list)
 
 
-def summarize(state: TaskState) -> str:
+def summarize(
+    state: TaskState, final: str = "", max_final_chars: int = 400
+) -> str:
     """把任务状态压成一句话，作为事件摘要。"""
     steps = "、".join(state.done) if state.done else "无记录"
-    return f"{state.goal}：已完成 {steps}"
+    base = f"{state.goal}：已完成 {steps}"
+    clipped = (final or "").strip()
+    if not clipped:
+        return base
+    flat = " ".join(clipped.split())
+    if len(flat) > max_final_chars:
+        flat = flat[:max_final_chars] + "…"
+    return f"{base}\n结论：{flat}"
 
 
 def archive_task(
@@ -45,13 +55,15 @@ def archive_task(
     outcome: str = "success",
     overrides: dict | None = None,
     promote: Sequence[tuple] = (),
+    final: str = "",
 ) -> ArchiveResult:
     """归档一次已结束的任务。"""
+    max_final_chars = int(limits.resolve("episode_final_chars", overrides)[0])
     episode_id = add_episode(
         conn,
         session_id=session_id,
         task=state.goal,
-        summary=summarize(state),
+        summary=summarize(state, final=final, max_final_chars=max_final_chars),
         outcome=outcome,
     )
 

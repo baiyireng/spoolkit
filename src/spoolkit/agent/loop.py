@@ -1279,7 +1279,9 @@ class AgentLoop:
             except Exception as exc:
                 promote = []
                 trace.append(f"归纳失败（已忽略）: {type(exc).__name__}: {exc}")
-        result = self.memory.archive(state, outcome=outcome, promote=promote)
+        result = self.memory.archive(
+            state, outcome=outcome, promote=promote, final=final
+        )
         trace.append(
             f"归档: 事件#{result.episode_id}，提升 {len(result.promoted)} 条，"
             f"下沉 {len(result.demoted)} 条"

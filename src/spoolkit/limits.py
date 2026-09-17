@@ -152,6 +152,10 @@ KNOBS: tuple[Knob, ...] = (
         "recent_chat_chars", 240, CAPABILITY,
         "上述每条往来最多留多少字；再长截断，避免把整段答复塞回窗口",
     ),
+    Knob(
+        "episode_final_chars", 400, CAPABILITY,
+        "事件摘要里任务结论最多留多少字（按本机 27B / 8K 标定）",
+    ),
     Knob("system_quota", 900, CAPABILITY, "系统提示的固定配额（token）"),
     Knob(
         "fixed_quota_cap", 0.20, CAPABILITY,

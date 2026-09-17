@@ -192,6 +192,38 @@ def test_归档结果报告提升与下沉(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_归档摘要带上结论(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    archive_task(
+        conn,
+        tmp_path / "memory.md",
+        _state(),
+        session_id="s1",
+        counter=OfflineTokenCounter(),
+        context_window=8000,
+        final="厦门近两天约 28°C。",
+    )
+    row = conn.execute("SELECT summary FROM episode").fetchone()
+    assert "28°C" in row["summary"]
+    assert "给 parser 加增量更新" in row["summary"]
+    conn.close()
+
+
+def test_没有结论时摘要不含结论行(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    archive_task(
+        conn,
+        tmp_path / "memory.md",
+        _state(),
+        session_id="s1",
+        counter=OfflineTokenCounter(),
+        context_window=8000,
+    )
+    row = conn.execute("SELECT summary FROM episode").fetchone()
+    assert "结论：" not in row["summary"]
+    conn.close()
+
+
 def test_失败任务的事件outcome为失败(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     archive_task(
