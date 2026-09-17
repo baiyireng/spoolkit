@@ -80,6 +80,22 @@ KNOBS: tuple[Knob, ...] = (
         "督导一次最多给多少步：给太多等于取消上限",
     ),
     Knob(
+        "name_cycle_window", 12, CAPABILITY,
+        "工具名短环看最近多少步（按本机 27B / 8K 标定）",
+    ),
+    Knob(
+        "name_cycle_at", 1, CAPABILITY,
+        "检测到工具名短环即升级给督导（1 = 有环就叫）",
+    ),
+    Knob(
+        "oscillation_at", 1, CAPABILITY,
+        "同路径内容来回覆盖几次就升级给督导",
+    ),
+    Knob(
+        "same_query_at", 3, CAPABILITY,
+        "同一检索词出现几次就升级给督导",
+    ),
+    Knob(
         "done_inline", 8, CAPABILITY,
         "状态块里「已完成」列几条；全量在 .agent/progress.md（每轮注入 = 每个请求的税）",
     ),
@@ -128,6 +144,14 @@ KNOBS: tuple[Knob, ...] = (
     ),
     Knob("retrieval_ratio", 0.15, CAPABILITY, "检索内容占有效预算的比例"),
     Knob("lessons_ratio", 0.10, CAPABILITY, "历史教训占有效预算的比例"),
+    Knob(
+        "recent_chat_turns", 6, CAPABILITY,
+        "通道/网页带进本轮提示的最近几条往来（不是工具往返；强模型可加）",
+    ),
+    Knob(
+        "recent_chat_chars", 240, CAPABILITY,
+        "上述每条往来最多留多少字；再长截断，避免把整段答复塞回窗口",
+    ),
     Knob("system_quota", 900, CAPABILITY, "系统提示的固定配额（token）"),
     Knob(
         "fixed_quota_cap", 0.20, CAPABILITY,

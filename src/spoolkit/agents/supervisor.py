@@ -66,6 +66,9 @@ class Evidence:
 
     刻意不含主循环的对话历史与推理过程：它要判断的是「这些动作有没有进展」，
     读到推理过程只会让它附和那个推理——和审查者必须是独立上下文同一个理由。
+
+    机械监测字段 cycle / oscillations / same_query 的窗口与阈值见登记表
+    "name_cycle_window"、"name_cycle_at"、"oscillation_at"、"same_query_at"。
     """
 
     goal: str
@@ -81,6 +84,9 @@ class Evidence:
     no_edit: int = 0
     tokens: int = 0
     asking: str = "预算用完了"
+    cycle: str = ""
+    oscillations: int = 0
+    same_query: int = 0
     # 只给它看最近这些行。再往前翻，它看到的是同一些动作的重复。
     trace_tail: int = 40
 
@@ -106,6 +112,9 @@ class Evidence:
             "repeats": self.repeats,
             "no_edit": self.no_edit,
             "tokens": self.tokens,
+            "cycle": self.cycle,
+            "oscillations": self.oscillations,
+            "same_query": self.same_query,
         }
 
 

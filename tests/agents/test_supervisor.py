@@ -95,3 +95,20 @@ def test_证据只带最近的那些行() -> None:
     assert rendered["trace"].count("step") == 40
     assert "step499" in rendered["trace"]
     assert "step459" not in rendered["trace"]
+
+
+def test_证据带监测字段() -> None:
+    evidence = _evidence(cycle="write_file→run_command", oscillations=1, same_query=3)
+    rendered = evidence.render()
+    assert rendered["cycle"] == "write_file→run_command"
+    assert rendered["oscillations"] == 1
+    assert rendered["same_query"] == 3
+
+
+def test_监测计数旋钮默认值() -> None:
+    from spoolkit import limits
+
+    assert limits.resolve("name_cycle_window") == (12.0, "默认")
+    assert limits.resolve("name_cycle_at") == (1.0, "默认")
+    assert limits.resolve("oscillation_at") == (1.0, "默认")
+    assert limits.resolve("same_query_at") == (3.0, "默认")

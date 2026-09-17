@@ -41,8 +41,29 @@ def test_分解模板要求声明改动范围() -> None:
     assert "scope" in T.DECOMPOSE
 
 
+def test_分解模板要求功能单元粒度() -> None:
+    # dogfood 暴露：技术切片拆法导致一步崩全盘崩 + patch 死循环
+    assert "功能单元" in T.DECOMPOSE
+    assert "技术切片" in T.DECOMPOSE
+
+
+def test_分解模板引导单文件整文件写入() -> None:
+    # dogfood 暴露：分步改同一文件每步生成 patch 容易死循环
+    assert "整文件" in T.DECOMPOSE or "write_file" in T.DECOMPOSE
+
+
+def test_工作方式告诉agent不要自己提取JS验证() -> None:
+    # dogfood 暴露：agent 自己提取 JS 做 node --check，试跑副本里没有文件，死循环
+    assert "node --check" in T.WORKFLOW_RUN
+    assert "自动跑验证" in T.WORKFLOW_RUN or "自动验" in T.WORKFLOW_RUN
+
+
 def test_归纳模板要求lesson带触发词() -> None:
     # 没有触发词的教训永远推不出去，等于白记
     assert "trigger" in T.DISTILL
     assert "必须" in T.DISTILL
+
+
+def test_督导模板要求读短环() -> None:
+    assert "短环" in T.SUPERVISE or "振荡" in T.SUPERVISE
 
