@@ -532,6 +532,7 @@ class AgentLoop:
         recent: list[str] = []
         # 监测窗口：每次工具调用记一条，跨步累计；任务结束随函数丢掉。
         sights: list[ToolSight] = []
+        cycle_streak = 0
         # 编辑工具连续失败计数。跨步骤累计，成功一次就清零。
         # 达到 2 时往工具输出里追加格式提示——模型看到错误后只会原样重试，
         # 不告诉它正确格式它就死循环（dogfood：贪吃蛇第 2 步连续 4 次 write_file 失败）。
@@ -580,8 +581,11 @@ class AgentLoop:
             )
             # A→A 是重复或漫游已经在管的事；短环要的是换参的 A→B→A→B。
             distinct = {name for name in report.cycle.split("→") if name}
-            cycle_hits = 1 if len(distinct) > 1 else 0
-            stuck_on_cycle = self.config.supervise and cycle_hits >= cycle_at
+            if len(distinct) > 1:
+                cycle_streak += 1
+            else:
+                cycle_streak = 0
+            stuck_on_cycle = self.config.supervise and cycle_streak >= cycle_at
             stuck_on_oscillation = (
                 self.config.supervise and report.oscillations >= oscillation_at
             )
@@ -652,7 +656,8 @@ class AgentLoop:
                     roam_intervene_at = max(
                         no_edit_steps * 2, roam_intervene_at * 2
                     )
-                    cycle_at = max(cycle_hits * 2, cycle_at * 2)
+                    cycle_at = max(cycle_streak * 2, cycle_at * 2)
+                    cycle_streak = 0
                     oscillation_at = max(
                         report.oscillations * 2, oscillation_at * 2
                     )
@@ -722,7 +727,8 @@ class AgentLoop:
                         roam_intervene_at = max(
                             no_edit_steps * 2, roam_intervene_at * 2
                         )
-                        cycle_at = max(cycle_hits * 2, cycle_at * 2)
+                        cycle_at = max(cycle_streak * 2, cycle_at * 2)
+                        cycle_streak = 0
                         oscillation_at = max(
                             report.oscillations * 2, oscillation_at * 2
                         )

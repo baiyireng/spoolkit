@@ -237,6 +237,32 @@ def test_名字环触发督导(tmp_path: Path) -> None:
     assert any("短环" in line for line in asked), asked
 
 
+def test_短环续期后还会再叫督导(tmp_path: Path) -> None:
+    """问过一次把门槛加倍，但换参回路还在转时必须还能再叫。
+
+    把短环压成 0/1 再加倍，1>=2 会永远为假——write_file↔run_command
+    换参回路只能叫醒一次。连续计数（像 no_edit_steps）才能在续期后
+    再次越阈。
+    """
+    loop = _build(
+        tmp_path,
+        [
+            _turn("看", [_look()]),
+            _turn("读", [_read()]),
+            _turn("看", [_look()]),
+            _turn("读", [_read()]),
+            _verdict("extend", steps=10, reason="先给几步看它能不能自己停"),
+            _turn("看", [_look()]),
+            _turn("读", [_read()]),
+            _verdict("stop", reason="还在短环里，收手"),
+        ],
+        max_steps=20,
+    )
+    result = loop.run("做点什么")
+    asked = [line for line in result.trace if "叫督导" in line and "短环" in line]
+    assert len(asked) >= 2, result.trace
+
+
 def test_督导说完成时带上它给的话(tmp_path: Path) -> None:
     loop = _build(
         tmp_path,
