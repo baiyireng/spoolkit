@@ -66,9 +66,6 @@ class Evidence:
 
     刻意不含主循环的对话历史与推理过程：它要判断的是「这些动作有没有进展」，
     读到推理过程只会让它附和那个推理——和审查者必须是独立上下文同一个理由。
-
-    机械监测字段 cycle / oscillations / same_query 的窗口与阈值见登记表
-    "name_cycle_window"、"name_cycle_at"、"oscillation_at"、"same_query_at"。
     """
 
     goal: str
