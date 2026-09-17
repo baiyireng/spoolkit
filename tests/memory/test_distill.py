@@ -206,3 +206,19 @@ def test_切分深度有上限() -> None:
     distill(model, state)
     # 深度 2 时最多 4 个叶节点，加上重试不应失控。
     assert len(model.requests) <= 16
+
+
+def test_空条目且有结论时兜底一条fact() -> None:
+    model = _model([_entries()])
+    final = "得分规则是每吃一个 +10"
+    result = distill(model, _state(), final=final)
+    assert len(result.entries) == 1
+    assert result.entries[0][0] == "fact"
+    assert "+10" in result.entries[0][1]
+    assert result.entries[0][2] == ""
+    assert result.raw == _entries()
+
+
+def test_空条目且无结论时仍为空() -> None:
+    assert distill(_model([_entries()]), _state()).entries == []
+    assert distill(_model([_entries()]), _state(), final="   ").entries == []

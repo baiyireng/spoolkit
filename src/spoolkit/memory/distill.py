@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from spoolkit import limits
 from spoolkit.agent.state import TaskState
 from spoolkit.context import templates as T
 from spoolkit.llm.gateway import ModelGateway
@@ -219,6 +220,14 @@ def _distill(
     return []
 
 
+def _clip_final(text: str, max_chars: int) -> str:
+    """把任务结论裁到事件摘要允许的篇幅。"""
+    flat = " ".join(text.split())
+    if len(flat) > max_chars:
+        flat = flat[:max_chars] + "…"
+    return flat
+
+
 def distill(
     gateway: ModelGateway,
     state: TaskState,
@@ -247,6 +256,11 @@ def distill(
         0,
         stats,
     )
+    clipped_final = final.strip()
+    if not entries and clipped_final:
+        knob_entry = limits.knob("episode_final_chars")
+        max_chars = int(knob_entry.default) if knob_entry else 400
+        entries = [("fact", _clip_final(clipped_final, max_chars), "")]
     return DistillResult(
         entries=entries,
         rounds=stats["rounds"],
