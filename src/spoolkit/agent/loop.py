@@ -7,11 +7,13 @@
 装配器最多只能装到有效预算，用实际装入量判断触发线永远不会触发。
 """
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from spoolkit.agent.state import TaskState, clear_state, load_state, save_state
 from spoolkit import limits as _limits
@@ -116,6 +118,56 @@ def _parse_feedback(failure: ParseFailure) -> str:
     if failure.kind == "empty_turn":
         return T.EMPTY_TURN_FEEDBACK
     return f"上一轮输出无法解析：{failure.reason}。请只输出规定的 JSON 对象。"
+
+
+def _edit_fail_hint(streak: int) -> str:
+    """编辑工具连续失败时注入的格式提示。
+
+    dogfood 暴露的问题：write_file / replace_text 连续失败后，模型只会原样
+    重试——它看到的是错误信息，但不知道正确格式应该长什么样。这里把
+    常见错误原因和正确做法直接告诉它，打断死循环。
+    """
+    return (
+        f"⚠ 编辑工具已连续失败 {streak} 次。不要再原样重试，换一种做法：\n"
+        "- write_file 失败：确认 path 是相对工作区的路径（不是绝对路径），"
+        "content 是文件完整内容（不是 diff）。\n"
+        "- replace_text 失败：old 片段必须在文件里唯一存在。"
+        "先 read_file 看原文，把缩进、空格、引号都对上；"
+        "不唯一就多带几行上下文让它唯一。\n"
+        "- replace_lines 失败：start_line/end_line 是 1 起的行号，"
+        "end_line ≥ start_line，不能超出文件总行数。\n"
+        "- 如果文件不存在，用 write_file 新建，不要用 replace_*。\n"
+        "- 如果连续失败 3 次以上，考虑先 read_file 重新确认文件内容再动手。"
+    )
+
+
+def _tool_sight(call: ToolCall, ok: bool) -> ToolSight:
+    """从一次工具调用抽出监测层要的那几个字段。"""
+    path = call.arguments.get("path")
+    path_s = path if isinstance(path, str) else ""
+    query = ""
+    for key in ("query", "goal", "pattern"):
+        value = call.arguments.get(key)
+        if isinstance(value, str) and value:
+            query = value
+            break
+    content_hash = ""
+    if call.name in ("write_file", "replace_text", "replace_lines"):
+        text = ""
+        for key in ("content", "new", "new_text"):
+            value = call.arguments.get(key)
+            if isinstance(value, str) and value:
+                text = value
+                break
+        if text:
+            content_hash = hashlib.sha1(text.encode()).hexdigest()[:12]
+    return ToolSight(
+        name=call.name,
+        path=path_s,
+        query=query,
+        content_hash=content_hash,
+        ok=ok,
+    )
 
 
 def _render_lessons(pushed: list[tuple[int, str]]) -> str:
@@ -478,6 +530,12 @@ class AgentLoop:
         last_signature = ""
         repeats = 0
         recent: list[str] = []
+        # 监测窗口：每次工具调用记一条，跨步累计；任务结束随函数丢掉。
+        sights: list[ToolSight] = []
+        # 编辑工具连续失败计数。跨步骤累计，成功一次就清零。
+        # 达到 2 时往工具输出里追加格式提示——模型看到错误后只会原样重试，
+        # 不告诉它正确格式它就死循环（dogfood：贪吃蛇第 2 步连续 4 次 write_file 失败）。
+        edit_fail_streak = 0
         no_edit_steps = 0
         empty_turns = 0
         overflow_retried = False
@@ -486,6 +544,9 @@ class AgentLoop:
         # 而不是设一个「隔几步问一次」的定时器。
         intervene_at = int(self.config.limit("repeat_intervene_at"))
         roam_intervene_at = int(self.config.limit("no_edit_intervene_at"))
+        cycle_at = int(self.config.limit("name_cycle_at"))
+        oscillation_at = int(self.config.limit("oscillation_at"))
+        same_query_at = int(self.config.limit("same_query_at"))
         edits_made = 0
         tool_calls_made = 0
         stopped_by = ""
@@ -513,13 +574,46 @@ class AgentLoop:
             stuck_on_roam = (
                 self.config.supervise and no_edit_steps >= roam_intervene_at
             )
-            if state.step >= limit or stuck_on_repeat or stuck_on_roam:
+            report = inspect(
+                sights,
+                window=int(self.config.limit("name_cycle_window")),
+            )
+            # A→A 是重复或漫游已经在管的事；短环要的是换参的 A→B→A→B。
+            distinct = {name for name in report.cycle.split("→") if name}
+            cycle_hits = 1 if len(distinct) > 1 else 0
+            stuck_on_cycle = self.config.supervise and cycle_hits >= cycle_at
+            stuck_on_oscillation = (
+                self.config.supervise and report.oscillations >= oscillation_at
+            )
+            stuck_on_query = (
+                self.config.supervise and report.same_query >= same_query_at
+            )
+            if (
+                state.step >= limit
+                or stuck_on_repeat
+                or stuck_on_roam
+                or stuck_on_cycle
+                or stuck_on_oscillation
+                or stuck_on_query
+            ):
                 # 两个触发点，同一件事：机械层已经说了有事，而模型自己没纠正。
                 # 这是**要判断**的点，不是失败点——原先的处理是停下来提示用户
                 # `--resume`，那等于把判断成本推给用户，还把一件事拆成两次对话。
                 exhausted = state.step >= limit
                 if exhausted:
                     asking = "这一轮的步数预算用完了，任务还没结束"
+                elif stuck_on_cycle:
+                    asking = (
+                        f"短环：工具路径在 {report.cycle} 打转"
+                        "（参数每次都不同，精确指纹抓不到）"
+                    )
+                elif stuck_on_oscillation:
+                    asking = (
+                        f"同一文件内容来回覆盖 {report.oscillations} 次，"
+                        "净效应可能为零"
+                    )
+                elif stuck_on_query:
+                    asking = f"同一检索词已经查了 {report.same_query} 次"
                 elif stuck_on_roam:
                     asking = f"它已经连续 {no_edit_steps} 步只看不写，没有任何产出"
                 else:
@@ -541,6 +635,9 @@ class AgentLoop:
                     no_edit=no_edit_steps,
                     tokens=prompt_tokens + completion_tokens,
                     asking=asking,
+                    cycle=report.cycle,
+                    oscillations=report.oscillations,
+                    same_query=report.same_query,
                 )
                 supervisor_seconds += time.time() - _supervisor_started
                 if verdict is not None:
@@ -554,6 +651,13 @@ class AgentLoop:
                     intervene_at = max(repeats * 2, intervene_at * 2)
                     roam_intervene_at = max(
                         no_edit_steps * 2, roam_intervene_at * 2
+                    )
+                    cycle_at = max(cycle_hits * 2, cycle_at * 2)
+                    oscillation_at = max(
+                        report.oscillations * 2, oscillation_at * 2
+                    )
+                    same_query_at = max(
+                        report.same_query * 2, same_query_at * 2
                     )
                     if exhausted:
                         stopped_by = "督导没能给出结论（调用失败或结论不合格式）"
@@ -617,6 +721,13 @@ class AgentLoop:
                         intervene_at = max(repeats * 2, intervene_at * 2)
                         roam_intervene_at = max(
                             no_edit_steps * 2, roam_intervene_at * 2
+                        )
+                        cycle_at = max(cycle_hits * 2, cycle_at * 2)
+                        oscillation_at = max(
+                            report.oscillations * 2, oscillation_at * 2
+                        )
+                        same_query_at = max(
+                            report.same_query * 2, same_query_at * 2
                         )
             # 强制收敛：连续若干步只查看不修改时，把「继续查」这个选项从
             # 语法里拿掉。实测这个模型对文字提醒完全免疫（重复提醒、拦截
@@ -777,6 +888,7 @@ class AgentLoop:
                     seen = recent.count(signature)
                     level = max(repeats, seen)
                     result = self._invoke_guarded(call, repeats, seen)
+                    sights.append(_tool_sight(call, result.ok))
                     tool_calls_made += 1
                     if result.usage is not None:
                         # 工具自己花的模型开销（派发那一趟）也要记账：
@@ -792,9 +904,12 @@ class AgentLoop:
                     if result.ok and call.name in EDIT_TOOLS:
                         edited = True
                         edits_made += 1
+                        edit_fail_streak = 0
                         path = call.arguments.get("path")
                         if isinstance(path, str) and path:
                             changed.append(path)
+                    elif not result.ok and call.name in EDIT_TOOLS:
+                        edit_fail_streak += 1
                     if level >= self.config.limit("repeat_warn_at"):
                         trace.append(
                             f"step{state.step}: 重复调用第 {level} 次：{call.name}"
@@ -833,6 +948,15 @@ class AgentLoop:
                     trace.append(
                         f"step{state.step}: {repeated} 条工具输出的内容与上面重复，"
                         "没有重复计入上下文"
+                    )
+                # 编辑工具连续失败 ≥2 次：追加格式提示，打断「原样重试」死循环。
+                # 模型看到错误后只会用同样方式再试——不告诉它正确格式，它就转不出来。
+                if edit_fail_streak >= 2:
+                    hint = _edit_fail_hint(edit_fail_streak)
+                    outputs.append(hint)
+                    trace.append(
+                        f"step{state.step}: 编辑工具连续失败 {edit_fail_streak} 次，"
+                        "已注入格式提示"
                     )
                 history.append(Message(role="tool", content="\n".join(outputs)))
 
@@ -950,6 +1074,9 @@ class AgentLoop:
         no_edit: int,
         tokens: int,
         asking: str,
+        cycle: str = "",
+        oscillations: int = 0,
+        same_query: int = 0,
     ) -> Verdict | None:
         """问一次督导。关着、或者它没能给出结论，都返回 None。
 
@@ -976,6 +1103,9 @@ class AgentLoop:
             no_edit=no_edit,
             tokens=tokens,
             asking=asking,
+            cycle=cycle,
+            oscillations=oscillations,
+            same_query=same_query,
         )
         verdict = supervise(
             self.gateway,

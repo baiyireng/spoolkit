@@ -38,6 +38,10 @@ def _look() -> dict:
     return {"name": "list_dir", "arguments": {"path": "."}}
 
 
+def _read() -> dict:
+    return {"name": "read_file", "arguments": {"path": "a.py"}}
+
+
 def _build(tmp_path: Path, script: list, **kwargs) -> AgentLoop:
     (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
     registry = ToolRegistry()
@@ -208,6 +212,29 @@ def test_督导说完成后按成功收尾(tmp_path: Path) -> None:
     assert result.finished is True
     assert "自动验证已通过" in result.final
     assert any("督导判断已完成" in line for line in result.trace)
+
+
+def test_名字环触发督导(tmp_path: Path) -> None:
+    """交替 list_dir / read_file 时签名每次都不同，重复计数抓不到。
+
+    四拍之后名字环是 list_dir→read_file；督导要被叫醒，且 asking 得说清
+    这是短环——否则它只会在 trace 里看到「又读了一次」。
+    """
+    loop = _build(
+        tmp_path,
+        [
+            _turn("看", [_look()]),
+            _turn("读", [_read()]),
+            _turn("看", [_look()]),
+            _turn("读", [_read()]),
+            _verdict("stop", reason="短环打转，这条路走不通"),
+        ],
+        max_steps=20,
+    )
+    result = loop.run("做点什么")
+    asked = [line for line in result.trace if "叫督导" in line]
+    assert asked, result.trace
+    assert any("短环" in line for line in asked), asked
 
 
 def test_督导说完成时带上它给的话(tmp_path: Path) -> None:
