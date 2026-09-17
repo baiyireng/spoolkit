@@ -7,6 +7,7 @@ from spoolkit.memory.store import (
     init_memory_schema,
     list_memories,
     normalize_for_fts,
+    search_episodes,
     search_memories,
 )
 from spoolkit.store.db import open_db
@@ -75,6 +76,23 @@ def test_中文检索不误命中(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     add_memory(conn, kind="fact", text="自动归档整理历史内容")
     assert search_memories(conn, "渲染") == []
+    conn.close()
+
+
+def test_中文部分词也能召回(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    add_memory(conn, kind="fact", text="厦门近两天约 28°C")
+    hits = search_memories(conn, "刚才厦门多少度")
+    assert any("28" in item.text for item in hits)
+    conn.close()
+
+
+def test_事件摘要能按结论数字搜到(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    add_episode(conn, "s1", "查天气", "查天气：已完成 无记录\n结论：厦门近两天约 28°C。", "success")
+    rows = search_episodes(conn, "厦门 温度")
+    assert rows
+    assert "28" in rows[0]["summary"]
     conn.close()
 
 

@@ -84,10 +84,22 @@ def normalize_for_fts(text: str) -> str:
     return _CJK.sub(lambda match: f" {match.group(0)} ", text)
 
 
-def _phrase_query(query: str) -> str:
-    """把查询规范化并转成 FTS5 短语查询，避免多词被当成 OR。"""
-    tokens = normalize_for_fts(query).split()
-    return '"' + " ".join(tokens) + '"'
+def _match_query(query: str) -> str:
+    """把查询规范化并转成 FTS5 OR 匹配：任一分词命中即可。"""
+    tokens = [t for t in normalize_for_fts(query).split() if len(t) >= 1]
+    if not tokens:
+        return ""
+    if len(tokens) == 1:
+        return f'"{tokens[0]}"'
+    return " OR ".join(tokens)
+
+
+_EPISODE_TOKEN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+|[^\s\u3400-\u9fff\uf900-\ufaff]+")
+
+
+def _episode_query_tokens(query: str) -> list[str]:
+    """按空白与非空白 CJK 连续串切分 episode 检索词。"""
+    return [t for t in _EPISODE_TOKEN.findall(query.strip()) if len(t) >= 1]
 
 
 def init_memory_schema(conn: sqlite3.Connection) -> None:
@@ -169,7 +181,7 @@ def search_memories(conn: sqlite3.Connection, query: str) -> list[Memory]:
         rows = conn.execute(
             "SELECT m.* FROM memory_fts f JOIN memory m ON m.id = f.rowid"
             " WHERE memory_fts MATCH ?",
-            (_phrase_query(query),),
+            (_match_query(query),),
         ).fetchall()
     except sqlite3.OperationalError:
         return []
@@ -229,12 +241,22 @@ def search_episodes(
     """
     if not query.strip():
         return []
-    needle = f"%{query.strip()}%"
+    tokens = _episode_query_tokens(query)
+    if not tokens:
+        return []
+    clauses: list[str] = []
+    params: list[str | int] = []
+    for token in tokens:
+        needle = f"%{token}%"
+        clauses.append("(task LIKE ? OR summary LIKE ?)")
+        params.extend([needle, needle])
+    params.append(limit)
+    where = " OR ".join(clauses)
     return conn.execute(
         "SELECT task, summary, outcome, created_at FROM episode"
-        " WHERE task LIKE ? OR summary LIKE ?"
+        f" WHERE {where}"
         " ORDER BY id DESC LIMIT ?",
-        (needle, needle, limit),
+        params,
     ).fetchall()
 
 
