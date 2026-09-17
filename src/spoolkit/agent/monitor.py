@@ -37,7 +37,8 @@ def name_cycle(names: Sequence[str], window: int = 12) -> str:
 def path_oscillations(sights: Sequence[ToolSight]) -> int:
     by_path: dict[str, list[str]] = defaultdict(list)
     for sight in sights:
-        if sight.path:
+        # 只有 write/replace 才有 content_hash；读文件的空 hash 不参与振荡判定。
+        if sight.path and sight.content_hash:
             by_path[sight.path].append(sight.content_hash)
 
     count = 0

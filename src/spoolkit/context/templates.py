@@ -250,8 +250,10 @@ SUPERVISE = """你在监督一次 Agent 运行，判断它该接着走、改道�
 共消耗 {tokens} token。
 短环：{cycle}（空表示没有）；同路径内容振荡 {oscillations} 次；
 同一检索词最多重复 {same_query} 次。
-短环、振荡、重复查询是**机械层已经判定的打转**：只要这些数不是空/零，
+若当前情况是在问短环、振荡或重复查询，这些统计就是机械层已判定的打转，
 优先 action=redirect 或 stop，不要因为又看到 write_file 成功就 extend。
+若当前情况是别的（例如步数预算用完），机械统计仅供参考，按下方证据判
+extend/redirect/stop，勿因 cycle/oscillations/same_query 仍有残留非零就优先收手。
 
 它属于哪一种：
 

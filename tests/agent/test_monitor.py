@@ -39,6 +39,15 @@ def test_同路径内容来回覆盖算振荡() -> None:
     assert path_oscillations(sights) >= 1
 
 
+def test_读改写同路径不算振荡() -> None:
+    sights = [
+        ToolSight("read_file", path="index.html", content_hash=""),
+        ToolSight("write_file", path="index.html", content_hash="abc"),
+        ToolSight("read_file", path="index.html", content_hash=""),
+    ]
+    assert path_oscillations(sights) == 0
+
+
 def test_同关键词再搜() -> None:
     sights = [
         ToolSight("search_code", query="贪吃蛇 键盘"),
