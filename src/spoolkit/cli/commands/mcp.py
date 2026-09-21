@@ -11,25 +11,13 @@
 import argparse
 from pathlib import Path
 
+from spoolkit.cli.commands.serve import extra_from_serve_args
 from spoolkit.mcp.server import WorkspaceRunner, serve_stdio
 
 
 def mcp_command(args: argparse.Namespace) -> int:
     project_root = Path(args.root).resolve()
-    extra: list[str] = []
-    for flag, value in (
-        ("--provider", args.provider),
-        ("--model", args.model),
-        ("--base-url", args.base_url),
-        ("--script", args.script),
-        ("--proxy", args.proxy),
-        ("--policy", args.policy),
-        ("--scope", args.scope),
-    ):
-        if value:
-            extra += [flag, value]
-    for root in getattr(args, "allow_read", []) or []:
-        extra += ["--allow-read", root]
+    extra = extra_from_serve_args(args)
 
     runner = WorkspaceRunner(
         project_root,

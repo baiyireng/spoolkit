@@ -23,7 +23,7 @@ from spoolkit.tools.types import ToolResult, ToolSpec, Usage
 CONTRACT = (
     "按这四项交卷（不要写文件、不要跑命令）：\n"
     "结论：……\n"
-    "引用：<url>#<块号>，可多项，必须能用 web_read 按块号核对\n"
+    "引用：抓过的页写 <url>#<块号>；只根据搜索摘要作答则写 url（搜索摘要）\n"
     "不确定：……（没有就写「无」）\n"
     "继续：是/否（还要不要抓别的页）"
 )
@@ -98,7 +98,8 @@ def research_spec(
             "把整页留在自己上下文」的情况。"
             "这是一个动作，需要时才调，不是每轮必做的阶段。"
             "urls 选填；给了就按页做地图-归并（每页一个干净上下文，最后只合并要点）。"
-            "不给且配了搜索，就先搜再读；没配搜索就从问题里找 URL，"
+            "不给且配了搜索，就先搜，把标题+网址+摘要交给一轮会话——"
+            "摘要够就停，不够再抓最相关的一页。没配搜索就从问题里找 URL，"
             "或你把入口放进 urls。"
             f"一次最多看 {page_limit} 页，交回大约 {output_budget} token——"
             "都是能力标定，可用 limits 覆盖。"
@@ -146,11 +147,23 @@ def _run(
             hits = backend.search(question, page_limit)
         except SearchError as exc:
             return str(exc) or "没配搜索，只能直接给 URL。", Usage(0, 0, 0)
-        urls = [str(hit.url).strip() for hit in hits if getattr(hit, "url", "")]
-        if not urls:
+        if not any(str(getattr(hit, "url", "") or "").strip() for hit in hits):
             return "搜了但没有网址。换个说法，或直接把 URL 放进 urls。", Usage(
                 0, 0, 0
             )
+        result = run_role(
+            RESEARCHER,
+            TaskSpec(goal=_search_goal(question, hits), acceptance=CONTRACT),
+            gateway,
+            tokenizer,
+            registry,
+            config,
+            max_steps=steps,
+        )
+        text = result.final or "（研究会话没有产出）"
+        return _fit(text, tokenizer, output_budget), Usage(
+            result.prompt_tokens, result.completion_tokens, result.model_calls
+        )
     taken = urls[:page_limit]
     leftover = urls[page_limit:]
     notes: list[str] = []
@@ -239,3 +252,25 @@ def _fit(text: str, tokenizer: TokenCounter, budget: int) -> str:
     if low <= 0:
         return "…"
     return text[:low].rstrip() + "…"
+
+
+def _search_goal(question: str, hits) -> str:
+    """把搜索摘要交给一轮会话。摘要够就停，不必按条抓页。"""
+    lines = [
+        f"问题：{question}",
+        "下面是搜索 API 给的标题+网址+摘要（不是搜索引擎结果页）。",
+        "摘要已经够答就交卷，不要 web_fetch。",
+        "不够再 web_fetch 最相关的一页：先看目录，再用 web_read 取相关块。",
+        "不要编网址，不要去抓搜索引擎结果页。",
+        "从摘要交卷时引用写 url（搜索摘要）；抓过的页仍用 url#块号。",
+        "搜索结果：",
+    ]
+    for hit in hits:
+        title = str(getattr(hit, "title", "") or "").strip() or "（无标题）"
+        url = str(getattr(hit, "url", "") or "").strip()
+        snippet = " ".join(str(getattr(hit, "snippet", "") or "").split())
+        line = f"- {title} {url}"
+        if snippet:
+            line += f" — {snippet}"
+        lines.append(line)
+    return "\n".join(lines)

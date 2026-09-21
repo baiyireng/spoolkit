@@ -48,9 +48,12 @@ llama-server.exe -m <模型.gguf> --host 127.0.0.1 --port 8080 -c 8192 -ngl 99 -
 
 云端供应商（验证 agent 循环够用了）：项目根 `.env` 里写 `GEMINI_API_KEY=...`。
 
+网页搜索（`research` 先搜再读）要 Tavily key：同一份 `.env` 写 `TAVILY_API_KEY=...`，
+或用户配置里 `tavily_api_key = "..."`。没有 key 时只能直接给 URL，不会去抓搜索结果页。
+
 ## 3. 配一次，以后不用再打
 
-第一次运行会**弹一个向导**问你用哪个供应商（llama.cpp / Gemini / 假模型），
+第一次运行会**弹一个向导**问你用哪个供应商（llama.cpp / Gemini；假模型只用于测试回放，不能写代码）。
 每一条都可以回车跳过。想自己设也行：
 
 ```powershell
@@ -104,7 +107,7 @@ spool run --resume
 `--policy auto` 才在 `--scope` 范围内自动落盘，越界仍退回确认；`spool revert`
 可以回滚上一次写入。
 
-想看着它做，用网页壳：
+想看着它做，用网页壳（联网默认开，和 CLI / QQ 同一套）：
 
 ```powershell
 spool serve                  # 打开 http://127.0.0.1:8765/
@@ -117,6 +120,8 @@ spool serve                  # 打开 http://127.0.0.1:8765/
 
 注意区分两个代理：**`--proxy` 管模型供应商**出网，**`--bridge-proxy` 管聊天通道**
 自己出网（比如 QQ 平台有 IP 白名单，借云主机的 SOCKS5 出去，白名单就固定了）。
+本机这条 SOCKS 常写成用户配置 `[[service]]` 里的 `tunnel`（`ssh -D`），用
+`spool service start tunnel` 拉起；hub 只探活、不启。
 
 ## 7. 卡住了先查这里
 

@@ -22,10 +22,25 @@ from typing import Callable
 
 from spoolkit.bridge.channel import Channel, Incoming
 from spoolkit.bridge.commands import handle as handle_command
-from spoolkit.bridge.commands import workspace_scope_notice
 from spoolkit.bridge.pairing import ALLOWLIST, OPEN, PAIRING, Pairings
+from spoolkit.health import DisconnectWatch, down_line
 
 DEFAULT_MAX_CHARS = 4000
+OUTBOX_MAX = 8
+TRANSIENT_SEND = frozenset(
+    {
+        "ConnectTimeout",
+        "ConnectError",
+        "ReadTimeout",
+        "WriteTimeout",
+        "TimeoutException",
+        "NetworkError",
+        "ProxyError",
+        "ConnectionError",
+        "TimeoutError",
+        "OSError",
+    }
+)
 
 # 陌生发送者拿到配对码时的回复模板。口令要写得像人话：这条消息会原样出现在
 # 别人的聊天窗口里。
@@ -33,6 +48,11 @@ PAIRING_REPLY = (
     "这条通道还不认识你。把下面这个配对码给机器的主人，"
     "他在命令行执行 `spool approve {code}` 之后你就能用了：\n{code}"
 )
+
+
+def _transient_send(exc: BaseException) -> bool:
+    """隧道抖、握手超时这类，通了再发还有戏。平台业务错误没有。"""
+    return type(exc).__name__ in TRANSIENT_SEND
 
 
 @dataclass(frozen=True)
@@ -58,6 +78,8 @@ class Bridge:
         pairings: Pairings | None = None,
         access: str = PAIRING,
         root: Path | str = ".",
+        notify_disconnect: bool = False,
+        disconnect_cooldown: float = 300.0,
     ) -> None:
         self.channel = channel
         self.runner = runner
@@ -67,10 +89,18 @@ class Bridge:
         self.pairings = pairings
         self.access = access
         # 斜杠命令要改的是桥自己的状态，所以桥得知道工作区在哪。
-        # 远程通道只说明工作区边界，不在聊天里开放工作区外的读权限。
+        # 文件读写边界写在工作方式里给模型看，不推给用户。
         self.root = Path(root)
         self._last_conversation = ""
-        self._scoped: set[str] = set()
+        # 断开通知只发给**放过的**最近聊天，不发给还在等配对码的人。
+        self._notify_conversation = ""
+        self._watch = DisconnectWatch(
+            enabled=notify_disconnect,
+            cooldown=disconnect_cooldown,
+        )
+        # 发出去失败（隧道抖、握手超时）时把答复留下，通了再补发。
+        # 平台业务错误（比如 11001）补发也没用，不进这里。
+        self._outbox: list[tuple[str, str]] = []
         # 长任务跑完要能补一条消息回来：把"回给最近这个会话"的能力交给 runner。
         # 只有 AgentRunner 认这个接口，别的 runner（测试里的假货）不受影响。
         setter = getattr(runner, "set_notify", None)
@@ -82,6 +112,9 @@ class Bridge:
         gate = self._admit(message)
         if gate is not None:
             return gate
+        self._notify_conversation = (
+            message.conversation or self._notify_conversation
+        )
 
         text = message.text.strip()
         if not text:
@@ -100,10 +133,6 @@ class Bridge:
             return Reply(user=message.user, text=reply, accepted=False, reason="超长")
 
         try:
-            if self._announce_scope(message):
-                self._send(
-                    workspace_scope_notice(self.root), message.conversation
-                )
             answer = self.runner(text)
         except Exception as exc:  # noqa: BLE001 - 桥不该被 agent 的异常带崩
             answer = f"这一轮没跑起来：{type(exc).__name__}: {exc}"
@@ -112,14 +141,6 @@ class Bridge:
 
         self._send(answer or "（没有产出）", message.conversation)
         return Reply(user=message.user, text=answer, accepted=True)
-
-    def _announce_scope(self, message: Incoming) -> bool:
-        """每个会话只说一次工作区边界。斜杠命令自己会写，这里只管交给 agent 的话。"""
-        key = message.conversation or message.user
-        if key in self._scoped:
-            return False
-        self._scoped.add(key)
-        return True
 
     def _admit(self, message: Incoming) -> Reply | None:
         """准入判定。返回 None 表示放行，否则返回一条"不放行"的回复。
@@ -153,11 +174,43 @@ class Bridge:
         整个桥进程**直接退出**——于是"手机上发了消息没人理"变成了永久状态，
         而现场只剩下一个崩栈。发失败是可能发生的事（平台没开通这个能力、被动
         回复窗口过期、消息太长……），它该是一条日志，不是一次自杀。
+
+        真机再踩：查完天气 SOCKS 握手超时，结论已经有了但没发出去，用户一直
+        等。网络抖动要留下补发；平台拒绝不要。
         """
         try:
             self.channel.send(text, conversation)
         except Exception as exc:  # noqa: BLE001 - 通道各异，这里只要"别死"
             self._note(f"回复发送失败（{type(exc).__name__}）：{exc}")
+            if _transient_send(exc):
+                self._keep_outbox(text, conversation)
+
+    def flush_outbox(self) -> int:
+        """把刚才没发出去的答复再试一遍。通了发几条算几条。"""
+        if not self._outbox:
+            return 0
+        leftover: list[tuple[str, str]] = []
+        sent = 0
+        for text, dest in self._outbox:
+            if leftover:
+                leftover.append((text, dest))
+                continue
+            try:
+                self.channel.send(text, dest)
+            except Exception as exc:  # noqa: BLE001
+                self._note(f"补发仍失败（{type(exc).__name__}）：{exc}")
+                leftover.append((text, dest))
+                continue
+            sent += 1
+            self._note("补发了一条刚才没发出去的回复")
+        self._outbox = leftover
+        return sent
+
+    def _keep_outbox(self, text: str, conversation: str) -> None:
+        self._outbox.append((text, conversation))
+        overflow = len(self._outbox) - OUTBOX_MAX
+        if overflow > 0:
+            del self._outbox[:overflow]
 
     def run_once(self) -> list[Reply]:
         """把当前能取到的消息都处理一遍。"""
@@ -168,3 +221,16 @@ class Bridge:
             except Exception as exc:  # noqa: BLE001 - 一条坏消息不该终止长驻进程
                 self._note(f"处理消息失败（{type(exc).__name__}）：{exc}")
         return replies
+
+    def notify_disconnects(self, rows: list[dict]) -> list[str]:
+        """通→断时给最近聊天发一句。没开开关、没人说过话、冷却期内都不发。"""
+        sent: list[str] = []
+        dest = self._notify_conversation
+        for row in self._watch.edges(rows):
+            text = down_line(row)
+            if not dest:
+                self._note("断开了，但还没有最近聊天可通知")
+                continue
+            self._send(text, dest)
+            sent.append(text)
+        return sent

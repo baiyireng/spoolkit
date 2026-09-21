@@ -16,6 +16,16 @@
 `%APPDATA%\\spoolkit\\config.toml`，其它平台用 `~/.config/spoolkit/config.toml`。
 **不放在工作区里**：工作区是要提交、要分享的东西，不该承载某台机器的默认值。
 
+本机外接也写在这份文件的 `[[service]]` 里（不进仓库）。常见两段、名字可改：
+
+- **llama**：本机语言模型进程。hub / serve 按 `provider` / `base_url` 探活；
+  配方只方便 `spool service start/stop`，已经通了不重复拉起。
+- **tunnel**：给聊天通道出网的本机 SOCKS（通常是 `ssh -D`）。QQ 等平台有
+  IP 白名单时，借跳板把出口固定成那台主机；`spool hub --bridge-proxy
+  socks5://127.0.0.1:1080` 去连它。这和 `--proxy`（模型供应商）不是一回事。
+
+hub **只探活、不启**这些进程。没写这张表时，隧道不探、不拉。
+
 改名（`agents-dev` → `spoolkit`）时留了一层兼容：**新位置没有文件而旧位置有，
 就继续读旧的那份**。所以已经配好的人一个字都不用改；等他下次 `config --set`，
 配置写到新位置，旧的那份留在原地当备份（不再读）。
@@ -29,7 +39,15 @@ from pathlib import Path
 
 # 能配置的键。写成一个白名单而不是"想存什么存什么"：
 # 配置文件的键写错一个字母，症状是"设置了但没生效"，而那种问题最难查。
-KEYS: tuple[str, ...] = ("provider", "model", "base_url", "proxy", "script")
+KEYS: tuple[str, ...] = (
+    "provider",
+    "model",
+    "base_url",
+    "proxy",
+    "script",
+    "notify_disconnect",
+    "web_search_api",
+)
 
 # 对应的环境变量名：SPOOLKIT_<KEY 大写>。
 ENV_PREFIX = "SPOOLKIT_"
@@ -146,8 +164,16 @@ def _quote(value: str) -> str:
 
 
 def save(values: dict[str, str], path: Path | None = None) -> Path:
-    """写配置。只写白名单里的键，其余忽略。"""
+    """写白名单里的键，并保留 `[[mcp]]` / `[[service]]` 以及白名单以外的
+    顶层标量（例如人手写的 `tavily_api_key`）。
+
+    数组表不在 KEYS 里；以前整文件重写会把它们抹掉——
+    `spool config --set` 一次，外挂工具、本机配方和搜索 key 就丢了。
+    """
     target = path or config_path()
+    existing, error = read_config(target)
+    if error:
+        existing = {}
     target.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# spoolkit 的用户级默认配置。命令行与环境变量优先于这里。",
@@ -157,8 +183,44 @@ def save(values: dict[str, str], path: Path | None = None) -> Path:
     for key in KEYS:
         if key in values and values[key] != "":
             lines.append(f"{key} = {_quote(values[key])}")
+    for key, raw in existing.items():
+        if key in KEYS or key in ("mcp", "service"):
+            continue
+        if isinstance(raw, (str, int, float, bool)):
+            lines.append(f"{key} = {_toml_value(raw)}")
+    for table in ("mcp", "service"):
+        for item in existing.get(table) or []:
+            if not isinstance(item, dict):
+                continue
+            lines.append("")
+            lines.append(f"[[{table}]]")
+            lines.extend(_dump_table_item(item))
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
+
+
+def _toml_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        return _quote(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        inner = ", ".join(
+            f"{key} = {_toml_value(item)}" for key, item in value.items()
+        )
+        return "{ " + inner + " }" if inner else "{}"
+    return _quote(str(value))
+
+
+def _dump_table_item(item: dict) -> list[str]:
+    order = ("name", "command", "args", "env", "health")
+    keys = [key for key in order if key in item]
+    keys.extend(key for key in item if key not in keys)
+    return [f"{key} = {_toml_value(item[key])}" for key in keys]
 
 
 def resolve(key: str, flag: str = "", env: dict[str, str] | None = None) -> tuple[str, str]:
@@ -176,6 +238,14 @@ def resolve(key: str, flag: str = "", env: dict[str, str] | None = None) -> tupl
     if table.get(key):
         return table[key], f"配置文件 {effective_config_path()}"
     return "", "未设置"
+
+
+def flag_enabled(key: str, flag: bool = False) -> bool:
+    """开关：命令行 True 优先，否则看配置里像 true/1/yes/on 的值。默认关。"""
+    if flag:
+        return True
+    value, _ = resolve(key)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -215,3 +285,50 @@ def load_mcp_servers(path: Path | None = None) -> list[McpServer]:
             )
         )
     return servers
+
+
+@dataclass(frozen=True)
+class ExternalService:
+    """本机外接配方。写在用户配置的 `[[service]]` 里，不进仓库。
+
+    `command` 可空：空就只探测、不替你启动。地址、gguf 路径、ssh 主机
+    都由这台机器的人自己写，产品不绑死。常见名字的用途：`llama` 是本机
+    语言模型；`tunnel` 是通道出网的 SOCKS（配合 `--bridge-proxy`），不是
+    模型的 `--proxy`。
+    """
+
+    name: str
+    command: tuple[str, ...] = ()
+    health: str = ""
+
+
+def _parse_command(raw) -> tuple[str, ...]:
+    if raw is None or raw == "" or raw == []:
+        return ()
+    if isinstance(raw, str):
+        import shlex
+
+        return tuple(shlex.split(raw, posix=(os.name != "nt")))
+    if isinstance(raw, list):
+        return tuple(str(part) for part in raw)
+    return ()
+
+
+def load_services(path: Path | None = None) -> list[ExternalService]:
+    """读 `[[service]]` 段。读不到就当没有——配方是增强，不该挡住启动。"""
+    payload, _ = read_config(path)
+    items: list[ExternalService] = []
+    for item in payload.get("service") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        items.append(
+            ExternalService(
+                name=name,
+                command=_parse_command(item.get("command")),
+                health=str(item.get("health") or "").strip(),
+            )
+        )
+    return items

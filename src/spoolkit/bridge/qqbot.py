@@ -32,7 +32,7 @@ import httpx
 from spoolkit.bridge.channel import Incoming
 from spoolkit.bridge import credentials
 from spoolkit.bridge.ws import Timeout as WebSocketTimeout
-from spoolkit.bridge.ws import WebSocket, WebSocketError
+from spoolkit.bridge.ws import WebSocket
 
 TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 DEFAULT_API = "https://api.sgroup.qq.com"
@@ -271,7 +271,7 @@ class QQBotChannel:
             try:
                 self._run_gateway_once()
                 self._note("QQ 网关断开，5 秒后重连")
-            except (WebSocketError, OSError, RuntimeError) as exc:
+            except Exception as exc:  # noqa: BLE001 - 隧道一断 httpx.ConnectError 也会来
                 # 网络抖动不该把通道打死：退一步重连（resume 留给下一步优化——
                 # 断了之后 QQ 会把没收到的事件按 op 0 重发一段时间）。
                 self._note(f"QQ 网关出错（{type(exc).__name__}: {exc}），5 秒后重连")

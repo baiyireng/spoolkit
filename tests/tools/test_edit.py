@@ -207,3 +207,97 @@ def test_片段替换能删内容(tmp_path: Path) -> None:
     )
     pending.apply()
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "keep\n"
+
+
+def test_write_file描述引导局部修改(tmp_path: Path) -> None:
+    """dogfood 暴露：整文件重写会丢内容（CSS 单位全丢）。
+    描述里要引导模型改已有文件时优先用 replace_text/replace_lines。"""
+    pending = _pending(tmp_path)
+    desc = write_file_spec(tmp_path, pending).description
+    assert "replace_text" in desc
+    assert "replace_lines" in desc
+    # 要说清楚为什么：整文件重写容易丢内容
+    assert "丢掉" in desc or "丢" in desc
+
+
+def test_整文件重写行数大减时警告(tmp_path: Path) -> None:
+    """dogfood 暴露：重写 index.html 时 CSS 单位全丢（100vh→100%）。
+    行数大幅减少时提醒模型检查有没有丢内容。"""
+    original = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\n"
+    (tmp_path / "big.py").write_text(original, encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "big.py", "content": "x = 1\n"}  # 11 行 → 1 行
+    )
+    assert result.ok is True
+    assert "从 11 行变成 1 行" in result.content
+    assert "丢掉" in result.content
+
+
+def test_行数小幅变化不警告(tmp_path: Path) -> None:
+    """行数减少不到 30% 不警告——正常修改不该被噪音打扰。"""
+    original = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\n"
+    (tmp_path / "big.py").write_text(original, encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "big.py", "content": "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\n"}  # 11→8，减少 27%
+    )
+    assert result.ok is True
+    assert "丢掉" not in result.content
+
+
+def test_新建文件不警告(tmp_path: Path) -> None:
+    """新建文件没有"原有内容"可丢，不该警告。"""
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "new.py", "content": "x = 1\n"}
+    )
+    assert result.ok is True
+    assert "丢掉" not in result.content
+
+
+def test_整文件重写减半被硬拦截(tmp_path: Path) -> None:
+    """dogfood 第二轮：175 行重写成 117 行，丢标题/overlay/重启按钮。
+    新行数 < 旧行数 × 50% 且文件 > 30 行时直接拒绝，逼模型用 replace_text。"""
+    original = "\n".join(f"line{i}" for i in range(50)) + "\n"
+    (tmp_path / "big.py").write_text(original, encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "big.py", "content": "x = 1\ny = 2\n"}  # 50 行 → 2 行
+    )
+    assert result.ok is False
+    assert "拒绝" in result.content
+    assert "replace_text" in result.content or "replace_lines" in result.content
+
+
+def test_整文件重写减半时pending不登记(tmp_path: Path) -> None:
+    """硬拦截后 pending 里不应该有这个改动——防止绕过。"""
+    original = "\n".join(f"line{i}" for i in range(50)) + "\n"
+    (tmp_path / "big.py").write_text(original, encoding="utf-8")
+    pending = _pending(tmp_path)
+    write_file_spec(tmp_path, pending).handler(
+        {"path": "big.py", "content": "x = 1\n"}
+    )
+    assert len(pending) == 0
+
+
+def test_整文件重写减不到一半不拦截(tmp_path: Path) -> None:
+    """减少不到 50% 不拦截——正常修改不该被挡。"""
+    original = "\n".join(f"line{i}" for i in range(50)) + "\n"
+    (tmp_path / "big.py").write_text(original, encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "big.py", "content": "\n".join(f"line{i}" for i in range(30)) + "\n"}
+    )  # 50 → 30，减少 40%
+    assert result.ok is True
+
+
+def test_小文件减半不拦截(tmp_path: Path) -> None:
+    """文件 < 30 行时不拦截——小文件重写风险低。"""
+    original = "\n".join(f"line{i}" for i in range(20)) + "\n"
+    (tmp_path / "small.py").write_text(original, encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "small.py", "content": "x = 1\n"}  # 20 → 1
+    )
+    assert result.ok is True  # 小文件放行

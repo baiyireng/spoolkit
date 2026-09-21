@@ -9,15 +9,20 @@ SSE 每写完一条都要 flush：不 flush 的话事件攒在缓冲里，
 
 import json
 import queue
+import sys
+import threading
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Sequence
 
+from spoolkit.health import describe_change, describe_service_change, probe_from_extra, probe_services
 from spoolkit.web.page import HTML
 from spoolkit.web.runner import Runner
 
 KEEPALIVE_SECONDS = 15
 MAX_BODY = 64 * 1024
+HEALTH_POLL_SECONDS = 5.0
 
 
 def _handler_for(runner: Runner):
@@ -136,15 +141,88 @@ def serve(
     port: int = 8765,
     session: str = "cli",
     extra_args: Sequence[str] = (),
+    extra_health: Callable[[], dict] | None = None,
 ) -> None:
     """启动服务，直到被中断。"""
-    runner = Runner(project_root, session=session, extra_args=list(extra_args))
+    runner = Runner(
+        project_root,
+        session=session,
+        extra_args=list(extra_args),
+        extra_health=extra_health,
+    )
     httpd = build_server(runner, host, port)
     print(f"Web UI: http://{host}:{httpd.server_port}/")
+    stop = threading.Event()
+    watcher = threading.Thread(
+        target=_watch_health,
+        args=(list(extra_args), extra_health, stop),
+        daemon=True,
+        name="spool-health",
+    )
+    watcher.start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()
         httpd.server_close()
+
+
+def _watch_health(
+    extra_args: list[str],
+    extra_health: Callable[[], dict] | None,
+    stop: threading.Event,
+) -> None:
+    """通↔断时往终端打一行。页面横幅靠 /state，终端靠这一头。"""
+    last_model: dict | None = None
+    last_bridge: bool | None = None
+    last_services: dict[str, bool] = {}
+    while True:
+        try:
+            model = probe_from_extra(extra_args)
+        except Exception as exc:
+            model = {
+                "ok": False,
+                "target": "",
+                "detail": f"探活失败：{exc}",
+            }
+        line = describe_change(last_model, model)
+        if line:
+            print(line, file=sys.stderr)
+        last_model = model
+        try:
+            rows = probe_services()
+        except Exception:
+            rows = []
+        for row in rows:
+            name = str(row.get("name") or "")
+            if not name:
+                continue
+            prev = last_services.get(name)
+            last_services[name] = bool(row.get("ok"))
+            note = describe_service_change(
+                None if prev is None else {"ok": prev},
+                row,
+            )
+            if note:
+                print(note, file=sys.stderr)
+        if extra_health is not None:
+            try:
+                extra = extra_health() or {}
+            except Exception:
+                extra = {}
+            bridge = extra.get("bridge") if isinstance(extra, dict) else None
+            if isinstance(bridge, dict):
+                alive = bool(bridge.get("ok"))
+                if last_bridge is not None and alive != last_bridge:
+                    target = str(bridge.get("target") or "").strip()
+                    where = f"（{target}）" if target else ""
+                    print(
+                        ("通道在跑" if alive else "通道已退出") + where,
+                        file=sys.stderr,
+                    )
+                last_bridge = alive
+        if stop.wait(HEALTH_POLL_SECONDS):
+            break
 

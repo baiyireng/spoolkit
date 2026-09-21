@@ -4,8 +4,8 @@
 打包时漏文件。代价是编辑时没有语法高亮，可以接受。
 
 这里刻意做得很薄——不持有状态、不做业务判断，只渲染事件、发三个请求，
-以及把快照里的待批准配对码画成横幅。配对不进模型上下文，也不能点
-「应用/拒绝」来批准——那两个按钮是落盘确认。
+以及把快照里的待批准配对码、模型通断画成横幅。配对和探活都不进模型
+上下文，也不能点「应用/拒绝」来批准或重连——那两个按钮是落盘确认。
 前端出错只能靠人看出来，所以它必须小到一眼能看完。
 
 布局是左右分栏：右侧的待确认面板固定，不随输出滚走。要判断的时候
@@ -54,6 +54,8 @@ HTML = """<!DOCTYPE html>
   #pairing { display:none; padding:8px 14px; background:#3d2a00; color:#f0c674;
              border-bottom:1px solid #5c4300; }
   #pairing .code { font-weight:700; letter-spacing:0.06em; }
+  #health { display:none; padding:8px 14px; background:#3d1515; color:#f0a0a0;
+            border-bottom:1px solid #5c2020; }
 </style>
 </head>
 <body>
@@ -62,6 +64,7 @@ HTML = """<!DOCTYPE html>
   <input id="goal" placeholder="要 agent 做什么…">
   <button id="start">开始</button>
 </header>
+<div id="health"></div>
 <div id="pairing"></div>
 <main>
   <div id="stream"></div>
@@ -167,6 +170,7 @@ function applyState(state) {
   if (state.awaiting) { showActions(); } else { actions.style.display = 'none'; }
   drawHistory(state.messages);
   showPairings(state.pairings);
+  showHealth(state.health);
 }
 
 // 配对码给人看，不进模型上下文。批准发生在另一个进程
@@ -196,12 +200,48 @@ function showPairings(items) {
   }
 }
 
+function showHealth(health) {
+  const box = document.getElementById('health');
+  const bits = [];
+  const model = (health && health.model) || {};
+  if (model.ok === false) {
+    const where = model.target ? '（' + model.target + '）' : '';
+    bits.push('模型连不上' + where + '：' + (model.detail || '连不上'));
+  }
+  const services = (health && health.services) || [];
+  for (const item of services) {
+    if (item.ok === false) {
+      const where = item.target ? '（' + item.target + '）' : '';
+      bits.push((item.name || '外接服务') + '连不上' + where
+        + '：' + (item.detail || '连不上'));
+    }
+  }
+  const bridge = (health && health.bridge) || {};
+  if (bridge.name && bridge.ok === false) {
+    const where = bridge.target ? '（' + bridge.target + '）' : '';
+    bits.push('通道已退出' + where);
+  }
+  if (!bits.length) {
+    box.style.display = 'none';
+    box.replaceChildren();
+    return;
+  }
+  box.style.display = 'block';
+  box.replaceChildren();
+  for (const text of bits) {
+    const line = document.createElement('div');
+    line.textContent = text;
+    box.appendChild(line);
+  }
+}
+
 async function refreshPairings() {
   try {
     const response = await fetch('/state');
     if (!response.ok) { return; }
     const state = await response.json();
     showPairings(state.pairings);
+    showHealth(state.health);
   } catch (err) { /* 轮询失败就等下一拍，横幅停在上一帧 */ }
 }
 

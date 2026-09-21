@@ -66,6 +66,9 @@ TOOLS: tuple[dict[str, Any], ...] = (
         "description": (
             "把一件事交给本地 agent，在它的工作区里实施。立刻返回 task_id"
             "（长任务不会阻塞这次调用）；之后用 task_status / task_events 跟进。"
+            "需要已配置真实模型（llamacpp 或 gemini）。"
+            "fake 只回放 --script、不能写代码；没有 LLM 时不要调用本工具当兜底，"
+            "改由调用方自己写。"
         ),
         "inputSchema": {
             "type": "object",
@@ -113,7 +116,11 @@ TOOLS: tuple[dict[str, Any], ...] = (
     },
     {
         "name": "workspace_status",
-        "description": "工作区现状：计划进度、授权策略、上一次改动、当前供应商配置。",
+        "description": (
+            "工作区现状：计划进度、授权策略、上一次改动、当前供应商配置。"
+            "若 provider 为 fake，当前不能生成代码，应改配 llamacpp 或 gemini，"
+            "不要继续下发任务。"
+        ),
         "inputSchema": {"type": "object", "properties": {}},
     },
 )

@@ -23,6 +23,7 @@ from spoolkit.cli.commands.policy import policy_command
 from spoolkit.cli.commands.revert import revert_command
 from spoolkit.cli.commands.run import run
 from spoolkit.cli.commands.serve import serve_command
+from spoolkit.cli.commands.hub import hub_command
 from spoolkit.cli.commands.diagnose import diagnose_command
 from spoolkit.cli.commands.session import session_command
 from spoolkit.cli.commands.limits import limits_command
@@ -31,6 +32,7 @@ from spoolkit.cli.commands.chat import chat_command
 from spoolkit.cli.commands.bridge import approve_entry, bridge_command
 from spoolkit.cli.commands.init import init_command
 from spoolkit.cli.commands.extra import extra_command
+from spoolkit.cli.commands.service import service_command
 from spoolkit.cli.commands.mcp import mcp_command
 from spoolkit.cli.commands.mcp_servers import mcp_servers_command
 from spoolkit.cli.options import (
@@ -115,7 +117,11 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("run", help="运行一次任务")
     parser.add_argument("--goal", default="")
     _add_provider_args(parser, default="fake")
-    parser.add_argument("--script", default="", help="假模型脚本 JSON")
+    parser.add_argument(
+        "--script",
+        default="",
+        help="仅测试回放：fake 的应答脚本 JSON。fake 不能写代码，真实任务不要走这条",
+    )
     parser.add_argument("--window", type=int, default=0, help="0 表示自动向供应商查询")
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument(
@@ -206,7 +212,7 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--from-channel",
         action="store_true",
-        help="远程聊天通道：默认只碰当前工作区；本机已关联的目录仍会带上",
+        help="远程聊天通道：只限制文件读写（当前工作区）；查资料不在这条限制里",
     )
     parser.add_argument(
         "--ask-on-stdin",
@@ -231,17 +237,17 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_web_args(parser: argparse.ArgumentParser) -> None:
-    """联网取用（web_fetch / web_read）。
+    """联网取用（research / web_fetch / web_read）。
 
-    **默认关**：它是唯一会把外部不可信内容带进上下文的入口——网页里的"指令"
-    可以诱使 agent 去写文件、跑命令（间接提示注入）。要不要开，由调用方明说。
-    白名单/黑名单/上限一律由调用方给，这里不写死（内网地址是硬拦的，见
-    fetch/client.py）。
+    **默认开**：QQ、网页壳、CLI 同一套能力。网页内容仍按不可信资料处理
+    （里面的「指令」不是用户指令；内网地址硬拦）。不要就 `--no-web`。
+    白名单/黑名单/上限一律由调用方给，这里不写死。
     """
     parser.add_argument(
         "--web",
-        action="store_true",
-        help="允许联网取用：web_fetch（抓一页给目录）+ web_read（按需取某一块）",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="联网取用（默认开）：research 查资料；--no-web 关掉",
     )
     parser.add_argument(
         "--web-allow",
@@ -261,7 +267,7 @@ def _add_web_args(parser: argparse.ArgumentParser) -> None:
         "--web-search-api",
         default="",
         metavar="名字",
-        help="网页搜索后端（如 tavily）；不给=没配搜索。要 key，现在还没接任何一家",
+        help="网页搜索后端（现在只接 tavily）。不给但有 Tavily key 就当 tavily；没 key=没配搜索",
     )
 
 
@@ -337,7 +343,11 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--session", default="cli")
     parser.add_argument("--provider", default="")
     parser.add_argument("--model", default="")
-    parser.add_argument("--script", default="", help="假模型的应答脚本（配合 --provider fake）")
+    parser.add_argument(
+        "--script",
+        default="",
+        help="仅测试回放：fake 的应答脚本。fake 不能写代码，真实任务不要走这条",
+    )
     parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
     parser.add_argument("--proxy", default="")
     parser.add_argument("--policy", default="")
@@ -352,6 +362,77 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
     _add_web_args(parser)
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.set_defaults(func=serve_command)
+
+
+def _add_hub_command(sub: argparse._SubParsersAction) -> None:
+    """产品内核：网页壳 + 可选 bridge。不启 llama / 隧道。"""
+    parser = sub.add_parser(
+        "hub",
+        help="起网页壳；声明了通道才再拉 bridge（不启 llama-server / 隧道）",
+    )
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--session", default="cli")
+    parser.add_argument("--provider", default="")
+    parser.add_argument("--model", default="")
+    parser.add_argument(
+        "--script",
+        default="",
+        help="仅测试回放：fake 的应答脚本。fake 不能写代码，真实任务不要走这条",
+    )
+    parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
+    parser.add_argument("--proxy", default="")
+    parser.add_argument("--policy", default="")
+    parser.add_argument("--scope", default="")
+    parser.add_argument(
+        "--allow-read",
+        action="append",
+        default=[],
+        metavar="目录",
+        help="授权额外可读目录（可重复），转发给子进程",
+    )
+    _add_web_args(parser)
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
+    parser.add_argument(
+        "--channel",
+        default="",
+        help="可选：再拉一条 bridge（fake / telegram / wecom / qqbot）。不给就只起网页壳",
+    )
+    parser.add_argument(
+        "--access",
+        choices=("pairing", "allowlist", "open"),
+        default="pairing",
+        help="通道准入；只在给了 --channel 时有意义",
+    )
+    parser.add_argument(
+        "--allow-user",
+        action="append",
+        default=[],
+        metavar="用户",
+        help="通道白名单（可重复）；给了就切到名单模式",
+    )
+    parser.add_argument(
+        "--bridge-proxy",
+        default="",
+        metavar="地址",
+        help=(
+            "通道自己出网走哪个代理（如 socks5://127.0.0.1:1080）。"
+            "本机 [[service]] 里名叫 tunnel 的配方通常就是这条 SOCKS；"
+            "和 --proxy（模型供应商）不是一回事"
+        ),
+    )
+    parser.add_argument("--token", default="", help="Telegram bot token（或用环境变量）")
+    parser.add_argument("--appid", default="", help="QQ 机器人的 AppID（或用环境变量）")
+    parser.add_argument("--secret", default="", help="QQ 机器人的 AppSecret（或用环境变量）")
+    parser.add_argument(
+        "--sandbox", action="store_true", help="QQ 机器人用沙箱环境"
+    )
+    parser.add_argument(
+        "--notify-disconnect",
+        action="store_true",
+        help="模型/外接服务从通变断时，给最近聊天发一句（默认关，避免刷屏）",
+    )
+    parser.set_defaults(func=hub_command)
 
 
 def _add_diagnose_command(sub: argparse._SubParsersAction) -> None:
@@ -410,7 +491,11 @@ def _add_chat_command(sub: argparse._SubParsersAction) -> None:
     """对话式使用：一行一句，共用同一个会话。"""
     parser = sub.add_parser("chat", help="对话式使用（多轮，共用同一个会话）")
     _add_provider_args(parser, default="")
-    parser.add_argument("--script", default="", help="假模型脚本 JSON")
+    parser.add_argument(
+        "--script",
+        default="",
+        help="仅测试回放：fake 的应答脚本 JSON。fake 不能写代码，真实任务不要走这条",
+    )
     parser.add_argument("--window", type=int, default=0, help="0 表示自动向供应商查询")
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument("--step-ceiling", type=int, default=0)
@@ -443,7 +528,11 @@ def _add_mcp_command(sub: argparse._SubParsersAction) -> None:
         "mcp", help="以 MCP（stdio）服务的方式运行，供别的 agent 调用"
     )
     _add_provider_args(parser, default="")
-    parser.add_argument("--script", default="", help="假模型脚本 JSON")
+    parser.add_argument(
+        "--script",
+        default="",
+        help="仅测试回放：fake 的应答脚本 JSON。fake 不能写代码，真实任务不要走这条",
+    )
     parser.add_argument(
         "--policy",
         choices=POLICIES,
@@ -528,7 +617,8 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
         metavar="地址",
         help=(
             "**通道自己**出网走哪个代理（如 socks5://127.0.0.1:1080）。"
-            "QQ 平台有 IP 白名单：借一台云主机出去（ssh -D 给的 SOCKS5），"
+            "本机 [[service]] 里名叫 tunnel 的配方通常就是这条 SOCKS"
+            "（ssh -D）。QQ 平台有 IP 白名单：借一台云主机出去，"
             "白名单就固定成那台主机的 IP。注意这和 --proxy（模型供应商用）不是一回事"
         ),
     )
@@ -540,7 +630,11 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
     )
     _add_provider_args(parser, default="")
     _add_web_args(parser)
-    parser.add_argument("--script", default="", help="假模型脚本 JSON")
+    parser.add_argument(
+        "--script",
+        default="",
+        help="仅测试回放：fake 的应答脚本 JSON。fake 不能写代码，真实任务不要走这条",
+    )
     parser.add_argument(
         "--policy", choices=POLICIES, default="", help="子进程的授权策略"
     )
@@ -548,6 +642,11 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
         "--scope", default="", help="允许自动落盘的范围（越界仍会退回确认）"
     )
     parser.add_argument("--session", default="bridge", help="会话名")
+    parser.add_argument(
+        "--notify-disconnect",
+        action="store_true",
+        help="模型/外接服务从通变断时，给最近聊天发一句（默认关，避免刷屏）",
+    )
     parser.set_defaults(func=bridge_command)
 
 
@@ -567,6 +666,28 @@ def _add_extra_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("path", nargs="?", default="", help="要关联或取消的目录")
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.set_defaults(func=extra_command)
+
+
+def _add_service_command(sub: argparse._SubParsersAction) -> None:
+    """本机外接配方：快捷拉起 / 停掉。hub 不替你启 llama / 隧道。"""
+    parser = sub.add_parser(
+        "service",
+        help="本机外接配方（llama 模型进程、tunnel 通道 SOCKS 等：start / stop / list）",
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "start", "stop"],
+        help="list 查看，start 拉起，stop 停掉（默认 list）",
+    )
+    parser.add_argument(
+        "name",
+        nargs="?",
+        default="",
+        help="配方名；start/stop 不给则对全部（start 只动有 command 的）",
+    )
+    parser.set_defaults(func=service_command)
 
 
 def _add_init_command(sub: argparse._SubParsersAction) -> None:
@@ -661,6 +782,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_bench_command(sub)
     _add_session_command(sub)
     _add_serve_command(sub)
+    _add_hub_command(sub)
     _add_diagnose_command(sub)
     _add_limits_command(sub)
     _add_config_command(sub)
@@ -670,6 +792,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_bridge_command(sub)
     _add_approve_command(sub)
     _add_extra_command(sub)
+    _add_service_command(sub)
 
     args = parser.parse_args(argv)
     if args.command is None:

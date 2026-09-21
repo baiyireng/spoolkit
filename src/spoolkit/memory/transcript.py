@@ -1,14 +1,11 @@
 """聊天记录。
 
-这一层解决的是**给人看**的问题，不是给模型看的问题。
-
 两件事必须分清楚：
-- **上下文**不加载历史——这是我们整个设计的支点（状态外置，历史可弃）；
-- **聊天区域**要能看到之前聊过什么——不然你重启之后面对一片空白，
-  根本想不起来上次做到哪。
 
-两者混为一谈会得出错误结论，比如「那就把历史塞回上下文吧」——
-那会把短上下文的前提直接推翻。
+- **聊天区域**给人看完整往来（可截断展示）；
+- **模型上下文**不加载工具往返，也不把整段历史塞回去——那会把短上下文
+  推翻。通道/网页每条消息却是一次新 `run`，指代（「那天气呢」）需要
+  最近几轮的**截断摘要**，由 `conversational_prompt` 拼进本轮提示。
 """
 
 import sqlite3
@@ -21,6 +18,11 @@ ASSISTANT = "assistant"
 NOTE = "note"
 
 ROLE_LABELS = {USER: "你", ASSISTANT: "助手", NOTE: "系统"}
+
+# 给人看的单条截断。给模型看的单条另有 max_chars，默认更短。
+MAX_ENTRY_CHARS = 200
+DEFAULT_TURNS = 6
+DEFAULT_CHARS = 240
 
 
 def record_message(
@@ -74,7 +76,48 @@ def render_transcript(rows: Sequence[sqlite3.Row]) -> str:
     return "\n".join(lines)
 
 
-MAX_ENTRY_CHARS = 200
+def conversational_prompt(
+    conn: sqlite3.Connection,
+    session_id: str,
+    goal: str,
+    *,
+    turns: int = DEFAULT_TURNS,
+    max_chars: int = DEFAULT_CHARS,
+) -> str:
+    """把最近几轮拼进本轮提示。没有上一轮就只返回当前目标。
+
+    当前这句话已经是 `goal`：它通常刚写入 transcript，这里要丢掉，避免付两遍。
+    """
+    goal = (goal or "").strip()
+    # 多取一条：最后那条往往就是当前目标。
+    rows = recent_messages(conn, session_id, limit=max(turns * 2, turns + 1))
+    prior = _prior_turns(rows, goal, turns=turns)
+    if not prior:
+        return goal
+    lines = ["上一轮对话（用来理解指代，不是当前任务）："]
+    for row in prior:
+        label = ROLE_LABELS.get(row["role"], row["role"])
+        lines.append(f"{label}：{_clip(row['content'], max_chars)}")
+    lines.append("")
+    lines.append(f"当前：{goal}")
+    return "\n".join(lines)
+
+
+def _prior_turns(rows: Sequence[sqlite3.Row], goal: str, *, turns: int) -> list:
+    """丢掉当前目标对应的那条用户消息，再取最近 `turns` 条。"""
+    items = list(rows)
+    if items and items[-1]["role"] == USER and items[-1]["content"].strip() == goal:
+        items = items[:-1]
+    if not items:
+        return []
+    return items[-turns:]
+
+
+def _clip(text: str, max_chars: int) -> str:
+    flat = " ".join((text or "").split())
+    if len(flat) <= max_chars:
+        return flat
+    return flat[:max_chars] + "…"
 
 
 def _shorten(text: str) -> str:

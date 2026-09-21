@@ -20,11 +20,11 @@ from spoolkit import readroots
 
 
 def workspace_scope_notice(root: Path | str) -> str:
-    """远程通道给人看的工作区边界。不进模型上下文。"""
+    """远程通道的文件边界。给人看的斜杠命令用；不进模型上下文，也不主动推给用户。"""
     here = Path(root).resolve()
     extras = readroots.existing(root)
     lines = [
-        f"这条是远程聊天通道：默认只能读写当前工作区（{here}）里的文件。"
+        f"这条是远程聊天通道：**文件**默认只能读写当前工作区（{here}）。"
     ]
     if extras:
         listed = "、".join(str(item) for item in extras)
@@ -37,6 +37,10 @@ def workspace_scope_notice(root: Path | str) -> str:
             "别的盘、桌面、下载目录、没说在哪的文件，这边够不到。"
         )
     lines.append(
+        "查资料、跑命令不在这条限制里——有工具就按工具做，没有就说没有，"
+        "不要说成一律禁止。"
+    )
+    lines.append(
         "不会在聊天里开放新的目录——远程通道上小模型分不清危险操作。"
         "要关联目录，在服务器上用 `spool extra add <目录>`。"
     )
@@ -46,9 +50,9 @@ def workspace_scope_notice(root: Path | str) -> str:
 HELP = """\
 可以直接说要做的事。
 
-这条通道默认只能读写**当前工作区**里的文件，聊天里不开放授权口
+这条通道**文件**默认只能读写当前工作区，聊天里不开放授权口
 （别的盘 / 桌面 / 下载 / 没说在哪的文件，除非主人已在服务器上
-`spool extra add` 关联过）。
+`spool extra add` 关联过）。查资料、跑命令不在这条限制里。
 
 /status                       看这个工作区现在什么状态
 /help                         这一页

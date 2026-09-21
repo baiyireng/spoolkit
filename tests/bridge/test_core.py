@@ -47,7 +47,7 @@ def test_白名单里的人正常跑一圈() -> None:
 
     assert reply.accepted is True
     assert channel.sent[-1] == ("c1", "收到：看看 a.py")
-    assert any("工作区" in text for _, text in channel.sent)
+    assert all("查资料" not in text for _, text in channel.sent)
 
 
 def test_没配白名单时谁都能用_但会在提示里说清() -> None:
@@ -107,11 +107,8 @@ def test_假通道关掉之后不再收() -> None:
         channel.send("hi")
 
 
-def test_远程通道第一次回话说明只能碰当前工作区(tmp_path) -> None:
-    """QQ/Telegram 进来的人看不见终端，必须把工作区边界说出口。
-
-    不开放工作区外的读权限：远程通道上小模型分不清危险操作。
-    """
+def test_普通消息不把文件限制发给用户(tmp_path) -> None:
+    """限制写在工作方式里给模型看，不要当成聊天消息推给用户。"""
     from pathlib import Path
 
     from spoolkit.bridge.pairing import OPEN
@@ -126,15 +123,10 @@ def test_远程通道第一次回话说明只能碰当前工作区(tmp_path) -> 
     )
     reply = bridge.handle(Incoming(user="u", text="把桌面上的报销单发我", conversation="c"))
     assert reply.accepted is True
-    assert len(channel.sent) == 2
-    notice, answer = channel.sent[0][1], channel.sent[1][1]
-    assert str(root.resolve()) in notice
-    assert "工作区" in notice
-    assert "别的盘" in notice or "桌面" in notice
-    assert answer == "收到：把桌面上的报销单发我"
+    assert channel.sent == [("c", "收到：把桌面上的报销单发我")]
 
 
-def test_同一会话不把工作区说明刷第二遍(tmp_path) -> None:
+def test_同一会话每条普通消息只回一轮(tmp_path) -> None:
     from pathlib import Path
 
     from spoolkit.bridge.pairing import OPEN
@@ -147,7 +139,6 @@ def test_同一会话不把工作区说明刷第二遍(tmp_path) -> None:
         root=Path(tmp_path),
     )
     bridge.handle(Incoming(user="u", text="一", conversation="c"))
-    first_count = len(channel.sent)
+    assert channel.sent == [("c", "ok")]
     bridge.handle(Incoming(user="u", text="二", conversation="c"))
-    assert len(channel.sent) == first_count + 1
-    assert channel.last == "ok"
+    assert channel.sent == [("c", "ok"), ("c", "ok")]

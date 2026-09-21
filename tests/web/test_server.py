@@ -57,6 +57,9 @@ def test_状态接口返回快照(server: str) -> None:
     payload = json.loads(body)
     assert payload["running"] is False
     assert payload["pairings"] == []
+    assert payload["health"]["model"]["ok"] is True
+    assert "假" in payload["health"]["model"]["detail"]
+    assert payload["health"]["services"] == []
 
 
 def test_状态接口带上待批准的配对码(server: str, tmp_path: Path) -> None:

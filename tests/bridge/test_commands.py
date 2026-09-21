@@ -55,6 +55,7 @@ def test_本机关联的目录会传给下一轮(tmp_path: Path) -> None:
     extra = run_extra_args(args, tmp_path)
 
     assert "--from-channel" in extra
+    assert "--web" in extra
     assert "--allow-read" in extra
     assert str(target.resolve()) in extra
 
@@ -69,6 +70,26 @@ def test_撤销之后本来就不带(tmp_path: Path) -> None:
         policy="", scope="",
     )
     assert "--allow-read" not in run_extra_args(args, tmp_path)
+
+
+def test_远程通道默认开联网取用() -> None:
+    args = argparse.Namespace(
+        provider="", model="", base_url="", script="", proxy="",
+        policy="", scope="",
+    )
+    extra = run_extra_args(args, Path("."))
+    assert "--from-channel" in extra
+    assert "--web" in extra
+
+
+def test_no_web关掉通道联网() -> None:
+    args = argparse.Namespace(
+        provider="", model="", base_url="", script="", proxy="",
+        policy="", scope="", web=False,
+    )
+    extra = run_extra_args(args, Path("."))
+    assert "--web" not in extra
+    assert "--no-web" in extra
 
 
 def test_陌生人不该拿到命令面(tmp_path: Path) -> None:
@@ -97,6 +118,8 @@ def test_help_不会去跑_agent_并说明工作区边界(tmp_path: Path) -> Non
 
     assert called == []
     assert "工作区" in channel.last
+    assert "文件" in channel.last
+    assert "查资料" in channel.last
     assert "不开放" in channel.last
 
 

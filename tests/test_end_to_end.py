@@ -95,6 +95,26 @@ def test_脚本文件不存在时返回非零(tmp_path: Path) -> None:
     assert exit_code == 2
 
 
+def test_假模型无脚本时说明不能当生成兜底(tmp_path: Path, capsys) -> None:
+    """协同 agent 走 --provider fake 且没脚本时，必须被明确拦住，而不是默默当生成器。"""
+    exit_code = main(
+        [
+            "run",
+            "--provider",
+            "fake",
+            "--goal",
+            "写个页面",
+            "--root",
+            str(tmp_path),
+            "--no-setup",
+        ]
+    )
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "不能生成代码" in err
+    assert "兜底" in err
+
+
 def test_命令行装配后索引工具已注册且预取生效(tmp_path: Path) -> None:
     (tmp_path / "parser.py").write_text(
         "def parse_config(path):\n    return path\n", encoding="utf-8"

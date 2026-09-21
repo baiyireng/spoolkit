@@ -6,6 +6,7 @@
 
 import atexit
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +29,8 @@ from spoolkit.memory.lessons import match_lessons, prune_lessons, record_outcome
 from spoolkit.memory.session import MemorySession
 from spoolkit.memory.store import check_binding, init_memory_schema, record_session
 from spoolkit.memory.tools import recall_spec
-from spoolkit.memory.transcript import recent_messages, render_transcript
+from spoolkit.memory.transcript import conversational_prompt, recent_messages, render_transcript
+from spoolkit.memory.distill import distill
 from spoolkit.store.db import init_schema, open_db
 from spoolkit.tools.edit import PendingChanges, register_edit_tools
 from spoolkit.tools.exec import run_command_spec
@@ -40,7 +42,8 @@ from spoolkit.tools.diagnosis import (
 from spoolkit.tools.fs import list_dir_spec, read_file_spec
 from spoolkit.tools.webfetch import web_fetch_spec, web_read_spec
 from spoolkit.fetch.client import WebPolicy
-from spoolkit.fetch.search import UnconfiguredSearch
+from spoolkit.fetch.search import TavilySearch, UnconfiguredSearch
+from spoolkit.llm.gemini import load_env_file
 from spoolkit.tools.webfetch import WebAccess
 from spoolkit.tools.websearch import web_search_spec
 from spoolkit.tools.grant import Grants
@@ -112,8 +115,8 @@ class LoopWiring:
     # 要不要挂用户配置里的 MCP 外挂工具。默认挂——配了就是要用；
     # `--no-mcp` 用来临时排除它们（排查"是不是外挂工具在捣乱"时用）。
     mcp: bool = True
-    # 联网取用（web_fetch / web_read）。**默认关**：它是唯一会把外部不可信内容
-    # 带进上下文的入口，要不要开由调用方明说。见 fetch/ 与 tools/webfetch.py。
+    # 联网取用（research / web_fetch / web_read）。CLI 入口默认开（`--no-web`
+    # 关掉）；装配时没传就没有这套工具。网页内容仍按不可信资料处理。
     web: object | None = None
     # 网页搜索后端。默认未配置：工具必须说「没配搜索，只能直接给 URL」。
     search: object | None = None
@@ -159,9 +162,10 @@ def provider_gateway(args, project_root):
             # 第一次用最容易撞这里：默认供应商是假模型，而报错原先只说
             # "需要 --script"，一个字都没提"你大概想接本地模型"。
             print(
-                "假模型需要 --script 指定脚本文件。\n"
-                "如果你是想接本地模型，加这两个参数就行："
-                " --provider llamacpp --base-url http://127.0.0.1:8080\n"
+                "假模型只回放 --script，不能生成代码。"
+                "没有 LLM 时不要用 --provider fake 当兜底。\n"
+                "测试回放才需要 --script；真实任务请接本地或云端模型：\n"
+                "  --provider llamacpp --base-url http://127.0.0.1:8080\n"
                 "想把它固定成默认（以后不用每次打）："
                 " spool config --set provider=llamacpp "
                 "--set base_url=http://127.0.0.1:8080",
@@ -500,12 +504,12 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
 
 
 def web_access(args, project_root: Path) -> WebAccess | None:
-    """按命令行参数构造联网取用能力；没开 `--web` 就返回 None（默认关）。
+    """按命令行参数构造联网取用能力。默认开；`--no-web` 关掉。
 
     代理沿用 `--proxy`，没给就用系统代理——和模型供应商那条保持一致，
     不要求用户配第二遍。
     """
-    if not getattr(args, "web", False):
+    if not getattr(args, "web", True) or getattr(args, "no_web", False):
         return None
     return WebAccess(
         root=project_root,
@@ -517,14 +521,40 @@ def web_access(args, project_root: Path) -> WebAccess | None:
     )
 
 
-def web_search_backend(args):
-    """网页搜索后端。现在没有任何一家接上——没有 key 就不装。
+def web_search_backend(args, project_root: Path | None = None):
+    """网页搜索后端。现在只接 Tavily；没有 key 就不装。
 
-    `--web-search-api` 先占位：名字认得出，真正的适配器等有 key 再接。
+    名字：`--web-search-api` / 配置 `web_search_api`。空着且有 Tavily key
+    就当 tavily。key 来源：环境变量 `TAVILY_API_KEY`（或
+    `SPOOLKIT_TAVILY_API_KEY`）、工作区 `.env`、用户配置里的 `tavily_api_key`。
     没配时研究会话里的 web_search 会说「没配搜索，只能直接给 URL」。
     """
     wanted = str(getattr(args, "web_search_api", "") or "").strip()
+    if not wanted:
+        wanted = settings.resolve("web_search_api")[0].strip()
+    name = wanted.lower()
+    proxy = (str(getattr(args, "proxy", "") or "") or system_proxy()) or None
+    if name in {"", "tavily"}:
+        key = _tavily_api_key(project_root)
+        if key:
+            return TavilySearch(api_key=key, proxy=proxy)
     return UnconfiguredSearch(wanted=wanted)
+
+
+def _tavily_api_key(project_root: Path | None) -> str:
+    for name in ("TAVILY_API_KEY", "SPOOLKIT_TAVILY_API_KEY"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    if project_root is not None:
+        value = load_env_file(Path(project_root) / ".env").get("TAVILY_API_KEY", "").strip()
+        if value:
+            return value
+    payload, _ = settings.read_config()
+    raw = payload.get("tavily_api_key")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return ""
 
 
 def build_memory(
@@ -562,6 +592,26 @@ def open_memory(
         print(f"提示：{warning}")
     record_session(memory._conn, session_id, str(project_root), model, window)
     return memory
+
+
+def distiller_for(args, gateway, memory):
+    """真实供应商才装归纳。假模型脚本不够分给第二次调用。"""
+    if memory is None:
+        return None
+    if getattr(args, "provider", "") == "fake":
+        return None
+    return lambda state, final: distill(gateway, state, final=final)
+
+
+def prompt_for_turn(memory, session_id: str, goal: str, overrides=None) -> str:
+    """通道/网页：把最近几轮（截断）拼进本轮提示。没有上一轮就只给当前目标。"""
+    if memory is None:
+        return goal
+    turns = int(limits.resolve("recent_chat_turns", overrides)[0])
+    chars = int(limits.resolve("recent_chat_chars", overrides)[0])
+    return conversational_prompt(
+        memory._conn, session_id, goal, turns=turns, max_chars=chars
+    )
 
 
 def show_history(memory: MemorySession, session_id: str, limit: int) -> None:

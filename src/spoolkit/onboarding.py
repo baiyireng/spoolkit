@@ -1,7 +1,8 @@
 """第一次跑起来时的配置向导。
 
 为什么要有它：命令行参数齐全，但对第一次用的人来说是**一片空白**——
-`spool run --goal "..."` 会回一句"假模型需要 --script"，而真正该说的是
+`spool run --goal "..."` 若落到假模型、又没给 --script，会说
+"假模型只回放脚本，不能生成代码"——真正该说的是
 "你还没有配模型，想用哪个？"。这一步不问，用户就得先读文档、再猜参数名，
 而多数人会在这一步放弃。
 
@@ -28,7 +29,7 @@ from spoolkit.llm.llamacpp import DEFAULT_BASE_URL
 CHOICES = {
     "1": ("llamacpp", "llama.cpp（本机，推荐）"),
     "2": ("gemini", "Gemini（云端，需要 API key）"),
-    "3": ("fake", "假模型（离线、可复现，用于测试；要配 --script）"),
+    "3": ("fake", "假模型（仅测试回放，必须 --script；不能写代码，不要当兜底）"),
 }
 
 DEFAULT_CHOICE = "1"
@@ -85,8 +86,9 @@ def run_wizard(
         if model:
             values["model"] = model
     else:
-        say("假模型要配 --script（一份应答脚本），例如：")
+        say("假模型只回放脚本，不能生成代码。测试才配 --script，例如：")
         say('  spool run --provider fake --script script.json --goal "..."')
+        say("真实任务请改选 llama.cpp 或 Gemini，不要用 fake 当没模型时的兜底。")
 
     written = settings.save({**settings.load(), **values})
     say(f"已写入 {written}")

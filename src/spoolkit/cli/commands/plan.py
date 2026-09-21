@@ -16,7 +16,11 @@ from spoolkit.agents.plan import (
     BATCH_LIMIT_NOTE,
     DONE,
     FAILED,
+    PENDING,
+    SELF,
     SUBAGENT,
+    Plan,
+    PlanStep,
     decompose,
     load_plan,
     narrow_scope,
@@ -401,22 +405,36 @@ def advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
         print("还没有计划，请先用 `plan --goal` 生成。", file=sys.stderr)
         return 2
 
-    step = plan.next_pending()
-    if step is None:
-        print(plan.render())
-        print("\n计划已全部完成。")
-        return 0
-
     blocked = plan.blocked_by()
     if blocked is not None:
-        print(plan.render())
-        print(
-            f"\n计划被第 {blocked.index} 步阻塞：{blocked.goal}\n"
-            f"原因：{blocked.note or '未记录'}\n"
-            "先处理它，或者用 `plan --goal` 重新生成计划。",
-            file=sys.stderr,
-        )
-        return 1
+        # 自动重试一次：把 failed 步骤改回 pending 重跑。
+        # dogfood 暴露：步骤失败后 resume 直接阻塞，没有重试机会——
+        # 很多失败是模型一次性抽风（patch 格式错、参数拼错），重试就能过。
+        if blocked.retries < 1:
+            blocked.status = PENDING
+            blocked.retries += 1
+            save_plan(plan_path(project_root, getattr(args, "session", "cli")), plan)
+            print(
+                f"第 {blocked.index} 步上次失败，自动重试"
+                f"（第 {blocked.retries} 次）：{blocked.goal}"
+            )
+            step = blocked
+        else:
+            print(plan.render())
+            print(
+                f"\n计划被第 {blocked.index} 步阻塞：{blocked.goal}\n"
+                f"原因：{blocked.note or '未记录'}\n"
+                f"已自动重试 {blocked.retries} 次仍未通过。"
+                "先处理它，或者用 `plan --goal` 重新生成计划。",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        step = plan.next_pending()
+        if step is None:
+            print(plan.render())
+            print("\n计划已全部完成。")
+            return 0
 
     print(f"执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
     # 打印的是**这一步实际生效**的范围，不是运行级默认值：
@@ -442,6 +460,30 @@ def advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
     return 0 if result.finished else 1
 
 
+import re
+
+_SINGLE_FILE_PATTERNS = [
+    re.compile(r"单个\s+\S+\.(?:html?|py|js|ts|tsx|jsx|css|json|md|txt|sh|go|rs|java|c|cpp|h)\b"),
+    re.compile(r"一个\s+\S+\.(?:html?|py|js|ts|tsx|jsx|css|json|md|txt|sh|go|rs|java|c|cpp|h)\b"),
+    re.compile(r"单个文件.*\.(?:html?|py|js|ts|tsx|jsx|css|json|md|txt)\b"),
+]
+
+
+def _looks_like_single_file_task(goal: str) -> bool:
+    """检测目标是否是「新建单个文件」类任务。
+
+    dogfood 暴露：分步改同一文件每步生成 patch 容易死循环。这类任务
+    一次写完比拆成 9 步更靠谱。检测靠关键词——不调模型，规则就够。
+
+    匹配：「做一个网页版贪吃蛇游戏：单个 index.html...」
+    不匹配：「把 src/ 下的测试都修好」（多文件）
+    """
+    for pattern in _SINGLE_FILE_PATTERNS:
+        if pattern.search(goal):
+            return True
+    return False
+
+
 def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
     """自己拆解目标并逐步做完。
 
@@ -461,6 +503,31 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
 
     batch = int(getattr(args, "batch", 0) or 0)
     rolling = batch > 0 and not getattr(args, "no_roll", False)
+    # 单文件新建任务不需要分步——分步改同一文件每步生成 patch 容易死循环
+    #（dogfood：贪吃蛇 9 步计划第 2 步 write_file 死循环）。
+    # 检测到就跳过拆解，构造单步计划直接执行，一次写完绕开 patch。
+    if _looks_like_single_file_task(args.goal):
+        print("检测到单文件任务，跳过拆解直接执行（一次写完，绕开 patch 死循环）")
+        plan = Plan(
+            goal=args.goal,
+            steps=[PlanStep(
+                index=1, goal=args.goal,
+                acceptance="文件创建成功且内容完整可运行",
+                scope=granted, executor=SELF,
+            )],
+        )
+        save_plan(plan_path(project_root, getattr(args, "session", "cli")), plan)
+        print(f"授权范围：{'、'.join(granted)}")
+        print(plan.render())
+        ctx = StepRun(
+            args=args, project_root=project_root,
+            gateway=gateway, plan=plan, non_interactive=True,
+        )
+        if _run_one_step(ctx, granted, plan.steps[0], plan):
+            print(f"\n自主运行结束：完成 1/1 步。")
+            return 0
+        print(plan.render())
+        return 1
     # 分批推进时第一批只排 batch 步：一次排满就没有"回头看一眼"的机会了。
     # 材料读一次，第一批与后面的续排共用——不给续排材料，它排出来的
     # 步骤会退化成"修复 04 目录下的编程题"这种话（实测）。

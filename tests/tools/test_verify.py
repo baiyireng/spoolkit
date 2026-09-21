@@ -28,10 +28,14 @@ def _project(tmp_path: Path) -> None:
     (tmp_path / "test_mod.py").write_text(FAILING, encoding="utf-8")
 
 
-def test_没有测试就不给验证器(tmp_path: Path) -> None:
+def test_没有测试也没有node就不给验证器(tmp_path: Path) -> None:
     (tmp_path / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")
     assert detect_test_command(tmp_path) is None
-    assert make_verifier(tmp_path, PendingChanges(tmp_path)) is None
+    # 没有 pytest 但 node 在 PATH 里时，会返回惰性 JS 验证器（降级验证）
+    # mock node 不在，确认此时返回 None
+    from unittest.mock import patch
+    with patch("spoolkit.tools.verify.shutil.which", return_value=None):
+        assert make_verifier(tmp_path, PendingChanges(tmp_path)) is None
 
 
 def test_有测试才给验证器(tmp_path: Path) -> None:

@@ -72,7 +72,8 @@ spool extra              # 列出
 | 参数 | 说明 |
 |---|---|
 | `--goal` | 要做的事（自然语言） |
-| `--provider {fake,gemini,llamacpp}` | 供应商（也可写 `--engine`）；留空用配置 |
+| `--provider {fake,gemini,llamacpp}` | 供应商（也可写 `--engine`）；留空用配置。**fake 只回放 `--script`，不能生成代码；没有 LLM 时不要用它当兜底** |
+| `--script` | 仅测试回放：fake 的应答脚本。真实任务不要走这条 |
 | `--model` / `--base-url` / `--proxy` | 覆盖模型名 / llama.cpp 地址 / 代理 |
 | `--root` | 工作区路径 |
 | `--policy {ask,auto,deny}` | 本次授权策略；留空用已保存的 |
@@ -106,7 +107,8 @@ spool extra              # 列出
 ## spool chat
 
 对话式使用：一行一句，多轮共用同一个会话。`/history` 看记录，`/exit` 退出。
-参数与 `run` 基本一致（少了自主编排那一组）。
+参数与 `run` 基本一致（少了自主编排那一组）。最近几轮往来会截断后带进本轮
+提示（理解指代）；工具往返不塞回去。
 
 ## spool serve
 
@@ -118,7 +120,87 @@ spool extra              # 列出
 | `--session` | 会话名 |
 | `--provider` `--model` `--script` `--base-url` `--proxy` | 转发给子进程 |
 | `--policy` / `--scope` / `--allow-read` | 同上 |
+| `--web` / `--no-web` | 联网取用（**默认开**，与 CLI / QQ 同一套）；不要就 `--no-web` |
 | `--root` | 工作区路径 |
+
+页面会探当前生效的模型（llama.cpp 打 `/props`；假模型/云端不探本机端口），
+不通时顶部出红横幅。只起网页壳、不拉聊天通道时继续用这一条。
+
+## spool hub
+
+产品内核的常驻入口：起网页壳；**声明了 `--channel` 才再拉一条 bridge**。
+不启 llama-server，也不启 SOCKS 隧道——那些是本机外接，用现成的
+`provider` / `base_url` 探活即可。退出时只杀 hub 自己拉起的 bridge。
+
+用户配置 `[[service]]` 常见两段（名字可改，路径/主机不进仓库）：
+
+- **llama**：本机语言模型。hub 按 `provider` / `base_url` 探活；配方只方便
+  `spool service start/stop`。
+- **tunnel**：聊天通道出网的本机 SOCKS（通常 `ssh -D`）。QQ 等平台有 IP
+  白名单时借跳板固定出口。`--bridge-proxy socks5://127.0.0.1:1080` 去连它，
+  **不是** `--proxy`（那是模型供应商）。
+
+```bash
+spool hub                          # 等价于 serve：只起网页
+spool hub --channel qqbot --bridge-proxy socks5://127.0.0.1:1080
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--host` / `--port` / `--session` / `--root` | 与 `serve` 相同 |
+| `--provider` `--model` `--script` `--base-url` `--proxy` | 转发给网页壳子进程，也转给 bridge |
+| `--policy` / `--scope` / `--allow-read` / `--web*` | 同上 |
+| `--channel {fake,telegram,wecom,qqbot}` | 可选。不给就只起网页 |
+| `--access` / `--allow-user` / `--bridge-proxy` | 只在给了 `--channel` 时有意义。`--bridge-proxy` 是通道出网（对准 `tunnel` 那条 SOCKS），不是模型 `--proxy` |
+| `--token` / `--appid` / `--secret` / `--sandbox` | 通道凭据（也可写在工作区 `.env`） |
+| `--notify-disconnect` | 通→断时给最近聊天发一句（默认关） |
+| `--web` / `--no-web` | 联网取用（默认开，与 `run` / 网页壳同一套）；`--no-web` 关掉 |
+
+模型从通变断（或通道子进程退出）时，hub 终端打一行；网页同一条横幅。
+本机 `[[service]]` 配方不通时也走同一条横幅（hub **不**替你启动它们）。
+桥给最近聊天发一句：默认关；`--notify-disconnect` 或
+`spool config --set notify_disconnect=true` 打开。只在通→断时发，冷却 5 分钟。
+
+## spool service
+
+本机外接配方的快捷入口：按用户配置里的 `[[service]]` 拉起 / 停掉 / 列出。
+**不写进仓库**，也不写死 gguf 路径或 ssh 主机。hub 只探活，不启这些进程。
+
+常见两段（名字可改）：**llama** 是本机语言模型；**tunnel** 是通道出网的
+SOCKS（`ssh -D`），给 `hub --bridge-proxy` 用，不是模型 `--proxy`。
+
+```bash
+spool service                         # 列出（没表就打印写法）
+spool service start llama
+spool service start tunnel
+spool service stop tunnel
+```
+
+| 参数 | 说明 |
+|---|---|
+| `list` / `start` / `stop` | 查看、拉起、停掉（不带 action 就是 list） |
+| `name` | 配方名；`start`/`stop` 不给则对全部（start 只动有 `command` 的） |
+
+配方写在用户配置文件（`spool config --path` 那份）里：
+
+```toml
+# llama：本机语言模型。hub 按 provider / base_url 探活；已经通了不重复拉起。
+[[service]]
+name = "llama"
+command = ["llama-server", "-m", "你的模型.gguf", "--port", "8080"]
+health = "http://127.0.0.1:8080/props"
+
+# tunnel：通道出网的本机 SOCKS（ssh -D），不是模型代理。
+# QQ 有 IP 白名单时借跳板固定出口；hub --bridge-proxy socks5://127.0.0.1:1080。
+[[service]]
+name = "tunnel"
+command = ["ssh", "-N", "-D", "1080", "你的跳板"]
+health = "tcp:127.0.0.1:1080"
+```
+
+`command` 可空：空就只探测、不替你启动。`health` 认 `http(s)://…`（GET）和
+`tcp:host:port`。停掉只杀 `spool service start` 写下 pid 的孩子。
+`spool config --set` 不会抹掉 `[[service]]` / `[[mcp]]`。
 
 ## spool session
 
@@ -142,7 +224,7 @@ spool extra              # 列出
 
 | 参数 | 说明 |
 |---|---|
-| `--set 键=值` | 可重复。键：`provider` `model` `base_url` `proxy` `script` |
+| `--set 键=值` | 可重复。键：`provider` `model` `base_url` `proxy` `script` `notify_disconnect` |
 | `--reset 键` | 清除一项 |
 | `--path` | 只打印配置文件路径 |
 
@@ -199,10 +281,11 @@ Cursor 扮演用户下发任务）。工具、信任模型、调用序列见 [`m
 | `--allow-user 用户` | 白名单（可重复）；给了就切到名单模式 |
 | `--approve <码>` | 批准一个配对码然后退出 |
 | `--check` | 只看凭据与连通性（认到没有、从哪认到的、能不能连上）|
-| `--bridge-proxy 地址` | **通道自己**出网走哪个代理（如 `socks5://127.0.0.1:1080`）|
+| `--bridge-proxy 地址` | **通道自己**出网走哪个代理（如 `socks5://127.0.0.1:1080`）。对准本机 `[[service]]` 里的 `tunnel`（`ssh -D`），不是模型 `--proxy` |
 | `--token` / `--appid` / `--secret` / `--sandbox` | 各通道凭据（也可写在 `.env`）|
 | `--user` / `--max-chars` / `--timeout` | 假通道的用户名 / 单条消息长度上限 / 一轮最多等多少秒 |
 | `--policy` / `--scope` / `--session` | 原样转给 agent |
+| `--notify-disconnect` | 通→断时给最近一次放过的聊天发一句（默认关） |
 
 详见 [`bridge.md`](bridge.md)。
 
@@ -210,10 +293,16 @@ Cursor 扮演用户下发任务）。工具、信任模型、调用序列见 [`m
 
 | 参数 | 说明 |
 |---|---|
-| `--web` | 打开联网取用：`web_fetch`（抓一页、给目录）+ `web_read`（按需取一块）。**默认关** |
+| `--web` | 打开联网取用：`research` / `web_fetch` / `web_read`。**默认开**（QQ、网页壳、CLI 同一套） |
+| `--no-web` | 关掉联网取用 |
 | `--web-allow 域名` | 只允许抓这些域名（可重复）。不给 = 允许任何公网域名 |
 | `--web-deny 域名` | 禁止抓这些域名（可重复，优先于 allow） |
 | `--proxy` | 抓取也走它；不给就用系统代理 |
+| `--web-search-api 名字` | 网页搜索后端。现在只接 `tavily`。不给但环境/工作区 `.env`/用户配置里有 Tavily key，也当 tavily |
+
+搜索要一把 **Tavily** key（[申请](https://tavily.com)）。来源按这个顺序：环境变量 `TAVILY_API_KEY`（或 `SPOOLKIT_TAVILY_API_KEY`）、工作区 `.env`、用户配置里的 `tavily_api_key`（手写进 `%APPDATA%\\spoolkit\\config.toml`，**不要**用 `spool config --set` 写密钥——那个命令只动白名单，会把密钥打到终端）。没 key 时研究会话会说「没配搜索，只能直接给 URL」，不会去抓搜索结果页。
+
+配了之后：`research` 先搜，把标题+网址+摘要交给一轮会话；摘要够（天气这类）就停，不够再抓最相关的一页。条数 `search_result_limit`，默认 3。
 
 内网/环回/保留地址**默认硬拦**，与 allow 无关。细节与已知短板见
-[`manual.md`](manual.md#联网取用--web默认关)。
+[`manual.md`](manual.md#联网取用--web默认开)。

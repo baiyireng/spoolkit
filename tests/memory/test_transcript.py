@@ -4,6 +4,7 @@ from spoolkit.memory.store import init_memory_schema
 from spoolkit.memory.transcript import (
     ASSISTANT,
     USER,
+    conversational_prompt,
     recent_messages,
     record_message,
     render_transcript,
@@ -71,5 +72,38 @@ def test_内容首尾空白被去掉(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     record_message(conn, "s", USER, "  有空白  ")
     assert recent_messages(conn, "s")[0]["content"] == "有空白"
+    conn.close()
+
+
+def test_上一轮对话不含当前这句话(tmp_path: Path) -> None:
+    """QQ / 网页每条消息是一次新 run。当前句已经是目标，再塞一遍只浪费窗口。"""
+    conn = _conn(tmp_path)
+    record_message(conn, "bridge", USER, "厦门")
+    record_message(conn, "bridge", ASSISTANT, "厦门近两天多云。")
+    record_message(conn, "bridge", USER, "那天气呢")
+    text = conversational_prompt(conn, "bridge", "那天气呢")
+    assert "厦门" in text
+    assert "近两天多云" in text
+    assert "当前：那天气呢" in text
+    assert text.count("那天气呢") == 1
+    conn.close()
+
+
+def test_没有上一轮就只给当前目标(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    record_message(conn, "bridge", USER, "查一下天气")
+    assert conversational_prompt(conn, "bridge", "查一下天气") == "查一下天气"
+    conn.close()
+
+
+def test_长答复截断不把整段历史塞回去(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    record_message(conn, "s", USER, "厦门")
+    record_message(conn, "s", ASSISTANT, "详" * 800)
+    record_message(conn, "s", USER, "那杭州呢")
+    text = conversational_prompt(conn, "s", "那杭州呢", max_chars=80)
+    assert "厦门" in text
+    assert "详" * 800 not in text
+    assert "…" in text
     conn.close()
 

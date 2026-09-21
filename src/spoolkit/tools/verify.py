@@ -196,14 +196,34 @@ def make_verifier(
     timeout: int = DEFAULT_TIMEOUT,
     overrides: dict | None = None,
 ) -> Callable[[], ToolResult] | None:
-    """装配一个验证器。没有测试、或命令不在白名单里，就返回 None。"""
+    """装配一个验证器。没有可用的验证手段就返回 None。
+
+    装配时 pending 往往是空的（agent 还没动手），所以不能在装配时判断
+    「有没有 HTML 改动」——要等到每次调用时动态检查。否则 agent 写完
+    HTML 后验证器仍然是 None（dogfood 第二轮暴露）。
+    """
     command = detect_test_command(root)
-    if command is None:
-        return None
-    # 不在白名单里就不自动跑：自动验证不该顺带向用户要授权，
-    # 那会把「我想安静地验一下」变成一次打断。
-    if classify(command)[0] != ALLOWED:
-        return None
+    if command is not None:
+        # 不在白名单里就不自动跑：自动验证不该顺带向用户要授权，
+        # 那会把「我想安静地验一下」变成一次打断。
+        if classify(command)[0] != ALLOWED:
+            return None
+        # 有 pytest：返回 pytest 验证器
+    else:
+        # 没有 pytest：返回惰性验证器，每次调用时检查 pending 里有没有 HTML
+        if shutil.which("node") is None:
+            return None  # node 也不在，真没东西可验
+        js_verifier_fn = make_js_verifier(root, pending, timeout)
+        if js_verifier_fn is None:
+            return None
+
+        def lazy_js_verify(changed: Sequence[str] = ()) -> ToolResult:
+            # 每次调用时检查 pending 里有没有 HTML 改动——装配时是空的
+            if not _has_html_changes(root, pending):
+                return ToolResult(ok=True, content="没有需要验证的改动。")
+            return js_verifier_fn(changed)
+
+        return lazy_js_verify
 
     # 一旦确认是环境坏了，就不再重跑：结论不会变，而每跑一次都要往
     # 上下文里再灌一遍同样的报错。实测一次运行里它被重报了 7 次。
@@ -331,3 +351,100 @@ def _report_many(
         lines.append(f"- {scope}：{condense_test_output(item.content, limit=200)}")
     lines.append("逐处按报错改——不要改测试文件。")
     return ToolResult(ok=False, content="\n".join(lines))
+
+
+# --- JS 语法检查（HTML 内联脚本的降级验证） ---
+
+import shutil
+import tempfile
+
+_SCRIPT_RE = re.compile(
+    r"<script(?:\s[^>]*)?>(.*?)</script>", re.DOTALL | re.IGNORECASE
+)
+
+
+def _has_html_changes(root: Path, pending) -> bool:
+    """待确认改动里有没有 HTML 文件。"""
+    try:
+        return any(
+            change.path.lower().endswith((".html", ".htm"))
+            for change in pending.items()
+        )
+    except Exception:
+        return False
+
+
+def extract_js_from_html(html: str) -> str:
+    """从 HTML 里抽出所有内联 <script> 的 JS 内容，拼成一段。
+
+    带 src 属性的 <script src="..."> 跳过——那是外部引用，抽出来也跑不了。
+    """
+    blocks = []
+    for match in _SCRIPT_RE.finditer(html):
+        tag = match.group(0)
+        # 带 src 的跳过
+        if re.search(r"\bsrc\s*=", tag[: tag.find(">") + 1], re.IGNORECASE):
+            continue
+        body = match.group(1).strip()
+        if body:
+            blocks.append(body)
+    return "\n;\n".join(blocks)
+
+
+def make_js_verifier(
+    root: Path, pending, timeout: int = DEFAULT_TIMEOUT
+) -> Callable[[], ToolResult] | None:
+    """对改动的 HTML 文件做 JS 语法检查（node --check）。
+
+    没有 pytest 时退而求其次：至少能拦住语法错（漏括号、未闭合字符串等）。
+    运行时逻辑错（比如 step() 没调 draw()）发现不了——那是浏览器验证的活。
+    node 不在 PATH 里就返回 None，不报错。
+    """
+    if shutil.which("node") is None:
+        return None
+
+    def verify(changed: Sequence[str] = ()) -> ToolResult:
+        html_changes = [
+            change for change in pending.items()
+            if change.path.lower().endswith((".html", ".htm"))
+        ]
+        if not html_changes:
+            return ToolResult(ok=True, content="没有 HTML 改动需要验证。")
+
+        results = []
+        for change in html_changes:
+            # 从待确认改动里读内容——改动还没落盘，磁盘上可能没有
+            js = extract_js_from_html(change.new_text)
+            if not js.strip():
+                results.append(f"{change.path}：没有内联 JS，跳过语法检查")
+                continue
+            # 写到临时文件做 node --check
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".js", delete=False, encoding="utf-8"
+            ) as tmp:
+                tmp.write(js)
+                tmp_path = tmp.name
+            try:
+                result = run_once(
+                    root, ["node", "--check", tmp_path],
+                    pending=pending, timeout=timeout,
+                )
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+
+            if result.ok:
+                results.append(f"{change.path}：JS 语法检查通过")
+            else:
+                msg = result.content.replace(tmp_path, change.path)
+                results.append(f"{change.path}：JS 语法错误 — {condense_test_output(msg)}")
+
+        all_ok = all("语法错误" not in r for r in results)
+        return ToolResult(
+            ok=all_ok,
+            content="\n".join(results) + (
+                "" if all_ok else "\n按上面的语法错误修——这是 node --check 的结果，"
+                "只查语法不查运行时逻辑。"
+            ),
+        )
+
+    return verify

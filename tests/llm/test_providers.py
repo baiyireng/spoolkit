@@ -29,6 +29,17 @@ def test_未知供应商报错并列出可选项() -> None:
     assert "llamacpp" in str(excinfo.value)
 
 
+def test_假模型说明禁止当生成兜底() -> None:
+    """协同 agent 读 --help / 供应商表时必须看见：fake 不能写代码。"""
+    from spoolkit.llm.providers import PROVIDERS, describe_providers
+
+    text = PROVIDERS["fake"].description + "\n" + describe_providers()
+    assert "不能生成" in text
+    assert "兜底" in text
+    assert "--script" in text
+    assert "无 GPU" not in text
+
+
 def test_装载假模型并消费脚本(tmp_path: Path) -> None:
     gateway = load_gateway("fake", _config(tmp_path, script=("一条",)))
     assert isinstance(gateway, FakeModel)

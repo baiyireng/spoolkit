@@ -116,6 +116,12 @@ def test_工具清单带_schema(tmp_path: Path) -> None:
     for item in tools:
         assert item["description"]
         assert item["inputSchema"]["type"] == "object"
+    delegate = next(item for item in tools if item["name"] == "delegate_task")
+    assert "fake" in delegate["description"]
+    assert "不能写代码" in delegate["description"]
+    assert "兜底" in delegate["description"]
+    status = next(item for item in tools if item["name"] == "workspace_status")
+    assert "fake" in status["description"]
 
 
 def test_通知不回话(tmp_path: Path) -> None:

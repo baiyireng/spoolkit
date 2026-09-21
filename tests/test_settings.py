@@ -38,6 +38,19 @@ def test_只写白名单里的键(config_file: Path) -> None:
     assert settings.load() == {"provider": "llamacpp"}
 
 
+def test_save保留文件里白名单以外的标量(config_file: Path) -> None:
+    """搜索 key 不进白名单（避免 `spool config` 把密钥打出来），但 `config --set`
+    不能把人手写进 toml 的 tavily_api_key 抹掉。"""
+    config_file.write_text(
+        'provider = "llamacpp"\ntavily_api_key = "tvly-keep"\n',
+        encoding="utf-8",
+    )
+    settings.save({"provider": "gemini"})
+    payload, _ = settings.read_config()
+    assert payload["provider"] == "gemini"
+    assert payload["tavily_api_key"] == "tvly-keep"
+
+
 def test_配置文件损坏时不挡启动(config_file: Path) -> None:
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text("这不是 toml = = =", encoding="utf-8")

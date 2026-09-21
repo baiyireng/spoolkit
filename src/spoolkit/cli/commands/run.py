@@ -27,7 +27,9 @@ from spoolkit.cli.runtime import (
     web_access,
     web_search_backend,
     build_lessons,
+    distiller_for,
     open_memory,
+    prompt_for_turn,
     provider_gateway,
     settle_lessons,
     show_history,
@@ -35,7 +37,6 @@ from spoolkit.cli.runtime import (
 from spoolkit.cli.settle import settle
 from spoolkit.cli.events import EventWriter, settle_with_events
 from spoolkit.llm.tokenizer import OfflineTokenCounter
-from spoolkit.memory.distill import distill
 from spoolkit.memory.transcript import ASSISTANT, USER, record_message
 from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.grant import Grants
@@ -87,6 +88,13 @@ def run(args: argparse.Namespace) -> int:
     if args.plan:
         return advance_plan(args, project_root, gateway)
     if args.autonomous:
+        # autonomous 是无人值守模式：policy 留空时会沿用工作区默认（通常是 ask），
+        # 写操作全被拒、白跑一趟。这里自动提权为 auto——边界仍由 --scope 守着，
+        # 没给 scope 它自己会拒绝。用户显式给了 --policy 就尊重用户的选择。
+        if not args.policy:
+            args.policy = "auto"
+            if not args.events:
+                print("autonomous 模式：未指定 --policy，自动提权为 auto（边界仍由 --scope 守）")
         return autonomous(args, project_root, gateway)
 
     if not args.events:
@@ -170,9 +178,10 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
     )
     # 聊天区域要有历史可看：网页壳按 /state 回放它。原先这条路径只开了记忆、
     # **不记往来**，于是页面刷新之后一片空白——"我上次说到哪儿"全靠回忆。
-    # 注意它只进给人看的 transcript，不进模型上下文。
+    # 注意完整 transcript 只进给人看的区域；模型拿的是截断后的最近几轮。
     if memory is not None:
         record_message(memory._conn, args.session, USER, args.goal)
+    prompt = prompt_for_turn(memory, args.session, args.goal, overrides)
     loop = assemble_loop(
         project_root,
         gateway,
@@ -189,6 +198,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
         ),
         wiring=LoopWiring(
             memory=memory,
+            distiller=distiller_for(args, gateway, memory),
             pending=pending,
             # 命令权限申请也要能问出去：桥/网页壳给了 --ask-on-stdin 时，把问题
             # 作为事件发出去、从 stdin 读回答（用户那边就是"回 y 允许这一次"）。
@@ -201,12 +211,12 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             on_event=writer.handle,
             read_roots=_resolve_read_roots(args, project_root)[0],
             web=web_access(args, project_root),
-            search=web_search_backend(args),
+            search=web_search_backend(args, project_root),
             mcp=not getattr(args, "no_mcp", False),
             from_channel=getattr(args, "from_channel", False),
         ),
     )
-    result = loop.run(args.goal, resume=args.resume)
+    result = loop.run(args.goal, resume=args.resume, prompt=prompt)
     _report_numbers(loop, result, writer)
     _maybe_file_diagnosis(project_root, before, result, writer)
 
@@ -250,9 +260,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             model=f"{args.provider}:{args.model or '默认'}",
             overrides=overrides,
         )
-        # 假模型没有多余脚本条目可分给归纳调用，因此只在真实供应商下启用。
-        if args.provider != "fake":
-            distiller = lambda state, final: distill(gateway, state, final=final)
+        distiller = distiller_for(args, gateway, memory)
 
     loop = assemble_loop(
         project_root,
@@ -276,7 +284,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             lessons=build_lessons(memory) if memory is not None else None,
             read_roots=read_roots,
             web=web_access(args, project_root),
-            search=web_search_backend(args),
+            search=web_search_backend(args, project_root),
             mcp=not getattr(args, "no_mcp", False),
             from_channel=getattr(args, "from_channel", False),
         ),

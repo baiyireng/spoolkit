@@ -52,3 +52,44 @@ def test_正常回复发不出去也不会抛出去(tmp_path: Path) -> None:
 
     assert replies and replies[0].accepted is True
     assert any("回复发送失败" in item for item in notes)
+
+
+class _TimeoutThenOk(FakeChannel):
+    """第一次发送网络超时，之后能发出去——长任务查完时隧道刚抖过。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def send(self, text: str, to: str = "") -> None:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise ConnectionError("handshake timed out")
+        super().send(text, to)
+
+
+def test_网络超时的回复会留下等补发(tmp_path: Path) -> None:
+    channel = _TimeoutThenOk()
+    channel.push("me", "查天气")
+    bridge, notes = _bridge(tmp_path, channel)
+    bridge.allowed_users = {"me"}
+
+    bridge.run_once()
+    assert channel.sent == []
+    assert any("回复发送失败" in item for item in notes)
+
+    flushed = bridge.flush_outbox()
+    assert flushed == 1
+    assert channel.sent == [("chat", "答复")]
+    assert any("补发" in item for item in notes)
+
+
+def test_平台拒绝的回复不进补发队列(tmp_path: Path) -> None:
+    channel = _RefusingChannel()
+    channel.push("me", "做点事")
+    bridge, notes = _bridge(tmp_path, channel)
+    bridge.allowed_users = {"me"}
+
+    bridge.run_once()
+    assert bridge.flush_outbox() == 0
+    assert channel.sent == []

@@ -147,6 +147,18 @@ def test_只读git子命令被允许() -> None:
     assert validate_command(["git", "diff"]) is None
 
 
+def test_node_check只允许js文件() -> None:
+    """dogfood：agent 直接对 HTML 跑 node --check，报 ERR_UNKNOWN_FILE_EXTENSION。"""
+    assert validate_command(["node", "--check", "snippet.js"]) is None
+    assert validate_command(["node", "--check", "index.html"]) is not None
+    assert ".js" in validate_command(["node", "--check", "index.html"])
+
+
+def test_node不带check被拒绝() -> None:
+    assert validate_command(["node", "script.js"]) is not None
+    assert validate_command(["node"]) is not None
+
+
 def test_会改写状态的git子命令被拒绝() -> None:
     for sub in ("commit", "reset", "checkout", "clean", "push"):
         assert validate_command(["git", sub]) is not None

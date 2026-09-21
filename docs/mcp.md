@@ -23,6 +23,10 @@
 `--policy` 决定子进程的授权策略。供应商/地址走用户级配置（`spool config`），
 也可以在 args 里给 `--provider` / `--base-url`。
 
+**fake 不能当生成器。** 这条 MCP 要的是已配置的 llamacpp 或 gemini。
+`--provider fake` 只回放 `--script`，没有 LLM 时不要把任务交给本服务当兜底——
+调用方自己写。`workspace_status` 里的 `provider` 若是 `fake`，先改配置再下发。
+
 ## 信任模型
 
 **外部 agent 在这个协议里扮演用户**：`confirm_changes(apply=true)` 等于用户
@@ -37,11 +41,11 @@
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `delegate_task` | `goal`（必填）、`mode`（`task`/`autonomous`/`plan`） | 下发任务，**立刻**返回 task_id——长任务不会阻塞这次调用 |
+| `delegate_task` | `goal`（必填）、`mode`（`task`/`autonomous`/`plan`） | 下发任务，**立刻**返回 task_id。需要真实模型；fake 不能写代码，不要当没 LLM 时的兜底 |
 | `task_status` | — | 快照：是否在跑、结局、用量、待确认改动、`last_seq` |
 | `task_events` | `since` | 按序号拉事件（step / tool / diff / await / final…），首次传 0 |
 | `confirm_changes` | `apply`（布尔） | 回答审批请求：落盘或丢弃 |
-| `workspace_status` | — | 计划进度、工作区默认策略、当前供应商配置 |
+| `workspace_status` | — | 计划进度、工作区默认策略、当前供应商配置。provider 为 fake 时不要继续下发 |
 
 ## 一次典型的调用序列
 

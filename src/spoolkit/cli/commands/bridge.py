@@ -22,7 +22,10 @@ from spoolkit.bridge.core import Bridge
 from spoolkit.bridge.fake import FakeChannel
 from spoolkit.bridge.pairing import ALLOWLIST, OPEN, PAIRING, POLICIES, Pairings
 from spoolkit.bridge.plugins import load_channel_factories
+from spoolkit.cli.commands.serve import _web_flags
 from spoolkit import readroots
+from spoolkit import settings
+from spoolkit.health import collect_rows
 
 
 def _build_channel(args, log) -> object:
@@ -220,17 +223,20 @@ def pending_notice(root: Path) -> str:
 def run_extra_args(args: argparse.Namespace, project_root: Path) -> list[str]:
     """每一轮子进程要带的参数。
 
-    `--from-channel`：远程聊天通道默认只碰当前工作区；本机 `spool extra add`
-    过的关联目录会转成 `--allow-read` 带下去。聊天里的 `/allow-read` 加不了目录。
+    `--from-channel`：远程聊天通道默认只限制**读写文件**（当前工作区；
+    本机 `spool extra add` 过的关联目录会转成 `--allow-read` 带下去）。
+    查资料默认开 `--web`（手机上让它查天气是常见场景）；`--no-web` 关掉。
+    聊天里的 `/allow-read` 加不了目录。
     """
     # `--ask-on-stdin`：events 模式默认"无人可问就拒绝"，桥这边有人可问
     # （用户就在聊天里），所以要显式打开。
     extra: list[str] = ["--ask-on-stdin", "--from-channel"]
     for item in readroots.existing(project_root):
         extra += ["--allow-read", str(item)]
-    if getattr(args, "web", False):
-        # 聊天通道也能开联网：用户在手机上让它查资料是常见场景。
-        extra += ["--web"]
+    extra += _web_flags(args)
+    api = str(getattr(args, "web_search_api", "") or "").strip()
+    if api:
+        extra += ["--web-search-api", api]
     for domain in getattr(args, "web_allow", []) or []:
         extra += ["--web-allow", domain]
     for domain in getattr(args, "web_deny", []) or []:
@@ -285,6 +291,9 @@ def bridge_command(args: argparse.Namespace) -> int:
         )
 
     extra = run_extra_args(args, project_root)
+    notify = settings.flag_enabled(
+        "notify_disconnect", bool(getattr(args, "notify_disconnect", False))
+    )
 
     runner = AgentRunner(
         project_root,
@@ -302,18 +311,28 @@ def bridge_command(args: argparse.Namespace) -> int:
         pairings=pairings,
         access=access,
         root=project_root,
+        notify_disconnect=notify,
     )
 
     if args.channel == "fake":
         return _fake_loop(bridge, channel, args.user)
 
+    if notify:
+        print("断开时会给最近聊天发一句。", file=sys.stderr)
     print(f"{args.channel} 通道已就绪，等消息（Ctrl-C 退出）。", file=sys.stderr)
+    next_probe = 0.0
     try:
         while True:
             replies = bridge.run_once()
             for reply in replies:
                 if reply.accepted:
                     print(f"· 处理了 {reply.user} 的一条消息", file=sys.stderr)
+            now = time.monotonic()
+            if now >= next_probe:
+                next_probe = now + 5.0
+                if notify:
+                    bridge.notify_disconnects(collect_rows(extra))
+                bridge.flush_outbox()
             if not replies:
                 # 长轮询通道自己会等；这里只是别把 CPU 打满。
                 time.sleep(0.2)

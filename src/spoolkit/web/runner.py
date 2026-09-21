@@ -18,6 +18,7 @@ import threading
 from pathlib import Path
 from typing import Sequence
 
+from spoolkit import health as health_mod
 from spoolkit.bridge.pairing import Pairings
 from spoolkit.memory.transcript import recent_messages
 from spoolkit.web.protocol import (
@@ -36,8 +37,8 @@ NOISE_LINES = 3
 # 所以事件必须留一段。留全量不行：长任务的事件是几千条，内存里攒着没意义。
 EVENT_LOG = 400
 
-# 聊天区域里回放多少条历史。它**只是给人看的**：模型上下文不受它影响，
-# 页面上看到的往来不等于模型看到的上下文（后者由状态与记忆按需取）。
+# 聊天区域里回放多少条历史。页面上的往来给人看；模型拿的是另一份
+# 截断后的最近几轮（`conversational_prompt`），不是这份完整回放。
 HISTORY_LIMIT = 20
 
 
@@ -50,11 +51,13 @@ class Runner:
         session: str = "cli",
         extra_args: Sequence[str] = (),
         history_limit: int = HISTORY_LIMIT,
+        extra_health=None,
     ) -> None:
         self.project_root = project_root
         self.session = session
         self.extra_args = list(extra_args)
         self.history_limit = history_limit
+        self._extra_health = extra_health
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self._listeners: list[queue.Queue] = []
@@ -180,8 +183,10 @@ class Runner:
         你会拿到一个自相矛盾的状态（比如「运行中」但已经给出了 final）。
 
         配对请求读磁盘、不进模型上下文：锁外读，别让文件 I/O 堵住确认按钮。
+        探活走 HTTP，同样放锁外，失败也不得把状态接口弄挂。
         """
         with self._lock:
+            final = dict(self._final) if self._final else None
             data = {
                 "running": self.running,
                 "finished": self._finished,
@@ -189,13 +194,45 @@ class Runner:
                 "awaiting_detail": dict(self._await_detail),
                 "goal": self._goal,
                 "usage": dict(self._usage),
-                "final": dict(self._final) if self._final else None,
+                "final": final,
                 "diffs": [dict(item) for item in self._diffs],
                 "session": self.session,
                 "messages": self._transcript(),
+                # 顶层别名：外部驱动者（MCP 客户端等）不读源码时靠直觉就能判断
+                # 「做完了没」「成功没」。finished/final 仍然保留，不破坏老接口。
+                "done": self._finished,
+                "ok": final.get("ok") if final else None,
             }
         data["pairings"] = self._pending_pairings()
+        data["health"] = self._health_snapshot()
         return data
+
+    def _health_snapshot(self) -> dict:
+        """模型（以及 hub 可选附带的通道）通不通。给人看的。"""
+        try:
+            model = health_mod.probe_from_extra(self.extra_args)
+        except Exception as exc:
+            model = {
+                "ok": False,
+                "name": "model",
+                "target": "",
+                "detail": f"探活失败：{exc}",
+            }
+        payload = {"model": model}
+        try:
+            payload["services"] = list(health_mod.probe_services())
+        except Exception:
+            payload["services"] = []
+        extra_fn = self._extra_health
+        if extra_fn is None:
+            return payload
+        try:
+            extra = extra_fn() or {}
+        except Exception:
+            return payload
+        if isinstance(extra, dict):
+            payload.update(extra)
+        return payload
 
     def _pending_pairings(self) -> list[dict]:
         """待批准的配对码。给人看的，不进模型上下文。"""

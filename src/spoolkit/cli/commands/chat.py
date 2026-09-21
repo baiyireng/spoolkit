@@ -3,10 +3,8 @@
 为什么要有它：`run --goal …` 是**一次性任务**式的——每次都要把话说全。
 但真实使用更像聊天：先让它看一眼，再让它改一处，再让它跑个测试。
 这条命令把一个进程里的多次运行串起来，**共用同一个会话**（记忆、进度、
-授权策略都延续），而上下文仍然按原设计：每轮独立，不把历史塞回模型。
-
-也就是说：**聊天区域有历史（给人看），模型上下文没有历史（给短上下文让路）**。
-这两件事混为一谈会得出"把历史塞回去"的结论，而那正是这个项目要避免的。
+授权策略都延续）。每轮 `loop.run()` 仍重置工具往返；最近几轮往来（截断）
+由 `prompt_for_turn` 拼进本轮提示，用来理解指代，不是把整段历史塞回去。
 """
 
 import argparse
@@ -24,14 +22,15 @@ from spoolkit.cli.runtime import (
     assemble_loop,
     build_approver,
     build_lessons,
+    distiller_for,
     open_memory,
+    prompt_for_turn,
     show_history,
     settle_lessons,
     web_access,
     web_search_backend,
 )
 from spoolkit.config import Config
-from spoolkit.memory.distill import distill
 from spoolkit.memory.transcript import ASSISTANT, USER, record_message
 from spoolkit.tools.edit import PendingChanges
 
@@ -120,9 +119,9 @@ def _turn(args, project_root, gateway, window, memory) -> int:
     approver, grants = build_approver(project_root)
     read_roots, _ = _resolve_read_roots(args, project_root)
     pending = PendingChanges(project_root, extra_roots=read_roots)
-    distiller = None
-    if memory is not None and args.provider != "fake":
-        distiller = lambda state, final: distill(gateway, state, final=final)
+    if memory is not None:
+        record_message(memory._conn, args.session, USER, args.goal)
+    prompt = prompt_for_turn(memory, args.session, args.goal, overrides)
 
     loop = assemble_loop(
         project_root,
@@ -139,21 +138,19 @@ def _turn(args, project_root, gateway, window, memory) -> int:
         ),
         wiring=LoopWiring(
             memory=memory,
-            distiller=distiller,
+            distiller=distiller_for(args, gateway, memory),
             pending=pending,
             approver=approver,
             grants=grants,
             lessons=build_lessons(memory) if memory is not None else None,
             read_roots=read_roots,
             web=web_access(args, project_root),
-            search=web_search_backend(args),
+            search=web_search_backend(args, project_root),
             mcp=not getattr(args, "no_mcp", False),
         ),
     )
-    if memory is not None:
-        record_message(memory._conn, args.session, USER, args.goal)
 
-    result = loop.run(args.goal)
+    result = loop.run(args.goal, prompt=prompt)
     _report_numbers(loop, result)
     if memory is not None:
         settle_lessons(memory, result.lessons_pushed, result.finished)
@@ -192,7 +189,7 @@ def chat_command(args: argparse.Namespace) -> int:
     policy = resolve_policy(args, project_root)
     scope = resolve_scope(args)
     print(_status_line(args, project_root, window, policy, scope))
-    print("进入对话模式（/help 看提示，/exit 退出）。每轮独立：历史不塞回模型。")
+    print("进入对话模式（/help 看提示，/exit 退出）。最近几轮会带进本轮提示（截断），工具往返不塞回去。")
 
     # 正开着桥时，"有人要配对"原先只写在桥自己的终端上。这里补一条，
     # 让消息出现在你人正在的这个会话里（并且能就地批准）。

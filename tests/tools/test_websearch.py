@@ -2,10 +2,12 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+from spoolkit.cli.runtime import web_search_backend
 from spoolkit.config import Config
 from spoolkit.fetch.client import Fetched, WebPolicy
-from spoolkit.fetch.search import SearchHit, UnconfiguredSearch
+from spoolkit.fetch.search import SearchHit, TavilySearch, UnconfiguredSearch
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.tools.edit import PendingChanges
@@ -61,6 +63,55 @@ def test_假后端只交标题和网址不交整页() -> None:
     assert "https://example.com/t" in result.content
     assert "Timeouts" in result.content
     assert backend.queries == ["httpx timeout"]
+
+
+def test_没key时后端仍是未配置(monkeypatch) -> None:
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("SPOOLKIT_TAVILY_API_KEY", raising=False)
+    backend = web_search_backend(SimpleNamespace(web_search_api="", proxy=""))
+    assert backend.configured is False
+    assert isinstance(backend, UnconfiguredSearch)
+
+
+def test_环境变量有tavily_key就接上(monkeypatch) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-from-env")
+    backend = web_search_backend(
+        SimpleNamespace(web_search_api="", proxy="socks5://127.0.0.1:1080")
+    )
+    assert isinstance(backend, TavilySearch)
+    assert backend.api_key == "tvly-from-env"
+    assert backend.proxy == "socks5://127.0.0.1:1080"
+
+
+def test_工作区env里的tavily_key也能用(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("SPOOLKIT_TAVILY_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("TAVILY_API_KEY=tvly-workspace\n", encoding="utf-8")
+    backend = web_search_backend(
+        SimpleNamespace(web_search_api="tavily", proxy=""), tmp_path
+    )
+    assert isinstance(backend, TavilySearch)
+    assert backend.api_key == "tvly-workspace"
+
+
+def test_配置文件里的tavily_key也能用(monkeypatch) -> None:
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("SPOOLKIT_TAVILY_API_KEY", raising=False)
+    from spoolkit import settings
+
+    path = settings.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('tavily_api_key = "tvly-from-toml"\n', encoding="utf-8")
+    backend = web_search_backend(SimpleNamespace(web_search_api="", proxy=""))
+    assert isinstance(backend, TavilySearch)
+    assert backend.api_key == "tvly-from-toml"
+
+
+def test_点了别家名字即使有tavily_key也不装(monkeypatch) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-from-env")
+    backend = web_search_backend(SimpleNamespace(web_search_api="brave", proxy=""))
+    assert backend.configured is False
+    assert getattr(backend, "wanted", "") == "brave"
 
 
 def test_主循环不挂web_search(tmp_path: Path) -> None:

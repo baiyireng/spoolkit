@@ -489,6 +489,39 @@ def _capturing_channel(ws):
     return channel, sent
 
 
+def test_代理连不上时网关线程会重连而不是退出() -> None:
+    """真跑踩到的：隧道一断，httpx.ConnectError 不在重连捕获里，线程直接死。"""
+    notes: list[str] = []
+    hits = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
+
+    channel = QQBotChannel(
+        app_id="A",
+        secret="S",
+        transport=httpx.MockTransport(handler),
+        on_note=notes.append,
+    )
+
+    def boom() -> None:
+        hits["n"] += 1
+        if hits["n"] == 1:
+            raise httpx.ConnectError("refused")
+        channel._stop.set()
+
+    channel._run_gateway_once = boom  # type: ignore[method-assign]
+    original_wait = channel._stop.wait
+    channel._stop.wait = lambda timeout=None: original_wait(0.01)  # type: ignore[method-assign]
+    channel.start()
+    deadline = time.time() + 2
+    while time.time() < deadline and hits["n"] < 2:
+        time.sleep(0.02)
+    channel.close()
+    assert hits["n"] >= 2, f"连不上代理就把线程打死了：hits={hits['n']} notes={notes}"
+    assert any("出错" in item and "ConnectError" in item for item in notes)
+
+
 def test_只给裸_openid_也能发出去() -> None:
     """兜底：调用方只给一个 openid（没有 `kind:` 前缀）时按最后一条消息的场景回。"""
     channel, sent = _capturing_channel(_ScriptedWS([]))

@@ -147,10 +147,13 @@ def test_有research时它是动作不是阶段():
     assert "不可信" in text
 
 
-def test_远程通道工作方式写明只能碰当前工作区() -> None:
+def test_远程通道工作方式只限制文件读写() -> None:
+    """查天气被拒：工作方式写成「只能碰工作区」，模型把联网也砍了。"""
     text = build_workflow(ToolRegistry(), from_channel=True)
     assert "聊天通道" in text
     assert "当前工作区" in text
+    assert "文件" in text
+    assert "查资料" in text
     assert "不要" in text and "allow-read" in text
     assert "extra add" in text or "spool extra" in text
 

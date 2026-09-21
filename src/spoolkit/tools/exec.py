@@ -123,6 +123,21 @@ def validate_command(argv: list[str]) -> str | None:
             return f"只允许只读的 git 子命令（{allowed}），{rest[0]} 不在其中"
         return None
 
+    # node --check：只允许语法检查，不允许任意脚本执行。
+    # 验证器用它做 HTML 内联 JS 的降级语法检查（dogfood：贪吃蛇写完没有验证）。
+    # dogfood 第二轮：agent 直接对 HTML 文件跑 node --check，报 ERR_UNKNOWN_FILE_EXTENSION。
+    # 限制文件后缀为 .js——HTML 要先提取 JS 再检查（验证器会自动做）。
+    if program == "node" or program.endswith("node.exe"):
+        if len(rest) >= 2 and rest[0] == "--check":
+            target = rest[1]
+            if not target.lower().endswith(".js"):
+                return (
+                    "node --check 只接受 .js 文件。HTML 文件不能直接检查——"
+                    "系统会自动从 HTML 里提取内联 JS 做语法检查，你不需要手动做。"
+                )
+            return None
+        return "node 只允许 --check（语法检查），不允许执行脚本"
+
     return f"命令不在白名单内: {program}"
 
 

@@ -366,6 +366,39 @@ def _propose(
     verb = "新建" if change.is_new_file else "修改"
     body = f"已生成{verb}预览（尚未写入，需用户确认）：\n{change.diff}"
 
+    # 整文件重写已有文件时，如果行数大幅减少，提醒模型检查有没有丢内容。
+    # dogfood 暴露：重写 index.html 时 CSS 单位全丢（100vh→100%、400px→400）。
+    # 不是 bug——是 27B 整文件重写时漏细节；提醒它再看一眼能拦住一部分。
+    if not change.is_new_file:
+        old_lines = old_text.count("\n") + (1 if old_text and not old_text.endswith("\n") else 0)
+        new_lines = new_text.count("\n") + (1 if new_text and not new_text.endswith("\n") else 0)
+        if old_lines > 10 and new_lines < old_lines * 0.7:
+            body = (
+                f"⚠ {stored} 从 {old_lines} 行变成 {new_lines} 行（少了 "
+                f"{old_lines - new_lines} 行）。确认没有丢掉原有内容——"
+                "整文件重写容易漏细节（比如 CSS 单位、闭合标签）。"
+                "如果确实删了那么多，忽略此提示。\n\n" + body
+            )
+        # 硬拦截：文件 > 30 行且新行数 < 旧行数的一半——几乎肯定是丢内容了。
+        # dogfood 第二轮：175 行重写成 117 行，丢了标题、overlay、重启按钮。
+        # 软提示模型能忽略，这里直接拒绝，逼它用 replace_text/replace_lines 做局部修改。
+        if old_lines > 30 and new_lines < old_lines * 0.5:
+            # 撤销这次登记——不让它进 pending
+            del pending._changes[stored]
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"⚠ 拒绝整文件重写：{stored} 从 {old_lines} 行变成 {new_lines} 行"
+                    f"（减少 {old_lines - new_lines} 行，超过一半）。"
+                    "这几乎肯定是丢内容了——整文件重写时 27B 容易漏掉原有细节"
+                    "（标题、CSS、事件绑定等）。\n"
+                    "改用 replace_text 或 replace_lines 做局部修改——"
+                    "只改你要改的那一段，其余不动。\n"
+                    "如果确实要删掉一半以上内容，用 replace_lines 删除对应行，"
+                    "或者分两次：先 replace_lines 删，再 replace_text 改。"
+                ),
+            )
+
     # 测试文件是验收标准。改它不会让验证通过（验证按原始内容判定），
     # 但模型不知道这件事——实测它会把测试改成 assert True 然后宣布完成，
     # 白烧四步。与其事后拦，不如在它动手时说清楚。
@@ -393,7 +426,10 @@ def write_file_spec(root: Path, pending: PendingChanges) -> ToolSpec:
         name="write_file",
         description=(
             "新建或整体覆盖一个文件，给出完整内容；只生成 diff，需用户确认后才写入。"
-            "文件不大时首选它——整份给出比算行号区间更不容易出错"
+            "新建文件时首选它。改已有文件时优先用 replace_text（改一处）或"
+            " replace_lines（改一段）——整文件重写容易丢掉原有内容里的细节"
+            "（实测：重写时 CSS 单位 100vh→100%、400px→400 全丢了），"
+            "而且内容要经过 JSON 转义，出错面更大"
         ),
         parameters={
             "type": "object",

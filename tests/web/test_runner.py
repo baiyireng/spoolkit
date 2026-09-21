@@ -29,8 +29,8 @@ def test_初始状态是空闲的(tmp_path: Path) -> None:
 def test_状态里带上会话历史(tmp_path: Path) -> None:
     """聊天区域要有历史可看：网页壳按 /state 回放它。
 
-    它**只是给人看的**：模型上下文不受它影响。两者混为一谈会得出
-    "把历史塞回上下文"的结论，而那会把这个项目的支点（短上下文）推翻。
+    页面上的往来给人看。模型不拿这份完整回放；`--events` 路径会另拼一份
+    截断后的最近几轮进本轮提示（见 conversational_prompt）。
     """
     from spoolkit.memory.store import init_memory_schema
     from spoolkit.memory.transcript import ASSISTANT, USER, record_message
@@ -93,8 +93,77 @@ def test_没有待确认时确认请求被拒绝(tmp_path: Path) -> None:
 
 def test_快照包含关键字段(tmp_path: Path) -> None:
     snapshot = _runner(tmp_path).snapshot()
-    for key in ("running", "finished", "awaiting", "goal", "usage", "final", "pairings"):
+    for key in (
+        "running",
+        "finished",
+        "awaiting",
+        "goal",
+        "usage",
+        "final",
+        "pairings",
+        "health",
+        "done",
+        "ok",
+    ):
         assert key in snapshot
+
+
+def test_done_ok是finished_final的别名(tmp_path: Path) -> None:
+    """外部驱动者靠 done/ok 就能判断「做完了没」「成功没」，不读源码。"""
+    snapshot = _runner(tmp_path).snapshot()
+    assert snapshot["done"] == snapshot["finished"]
+    assert snapshot["ok"] == (snapshot["final"].get("ok") if snapshot["final"] else None)
+
+
+def test_快照带上模型探活(tmp_path: Path, monkeypatch) -> None:
+    """给人看的红绿，不进模型上下文。探活失败也不能把状态接口弄挂。"""
+    from spoolkit import health as health_mod
+
+    monkeypatch.setattr(
+        health_mod,
+        "probe_from_extra",
+        lambda extra, **kw: {
+            "ok": False,
+            "name": "model",
+            "target": "http://127.0.0.1:8080",
+            "detail": "拒绝连接",
+        },
+    )
+    snapshot = _runner(tmp_path).snapshot()
+    assert snapshot["health"]["model"]["ok"] is False
+    assert "8080" in snapshot["health"]["model"]["target"]
+
+
+def test_快照带上配方表探活(tmp_path: Path, monkeypatch) -> None:
+    from spoolkit import health as health_mod
+
+    monkeypatch.setattr(
+        health_mod,
+        "probe_services",
+        lambda: [
+            {
+                "ok": False,
+                "name": "tunnel",
+                "target": "tcp:127.0.0.1:1080",
+                "detail": "连不上",
+            }
+        ],
+    )
+    snapshot = _runner(tmp_path).snapshot()
+    assert snapshot["health"]["services"][0]["name"] == "tunnel"
+    assert snapshot["health"]["services"][0]["ok"] is False
+
+
+def test_探活抛错也不弄挂快照(tmp_path: Path, monkeypatch) -> None:
+    from spoolkit import health as health_mod
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("探活自己崩了")
+
+    monkeypatch.setattr(health_mod, "probe_from_extra", boom)
+    snapshot = _runner(tmp_path).snapshot()
+    assert snapshot["health"]["model"]["ok"] is False
+    assert snapshot["running"] is False
 
 
 def test_快照带上待批准的配对码(tmp_path: Path) -> None:

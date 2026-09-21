@@ -107,6 +107,9 @@ class PlanStep:
     executor: str = SELF
     status: str = PENDING
     note: str = ""
+    # 自动重试次数。advance_plan 遇到 failed 步骤时自动重试一次（改回 pending），
+    # 用这个字段防止无限重试。dogfood 暴露：步骤失败后 resume 阻塞，没有重试机制。
+    retries: int = 0
 
     @property
     def finished(self) -> bool:

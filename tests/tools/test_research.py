@@ -186,6 +186,54 @@ def test_配了搜索且没给urls就先搜再按页读(tmp_path: Path) -> None:
     assert search.queries == ["A 说什么"]
 
 
+def test_配了搜索时多条摘要只开一轮会话_不按页抓(tmp_path: Path) -> None:
+    """先搜再读：摘要够就停。不能把每条命中都开一轮 27B 去抓整页。"""
+    from spoolkit.fetch.search import SearchHit
+
+    class FakeSearch:
+        configured = True
+
+        def search(self, query: str, limit: int) -> list[SearchHit]:
+            return [
+                SearchHit(title="厦门", url="https://a.example/", snippet="多云 26℃"),
+                SearchHit(title="备选", url="https://b.example/", snippet="阵雨"),
+                SearchHit(title="广告", url="https://c.example/", snippet="攻略"),
+            ][:limit]
+
+    tokenizer = OfflineTokenCounter()
+    gateway = FakeModel(
+        script=[
+            _turn(
+                "摘要够了",
+                [],
+                final="结论：厦门多云约 26℃\n引用：https://a.example/（搜索摘要）\n不确定：无\n继续：否",
+            ),
+        ],
+        tokenizer=tokenizer,
+    )
+    pages = {
+        "https://a.example/": _page("A", "ALPHA_UNIQUE_BODY " * 40),
+        "https://b.example/": _page("B", "BETA_UNIQUE_BODY " * 40),
+        "https://c.example/": _page("C", "GAMMA_UNIQUE_BODY " * 40),
+    }
+    tool = research_spec(
+        gateway,
+        _parent_registry(tmp_path, _access(tmp_path, pages)),
+        Config(project_root=tmp_path, supervise=False, context_window=4096),
+        tokenizer,
+        search=FakeSearch(),
+    )
+    result = tool.handler({"question": "最近两天厦门天气"})
+    assert result.ok
+    assert "26℃" in result.content
+    assert "ALPHA_UNIQUE_BODY" not in result.content
+    assert len(gateway.requests) == 1
+    bundled = "\n".join(message.content for message in gateway.requests[0].messages)
+    assert "多云 26℃" in bundled
+    assert "https://b.example/" in bundled
+    assert "不要 web_fetch" in bundled or "摘要" in bundled
+
+
 def test_多页是每页一个上下文再合并_不把五页正文一起塞(tmp_path: Path) -> None:
     tokenizer = OfflineTokenCounter()
     long_a = "ALPHA_UNIQUE_BODY " * 80

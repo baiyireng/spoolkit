@@ -47,6 +47,20 @@ def test_页面能按快照重建待确认面板() -> None:
     assert "showPending" in HTML
 
 
+def test_页面按快照显示模型断开() -> None:
+    """配对横幅是待批准；模型不通是另一条，不能复用「应用/拒绝」。"""
+    assert "showHealth" in HTML
+    assert 'id="health"' in HTML
+    assert "模型连不上" in HTML
+    assert "state.health" in HTML
+
+
+def test_页面也报外接配方断开() -> None:
+    """llama / 隧道是本机配方，不通时走同一条横幅，不另开按钮。"""
+    assert "health.services" in HTML
+    assert "连不上" in HTML
+
+
 def test_页面按快照显示待批准的配对码() -> None:
     """给人看的一行，不进模型上下文。不能复用「应用/拒绝」——那是落盘确认。"""
     assert "pairings" in HTML

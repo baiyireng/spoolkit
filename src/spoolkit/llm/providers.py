@@ -91,7 +91,10 @@ def _build_llamacpp(config: ProviderConfig) -> ModelGateway:
 PROVIDERS: dict[str, Provider] = {
     "fake": Provider(
         name="fake",
-        description="脚本化假模型，离线可用，用于测试与无 GPU 环境",
+        description=(
+            "测试回放（必须 --script），不能生成代码；"
+            "没有 LLM 时不要用它当兜底，真实任务用 llamacpp 或 gemini"
+        ),
         default_model="",
         requires_api_key=False,
         build=_build_fake,
