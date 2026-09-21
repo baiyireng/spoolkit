@@ -19,6 +19,10 @@ __pycache__/
 
 # 临时试验目录
 scratch_lab/
+.tmp/
+
+# 本地交接备忘（开发机用，不进仓库）
+docs/roadmap.md
 
 # 设计讨论时的可视化伴侣产物
 .superpowers/
