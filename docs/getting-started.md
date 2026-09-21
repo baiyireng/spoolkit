@@ -96,7 +96,8 @@ spool                        # 什么都不带 → 进对话
 spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测试"
 
 # 长任务：自己拆解、逐步做完、逐步验收（--scope 是允许自动落盘的范围）
-spool run --autonomous --scope "**" --policy auto --limit 20 `
+# 没写 --policy 时会自动提权为 auto；边界仍由 --scope 守
+spool run --autonomous --scope "**" --limit 20 `
     --goal "把这个工作区里的题目都做对"
 
 # 接着上次没做完的检查点继续
@@ -104,14 +105,19 @@ spool run --resume
 ```
 
 默认**不动你的文件**：写操作先产出 diff，按 `ask / auto / deny` 三档处理。
-`--policy auto` 才在 `--scope` 范围内自动落盘，越界仍退回确认；`spool revert`
-可以回滚上一次写入。
+`--policy auto` 才在 `--scope` 范围内自动落盘，越界仍退回确认。`--autonomous`
+若没写 `--policy`，会提权为 auto（免得无人值守时写操作全被拒、白跑一趟）。
+`spool revert` 可以回滚上一次写入。
 
-想看着它做，用网页壳（联网默认开，和 CLI / QQ 同一套）：
+想看着它做，用常驻入口（联网默认开，和 CLI / QQ 同一套）：
 
 ```powershell
-spool serve                  # 打开 http://127.0.0.1:8765/
+spool hub                    # 打开 http://127.0.0.1:8765/ （网页壳）
+spool hub --channel qqbot    # 网页壳 + 聊天桥；本机 llama / 隧道用 spool service
 ```
+
+只起网页、不拉通道也可以 `spool serve`。`--channel fake` 是**聊天通道**的本地回环
+（stdin/stdout），和 `--provider fake`（只回放 `--script` 的假模型）不是一回事。
 
 ## 6. 代理
 
@@ -130,6 +136,9 @@ spool serve                  # 打开 http://127.0.0.1:8765/
 | 命令说"当前目录不是工作区" | 这里确实没有 `.agent/`，登记表里也没有 | `spool init`，或用 `--root <路径>` |
 | `没有这个配对码` | **看错了工作区**（不是码错） | 报错里会写它看的是哪个文件；用 `--root` 指对，或先 `spool init` 登记 |
 | 模型返回空内容 | 思考内容吃光了输出预算 | llama-server 加 `--reasoning off` |
+| 终端几分钟没有新行 | llama.cpp 是非流式的，整段生成完才打印 | 等它返回。假模型缺脚本会立刻退出，不会替你写代码 |
+| 假模型立刻退出 / 不写代码 | 用了 `--provider fake` 却没给 `--script`，或把它当没 LLM 的兜底 | 真实任务用 llamacpp / gemini。fake **只回放脚本** |
+| 网页起来了但手机没消息 | 用了 `serve`，或 `hub` 没加 `--channel` | 常驻带聊天：`spool hub --channel …` |
 | 输出被截断 | 输出预算不够 | 看 `.agent/limits.json`；它支持续写与分轮，真要调就 `spool limits --set 名字=值` |
 | 改不动文件，一直问 | 策略是 `ask` | `spool policy --set auto` 并给 `--scope`，或运行时 `--policy auto` |
 | 命令被拒 | 不在白名单里 | 它会**申请权限**（本轮允许 / 工作区始终允许 / 拒绝 / 本轮全拒），按提示选 |

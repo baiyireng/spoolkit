@@ -58,8 +58,7 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 
 ## 它能做什么
 
-- **本地小模型驱动**：llama.cpp（含多模态模型的接口位）、Gemini 两个供应商，
-  按供应商提供专属模型装载器；上下文窗口与分词都向服务端问，不写死。
+- **本地小模型驱动**：真实任务用 llama.cpp 或 Gemini。上下文窗口与分词都向服务端问，不写死。`--provider fake` **只回放 `--script`，不能生成代码**，没有 LLM 时不要拿它当兜底。
 - **长任务自主编排**：把大目标拆成带验收标准的步骤（排不完就分批续排），
   逐步执行、逐步验收、可断点续跑（`plan.json` + `progress.md`）。
 - **子智能体**：一步可以派给独立上下文的实现者，再由另一个独立上下文审查。
@@ -69,7 +68,9 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 - **分级授权**：写操作默认只产出 diff，按 `ask / auto / deny` 三档处理；
   越界自动退回确认，白名单外的命令可以申请（无人值守时不会静默放行）。
 - **自我验证**：改完自动跑验收并把结果顶回给模型；它报"做完了"不算数，
-  验收命令的退出码才算数。
+  验收命令的退出码才算数。没有 pytest 但改了 HTML 时，会抽出内联 JS 做语法检查。
+- **常驻入口**：`spool hub` 起网页壳，加 `--channel` 才再拉聊天桥；本机
+  llama-server / SOCKS 隧道用 `spool service` 按配方启停，hub 只探活、不替你启动。
 - **能被别的 agent 调用**：挂成 MCP 服务，Codex / Claude Code / Cursor 可以
   扮演用户下发编排任务（[`docs/mcp.md`](docs/mcp.md)）。
 - **能被聊天驱动**：手机发一条消息 → 在工作区里跑一轮 → 结果发回来
@@ -82,16 +83,19 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 | `spool` | 进对话；当前目录不是工作区就先问一句要不要初始化 |
 | `spool init [路径]` | 把目录做成工作区（建 `.agent/` 并登记，幂等） |
 | `spool approve <码>` | 批准聊天通道的配对码（**任意目录都能敲**） |
+| `spool extra add <目录>` | 本机关联工作区外的目录（读放开，写要确认） |
 | `spool run --goal …` | 跑一次任务 |
-| `spool run --autonomous --scope … --goal …` | 自主拆解并逐步做完 |
+| `spool run --autonomous --scope … --goal …` | 自主拆解并逐步做完（未指定 `--policy` 时提权为 auto） |
 | `spool run --plan` / `--resume` | 推进已有计划的下一步 / 接着检查点继续 |
 | `spool plan --goal …` | 只拆解、落盘计划，不执行 |
 | `spool chat` | 对话式使用：多轮、共用同一个会话 |
-| `spool serve` | 起 Web UI（在浏览器里看步骤、diff、待确认） |
-| `spool bridge --channel fake` | 用聊天消息驱动它（telegram / qqbot / wecom 见文档） |
+| `spool hub` | 常驻：网页壳；加 `--channel` 才再拉聊天桥 |
+| `spool serve` | 只起 Web UI（不拉通道） |
+| `spool service` | 按本机配方启停 llama / 隧道（不写进仓库） |
+| `spool bridge --channel fake` | 只用聊天通道（telegram / qqbot / wecom 见文档） |
 | `spool mcp` / `spool mcp-servers --check` | 被别的 agent 调用 / 看自己配的外挂 MCP |
 | `spool config` `limits` `policy` `session` `revert` | 默认值 / 标定值 / 授权 / 会话 / 回滚 |
-| `spool bench --limit N` | 跑回归任务集（可复现的测量） |
+| `spool extra` `diagnose` `bench` | 关联目录 / 环境诊断 / 回归任务集 |
 
 逐条参数见 [`docs/cli.md`](docs/cli.md)。
 
@@ -135,6 +139,8 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
   **引用图与 `find_callers` 只对 Python 成立**——别的语言上工具会明说
   "没查 ≠ 没有"。认不出的后缀会以通用扫描进索引。
 - **多模态未接**：供应商抽象里留了位置，还没有可用的图文输入路径。
+- **本地超长文件仍整份读**：网页有切块通道（`web_fetch` / `web_read`）；工作区里的大手册还是 `read_file`。
+- **llama.cpp 等待期可能长时间无输出**：生成是非流式的，终端在模型返回前可能几分钟没有新行。假模型缺脚本会立刻退出，不会替你写代码。
 - **单机单人**：单 GPU、串行执行，没有并发与多用户设计。
 - **模型越弱，越依赖这套脚手架**：能力标定值就是为弱模型准备的；强模型上它们
   是上限而不是保护，该往大调。
@@ -144,7 +150,9 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 ```powershell
 uv venv --python 3.12
 uv pip install -e ".[dev]"
-uv run pytest -q
+# basetemp 放仓库外，避免被当成工作区根
+$env:PYTHONIOENCODING='utf-8'
+uv run pytest -q -p no:cacheprovider --basetemp="$env:TEMP\agents-dev-pytest"
 ```
 
 ## License

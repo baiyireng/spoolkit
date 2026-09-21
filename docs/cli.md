@@ -72,13 +72,14 @@ spool extra              # 列出
 | 参数 | 说明 |
 |---|---|
 | `--goal` | 要做的事（自然语言） |
-| `--provider {fake,gemini,llamacpp}` | 供应商（也可写 `--engine`）；留空用配置。**fake 只回放 `--script`，不能生成代码；没有 LLM 时不要用它当兜底** |
-| `--script` | 仅测试回放：fake 的应答脚本。真实任务不要走这条 |
+| `--provider {fake,gemini,llamacpp}` | 供应商（也可写 `--engine`）；留空用配置。**fake 只回放 `--script`，不能生成代码；没有 LLM 时不要用它当兜底**。这和 `--channel fake`（聊天通道本地回环）不是一回事 |
+| `--script` | 仅测试回放：假模型的应答脚本。真实任务不要走这条 |
 | `--model` / `--base-url` / `--proxy` | 覆盖模型名 / llama.cpp 地址 / 代理 |
 | `--root` | 工作区路径 |
-| `--policy {ask,auto,deny}` | 本次授权策略；留空用已保存的 |
+| `--policy {ask,auto,deny}` | 本次授权策略；留空用已保存的。`--autonomous` 且未指定时会**提权为 auto**（边界仍由 `--scope` 守） |
 | `--scope` | `auto` 下允许**自动落盘**的路径（逗号分隔）；必须由你给 |
-| `--autonomous` | 自己拆解目标并逐步做完（要配 `--scope`） |
+| `--autonomous` | 自己拆解目标并逐步做完（要配 `--scope`）。未写 `--policy` 时提权为 auto；显式给了就尊重 |
+| `--web` / `--no-web` | 联网取用（**默认开**）。完整参数见文末「联网取用」 |
 | `--plan` | 只推进已有计划的下一个待办步骤 |
 | `--resume` | 接着上次未完成的检查点继续 |
 | `--limit` | 自主模式最多拆几步；`--batch N` 分批推进（每批 N 步，做完回头看一眼再排下一批）|
@@ -276,7 +277,7 @@ Cursor 扮演用户下发任务）。工具、信任模型、调用序列见 [`m
 
 | 参数 | 说明 |
 |---|---|
-| `--channel {fake,telegram,wecom,qqbot}` | 通道种类；`fake` 本地可跑、不需要凭据 |
+| `--channel {fake,telegram,wecom,qqbot}` | 通道种类；`fake` 是 stdin/stdout 本地回环，**不是** `--provider fake` |
 | `--access {pairing,allowlist,open}` | 准入：`pairing`（默认，陌生人拿码）/ `allowlist`（只放行名单）/ `open`（谁都能用，会警告）|
 | `--allow-user 用户` | 白名单（可重复）；给了就切到名单模式 |
 | `--approve <码>` | 批准一个配对码然后退出 |

@@ -80,6 +80,10 @@ spool bridge --channel qqbot --bridge-proxy socks5://127.0.0.1:1080 --policy ask
   症状是 `ssh -D` 连上、但本地 1080 端口谁也连不通。改成 `local` 即可
   （`local` 只允许本地转发，比 `yes` 收得紧），改完 `sshd -t && systemctl reload sshd`。
 
+常驻入口更省事：`spool hub --channel qqbot`（网页壳 + 桥）。`spool bridge` 只起通道、不起网页。
+`--channel fake` 是 stdin/stdout 本地回环，用来测桥；**不要**写成 `--provider fake`
+（那是只回放 `--script` 的假模型，不能写代码）。
+
 ```powershell
 # 本地跑通（不需要任何外部服务）
 spool bridge --channel fake --provider llamacpp --policy auto --scope "**" --user me --allow-user me

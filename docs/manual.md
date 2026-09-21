@@ -147,16 +147,30 @@ spool run --web-deny ads.example.com --goal "..."                # 拉黑某个�
 
 - **拆解**要带验收标准；`--batch N` 让它分批续排，`--cover` 用于"目标明说这几件事
   都要做完"的场合（不给就不查——什么算"必须覆盖"是关于目标的判断，不归脚手架猜）。
+- **自主模式提权**：`--autonomous` 且命令行没写 `--policy` 时，会提权为 `auto`——
+  免得无人值守时写操作全被拒、白跑一趟。边界仍由 `--scope` 守；显式给了 `--policy`
+  就尊重。
+- **失败步骤自动重试一次**：`--plan` / `--resume` 撞上 `failed` 步骤时，会改回
+  pending 再跑一遍（很多失败是一次性格式错）。再失败才阻塞，要你处理或重排计划。
 - **子智能体**：一步可以派给独立上下文的实现者，再由另一个独立上下文审查。
   主循环因此不必同时承担"规划 + 写代码 + 检查"三件事，输出预算不会被撑爆。
-- **督导**：撞上步数上限时，监督者判断能不能续期（而不是把问题丢回给你）；
-  一旦发现空转/死循环会介入。不想要就 `--no-supervise`，到点即停、由你 `--resume`。
+- **督导**：撞上步数上限时，监督者判断能不能续期（而不是把问题丢回给你）。
+  近几步若出现工具名短环（`write_file→run_command→write_file…`）、同一文件内容
+  来回振荡、或同一关键词反复检索，会叫醒督导。不想要就 `--no-supervise`，
+  到点即停、由你 `--resume`。
 - **断点续跑**：计划与进度都在 `.agent/` 里，`--resume` 接着来。
 
 ## 验证与诊断
 
 - **验收以退出码为准**：它报"做完了"不算数，验收命令的结果才算数；
-  结论会顶回模型，不通过就打回去重做。
+  结论会顶回模型，不通过就打回去重做。工作区有 pytest 就跑 pytest（环境故障
+  按报错指向工作区外分流，避免拿着临时目录权限问题去改代码）。
+- **没有 pytest 时的 HTML/JS**：改了 HTML 且 PATH 里有 `node`，会抽出内联
+  `<script>` 做 `node --check`（只查语法，不跑浏览器）。不要让模型自己对
+  `.html` 跑 `node --check`——白名单只接受 `.js`，系统会自动抽。
+- **整文件重写拦截**：`write_file` 改已有文件时，行数掉到原来的 70% 会警告；
+  超过 30 行且砍掉一半以上会**硬拒绝**（撤销这次预览），逼它用 `replace_text`
+  / `replace_lines` 做局部修改。测试文件改了也会提醒：验证按测试原文判定。
 - **诊断请求**：当它判断"像是环境坏了"（临时目录不可写、解释器坏了、依赖缺失），
   它**只能申请**：把问题、假设、证据登记到 `.agent/diagnosis/`。报告必须由拥有
   真实环境权限的一方（你，或你跑的外部会话）写，并带签名——签名密钥放在项目目录
@@ -165,8 +179,13 @@ spool run --web-deny ads.example.com --goal "..."                # 拉黑某个�
 
 ## 聊天通道
 
-三条内置通道：`fake`（本地可跑）、`telegram`、`wecom`，另有官方 QQ 机器人。
-细节见 [`bridge.md`](bridge.md)，这里只说安全模型：
+常驻入口是 `spool hub`：起网页壳；**声明了 `--channel` 才再拉一条桥**。
+本机 llama-server / SOCKS 隧道用 `spool service` 按配方启停，hub 只探活、不替你启动。
+只起网页、不拉通道继续用 `spool serve`。
+
+三条内置通道：`fake`（stdin/stdout 本地回环）、`telegram`、`wecom`，另有官方 QQ 机器人。
+**`--channel fake` 不是 `--provider fake`**：前者不需要凭据、用来测桥；后者只回放
+`--script`，不能生成代码。细节见 [`bridge.md`](bridge.md)，这里只说安全模型：
 
 - 默认**配对**：陌生人发消息会拿到一个一次性配对码，你执行 `spool approve <码>`
   之后这个人才被放行。默认放行是致命的（公网通道 + 能驱动工作区的 agent）。
@@ -197,10 +216,11 @@ spool run --web-deny ads.example.com --goal "..."                # 拉黑某个�
 
 | 想知道 | 用什么 |
 |---|---|
-| 这一步在干什么 | `spool run --events`（JSON 行事件）、或 `spool serve` 的网页 |
+| 这一步在干什么 | `spool run --events`（JSON 行事件）、或 `spool hub` / `spool serve` 的网页 |
 | 以前干过什么 | `spool session`；`--history N` 在开跑时显示 |
 | 现在的标定值 | `spool limits`（值 + 来源） |
 | 现在的默认配置 | `spool config`（值 + 来源） |
+| 本机 llama / 隧道活不活 | `spool service`（配方在用户配置 `[[service]]`，不进仓库）；hub 顶部横幅也会探 |
 | 想撤掉上一次写入 | `spool revert` |
 | 外挂工具在不在 | `spool mcp-servers --check` |
 | 它登记的环境问题 | `spool diagnose --list` / `--show <id>` / `--report <id>` |
@@ -213,6 +233,15 @@ spool run --web-deny ads.example.com --goal "..."                # 拉黑某个�
 兼容：命令 `agents-dev`、环境变量 `AGENTS_DEV_*`、用户配置
 `%APPDATA%\agents-dev\config.toml`、诊断密钥 `~/.agents-dev/diagnosis.key`
 都继续认。工作区状态目录 `.agent/` 没有改名——里面有你的记忆与索引。
+
+## 供应商
+
+真实任务用 **llamacpp**（本机 `llama-server`）或 **gemini**。`--provider fake`
+只回放 `--script`，是测试回放器，**不能写代码**，没有 LLM 时不要当兜底——
+协同的 agent 从 MCP 工具描述里也会读到同一句。
+
+llama.cpp 生成本身是非流式的：终端在模型返回前可能几分钟没有新行，这不是挂死。
+假模型缺脚本会立刻退出。本地超长文件仍整份 `read_file`（网页才有切块通道）。
 
 ## 设计文档
 
