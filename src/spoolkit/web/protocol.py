@@ -22,9 +22,10 @@ ERROR = "error"
 # 系统说给用户听的一句话。不是工具调用——工具那行只报「成功/失败」，
 # 而「你的交付物里有个数找不到出处」这种事，理由才是全部内容。
 NOTE = "note"
+WAIT = "wait"
 
 KNOWN = frozenset(
-    {START, STEP, TOOL, DIFF, AWAIT, CONFIRM, USAGE, FINAL, ERROR, NOTE}
+    {START, STEP, TOOL, DIFF, AWAIT, CONFIRM, USAGE, FINAL, ERROR, NOTE, WAIT}
 )
 
 
