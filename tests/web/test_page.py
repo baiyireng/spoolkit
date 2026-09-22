@@ -79,3 +79,21 @@ def test_脚本里没有会被浏览器当成标签的小于号() -> None:
     assert "<" not in script
     # Python 三引号里写 '\n 会变成 JS 单引号字符串中间的真换行，整段脚本同样不跑。
     assert "\n（点" not in script
+
+
+def test_页面显示模型等待心跳() -> None:
+    assert "data.type === 'wait'" in HTML
+    assert "模型生成中，已等待" in HTML
+    assert "上限" in HTML
+
+
+def test_等待心跳不占用探活横幅() -> None:
+    """红色 #health 是连不上，不是还在生成。"""
+    start = HTML.find("<script>")
+    end = HTML.rfind("</script>")
+    script = HTML[start + len("<script>") : end]
+    wait_at = script.find("data.type === 'wait'")
+    assert wait_at != -1
+    wait_block = script[wait_at : wait_at + 280]
+    assert "showHealth" not in wait_block
+    assert "health" not in wait_block
