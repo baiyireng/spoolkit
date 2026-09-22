@@ -11,11 +11,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from spoolkit.cli.events import EventWriter
 from spoolkit.llm.providers import ProviderConfig, ProviderError, load_gateway
 from spoolkit.net import system_proxy
 from spoolkit import settings
 from spoolkit.agent.loop import AgentLoop
 from spoolkit.config import Config
+from spoolkit.llm.gateway import ModelGateway, WaitingGateway, attach_wait_listener, wait_line
+from spoolkit.web.protocol import WAIT
 from spoolkit.index.indexer import index_project, iter_source_files
 from spoolkit import limits
 from spoolkit.index.rank import prefetch as prefetch_text
@@ -23,7 +26,6 @@ from spoolkit.index.rank import prefetch_contents
 from spoolkit.index.rank import prefetch_scope
 from spoolkit.index.tools import file_symbols_spec, find_callers_spec, find_symbol_spec
 from spoolkit.llm.fake import FakeModel
-from spoolkit.llm.gateway import ModelGateway
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.lessons import match_lessons, prune_lessons, record_outcome
 from spoolkit.memory.session import MemorySession
@@ -212,7 +214,24 @@ def provider_gateway(args, project_root):
             file=sys.stderr,
         )
         return None
-    return gateway
+    return WaitingGateway(gateway)
+
+
+def bind_model_wait(gateway, args, writer=None) -> None:
+    """按本次命令的输出模式绑心跳。漏绑等于今天（静默），不崩溃。"""
+    events = bool(getattr(args, "events", False))
+
+    def on_wait(elapsed: int, limit: float | None) -> None:
+        if events:
+            payload = {"elapsed": elapsed}
+            if limit is not None:
+                payload["limit"] = int(limit)
+            stream = writer if writer is not None else EventWriter()
+            stream.emit(WAIT, **payload)
+            return
+        print(wait_line(elapsed, limit), file=sys.stderr, flush=True)
+
+    attach_wait_listener(gateway, on_wait)
 
 
 def attach_index(

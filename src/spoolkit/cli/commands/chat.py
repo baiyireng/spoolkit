@@ -171,11 +171,12 @@ def _turn(args, project_root, gateway, window, memory) -> int:
 
 def chat_command(args: argparse.Namespace) -> int:
     project_root = Path(args.root).resolve()
-    from spoolkit.cli.runtime import provider_gateway
+    from spoolkit.cli.runtime import bind_model_wait, provider_gateway
 
     gateway = provider_gateway(args, project_root)
     if gateway is None:
         return 2
+    bind_model_wait(gateway, args)
     window = resolve_window(gateway, args.window)
     memory = None
     if not args.no_memory:

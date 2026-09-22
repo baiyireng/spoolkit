@@ -31,6 +31,7 @@ from spoolkit.cli.runtime import (
     open_memory,
     prompt_for_turn,
     provider_gateway,
+    bind_model_wait,
     settle_lessons,
     show_history,
 )
@@ -78,6 +79,7 @@ def run(args: argparse.Namespace) -> int:
     gateway = provider_gateway(args, project_root)
     if gateway is None:
         return 2
+    bind_model_wait(gateway, args)
 
     window = resolve_window(gateway, args.window)
     # --events 模式下 stdout 上只能有 JSON 行。散文会被解析器忽略，
