@@ -27,6 +27,9 @@ docs/roadmap.md
 # 设计讨论时的可视化伴侣产物
 .superpowers/
 
+# 本地 git worktree
+.worktrees/
+
 # 编辑器
 .vscode/
 .idea/
