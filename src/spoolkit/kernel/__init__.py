@@ -4,6 +4,7 @@
 解析 `--root`。实现细节在各子模块里；这里只做出口，免得调用方到处 import 路径。
 """
 
+from spoolkit.kernel.target import Target, resolve_target
 from spoolkit.kernel.workspaces import WorkspaceError
 
-__all__ = ["WorkspaceError"]
+__all__ = ["Target", "WorkspaceError", "resolve_target"]

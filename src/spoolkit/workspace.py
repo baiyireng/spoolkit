@@ -63,32 +63,31 @@ def resolve_root(
     choose: Callable[[list[Path]], Path] | None = None,
     interactive: Callable[[], bool] | None = None,
 ) -> Path:
-    """按四条规则定出工作区（这一段本任务只搬家，不改行为）。"""
-    if explicit not in (None, ""):
-        return Path(str(explicit)).resolve()
+    """老签名、老行为。多出来的只是"指针"这一层兜底。"""
+    from spoolkit.kernel.target import resolve_target
 
-    found = find_root()
-    if found is not None:
-        register(found)
-        return found
+    on_ambiguous: Callable[[list[Path]], Path] | None = None
+    if choose is not None or interactive is not None:
 
-    candidates = known()
-    if len(candidates) == 1:
-        return candidates[0]
-    if len(candidates) > 1:
-        chooser = choose or _ask_which
-        is_interactive = interactive or _interactive
-        if is_interactive():
-            picked = chooser(candidates)
-            register(picked)
-            return picked
-        listed = "\n".join(f"  {item}" for item in candidates)
-        raise WorkspaceError(
-            "当前目录不是工作区，而登记表里有好几个，说不清是哪一个：\n"
-            f"{listed}\n"
-            "用 `--root <路径>` 指定一个。"
-        )
-    return Path.cwd().resolve()
+        def on_ambiguous(candidates: list[Path]) -> Path:
+            asks = interactive or _interactive
+            if not asks():
+                return _ambiguous_error(candidates)
+            return (choose or _ask_which)(candidates)
+
+    return resolve_target(
+        workspace=explicit, client="cli", on_ambiguous=on_ambiguous
+    ).root
+
+
+def _ambiguous_error(candidates: list[Path]) -> Path:
+    """说不清是哪一个。文案一字不改：tests/test_workspace_root.py 钉着它。"""
+    listed = "\n".join(f"  {item}" for item in candidates)
+    raise WorkspaceError(
+        "当前目录不是工作区，而登记表里有好几个，说不清是哪一个：\n"
+        f"{listed}\n"
+        "用 `--root <路径>` 指定一个。"
+    )
 
 
 def _interactive() -> bool:
