@@ -2219,3 +2219,27 @@ T6（`episode.summary` + 空 distill 兜底 + FTS OR）与 T7（工具名短环 
 - T8 本地长文切块：工作区大文件还是 `read_file`。
 
 
+---
+
+## 2026-09-24 · 工作区与会话内核 · Task 1（jsonstore + 工作区登记命名）
+
+**任务**：新增 `spoolkit/kernel/` 底座——`jsonstore` 做机器级小文件的原子读写；
+`workspaces` 在原有四条解析规则上加命名层（目录名 / 别名 / 序号 / 显示名）；
+`workspace.py` 变转出壳，老导入路径一条不改。
+
+**结果：通过。** 14 个新用例全绿；全套 1408 passed / 3 failed，那 3 条是沙箱
+禁止起子进程导致的既有失败，与本次无关。
+
+### 量到什么
+
+- 登记表格式保持 `{"workspaces": [...]}` 纯路径数组不变，别名单独放
+  `workspace-aliases.json`，没把按老格式读它的工具弄瞎。
+- `tests/test_workspace_root.py` 一条没改，作为"老行为没变"的凭据。
+
+### 哪条被证伪
+
+- 计划 Task 1 里 `resolve_workspace` 的样例用 `item.name`（显示名）做名字匹配。
+  重名时显示名带上一级（`left/app`、`right/app`），于是敲目录名 `app` 永远匹配不上，
+  "同名多个"那条报错分支根本走不到。改成按 `item.root.name`（目录名）匹配后，
+  `test_同名多个时报清楚并给出出路` 才通过。
+
