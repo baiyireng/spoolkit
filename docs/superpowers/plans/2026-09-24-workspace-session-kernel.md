@@ -531,7 +531,9 @@ def resolve_workspace(name_or_path: str | Path) -> Path:
             return items[index - 1].root
         raise WorkspaceError(f"只有 {len(items)} 个登记过的工作区，没有第 {index} 个。")
 
-    exact = [item for item in items if item.name == raw or item.alias == raw]
+    # 按**目录名**匹配，不是显示名：重名时显示名会带上一级（left/app），
+    # 于是敲 `app` 永远匹配不上、「同名多个」那条分支根本走不到。
+    exact = [item for item in items if item.root.name == raw or item.alias == raw]
     if len(exact) == 1:
         return exact[0].root
     if len(exact) > 1:
@@ -923,7 +925,9 @@ def test_说不清时可以交给调用方挑(tmp_path: Path, monkeypatch) -> No
     plain = tmp_path / "plain"
     plain.mkdir()
     monkeypatch.chdir(plain)
-    assert resolve_target(on_ambiguous=lambda items: items[1]).root == second
+    # `known()` 是"最近使用在前"：先 register(first) 再 register(second) 得
+    # `[second, first]`，所以 `items[1]` 是 first（这一行原稿写成 second，是笔误）。
+    assert resolve_target(on_ambiguous=lambda items: items[1]).root == first
 
 
 def test_一个都没有就退回当前目录(tmp_path: Path, monkeypatch) -> None:
