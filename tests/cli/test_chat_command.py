@@ -129,3 +129,91 @@ def test_会话里看得见配对请求也能就地批准(tmp_path: Path, capsys
     assert "待批准的通道配对请求" in out
     assert code in out
     assert "已批准 openid-9" in out
+
+
+# --- 工作区与会话内核 · Task 5：对话里的工作区与会话 ---------------------------
+
+
+def test_开局那一眼带上会话与来源(tmp_path: Path, capsys) -> None:
+    """光说"在哪个工作区"不够：还要说清**为什么是它**（显式 / 向上找 / 指针 / 兜底）。"""
+    from spoolkit.kernel import sessions
+
+    (tmp_path / ".agent").mkdir(parents=True, exist_ok=True)
+    sessions.create_session(tmp_path, title="修 calc.py")
+    script = _script(tmp_path, [_turn("答复")])
+    args = _args(tmp_path, script, ["/exit"], session="")
+
+    assert chat_command(args) == 0
+
+    out = capsys.readouterr().out
+    assert "会话：chat" in out  # 兜底名仍是 chat，老会话接得上
+    assert "default" in out  # 来源要说出来
+    assert "工作区：" in out
+
+
+def test_斜杠命令看工作区与会话(tmp_path: Path, capsys) -> None:
+    from spoolkit.kernel import workspaces as kws
+    from spoolkit.kernel import sessions
+
+    (tmp_path / ".agent").mkdir(parents=True, exist_ok=True)
+    sessions.create_session(tmp_path, title="会话甲")
+    script = _script(tmp_path, [_turn("答复")])
+    args = _args(tmp_path, script, ["/ws", "/sessions", "/exit"])
+
+    assert chat_command(args) == 0
+
+    out = capsys.readouterr().out
+    assert "登记过的工作区：" in out
+    assert tmp_path.name in out
+    assert "会话甲" in out
+
+
+def test_new_开一条新会话并写指针(tmp_path: Path, capsys) -> None:
+    from spoolkit.kernel import pointers, sessions
+
+    (tmp_path / ".agent").mkdir(parents=True, exist_ok=True)
+    script = _script(tmp_path, [_turn("答复")])
+    args = _args(tmp_path, script, ["/new 修 calc.py", "/exit"])
+
+    assert chat_command(args) == 0
+
+    out = capsys.readouterr().out
+    made = pointers.get("cli")
+    assert made is not None
+    assert made.workspace == tmp_path.resolve()
+    assert made.session == sessions.list_sessions(tmp_path)[0].id
+    assert "现在用会话" in out
+    assert "修 calc.py" in out
+
+
+def test_use_切到另一条会话并写指针(tmp_path: Path, capsys) -> None:
+    from spoolkit.kernel import pointers, sessions
+
+    (tmp_path / ".agent").mkdir(parents=True, exist_ok=True)
+    first = sessions.create_session(tmp_path, title="甲")
+    second = sessions.create_session(tmp_path, title="乙")
+    script = _script(tmp_path, [_turn("答复")])
+    args = _args(tmp_path, script, [f"/use {first}", "/exit"])
+
+    assert chat_command(args) == 0
+
+    out = capsys.readouterr().out
+    assert pointers.get("cli").session == first
+    assert f"现在用会话 {first}" in out
+    assert second != first
+
+
+def test_use_不认识的会话只报错不新建(tmp_path: Path, capsys) -> None:
+    from spoolkit.kernel import sessions
+
+    (tmp_path / ".agent").mkdir(parents=True, exist_ok=True)
+    made = sessions.create_session(tmp_path, title="甲")
+    script = _script(tmp_path, [_turn("答复")])
+    args = _args(tmp_path, script, ["/use 查无此会话", "/exit"])
+
+    assert chat_command(args) == 0
+
+    out = capsys.readouterr().out
+    assert "没有叫 查无此会话 的会话" in out
+    assert len(sessions.list_sessions(tmp_path)) == 1
+    assert made in out  # 候选里列得出来

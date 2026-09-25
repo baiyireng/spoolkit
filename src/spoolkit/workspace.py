@@ -51,6 +51,7 @@ __all__ = [
     "register",
     "registry_path",
     "resolve_root",
+    "resolve_root_interactive",
     "resolve_workspace",
     "set_alias",
     "state_dir",
@@ -78,6 +79,17 @@ def resolve_root(
     return resolve_target(
         workspace=explicit, client="cli", on_ambiguous=on_ambiguous
     ).root
+
+
+def resolve_root_interactive(explicit: str | Path | None = None) -> Path:
+    """**CLI 专用**：说不清是哪一个时，人在终端前就问，问不了就照老文案报错。
+
+    为什么要单独一个函数：内核只认"调用方注入的 chooser"，它不认识终端
+    （设计 3.x：交互属于入口面）。而 CLI 是唯一确定"人就在终端前"的入口，
+    所以由它把 chooser 注入进来。少了这一步，登记表里有两个工作区时，
+    终端就从"弹选单"变成"报错退 2"——那是一次真回归。
+    """
+    return resolve_root(explicit, choose=_ask_which, interactive=_interactive)
 
 
 def _ambiguous_error(candidates: list[Path]) -> Path:

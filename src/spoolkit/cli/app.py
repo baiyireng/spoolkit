@@ -26,6 +26,7 @@ from spoolkit.cli.commands.serve import serve_command
 from spoolkit.cli.commands.hub import hub_command
 from spoolkit.cli.commands.diagnose import diagnose_command
 from spoolkit.cli.commands.session import session_command
+from spoolkit.cli.commands.ws import ws_command
 from spoolkit.cli.commands.limits import limits_command
 from spoolkit.cli.commands.config import config_command
 from spoolkit.cli.commands.chat import chat_command
@@ -198,7 +199,9 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         ),
     )
     parser.add_argument(
-        "--session", default="cli", help="会话名。不同时段/目的的活分开记"
+        "--session",
+        default="",
+        help="会话名。留空 = 用指针里那条，没有就用老默认名 cli",
     )
     parser.add_argument(
         "--history", type=int, default=6, help="启动时显示最近几轮会话记录"
@@ -275,8 +278,9 @@ def _add_plan_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("plan", help="把目标拆成可验收的步骤序列")
     parser.add_argument("--goal", required=True)
     # 计划是会话级的（见 session_state.py）：这里的默认值必须与 `run` 一致，
-    # 否则 `spool plan` 排的计划，`spool run --plan` 找不到。
-    parser.add_argument("--session", default="cli", help="会话名，默认与 run 一致")
+    # 否则 `spool plan` 排的计划，`spool run --plan` 找不到。现在两者都是空串，
+    # 由内核按"显式 > 指针 > cli"定，仍然是同一条。
+    parser.add_argument("--session", default="", help="会话名，默认与 run 同一个会话")
     _add_provider_args(parser, default="gemini")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument(
@@ -331,9 +335,34 @@ def _add_bench_command(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_session_command(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("session", help="列出这个工作区里的会话")
+    parser = sub.add_parser("session", help="会话管理：列 / 建 / 切 / 改名 / 归档")
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "new", "use", "rename", "archive"],
+    )
+    parser.add_argument("name", nargs="?", default="", help="会话 id / 序号 / latest")
+    parser.add_argument("title", nargs="?", default="", help="`new` 或 `rename` 时的标题")
+    parser.add_argument("--all", action="store_true", help="连归档的一起列")
     parser.set_defaults(func=session_command)
+
+
+def _add_ws_command(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser(
+        "ws", aliases=["workspace"], help="工作区管理：列 / 切 / 加 / 忘 / 别名"
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "use", "add", "forget", "alias"],
+    )
+    parser.add_argument("name", nargs="?", default="", help="名字、序号、路径或别名")
+    parser.add_argument("value", nargs="?", default="", help="`alias` 时给别名")
+    parser.set_defaults(func=ws_command)
+    # 注意：`ws` 自己**不带** --root，它是用来选工作区的，不是被解析的对象。
 
 
 def _add_serve_command(sub: argparse._SubParsersAction) -> None:
@@ -509,7 +538,11 @@ def _add_chat_command(sub: argparse._SubParsersAction) -> None:
         help="本次会话的授权策略；留空则用已保存的设置",
     )
     parser.add_argument("--scope", default="", help="auto 策略下允许自动落盘的路径")
-    parser.add_argument("--session", default="chat", help="会话名。不同时段/目的的活分开记")
+    parser.add_argument(
+        "--session",
+        default="",
+        help="会话名。留空 = 用指针里那条，没有就用老默认名 chat",
+    )
     _add_web_args(parser)
     parser.add_argument("--history", type=int, default=6)
     parser.add_argument(
@@ -775,6 +808,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=False)
     _add_init_command(sub)
+    _add_ws_command(sub)
     _add_run_command(sub)
     _add_plan_command(sub)
     _add_policy_command(sub)
@@ -802,10 +836,17 @@ def main(argv: list[str] | None = None) -> int:
     # "某个命令的记忆跟别的命令不是同一份"，那种问题最难查。
     if hasattr(args, "root"):
         try:
-            args.root = str(workspace.resolve_root(args.root))
+            # 走 `resolve_root_interactive`：登记表里有多个工作区、而当前目录不是
+            # 工作区时，终端里要能问一句（内核自己不认识终端，chooser 由 CLI 注入）。
+            args.root = str(workspace.resolve_root_interactive(args.root))
         except workspace.WorkspaceError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+    if hasattr(args, "session"):
+        # `--session` 留空表示"交给内核定"（显式 > 指针 > 该入口的老默认名）。
+        # 各命令的 argparse 默认值必须是空串：只要默认值还在，它就永远是"显式给的"，
+        # 指针永远轮不到——这条正是写计划时才发现的那个坑。
+        args.session = str(getattr(args, "session", "") or "")
     # 第一次用（没配过供应商）且人在终端前：先向导，再干活。
     # 非交互环境绝不弹问题——那会挂住别人的脚本；那种场景由 provider_gateway
     # 给一句明确的指路。

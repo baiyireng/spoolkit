@@ -53,6 +53,7 @@ from spoolkit.cli.runtime import (
     settle_lessons,
 )
 from spoolkit.cli.settle import settle
+from spoolkit.kernel.target import resolve_target
 from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.grant import Grants
 from spoolkit.memory.lessons import record_lesson
@@ -205,6 +206,12 @@ def _plan_phase(
 
 def make_plan(args: argparse.Namespace) -> int:
     """把一个较大目标拆成可验收的步骤序列并落盘。"""
+    # 与 `run` 同一套解析：`--session` 留空时用指针里那条，没有就回到 `cli`
+    # （计划和进度是会话级的，两条命令必须落在同一条会话上）。
+    target = resolve_target(
+        workspace=args.root, session=args.session, client="cli", session_fallback="cli"
+    )
+    args.root, args.session = str(target.root), target.session
     project_root = Path(args.root).resolve()
     gateway = provider_gateway(args, project_root)
     if gateway is None:
