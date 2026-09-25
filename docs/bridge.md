@@ -130,10 +130,10 @@ spool bridge --channel wecom --allow-user zhangsan --policy ask
    `spool chat` 就完全看不到——这条是用户问出来的）：
 
    - 桥的终端/日志里：`有人要配对：<用户>（码 XXXXXX）`
-- **`spool chat` 开局**：有等待中的请求时打一行提示，并且**可以就地批准**
-  `/approve 5R3CVG`
-- `spool run`（散文模式）开局同样提示；`--events` 模式不打散文明，免得弄脏
-  JSON 事件流
+   - **`spool chat` 开局**：有等待中的请求时打一行提示，并且**可以就地批准**
+     `/approve 5R3CVG`
+   - `spool run`（散文模式）开局同样提示；`--events` 模式不打散文明，免得弄脏
+     JSON 事件流
 - 随手查：`spool approve --list`
 
 **批准/撤销是即时生效的，不需要重启桥**——这一条曾经不成立：桥拿着启动那一刻的
@@ -163,7 +163,7 @@ spool bridge --channel wecom --allow-user zhangsan --policy ask
 | 想做什么 | 怎么做 |
 |---|---|
 | 看这台机器放行了谁、还有谁在等 | `spool approve --list`（机器级 + 各工作区旧文件一起列）|
-| 放行一个人 | `spool approve <码>`（或会话里 `/approve <码>`）|
+| 放行一个人 | `spool approve <码>`（或在 `spool chat` 里 `/approve <码>`）|
 | 放行到这个工作区（旧式的码） | `spool approve <码> --ws <名字>`（登记表里多个工作区时**必须**点名）|
 | **解除某人的放行** | `spool approve --revoke <用户>`；他再发消息会重新拿码 |
 | 丢掉一个还没用的码 | `spool approve --forget <码>` |
