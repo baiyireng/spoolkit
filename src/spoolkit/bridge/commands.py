@@ -34,9 +34,11 @@ HELP = """\
 /sessions                      这个工作区的会话；`/use <序号|id|latest>` 切
 /new [标题]                    开一条新会话，接着往它写
 /allow-read                    说明这条通道的文件边界、已关联了哪些目录
-/approve                       配对请求：`/approve <码>` 批准、`--list` 看、`--revoke <用户>`
 /help                          这一页
 （另：agent 有改动等你确认时，回 y 应用、n 丢弃）
+
+配对请求在**本机**处理：任意目录敲 `spool approve <码>`，或在 `spool chat` 里
+`/approve <码>`——这条通道上不开放授权口。
 """
 
 

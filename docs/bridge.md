@@ -195,8 +195,11 @@ spool bridge --channel wecom --allow-user zhangsan --policy ask
 | `/new [标题]` | 开一条新会话，接着往它写 |
 | `/status` | 现在指着哪个工作区、哪条会话；文件边界与已关联目录 |
 | `/allow-read` | 说明远程通道的文件边界（聊天里加不了目录）|
-| `/approve <码>` / `/approve --list` / `/approve --revoke <用户>` | 处理配对请求（`--list`、`--revoke` 与 CLI 那两条同义）|
 | `/help` | 上面这一页 |
+
+**配对请求不在这条通道上处理**（这条通道不开放授权口）：在本机任意目录敲
+`spool approve <码>`，或者在 `spool chat` 里 `/approve <码>` / `/approve --list` /
+`/approve --revoke <用户>`。
 
 `/use` 只在**当前工作区**里挑会话（会话属于工作区，不能一步跨两个）；换工作区用
 `/ws use`，再 `/use` 挑回原来那条。
