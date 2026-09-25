@@ -38,8 +38,16 @@ def resolve_target(
     client: str = "cli",
     session_fallback: str = "cli",
     on_ambiguous: Callable[[list[Path]], Path] | None = None,
+    use_cwd: bool = True,
 ) -> Target:
-    root, workspace_source, note = _resolve_workspace(workspace, client, on_ambiguous)
+    """`use_cwd=False`：这条入口**不是"在某个目录里干活"**那种（聊天通道就是），
+    于是"当前目录向上找"这一层不参与——桥是长驻进程，它的 cwd 只是启动方式的
+    副产品，跟"手机那边这条聊天想在哪干活"毫无关系。此时工作区只能来自
+    显式参数、这条聊天的指针，或登记表；都没有就报错，不猜。
+    """
+    root, workspace_source, note = _resolve_workspace(
+        workspace, client, on_ambiguous, use_cwd
+    )
     name, session_source = _resolve_session(session, client, root, session_fallback)
     return Target(
         root=root,
@@ -54,16 +62,18 @@ def _resolve_workspace(
     explicit: str | Path | None,
     client: str,
     on_ambiguous: Callable[[list[Path]], Path] | None,
+    use_cwd: bool = True,
 ) -> tuple[Path, str, str]:
     if explicit not in (None, ""):
         root = Path(str(explicit)).resolve()
         workspaces.register(root)  # 显式给的值不写指针，但登记表照旧更新
         return root, "explicit", ""
 
-    found = workspaces.find_root()
-    if found is not None:
-        workspaces.register(found)
-        return found, "cwd", ""
+    if use_cwd:
+        found = workspaces.find_root()
+        if found is not None:
+            workspaces.register(found)
+            return found, "cwd", ""
 
     pointer = pointers.get(client)
     note = ""
@@ -88,6 +98,12 @@ def _resolve_workspace(
             "当前目录不是工作区，而登记表里有好几个，说不清是哪一个：\n"
             f"{listed}\n"
             "用 `--root <路径>` 指定一个。"
+        )
+    if not use_cwd:
+        # 不看 cwd 的入口：没有可指的工作区时**报错**，别拿启动目录凑数。
+        raise WorkspaceError(
+            "还没有工作区指向这里。让你的主人登记一个（`spool ws add <目录>`），"
+            "或发 `/ws use <名字>` 挑一个。"
         )
     return Path.cwd().resolve(), "cwd-fallback", note
 

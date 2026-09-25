@@ -29,12 +29,25 @@ def pointers_path() -> Path:
     return state_dir() / POINTERS
 
 
+def _clients(payload: object) -> dict:
+    """`clients` 那一层容器，形状坏掉就当空的。
+
+    这条不是洁癖：`clients.json` 是人也能手改的机器级文件，写成
+    `{"clients": "不是字典"}` 之后，读路径会 `AttributeError`、写路径会
+    `ValueError`（`dict("...")`）。而 `AttributeError` 会一路穿过桥的
+    `except WorkspaceError`，症状是**用户发了消息没人理**——正是桥最该避免的
+    那类失败（它连一句"我坏了"都发不出去）。`trust.py` 里同族的 `_mapping()`
+    就是为这个写的。
+    """
+    raw = payload.get("clients") if isinstance(payload, dict) else None
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
 def all_pointers() -> dict[str, Pointer]:
     """坏条目直接跳过：指向是便利，不是数据。"""
     payload = jsonstore.read_json(pointers_path(), {})
-    raw = payload.get("clients") if isinstance(payload, dict) else None
     found: dict[str, Pointer] = {}
-    for key, value in (raw or {}).items():
+    for key, value in _clients(payload).items():
         if not isinstance(value, dict):
             continue
         text = str(value.get("workspace") or "").strip()
@@ -61,7 +74,7 @@ def set(client_key: str, root: Path | str, session: str) -> None:
 
     def mutate(payload: object) -> dict:
         data = payload if isinstance(payload, dict) else {}
-        clients = dict(data.get("clients") or {})
+        clients = _clients(data)
         clients[str(client_key)] = {"workspace": root_text, "session": session_text}
         return {**data, "clients": clients}
 
@@ -71,7 +84,7 @@ def set(client_key: str, root: Path | str, session: str) -> None:
 def clear(client_key: str) -> None:
     def mutate(payload: object) -> dict:
         data = payload if isinstance(payload, dict) else {}
-        clients = dict(data.get("clients") or {})
+        clients = _clients(data)
         clients.pop(str(client_key), None)
         return {**data, "clients": clients}
 

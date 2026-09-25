@@ -125,21 +125,43 @@ class Bridge:
     def target_for(self, user: str) -> Target:
         """这条聊天现在指向哪儿。桥与测试都用它。
 
-        **机器级（没给 `--root`）时，这条聊天的指针压过"当前目录向上找"**：
-        内核的通用顺序（设计 §3.5）是给 CLI 定的——"我在哪个目录敲命令"在那里
-        指定性很强；而桥是一个长驻进程，它的 cwd 跟"手机那边这条聊天想在哪干活"
-        毫无关系。给了 `--root` 时那条通道只服务那一个工作区，按它解析。
+        **机器级（没给 `--root`）时完全不看当前目录**：内核的通用顺序
+        （设计 §3.5）里"向上找 .agent/"是给 CLI 定的——"我在哪个目录敲命令"
+        在那里指定性很强；而桥是长驻进程，它的 cwd 只是**启动方式的副产品**，
+        跟"手机那边这条聊天想在哪干活"毫无关系。所以这条入口把"显式 > 指针 >
+        登记表"用到底，没得可指就报错（由 `handle` 回一句），不拿 cwd 凑数。
+
+        给了 `--root` 的通道只服务那一个工作区，按它解析（向后兼容）。
         """
         key = self._client_key(user)
         if self.root is None:
             pointer = pointers.get(key)
             if pointer is not None and (pointer.workspace / workspaces.MARK).is_dir():
+                # 指针指着谁就是谁；把它当显式值传进去，解析剩余部分仍归内核。
                 return resolve_target(
                     workspace=pointer.workspace,
                     session=None,  # 让内核的指针层给会话（同一个 key）
                     client=key,
                     session_fallback=self.default_session,
                 )
+            try:
+                return resolve_target(
+                    workspace=None,
+                    client=key,
+                    session_fallback=self.default_session,
+                    use_cwd=False,
+                )
+            except WorkspaceError:
+                # 登记表里也说不清：**登记表里有东西时绝不猜**（照内核的态度报错，
+                # 由 `handle` 回一句）。一个都没登记过时才退回"桥的启动目录"这最后
+                # 一层——那种机器上让桥整个不能用，比"默认在启动目录里干活"更糟。
+                if workspaces.known():
+                    raise
+            return resolve_target(
+                workspace=None,
+                client=key,
+                session_fallback=self.default_session,
+            )
         return resolve_target(
             workspace=self.root,
             client=key,
@@ -166,6 +188,17 @@ class Bridge:
             reply = f"{exc}\n（让主人先指定一个工作区，或发 `/ws use <名字>`。）"
             self._send(reply, message.conversation)
             return Reply(user=message.user, text=reply, accepted=False, reason="说不清工作区")
+        except Exception as exc:  # noqa: BLE001 - 坏状态文件不许变成"没人理"
+            # 兜底一次：机器级状态文件（`clients.json`）是人也能手改的，形状坏掉
+            # 时读路径可能抛任何东西。抛出去的后果不是"报错"，而是**用户发了消息
+            # 没人理**——那正是这个模块最想避免的症状，所以这里必须回一句。
+            reply = (
+                f"这条消息没能落到工作区上：{type(exc).__name__}: {exc}\n"
+                "（多半是状态文件坏了；让主人在服务器上看一眼 `spool ws`。）"
+            )
+            self._send(reply, message.conversation)
+            self._note(f"解析目标失败（{type(exc).__name__}）：{exc}")
+            return Reply(user=message.user, text=reply, accepted=False, reason="状态坏了")
 
         # 准入第二步：身份过了，还要看他能不能碰**这个**工作区。
         # 只对"机器级放行"来的身份生效——`allowed_users` / `open` / `allowlist`

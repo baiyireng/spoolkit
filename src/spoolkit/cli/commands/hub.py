@@ -95,6 +95,10 @@ def hub_command(args: argparse.Namespace) -> int:
     target = resolve_target(
         workspace=args.root, session=args.session, client="web", session_fallback="cli"
     )
+    # 子进程（`spool bridge`）按**解析后**的工作区钉住：`--root` 不给时那是内核
+    # 退出来的那个（当前目录 → 网页壳指针 → 登记表），不能让它拿 `Path("")`
+    # （= cwd）去钉一个可能压根不是工作区的目录。
+    args.root = str(target.root)
     children = spawn_bridge(args)
 
     def extra_health() -> dict:

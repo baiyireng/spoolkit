@@ -392,7 +392,10 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
     )
     _add_web_args(parser)
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
-    parser.set_defaults(func=serve_command)
+    # `--root` 不给时不要替它自动找一个：留给内核按"当前目录 → 网页壳指针 →
+    # 登记表"退。少了这一条，从任何工作区目录敲 `spool serve` 都会被填成
+    # `explicit`，`client="web"` 那层指向永远读不到（Task 6 评审的 Important-1）。
+    parser.set_defaults(func=serve_command, optional_root=True)
 
 
 def _add_hub_command(sub: argparse._SubParsersAction) -> None:
@@ -465,7 +468,7 @@ def _add_hub_command(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="模型/外接服务从通变断时，给最近聊天发一句（默认关，避免刷屏）",
     )
-    parser.set_defaults(func=hub_command)
+    parser.set_defaults(func=hub_command, optional_root=True)
 
 
 def _add_diagnose_command(sub: argparse._SubParsersAction) -> None:
