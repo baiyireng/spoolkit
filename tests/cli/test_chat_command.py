@@ -217,3 +217,36 @@ def test_use_不认识的会话只报错不新建(tmp_path: Path, capsys) -> Non
     assert "没有叫 查无此会话 的会话" in out
     assert len(sessions.list_sessions(tmp_path)) == 1
     assert made in out  # 候选里列得出来
+
+
+def test_上次指向的工作区不在了就要说出来(tmp_path: Path, monkeypatch, capsys) -> None:
+    """设计 §7：跳过不在了的指针、继续往下退，**但不静默换地方**。
+
+    静默换地方的症状是"我明明指着 A，它却在 B 里干活"，属于最难查的那类问题。
+    """
+    import shutil
+
+    from spoolkit.kernel import pointers, sessions
+    from spoolkit.kernel import workspaces as kws
+
+    gone = tmp_path / "gone"
+    (gone / kws.MARK).mkdir(parents=True)
+    home = tmp_path / "home"
+    (home / kws.MARK).mkdir(parents=True)
+    sessions.create_session(home, title="家里那条")
+    kws.register(home)
+    pointers.set("cli", gone, "cli")
+    shutil.rmtree(gone)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.chdir(plain)
+
+    script = _script(tmp_path, [_turn("答复")])
+    args = _args(tmp_path, script, ["/exit"], root=None, session="")
+
+    assert chat_command(args) == 0
+
+    out = capsys.readouterr().out
+    assert "不在了" in out
+    assert str(gone) in out
+    assert f"工作区：{home}" in out  # 退到登记表里那个能用的

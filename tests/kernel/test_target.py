@@ -112,3 +112,36 @@ def test_会话默认值由入口给(tmp_path: Path, monkeypatch) -> None:
     root = _ws(tmp_path, "here")
     monkeypatch.chdir(root)
     assert resolve_target(session_fallback="bridge").session == "bridge"
+
+
+def test_指针指向的工作区不在了要留一句话(tmp_path: Path, monkeypatch) -> None:
+    """设计 §7：跳过它、继续往下退，**但不静默换地方**。
+
+    静默换地方的症状是"我明明指着 A，它却在 B 里干活"——属于最难查的那类问题。
+    """
+    import shutil
+
+    gone = _ws(tmp_path, "gone")
+    home = _ws(tmp_path, "home")
+    kws.register(home)
+    pointers.set("cli", gone, "s1")
+    shutil.rmtree(gone)  # 工作区被人删了（或挂在没插的盘上）
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.chdir(plain)
+
+    target = resolve_target()
+
+    assert target.root == home
+    assert target.workspace_source == "registry"  # 照 §3.5 的顺序退到登记表
+    assert "不在了" in target.note
+    assert str(gone) in target.note
+
+
+def test_指针没事时不留话(tmp_path: Path, monkeypatch) -> None:
+    root = _ws(tmp_path, "here")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    pointers.set("cli", root, "s1")
+    monkeypatch.chdir(plain)
+    assert resolve_target().note == ""

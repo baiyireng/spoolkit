@@ -81,9 +81,11 @@ def _status_line(
         from spoolkit.kernel import sessions as ksession
 
         title = ksession.read_meta(project_root, target.session).get("title") or "（还没标题）"
+        note = f"{target.note}\n" if getattr(target, "note", "") else ""
         head = (
             f"工作区：{project_root}（{target.workspace_source}）\n"
             f"会话：{target.session} ｜ {title}（{target.session_source}）\n"
+            f"{note}"
         )
     else:
         head = f"工作区：{project_root}\n"

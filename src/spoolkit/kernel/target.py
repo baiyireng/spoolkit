@@ -28,6 +28,7 @@ class Target:
     session: str
     workspace_source: str  # explicit / cwd / pointer / registry / cwd-fallback
     session_source: str    # explicit / pointer / default
+    note: str = ""         # 需要交代给用户的一句话（例如"上次指向的 X 不在了"）
 
 
 def resolve_target(
@@ -38,13 +39,14 @@ def resolve_target(
     session_fallback: str = "cli",
     on_ambiguous: Callable[[list[Path]], Path] | None = None,
 ) -> Target:
-    root, workspace_source = _resolve_workspace(workspace, client, on_ambiguous)
+    root, workspace_source, note = _resolve_workspace(workspace, client, on_ambiguous)
     name, session_source = _resolve_session(session, client, root, session_fallback)
     return Target(
         root=root,
         session=name,
         workspace_source=workspace_source,
         session_source=session_source,
+        note=note,
     )
 
 
@@ -52,37 +54,42 @@ def _resolve_workspace(
     explicit: str | Path | None,
     client: str,
     on_ambiguous: Callable[[list[Path]], Path] | None,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     if explicit not in (None, ""):
         root = Path(str(explicit)).resolve()
         workspaces.register(root)  # 显式给的值不写指针，但登记表照旧更新
-        return root, "explicit"
+        return root, "explicit", ""
 
     found = workspaces.find_root()
     if found is not None:
         workspaces.register(found)
-        return found, "cwd"
+        return found, "cwd", ""
 
     pointer = pointers.get(client)
-    if pointer is not None and (pointer.workspace / workspaces.MARK).is_dir():
-        workspaces.register(pointer.workspace)
-        return pointer.workspace, "pointer"
+    note = ""
+    if pointer is not None:
+        if (pointer.workspace / workspaces.MARK).is_dir():
+            workspaces.register(pointer.workspace)
+            return pointer.workspace, "pointer", ""
+        # 指针指向的工作区不在了：**跳过它、继续往下退，但要说出来**。
+        # 静默换地方的症状是"我明明指着 A，它却在 B 里干活"，属于最难查的那类。
+        note = f"上次指向的 {pointer.workspace} 不在了（没有 .agent/），已跳过。"
 
     candidates = workspaces.known()
     if len(candidates) == 1:
-        return candidates[0], "registry"
+        return candidates[0], "registry", note
     if len(candidates) > 1:
         if on_ambiguous is not None:
             picked = on_ambiguous(candidates)
             workspaces.register(picked)
-            return picked, "registry"
+            return picked, "registry", note
         listed = "\n".join(f"  {item}" for item in candidates)
         raise WorkspaceError(
             "当前目录不是工作区，而登记表里有好几个，说不清是哪一个：\n"
             f"{listed}\n"
             "用 `--root <路径>` 指定一个。"
         )
-    return Path.cwd().resolve(), "cwd-fallback"
+    return Path.cwd().resolve(), "cwd-fallback", note
 
 
 def _resolve_session(
