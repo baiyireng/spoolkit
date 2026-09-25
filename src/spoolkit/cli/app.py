@@ -584,7 +584,11 @@ def _add_mcp_command(sub: argparse._SubParsersAction) -> None:
         default="",
         help="允许自动落盘的范围。外部 agent 的确认等于用户确认，边界靠它收窄",
     )
-    parser.add_argument("--session", default="mcp", help="会话名")
+    parser.add_argument(
+        "--session",
+        default="",
+        help="会话名。留空 = 用 mcp 的指向，没有就 mcp；单次调用还能用 session 覆盖",
+    )
     _add_web_args(parser)
     parser.add_argument(
         "--allow-read",
@@ -593,7 +597,8 @@ def _add_mcp_command(sub: argparse._SubParsersAction) -> None:
         metavar="目录",
         help="授权额外可读目录（可重复）",
     )
-    parser.set_defaults(func=mcp_command)
+    # `--root` 不给 = 服务整台机器（每次调用点名，或按 mcp 的指向）。
+    parser.set_defaults(func=mcp_command, root="", optional_root=True)
 
 
 def _add_mcp_servers_command(sub: argparse._SubParsersAction) -> None:

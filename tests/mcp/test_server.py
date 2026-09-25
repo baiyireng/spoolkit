@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from spoolkit.agents.plan import DONE, parse_plan, plan_path, save_plan
+from spoolkit.kernel import workspaces as kws
 from spoolkit.mcp.server import McpServer, serve_stdio
 
 
@@ -112,6 +113,8 @@ def test_工具清单带_schema(tmp_path: Path) -> None:
         "task_events",
         "confirm_changes",
         "workspace_status",
+        "list_workspaces",
+        "list_sessions",
     }
     for item in tools:
         assert item["description"]
@@ -301,3 +304,164 @@ def _notifications(text: str) -> list[dict]:
         for item in (json.loads(line) for line in text.splitlines() if line.strip())
         if item.get("method") == "notifications/progress"
     ]
+
+
+# --- Task 7：按调用点名工作区 ------------------------------------------------
+
+
+def _ws(tmp_path: Path, name: str) -> Path:
+    root = tmp_path / name
+    (root / kws.MARK).mkdir(parents=True)
+    return root.resolve()
+
+
+def _bare(root: Path | None = None) -> McpServer:
+    """没注入 Runner 的服务：`delegate_task` 会按目标自己建（这里被调用的路径
+    不会真起子进程，因为断言只走到 `_runner_for` 之前/之后的目标）。"""
+    return McpServer(root, runner=None)
+
+
+def _payload(answer: dict) -> dict:
+    """工具回话里的 JSON 载荷。
+
+    别用 `str(root) in text` 那种断言：路径进 JSON 之后反斜杠是**转义过的**
+    （`C:\\\\Users\\\\...`），在 Windows 上永远匹配不上。
+    """
+    return json.loads(answer["content"][0]["text"])
+
+
+def test_列工作区(tmp_path: Path) -> None:
+    root = _ws(tmp_path, "alpha")
+    kws.register(root)
+    answer = _bare()._call_tool("list_workspaces", {})
+    payload = _payload(answer)
+    assert payload["workspaces"][0]["root"] == str(root)
+    assert payload["workspaces"][0]["ready"] is True
+    assert "工作区只能由人建" in payload["note"]
+
+
+def test_列会话(tmp_path: Path) -> None:
+    from spoolkit.kernel import sessions
+
+    root = _ws(tmp_path, "alpha")
+    kws.register(root)
+    made = sessions.create_session(root, title="修 calc.py")
+    answer = _bare()._call_tool("list_sessions", {"workspace": "alpha"})
+    payload = _payload(answer)
+    assert payload["workspace"] == str(root)
+    assert payload["sessions"][0]["id"] == made
+    assert payload["sessions"][0]["title"] == "修 calc.py"
+
+
+def test_说不清是哪一个就要求点名(tmp_path: Path) -> None:
+    first = _ws(tmp_path, "a")
+    second = _ws(tmp_path, "b")
+    kws.register(first)
+    kws.register(second)
+    answer = _bare()._call_tool("delegate_task", {"goal": "干点活"})
+    assert answer.get("isError") is True
+    assert str(first) in answer["content"][0]["text"]
+
+
+def test_点名的工作区不存在时报清楚(tmp_path: Path) -> None:
+    kws.register(_ws(tmp_path, "a"))
+    answer = _bare()._call_tool(
+        "delegate_task", {"goal": "干点活", "workspace": "查无此区"}
+    )
+    assert answer.get("isError") is True
+
+
+def test_点名之后就在那个工作区里派活(tmp_path: Path, monkeypatch) -> None:
+    """计划样例里那句 `_Recorder.last_root` 是留的钩子，它自己注了"改成断言
+    `_last_target.root`"——照它来（见 task-7-brief 的注）。"""
+    root = _ws(tmp_path, "alpha")
+    kws.register(root)
+    started: list[str] = []
+    server = _bare()
+
+    class _Recorder:
+        def __init__(self, target) -> None:
+            self.session = target.session
+            self.running = False
+            self.mode = "task"
+
+        def start(self, goal: str) -> bool:
+            started.append(goal)
+            self.running = True
+            return True
+
+        def snapshot(self) -> dict:
+            return {"running": self.running}
+
+    def _fake_runner_for(self, target):
+        self._last_target = target
+        self._active = _Recorder(target)
+        return self._active
+
+    monkeypatch.setattr(McpServer, "_runner_for", _fake_runner_for)
+    answer = server._call_tool("delegate_task", {"goal": "干活", "workspace": "alpha"})
+
+    assert answer.get("isError") is not True
+    assert started == ["干活"]
+    assert server._last_target.root == root
+
+
+def test_没定工作区时状态工具要说话而不是崩() -> None:
+    server = _bare()
+    for name in ("task_status", "task_events"):
+        answer = server._call_tool(name, {})
+        assert answer.get("isError") is True
+        assert "还没有任务" in answer["content"][0]["text"]
+    assert server._call_tool("confirm_changes", {"apply": True}).get("isError") is True
+    assert server._call_tool("workspace_status", {}).get("isError") is True
+
+
+def test_没给_workspace_时用_mcp_的指向(tmp_path: Path) -> None:
+    from spoolkit.kernel import pointers
+
+    root = _ws(tmp_path, "alpha")
+    kws.register(root)
+    pointers.set("mcp", root, "mcp")
+    server = _bare()
+    assert server._target({}).root == root
+    assert server._target({"workspace": "alpha"}).root == root
+
+
+def test_一个目标一个_runner(tmp_path: Path, monkeypatch) -> None:
+    """换工作区就是另一个 Runner；同一个目标复用同一个。"""
+    import spoolkit.mcp.server as module
+
+    made: list[tuple[str, str]] = []
+
+    class _Fake:
+        def __init__(self, root, session="", extra_args=(), mode="task"):
+            made.append((str(root), session))
+            self.root, self.session, self.mode = root, session, mode
+            self.running = False
+            self._lock = __import__("threading").Lock()
+            self._log_seq = 0
+
+        def start(self, goal: str) -> bool:
+            self.running = True
+            return True
+
+        def snapshot(self) -> dict:
+            return {"running": self.running}
+
+        def events(self, since: int = 0) -> list[dict]:
+            return []
+
+    monkeypatch.setattr(module, "WorkspaceRunner", _Fake)
+    a = _ws(tmp_path, "a")
+    b = _ws(tmp_path, "b")
+    kws.register(a)
+    kws.register(b)
+    server = _bare()
+
+    server._call_tool("delegate_task", {"goal": "一", "workspace": "a"})
+    server._call_tool("delegate_task", {"goal": "二", "workspace": "b"})
+    server._call_tool("delegate_task", {"goal": "三", "workspace": "a"})
+
+    assert made == [(str(a), "mcp"), (str(b), "mcp")]  # 每个工作区各一个
+    assert server._last_target.root == a  # 当前任务跟着最近一次 delegate 走
+    assert _payload(server._call_tool("task_status", {}))["workspace"] == str(a)
