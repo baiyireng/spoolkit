@@ -30,9 +30,11 @@ HELP = """\
 `spool extra add` 关联过）。查资料、跑命令不在这条限制里。
 
 /status                        现在指着哪个工作区、哪条会话
-/ws                            登记过的工作区；`/ws use <名字|序号>` 换一个
+/ws                            登记过的工作区；`/ws use <名字|序号|路径>` 换一个
 /sessions                      这个工作区的会话；`/use <序号|id|latest>` 切
 /new [标题]                    开一条新会话，接着往它写
+/allow-read                    说明这条通道的文件边界、已关联了哪些目录
+/approve                       配对请求：`/approve <码>` 批准、`--list` 看、`--revoke <用户>`
 /help                          这一页
 （另：agent 有改动等你确认时，回 y 应用、n 丢弃）
 """

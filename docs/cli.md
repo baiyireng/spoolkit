@@ -7,8 +7,8 @@
 → 全局登记表 → 当前目录），见 [`getting-started.md`](getting-started.md#4-在任意目录起手)。
 
 `--session` 留空（默认）表示"用**指向**里那条会话"，没有就回到该命令一直以来的
-默认名（`run`/`plan` → `cli`，`chat` → `chat`，`bridge` → `bridge`，`mcp` → `mcp`）。
-指向由 `spool ws use` / `spool session use` 写。
+默认名：`run` / `plan` → `cli`，`chat` → `chat`，`bridge` → `bridge`，`mcp` → `mcp`，
+`serve` / `hub` → `cli`。指向由 `spool ws use` / `spool session use` 写。
 
 ## 入口
 

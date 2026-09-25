@@ -2258,9 +2258,10 @@ T6（`episode.summary` + 空 distill 兜底 + FTS OR）与 T7（工具名短环 
 
 **量到什么**：
 
-- 新增用例 **约 90 条**（kernel 51→62、bridge +17、cli +14、mcp +8、端到端 1）；
-  全套从 **1423 passed / 3 failed** 涨到 **1508 passed / 3 failed**（那 3 条始终是本机
-  沙箱拦的既有失败：`test_service_command`×2 不许起子进程、`test_js_verify`×1 找不到 node）。
+- 新增用例 **115 条**（`git diff main..HEAD` 里新增的 `def test_` 计数）；全套从
+  `main` 上的 **1394 passed / 3 failed** 涨到这条分支上的 **1509 passed / 3 failed**
+  ——两边差正好 115。那 3 条始终是本机沙箱拦的既有失败（`test_service_command`×2
+  不许起子进程、`test_js_verify`×1 找不到 node），不是本批引入的。
 - 端到端那条钉住的正是用户抱怨的原话：同一台机器两个工作区，主人**一次批准**
   放行到两台，在 A 里说一句 → `/ws use 项目B` 切过去干活（**没有重新配对**）→
   `/ws use 项目A` + `/use <序号>` 切回来，A 的会话与标题都还在。假模型 + 假通道跑，
