@@ -59,19 +59,48 @@ def _grant_key(channel: str, user: str) -> str:
     return f"{channel}\u0000{user}"
 
 
+def _mapping(value: object) -> dict:
+    """从一个可能坏掉的容器里取出可用的 dict。
+
+    `channel-trust.json` 是人也能手改的机器级文件，形状坏掉（`grants` 写成数组之类）
+    时按"空的"处理——放行有问题应该是**够不到**，不是整个通道起不来。读路径与写路径
+    都要走这里：写路径上 `dict(坏形状)` 会抛，等于"文件坏了就再也修不回来"。
+    """
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _usable(channel: object, user: object) -> bool:
+    """这条放行/这个码有没有意义：通道和用户都得有字。
+
+    旧配对文件是别人写的，里面可能留着空用户名（`ensure_code("")` 写进去过）。
+    空用户名的条目**不入账**，但也**不能让认领路径抛异常**——桥是在启动时认领的，
+    一个垃圾条目不该把桥拦在门外。
+    """
+    return bool(str(channel).strip()) and bool(str(user).strip())
+
+
+def _root_list(value: object) -> tuple[Path, ...]:
+    """`roots` 只认"一串路径"。
+
+    字符串会被逐字符拆成 `D` / `:` / `/` / `t` 这种单字符路径，造出
+    "`is_allowed` 说能、`may_use` 说不能"的幻影放行，所以显式拒掉非序列形状。
+    """
+    if not isinstance(value, (list, tuple, set)):
+        return ()
+    return tuple(
+        Path(str(text)).resolve() for text in value if str(text).strip()
+    )
+
+
 def list_grants() -> list[Grant]:
     """坏条目跳过：放行有问题应该是"够不到"，不是"整个通道起不来"。"""
     data = _load()
     found: list[Grant] = []
-    for key, item in (data.get("grants") or {}).items():
+    for key, item in _mapping(data.get("grants")).items():
         if not isinstance(item, dict):
             continue
         channel, _, user = str(key).partition("\u0000")
-        roots = tuple(
-            Path(str(text)).resolve()
-            for text in (item.get("roots") or [])
-            if str(text).strip()
-        )
+        roots = _root_list(item.get("roots"))
         if not roots:
             continue
         found.append(
@@ -105,7 +134,7 @@ def grant(
 
     def mutate(payload: object) -> dict:
         data = dict(payload) if isinstance(payload, dict) else {}
-        grants = dict(data.get("grants") or {})
+        grants = _mapping(data.get("grants"))
         existing = grants.get(_grant_key(channel, user)) or {}
         previous = [str(item) for item in existing.get("roots") or []]
         merged = list(dict.fromkeys(previous + [str(item) for item in picked]))
@@ -128,7 +157,7 @@ def _drop_codes_for(channel: str, user: str) -> None:
         data = dict(payload) if isinstance(payload, dict) else {}
         codes = {
             code: item
-            for code, item in (data.get("codes") or {}).items()
+            for code, item in _mapping(data.get("codes")).items()
             if not (
                 isinstance(item, dict)
                 and str(item.get("channel")) == channel
@@ -147,7 +176,7 @@ def revoke(channel: str, user: str) -> bool:
     def mutate(payload: object) -> dict:
         nonlocal removed
         data = dict(payload) if isinstance(payload, dict) else {}
-        grants = dict(data.get("grants") or {})
+        grants = _mapping(data.get("grants"))
         removed = grants.pop(_grant_key(str(channel), str(user)), None) is not None
         return {**data, "grants": grants}
 
@@ -177,7 +206,7 @@ def may_use(channel: str, user: str, root: Path | str) -> bool:
 
 def _codes() -> dict[str, dict]:
     data = _load()
-    raw = data.get("codes") or {}
+    raw = _mapping(data.get("codes"))
     return {
         str(code).upper(): dict(item)
         for code, item in raw.items()
@@ -213,7 +242,7 @@ def ensure_code(channel: str, user: str, root: Path | str) -> str:
 
     def mutate(payload: object) -> dict:
         data = dict(payload) if isinstance(payload, dict) else {}
-        codes = dict(data.get("codes") or {})
+        codes = _mapping(data.get("codes"))
         codes[code] = {"user": user, "channel": channel, "root": target}
         return {**data, "codes": codes}
 
@@ -228,7 +257,7 @@ def forget_code(code: str) -> bool:
     def mutate(payload: object) -> dict:
         nonlocal dropped
         data = dict(payload) if isinstance(payload, dict) else {}
-        codes = dict(data.get("codes") or {})
+        codes = _mapping(data.get("codes"))
         dropped = codes.pop(str(code).strip().upper(), None) is not None
         return {**data, "codes": codes}
 
@@ -251,6 +280,11 @@ def find_code(code: str) -> PendingCode | None:
 def approve_code(code: str) -> PendingCode | None:
     got = find_code(code)
     if got is None:
+        return None
+    if not _usable(got.channel, got.user):
+        # 旧文件里可能留着空用户名的条目（`Pairings` 不校验条目内容）。放行一个
+        # "没有名字的人"没有意义，但**不能抛**——批准是人手敲的一条路径，
+        # 报"没这个码"远比崩掉好。条目留在原地，不动它。
         return None
     grant(got.channel, got.user, [got.root])
     forget_code(code)
@@ -303,8 +337,10 @@ def _import_legacy_codes(channel: str, root: Path, codes: tuple[tuple[str, str],
 
     def mutate(payload: object) -> dict:
         data = dict(payload) if isinstance(payload, dict) else {}
-        stored = dict(data.get("codes") or {})
+        stored = _mapping(data.get("codes"))
         for code, user in codes:
+            if not _usable(channel, user):
+                continue
             stored.setdefault(
                 str(code).strip().upper(),
                 {"user": str(user), "channel": channel, "root": str(root)},
@@ -326,6 +362,10 @@ def adopt_legacy(root: Path | str, channel: str) -> int:
         return 0
     channel = str(channel)
     for user in pairings.approved:
+        if not _usable(channel, user):
+            # 空用户名的条目跳过：**认领是在桥启动时跑的**，一个垃圾条目不该
+            # 把桥拦在门外（`Pairings` 的契约是"读不了就当空的，配对是增强"）。
+            continue
         grant(channel, user, [resolved], label="从旧配对记录认领")
     _import_legacy_codes(channel, resolved, pairings.pending)
     return sum(1 for item in list_grants() if item.channel == channel)
