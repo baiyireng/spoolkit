@@ -13,15 +13,25 @@
   "mcpServers": {
     "spool": {
       "command": "spool",
-      "args": ["mcp", "--root", "D:\\你的项目", "--scope", "src", "--policy", "auto"]
+      "args": ["mcp", "--scope", "src", "--policy", "auto"]
     }
   }
 }
 ```
 
-`--root` 是工作区；`--scope` 是允许**自动落盘**的范围（越界照样退回确认）；
-`--policy` 决定子进程的授权策略。供应商/地址走用户级配置（`spool config`），
-也可以在 args 里给 `--provider` / `--base-url`。
+`--scope` 是允许**自动落盘**的范围（越界照样退回确认）；`--policy` 决定子进程的
+授权策略。供应商/地址走用户级配置（`spool config`），也可以在 args 里给
+`--provider` / `--base-url`。
+
+**`--root` 是可选的**：不给就是"服务整台机器"——每次调用可以带 `workspace`
+点名一个**已登记**的工作区（先 `list_workspaces` 看有什么），不给就用 `mcp` 的
+指向。给了 `--root` 就把这条 MCP 会话钉在那一个工作区里（想收紧时用）。想固定
+会话名就带 `--session`；不带就用 `mcp` 的指向，单次调用还能用 `session` 覆盖。
+
+**工作区只能由人建**：遇到没有 `.agent/` 的目录，让主人在服务器上敲
+`spool ws add <目录>`——外部 agent 不能自己开辟新的信任边界。没有 `workspace`
+而登记表里有多个工作区时，`delegate_task` 会**报错并要求点名**（列出候选），
+不会替调用方挑一个。
 
 **fake 不能当生成器。** 这条 MCP 要的是已配置的 llamacpp 或 gemini。
 `--provider fake` 只回放 `--script`，没有 LLM 时不要把任务交给本服务当兜底——
@@ -41,19 +51,27 @@
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `delegate_task` | `goal`（必填）、`mode`（`task`/`autonomous`/`plan`） | 下发任务，**立刻**返回 task_id。需要真实模型；fake 不能写代码，不要当没 LLM 时的兜底 |
-| `task_status` | — | 快照：是否在跑、结局、用量、待确认改动、`last_seq` |
+| `delegate_task` | `goal`（必填）、`workspace`、`session`、`mode`（`task`/`autonomous`/`plan`） | 下发任务，**立刻**返回 task_id。`workspace` 点名一个已登记的工作区（名字/序号/路径），不给就用 `mcp` 的指向；说不清时会报错要求点名。需要真实模型；fake 不能写代码，不要当没 LLM 时的兜底 |
+| `task_status` | — | 快照：是否在跑、结局、用量、待确认改动、`last_seq`（还会带上 `workspace`）|
 | `task_events` | `since` | 按序号拉事件（step / tool / diff / await / final…），首次传 0 |
 | `confirm_changes` | `apply`（布尔） | 回答审批请求：落盘或丢弃 |
 | `workspace_status` | — | 计划进度、工作区默认策略、当前供应商配置。provider 为 fake 时不要继续下发 |
+| `list_workspaces` | — | **只读**：这台机器上登记过的工作区（名字、别名、路径、是否已经是工作区）|
+| `list_sessions` | `workspace`（可选） | **只读**：某个工作区的会话（id、标题、最近活跃、是否归档）|
+
+一个 MCP 会话里可以有**多个工作区**：每个 (工作区, 会话) 一个 Runner，而
+`task_status` / `task_events` / `confirm_changes` 作用在**最近一次 `delegate_task`
+的那个**上（就是"一个活跃任务"那套语义）。
 
 ## 一次典型的调用序列
 
 ```
 → initialize            （协议握手）
 → tools/list
-→ tools/call delegate_task {"goal": "把 43_nested_get 修好，验收是跑 pytest 通过"}
-← {"task_id": 1, "status": "running"}
+→ tools/call list_workspaces                       ← 先看有什么（只读）
+← {"workspaces": [{"name": "proj", "root": "D:\\work", "ready": true}]}
+→ tools/call delegate_task {"goal": "…", "workspace": "proj"}
+← {"task_id": 1, "workspace": "D:\\work", "status": "running"}
 → tools/call task_events {"since": 0}      ← 轮询，直到出现 final 或 await
 ← {"events": [...], "last_seq": 12}
 → tools/call task_status                   ← 看结局与是否要审批

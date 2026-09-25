@@ -29,8 +29,9 @@
   Telegram 都能接——手机上发一句话，它在工作区里干完把结果发回来。默认**配对**
   （陌生发送者拿码，你放行才生效），越界改动照样退回确认。
 - **和别的 Agent 协同**：两个方向都通。它**能被** Cursor / Codex / Claude Code
-  通过 MCP 调用（对方扮演用户下发编排任务，它负责实施与验收）；也**能调用**
-  外面现成的 MCP 工具（挂进来长这样 `mcp__服务名__工具名`）。
+  通过 MCP 调用（对方扮演用户下发编排任务，它负责实施与验收；工作区可以**按次点名**，
+  一条 MCP 连接就能管好几个项目）；也**能调用**外面现成的 MCP 工具
+  （挂进来长这样 `mcp__服务名__工具名`）。
 
 ## 30 秒上手
 
@@ -41,6 +42,7 @@ uv tool install --editable .
 
 spool init                                # 把当前目录做成工作区（幂等）
 spool config --set provider=llamacpp --set base_url=http://127.0.0.1:8080
+spool ws alias 我的项目 proj               # 可选：起个短名，之后在哪儿都能 spool ws use proj
 spool                                     # 什么都不带就进对话；不是工作区会先问一句
 ```
 
@@ -82,6 +84,7 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 |---|---|
 | `spool` | 进对话；当前目录不是工作区就先问一句要不要初始化 |
 | `spool init [路径]` | 把目录做成工作区（建 `.agent/` 并登记，幂等） |
+| `spool ws` | 工作区管理：`use <名字\|序号>` 切、`add` 建、`forget` 摘掉、`alias` 起短名 |
 | `spool approve <码>` | 批准聊天通道的配对码（**任意目录都能敲**） |
 | `spool extra add <目录>` | 本机关联工作区外的目录（读放开，写要确认） |
 | `spool run --goal …` | 跑一次任务 |
@@ -96,6 +99,13 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 | `spool mcp` / `spool mcp-servers --check` | 被别的 agent 调用 / 看自己配的外挂 MCP |
 | `spool config` `limits` `policy` `session` `revert` | 默认值 / 标定值 / 授权 / 会话 / 回滚 |
 | `spool extra` `diagnose` `bench` | 关联目录 / 环境诊断 / 回归任务集 |
+
+`spool session` 有生命周期：`list`（默认）/ `new [标题]` / `use <序号|id|latest>` /
+`rename` / `archive`，`--all` 连归档的一起列。
+
+"在哪个工作区、哪条会话里干活"现在是**运行时状态**（`spool ws use`；聊天里
+`/ws use`），不是启动参数：`--root` / `--session` 变成"这一次覆盖"，`--session`
+留空就用上次那条。**换工作区不用重启、也不用重新配对**。
 
 逐条参数见 [`docs/cli.md`](docs/cli.md)。
 
