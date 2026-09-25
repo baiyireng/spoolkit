@@ -117,3 +117,39 @@ def test_机器级里的空用户码批准时只当作没有(tmp_path: Path) -> 
     assert trust.find_code("ABC123") is not None  # 条目还在，看得见
     assert trust.approve_code("ABC123") is None  # 但批不了，也不抛
     assert trust.is_allowed("qqbot", "") is False
+
+
+def test_要合并的那一条本身坏了也不抛(tmp_path: Path) -> None:
+    """`grant` 是 `adopt_legacy`（桥启动）与 `approve_code`（人手批准）的必经之路。
+
+    坏形状在这里抛，等于那两条路照样被打死——修复轮第一版只收了读路径，
+    这一处是复核抓出来的。
+    """
+    root = _ws(tmp_path, "a")
+    for broken in ("字符串", ["数组"]):
+        _break_trust({"grants": {"qqbot\u0000u1": broken}})
+        trust.grant("qqbot", "u1", [root])
+        assert trust.may_use("qqbot", "u1", root) is True
+    _break_trust({"grants": {"qqbot\u0000u1": {"roots": 3}}})
+    trust.grant("qqbot", "u1", [root])
+    assert trust.may_use("qqbot", "u1", root) is True
+
+
+def test_要合并的那一条roots是字符串时不会把字符写进放行(tmp_path: Path) -> None:
+    """字符串 `roots` 被逐字符拆开会凭空多出 `D:\\` 这种根，等于把放行放宽。"""
+    root = _ws(tmp_path, "a")
+    _break_trust(
+        {
+            "grants": {
+                "qqbot\u0000u1": {
+                    "channel": "qqbot",
+                    "user": "u1",
+                    "roots": "D:/tmp",
+                }
+            }
+        }
+    )
+    trust.grant("qqbot", "u1", [root])
+    roots = trust.allowed_roots("qqbot", "u1")
+    assert roots == (root,)
+    assert all(len(str(item)) > 3 for item in roots)  # 没有 `D:\`、`D` 这类单字符根

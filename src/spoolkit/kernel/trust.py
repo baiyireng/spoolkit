@@ -135,8 +135,13 @@ def grant(
     def mutate(payload: object) -> dict:
         data = dict(payload) if isinstance(payload, dict) else {}
         grants = _mapping(data.get("grants"))
-        existing = grants.get(_grant_key(channel, user)) or {}
-        previous = [str(item) for item in existing.get("roots") or []]
+        # 被合并的那一条自己也可能被手改坏：不是 dict 就当作没有；`roots` 同样只认
+        # 一串路径。两处都必须收——`grant` 是 `adopt_legacy`（桥启动）与
+        # `approve_code`（人手批准）的必经之路，坏形状在这里抛等于那两条路照样被打死；
+        # 而字符串 `roots` 会被**逐字符写回放行表**，凭空多出 `D:\` 这种根。
+        existing = grants.get(_grant_key(channel, user))
+        existing = existing if isinstance(existing, dict) else {}
+        previous = [str(item) for item in _root_list(existing.get("roots"))]
         merged = list(dict.fromkeys(previous + [str(item) for item in picked]))
         grants[_grant_key(channel, user)] = {
             "channel": channel,
