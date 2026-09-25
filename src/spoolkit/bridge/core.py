@@ -24,6 +24,10 @@ from spoolkit.bridge.channel import Channel, Incoming
 from spoolkit.bridge.commands import handle as handle_command
 from spoolkit.bridge.pairing import ALLOWLIST, OPEN, PAIRING, Pairings
 from spoolkit.health import DisconnectWatch, down_line
+from spoolkit.kernel import pointers, sessions, trust as trust_module
+from spoolkit.kernel import workspaces
+from spoolkit.kernel.target import Target, resolve_target
+from spoolkit.kernel.workspaces import WorkspaceError
 
 DEFAULT_MAX_CHARS = 4000
 OUTBOX_MAX = 8
@@ -77,9 +81,13 @@ class Bridge:
         on_note: Callable[[str], None] | None = None,
         pairings: Pairings | None = None,
         access: str = PAIRING,
-        root: Path | str = ".",
+        root: Path | str | None = None,
         notify_disconnect: bool = False,
         disconnect_cooldown: float = 300.0,
+        *,
+        channel_name: str = "fake",
+        default_session: str = "bridge",
+        trust_mod=None,
     ) -> None:
         self.channel = channel
         self.runner = runner
@@ -88,9 +96,12 @@ class Bridge:
         self._note = on_note or (lambda text: None)
         self.pairings = pairings
         self.access = access
-        # 斜杠命令要改的是桥自己的状态，所以桥得知道工作区在哪。
-        # 文件读写边界写在工作方式里给模型看，不推给用户。
-        self.root = Path(root)
+        # `root` 给了 = 这条通道**只**服务那一个工作区（收紧，向后兼容）；
+        # 不给 = 服务整台机器，具体落到哪由"这条聊天的指针"决定。
+        self.root = Path(root).resolve() if root not in (None, "") else None
+        self.channel_name = str(channel_name)
+        self.default_session = str(default_session)
+        self._trust = trust_mod if trust_mod is not None else trust_module
         self._last_conversation = ""
         # 断开通知只发给**放过的**最近聊天，不发给还在等配对码的人。
         self._notify_conversation = ""
@@ -107,9 +118,37 @@ class Bridge:
         if callable(setter):
             setter(lambda text: self._send(text, self._last_conversation))
 
+    def _client_key(self, user: str) -> str:
+        """这条聊天的指针键。按聊天分键，所以两个群可以各指一个工作区。"""
+        return f"chat:{self.channel_name}:{user}"
+
+    def target_for(self, user: str) -> Target:
+        """这条聊天现在指向哪儿。桥与测试都用它。
+
+        **机器级（没给 `--root`）时，这条聊天的指针压过"当前目录向上找"**：
+        内核的通用顺序（设计 §3.5）是给 CLI 定的——"我在哪个目录敲命令"在那里
+        指定性很强；而桥是一个长驻进程，它的 cwd 跟"手机那边这条聊天想在哪干活"
+        毫无关系。给了 `--root` 时那条通道只服务那一个工作区，按它解析。
+        """
+        key = self._client_key(user)
+        if self.root is None:
+            pointer = pointers.get(key)
+            if pointer is not None and (pointer.workspace / workspaces.MARK).is_dir():
+                return resolve_target(
+                    workspace=pointer.workspace,
+                    session=None,  # 让内核的指针层给会话（同一个 key）
+                    client=key,
+                    session_fallback=self.default_session,
+                )
+        return resolve_target(
+            workspace=self.root,
+            client=key,
+            session_fallback=self.default_session,
+        )
+
     def handle(self, message: Incoming) -> Reply:
         """处理一条消息。任何一条都不该让桥崩掉。"""
-        gate = self._admit(message)
+        gate, via_trust = self._admit(message)
         if gate is not None:
             return gate
         self._notify_conversation = (
@@ -119,8 +158,23 @@ class Bridge:
         text = message.text.strip()
         if not text:
             return Reply(user=message.user, text="", accepted=False, reason="空消息")
+
+        try:
+            target = self.target_for(message.user)
+        except WorkspaceError as exc:
+            # 说不清这条消息该落到哪个工作区：**回一句，不进 agent**。
+            reply = f"{exc}\n（让主人先指定一个工作区，或发 `/ws use <名字>`。）"
+            self._send(reply, message.conversation)
+            return Reply(user=message.user, text=reply, accepted=False, reason="说不清工作区")
+
+        # 准入第二步：身份过了，还要看他能不能碰**这个**工作区。
+        # 只对"机器级放行"来的身份生效——`allowed_users` / `open` / `allowlist`
+        # 与旧的工作区配对文件都是主人显式的口子，语义不变。
+        if via_trust and not self._trust.may_use(self.channel_name, message.user, target.root):
+            return self._workspace_denied(message, target)
+
         # 斜杠命令由桥自己处理（**在准入判定之后**：陌生人连 /help 都不该拿到）。
-        command = handle_command(text, self.root)
+        command = handle_command(text, target, client_key=self._client_key(message.user))
         if command is not None:
             self._send(command, message.conversation)
             return Reply(user=message.user, text=command, accepted=True)
@@ -132,8 +186,13 @@ class Bridge:
             self._send(reply, message.conversation)
             return Reply(user=message.user, text=reply, accepted=False, reason="超长")
 
+        target = self._bind_session(message.user, target, text)
+        # runner 协议：只有认得 `for_client` 的 runner（真的 AgentRunner）才按
+        # 客户端键取目标；测试里的假 runner 是普通可调用对象，一行都不用改。
+        call = runner_for = getattr(self.runner, "for_client", None)
+        call = call(self._client_key(message.user)) if callable(runner_for) else self.runner
         try:
-            answer = self.runner(text)
+            answer = call(text)
         except Exception as exc:  # noqa: BLE001 - 桥不该被 agent 的异常带崩
             answer = f"这一轮没跑起来：{type(exc).__name__}: {exc}"
             self._send(answer, message.conversation)
@@ -142,29 +201,90 @@ class Bridge:
         self._send(answer or "（没有产出）", message.conversation)
         return Reply(user=message.user, text=answer, accepted=True)
 
-    def _admit(self, message: Incoming) -> Reply | None:
-        """准入判定。返回 None 表示放行，否则返回一条"不放行"的回复。
+    def _bind_session(self, user: str, target: Target, text: str) -> Target:
+        """第一次说话的聊天：显式开一条会话并写指针。
 
-        默认是**配对**：不认识的人拿码，主人批准之后才放行。原先的默认是
-        "名单为空就谁都能用"，那在公网通道上是不可接受的。
+        "一个聊天 = 一条线程"是聊天这类界面的预期形状，而**开会话是入口面的
+        显式动作**，不是解析器偷偷新建（设计 §3.4）。所以只有"指针存在、但里面
+        还没有会话"时由桥开一条；连指针都没有的聊天先用这条入口的默认会话名。
+        """
+        from dataclasses import replace
+
+        key = self._client_key(user)
+        pointer = pointers.get(key)
+        if pointer is not None and pointer.workspace == target.root:
+            if pointer.session:
+                sessions.ensure_title(target.root, target.session, text)
+                return target
+            made = sessions.create_session(target.root, title=sessions.title_from_goal(text))
+            pointers.set(key, target.root, made)
+            return replace(target, session=made, session_source="new")
+        return target
+
+    def _workspace_denied(self, message: Incoming, target: Target) -> Reply:
+        allowed = "、".join(
+            str(item) for item in self._trust.allowed_roots(self.channel_name, message.user)
+        )
+        reply = (
+            f"你还没被放行到 {target.root}。"
+            + (f"你能碰的是：{allowed}。" if allowed else "现在哪儿都没放行。")
+            + "\n`/ws` 看能切的地方。"
+        )
+        self._send(reply, message.conversation)
+        return Reply(user=message.user, text=reply, accepted=False, reason="没被放行到这个工作区")
+
+    def _admit(self, message: Incoming) -> tuple[Reply | None, bool]:
+        """准入第一步：这个人是谁。
+
+        返回 `(不放行时的回复, 这次是不是靠机器级放行进来的)`。第二个值决定要不要
+        再走"这个工作区在不在他的放行列表里"那一步（见 `handle`）。
         """
         user = message.user
         self._last_conversation = message.conversation or self._last_conversation
         if user in self.allowed_users:
-            return None
+            return None, False
         if self.access == OPEN:
-            return None
-        if self.access == ALLOWLIST or self.pairings is None:
+            return None, False
+        if self.access == ALLOWLIST:
             # 名单模式：名单外连码都不给（这是使用者的明确选择）。
             self._note(f"忽略未授权用户 {user}")
-            return Reply(user=user, text="", accepted=False, reason="未授权")
+            return Reply(user=user, text="", accepted=False, reason="未授权"), False
+        # 机器级放行（通道, 用户, 工作区列表）：换工作区不用重新配对，靠的就是它。
+        if self._trust.is_allowed(self.channel_name, user):
+            return None, True
+        # 旧的工作区级配对文件：留着，老桥与老流程接得上。
+        if self.pairings is not None and self.pairings.is_approved(user):
+            return None, False
+        return self._ask_for_code(message), False
 
-        if self.pairings.is_approved(user):
-            return None
-        code = self.pairings.ensure_code(user)
+    def _ask_for_code(self, message: Incoming) -> Reply:
+        """陌生发送者：给一个配对码，但**不告诉 agent**。
+
+        码记在机器级（带上它请求的工作区与通道），所以 `spool approve <码>`
+        在任何目录都能批。**没有工作区可指的时候不发码**——批了也不知道该放行到
+        哪儿，只会让人白等一句"已批准"。
+        """
+        user = message.user
+        try:
+            target = self.target_for(user)
+        except WorkspaceError:
+            reply = (
+                "这条通道还不认识你，而且现在也说不清该把你放行到哪个工作区。"
+                "让机器的主人先在服务器上敲 `spool ws add <目录>`，再来一次。"
+            )
+            self._send(reply, message.conversation)
+            self._note(f"有人要配对，但没有可指的工作区：{user}")
+            return Reply(user=user, text=reply, accepted=False, reason="待配对")
+        code = (
+            self.pairings.ensure_code(user)
+            if self.pairings is not None
+            # 带着工作区配对文件的桥（给了 `--root`）继续用它：老流程、
+            # 老 `spool approve` 都认那一份，换成机器级的会让"批准了却不认账"。
+            else self._trust.ensure_code(self.channel_name, user, target.root)
+        )
         reply = PAIRING_REPLY.format(code=code)
         self._send(reply, message.conversation)
-        self._note(f"有人要配对：{user}（码 {code}）")
+        self._note(f"有人要配对：{user}（码 {code}，工作区 {target.root}）")
         return Reply(user=user, text=reply, accepted=False, reason="待配对")
 
     def _send(self, text: str, conversation: str) -> None:

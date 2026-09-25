@@ -369,7 +369,9 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("serve", help="启动 Web UI 壳")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--session", default="cli")
+    parser.add_argument(
+        "--session", default="", help="会话名。留空 = 用网页壳的指针，没有就 cli"
+    )
     parser.add_argument("--provider", default="")
     parser.add_argument("--model", default="")
     parser.add_argument(
@@ -401,7 +403,9 @@ def _add_hub_command(sub: argparse._SubParsersAction) -> None:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--session", default="cli")
+    parser.add_argument(
+        "--session", default="", help="会话名。留空 = 用网页壳的指针，没有就 cli"
+    )
     parser.add_argument("--provider", default="")
     parser.add_argument("--model", default="")
     parser.add_argument(
@@ -680,7 +684,10 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="模型/外接服务从通变断时，给最近聊天发一句（默认关，避免刷屏）",
     )
-    parser.set_defaults(func=bridge_command)
+    # `--root` 不给是**有意义的取值**：服务整台机器，具体落到哪由"这条聊天的
+    # 指针"决定。所以这里既把默认值定成空串，也打上 optional_root 让 main()
+    # 别替它自动找一个工作区。
+    parser.set_defaults(func=bridge_command, root="", optional_root=True)
 
 
 def _add_extra_command(sub: argparse._SubParsersAction) -> None:
@@ -749,7 +756,18 @@ def _add_approve_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--forget", default="", metavar="配对码", help="丢掉一个还没批准的码"
     )
-    parser.set_defaults(func=approve_entry)
+    parser.add_argument(
+        "--ws",
+        default="",
+        metavar="名字",
+        help=(
+            "批准时点名工作区（旧配对文件里的码没有工作区维度；"
+            "登记表里有多个工作区时**必须**点名）"
+        ),
+    )
+    # `--root` 不给是正常的：机器级的码自带工作区，旧式的码按
+    # "当前目录 → 登记表" 退。所以别在这里替它自动找一个工作区。
+    parser.set_defaults(func=approve_entry, optional_root=True)
 
 
 def configure_stdio() -> None:
@@ -836,9 +854,19 @@ def main(argv: list[str] | None = None) -> int:
     # "某个命令的记忆跟别的命令不是同一份"，那种问题最难查。
     if hasattr(args, "root"):
         try:
-            # 走 `resolve_root_interactive`：登记表里有多个工作区、而当前目录不是
-            # 工作区时，终端里要能问一句（内核自己不认识终端，chooser 由 CLI 注入）。
-            args.root = str(workspace.resolve_root_interactive(args.root))
+            if getattr(args, "optional_root", False):
+                # `bridge` / `serve` / `hub`：**不给 `--root` 是一个有意义的取值**
+                # （服务整台机器 / 由指针决定），所以不能在这里替它自动找一个
+                # 工作区。给了才解析。
+                args.root = (
+                    str(workspace.resolve_root_interactive(args.root))
+                    if str(getattr(args, "root", "") or "").strip()
+                    else ""
+                )
+            else:
+                # 走 `resolve_root_interactive`：登记表里有多个工作区、而当前目录不是
+                # 工作区时，终端里要能问一句（内核自己不认识终端，chooser 由 CLI 注入）。
+                args.root = str(workspace.resolve_root_interactive(args.root))
         except workspace.WorkspaceError as exc:
             print(str(exc), file=sys.stderr)
             return 2

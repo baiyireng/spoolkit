@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Callable, Sequence
 
+from spoolkit.kernel.target import Target
 from spoolkit.web.runner import Runner
 
 POLL_SECONDS = 0.5
@@ -40,24 +41,49 @@ ANSWERS = {
 
 
 class AgentRunner:
-    """`Callable[[str], str]`：给一条消息，回一段答复。"""
+    """`Callable[[str], str]`：给一条消息，回一段答复。
+
+    一条通道服务整台机器时，"这次落到哪个工作区、哪条会话"是**按聊天**算的，
+    所以第一个参数既可以是 `(client_key) -> Target` 的解析函数（新的形状），
+    也可以直接给一个工作区路径（老的形状：这条通道只服务那一个工作区）。
+    """
 
     def __init__(
         self,
-        project_root: Path,
-        session: str = "bridge",
+        resolve: Callable[[str], Target] | Path | str,
+        *,
+        session: str = "",
+        default_session: str = "bridge",
         extra_args: Sequence[str] = (),
         timeout: float = 900.0,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         notify: Callable[[str], None] | None = None,
     ) -> None:
-        self.project_root = project_root
-        self.session = session
+        if callable(resolve):
+            self._resolve: Callable[[str], Target] = resolve
+        else:
+            # 老形状：固定一个工作区（`--root` 给了的桥就走这条）。
+            fixed_root = Path(resolve)
+            fixed_session = str(session or default_session)
+            self._resolve = lambda _key: Target(
+                root=fixed_root,
+                session=fixed_session,
+                workspace_source="explicit",
+                session_source="default",
+            )
+        self.default_session = str(default_session)
+        self.session = str(session or default_session)
+        self.project_root = None if callable(resolve) else Path(resolve)
         self.extra_args = list(extra_args)
         self.timeout = timeout
         self._clock = clock
         self._sleep = sleep
+        # 一个 (工作区, 会话) 一个 Runner：`start()` 里那句"已有运行在跑就拒绝"
+        # 是按实例算的，共用一个实例会让两个聊天互相挡住。
+        self._runners: dict[str, Runner] = {}
+        self._current = ""
+        # 兼容老用法（测试直接塞一个替身进来）：非空时优先用它。
         self._runner: Runner | None = None
         # 超时之后**结果还要送回来**：聊天通道里"等超时就丢掉结论"等于这个任务
         # 白跑了。notify 由桥注入（它知道回给哪个会话）。
@@ -69,19 +95,21 @@ class AgentRunner:
         """桥用它把"补发一条消息"的能力挂上来（见 `_watch_later`）。"""
         self.notify = notify
 
+    def for_client(self, client_key: str) -> Callable[[str], str]:
+        """桥按"每条聊天"取一个可调用对象（`Bridge` 认得这个接口就用它）。"""
+        return lambda text: self.run(text, client_key)
+
     def __call__(self, message: str) -> str:
+        return self.run(message, "")
+
+    def run(self, message: str, client_key: str = "") -> str:
         reply = self._confirmation_answer(message)
         if reply is not None:
             return reply
-        # **复用同一个 Runner**。原先每条消息都新建一个：`start()` 里那句
+        # **按目标复用同一个 Runner**。原先每条消息都新建一个：`start()` 里那句
         # "已有运行在跑就拒绝"只认自己那一个实例，于是你连着发两条，第二个
         # agent 会在同一个工作区里同时跑起来（记忆、检查点、进度文件一起写）。
-        runner = self._runner
-        if runner is None:
-            runner = Runner(
-                self.project_root, session=self.session, extra_args=self.extra_args
-            )
-            self._runner = runner
+        runner = self._runner_for(client_key)
         if not runner.start(message):
             return "上一轮还在跑，等它结束再发。"
         deadline = self._clock() + self.timeout
@@ -98,6 +126,37 @@ class AgentRunner:
                     "它还在后台跑，跑完我会把结论发给你。"
                 )
             self._sleep(POLL_SECONDS)
+
+    def _runner_for(self, client_key: str) -> Runner:
+        if self._runner is not None:  # 测试塞进来的替身
+            return self._runner
+        target = self._resolve(client_key)
+        key = f"{target.root}\u0000{target.session}"
+        runner = self._runners.get(key)
+        if runner is None:
+            runner = Runner(
+                target.root, session=target.session, extra_args=self.extra_args
+            )
+            self._runners[key] = runner
+        self._current = key
+        return runner
+
+    def _awaiting_runner(self) -> Runner | None:
+        """正在等确认的那个 runner：先看最近用过的那条聊天，再扫全部。"""
+        candidates: list[Runner] = []
+        if self._runner is not None:
+            candidates.append(self._runner)
+        for key in [self._current, *self._runners]:
+            runner = self._runners.get(key)
+            if runner is not None and runner not in candidates:
+                candidates.append(runner)
+        for runner in candidates:
+            try:
+                if runner.snapshot().get("awaiting"):
+                    return runner
+            except Exception:  # noqa: BLE001 - 快照拿不到就当没在等
+                continue
+        return None
 
     def _watch_later(self, runner: Runner) -> None:
         """超时之后守着这一轮：它跑完（或被确认）就把结论补发出去。
@@ -136,7 +195,7 @@ class AgentRunner:
         word = message.strip().lower()
         if word not in ANSWERS:
             return None
-        runner = self._runner
+        runner = self._awaiting_runner()
         if runner is None:
             return None
         try:
@@ -157,12 +216,17 @@ class AgentRunner:
                     "b": "本轮不再询问这类命令。",
                 }.get(answer, "已拒绝。")
             return "现在没有待确认的授权请求。"
-        return self.confirm(word in YES_WORDS)
+        return self._confirm(runner, word in YES_WORDS)
 
     def confirm(self, apply: bool) -> str:
         """回答 agent 的授权询问（它正在等）。"""
-        runner = self._runner
-        if runner is None or not runner.confirm(apply):
+        runner = self._awaiting_runner()
+        if runner is None:
+            return "现在没有待确认的改动。"
+        return self._confirm(runner, apply)
+
+    def _confirm(self, runner: Runner, apply: bool) -> str:
+        if not runner.confirm(apply):
             return "现在没有待确认的改动。"
         return "已应用。" if apply else "已丢弃。"
 

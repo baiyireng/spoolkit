@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from spoolkit.cli.commands.serve import extra_from_serve_args
+from spoolkit.kernel.target import resolve_target
 from spoolkit.web.server import serve
 
 CHANNELS = ("fake", "telegram", "wecom", "qqbot")
@@ -90,6 +91,10 @@ def hub_command(args: argparse.Namespace) -> int:
         )
         return 2
 
+    # 与 `serve` 同一条口径：会话由内核定，解析结果显式传给网页壳与子进程。
+    target = resolve_target(
+        workspace=args.root, session=args.session, client="web", session_fallback="cli"
+    )
     children = spawn_bridge(args)
 
     def extra_health() -> dict:
@@ -108,10 +113,10 @@ def hub_command(args: argparse.Namespace) -> int:
 
     try:
         serve(
-            Path(args.root).resolve(),
+            target.root,
             host=args.host,
             port=args.port,
-            session=args.session,
+            session=target.session,
             extra_args=extra_from_serve_args(args),
             extra_health=extra_health,
         )
