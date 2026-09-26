@@ -272,3 +272,67 @@ def test_老用法的单个Runner也是钉住的(start_server, tmp_path: Path) -
     assert _state(url)["target"]["session"] == "t"
     assert _state(url)["target"]["pinned"] is True
     assert _post(url + "/target", {"workspace": str(tmp_path)})[0] == 409
+
+
+def test_给了project_root就等于钉住它(tmp_path: Path, monkeypatch) -> None:
+    """评审 Important：`build_state(root)` 原先会**静默忽略** root。
+
+    `serve(project_root)` 是这套壳最初的签名，它的意思是"钉住这个工作区"，
+    而不是"机器级的初始目标"。不归一的话，`serve(SA)` 会转身去钉指针或登记表里的
+    **另一个**工作区（评审实测：实际 target 是 SB，而且一声不响）。
+    """
+    from spoolkit.kernel import pointers as kernel_pointers
+
+    a = _ws(tmp_path, "A")
+    b = _ws(tmp_path, "B")
+    kernel_workspaces.register(b)
+    kernel_pointers.set("web", b, "s-b")  # "别处"确实存在，而且指针正指着它
+
+    state = build_state(a)  # 只给 root，不给 pinned
+    try:
+        payload = state.snapshot()
+    finally:
+        state.close()
+
+    assert payload["target"]["root"] == str(a.resolve())
+    assert payload["target"]["pinned"] is True  # 它被当成"钉住这个"
+    assert payload["target"]["workspace_source"] == "explicit"
+
+
+def test_serve_的提示语也要说真话(tmp_path: Path, monkeypatch, capsys) -> None:
+    """`serve(root)` 不带 `pinned` 时，终端那句话必须说"钉住了"，不能说"机器级"。
+
+    归一只有一处是不够的：`build_state` 里改了、`serve` 里没改的话，行为对而
+    **提示语在骗人**——而"终端说机器级、实际钉住了"正是这次评审逮到的那个形状。
+    """
+    from spoolkit.web import server as web_server
+
+    a = _ws(tmp_path, "A")
+
+    class _Httpd:
+        server_port = 0
+
+        def serve_forever(self) -> None:
+            return None
+
+        def server_close(self) -> None:
+            return None
+
+    seen: dict = {}
+    real_build_state = web_server.build_state
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real_build_state(*args, **kwargs)
+
+    monkeypatch.setattr(web_server, "build_state", spy)
+    monkeypatch.setattr(web_server, "build_server", lambda state, host, port: _Httpd())
+    # 健康探针是个后台线程，会去打本机默认的模型地址（开发机上真在跑的话，
+    # 测试输出里会冒出"模型通"，而且用例的结果就依赖了那台机器的状态）。
+    monkeypatch.setattr(web_server, "_watch_health", lambda *a, **k: None)
+
+    web_server.serve(a)
+    err = capsys.readouterr().err
+
+    assert seen.get("pinned") is True  # 归一发生在进 build_state 之前
+    assert "机器级网页壳" not in err  # 提示语不许说反

@@ -86,7 +86,13 @@ def run_wizard(
         key = ask("GEMINI_API_KEY（留空跳过，稍后写进 .env 也行）：").strip()
         if key:
             where = _write_env_key(project_root, key)
-            say(f"密钥已写入 {where}（已在 .gitignore 里）")
+            # "已在 .gitignore 里"只对**工作区里**那份成立。机器级入口（没有工作区）
+            # 写的是用户级 `.env`（`%APPDATA%` 下），它压根不在任何仓库里——
+            # 说错等于教人一条错的知识（评审逮到的就是这句）。
+            if where == settings.env_path():
+                say(f"密钥已写入 {where}（用户级配置，不在任何仓库里）")
+            else:
+                say(f"密钥已写入 {where}（已在 .gitignore 里）")
         model = ask("模型名（留空用默认，直接回车跳过）：").strip()
         if model:
             values["model"] = model

@@ -368,19 +368,26 @@ def _handler_for(state: WebState):
             listener: queue.Queue | None = None
             # 初值用一个"谁都不是"的哨兵：没有它，第一圈会以为"目标没变"而不订阅。
             subscribed: object = _UNSET
+            # `switch()` 每次都会把版本号 +1，而**重订阅**的判据是 Runner 身份
+            # （认错对象会订阅到别的目标上）。但"补一帧 state"要看版本号：否则
+            # A→B→A 这种"一个周期里来回切"会既没换对象、也没补帧，页面就永远
+            # 不知道目标动过（评审记的就是这条：`_version` 取了不用）。
+            seen_version = -1
             last_write = time.monotonic()
             try:
                 while True:
-                    _version, current = state.current()
-                    if current is not subscribed:
-                        # 目标换了（第一次连上也算"换"）：**先退订旧的，再订阅新的**。
-                        # 顺序不能反——先订阅的话，两条流会短暂地同时把事件推进
-                        # 同一个页面，而页面会把它们当成同一段历史。
-                        if listener is not None and runner is not None:
-                            runner.unsubscribe(listener)
-                        runner = current
-                        listener = runner.subscribe() if runner is not None else None
-                        subscribed = current
+                    version, current = state.current()
+                    if current is not subscribed or version != seen_version:
+                        if current is not subscribed:
+                            # 目标换了（第一次连上也算"换"）：**先退订旧的，再订阅新的**。
+                            # 顺序不能反——先订阅的话，两条流会短暂地同时把事件推进
+                            # 同一个页面，而页面会把它们当成同一段历史。
+                            if listener is not None and runner is not None:
+                                runner.unsubscribe(listener)
+                            runner = current
+                            listener = runner.subscribe() if runner is not None else None
+                            subscribed = current
+                        seen_version = version
                         self._push({"type": "state", **state.snapshot()})
                         last_write = time.monotonic()
                         continue
@@ -511,6 +518,12 @@ def build_state(
       内核不猜，这里要接住它，否则机器级网页壳根本起不来）。
     """
     args = tuple(extra_args)
+    # **给了 `project_root` 就是"钉住这个工作区"**，不是"机器级的初始目标"。
+    # 不这么归一的话，`build_state(root)` / `serve(root)` 会静默地忽略 root、去钉
+    # 指针或登记表里的**另一个**工作区（评审实测：`serve(SA)` 的实际 target 是 SB，
+    # 而且一声不响）——`serve(project_root)` 是这套壳最初的签名，它的意思不能被改掉。
+    if project_root is not None and target is None:
+        pinned = True
     if pinned and target is None and project_root is None:
         # 钉住却没给钉什么：这种组合没有意义，而"悄悄当成机器级"会让调用方以为
         # 自己钉住了。宁可当场说清楚（`serve_command` / `hub_command` 都不会这么调）。
@@ -600,6 +613,11 @@ def serve(
     `target` 可选：调用方已经把目标连"来源说明"一起解析好了就原样给过来，
     免得这里再解析一遍、把来源记错（`serve_command` 走这条）。
     """
+    # 与 `build_state` 里同一条归一（那里也有一份，因为它是个公开入口）：
+    # 给了 `project_root` 就是钉住它。这里还要这份，是因为下面那句提示语
+    # 直接读 `pinned`——不归一的话，`serve(root)` 会去钉别的目标、终端还印着
+    # "机器级网页壳"，两句话都在骗人。
+    pinned = pinned or project_root is not None
     state = build_state(
         project_root,
         session=session,
