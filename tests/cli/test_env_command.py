@@ -322,8 +322,13 @@ def test_import_only不能是空的(tmp_path: Path, monkeypatch, capsys) -> None
     assert "--only" in err
 
 
-def test_import_目标不可读时给人话(tmp_path: Path, monkeypatch, capsys) -> None:
-    """目标 `.env` 是二进制（认不出的编码）时，不许把回溯甩给人。"""
+def test_import_目标编码不认时给人话(tmp_path: Path, monkeypatch, capsys) -> None:
+    """目标 `.env` 是二进制（认不出的编码）时，不许把回溯甩给人。
+
+    名字里特意写"编码"：这条**不**覆盖权限场景（权限那条在
+    `test_set_只读目标时给人话`）——二轮评审指出原名"不可读"名实不符，
+    而正是这种含糊让"写路径没包 OSError"从用例的缝里漏了过去。
+    """
     path = _user_env(tmp_path, monkeypatch)
     path.write_bytes(b"\x81\x82\x83\xff\xfe\x00\x01")
     source = tmp_path / "ws" / ".env"
@@ -348,3 +353,85 @@ def test_list_目标是目录时说明白(tmp_path: Path, monkeypatch, capsys) -
 
     assert code == 0
     assert "是个目录" in out
+
+
+# --- 二轮评审 Critical：写入必须原子，失败不许毁掉原文件 ---
+
+
+def test_set_写失败时原文件毫发无伤(tmp_path: Path, monkeypatch, capsys) -> None:
+    """评审实测：`write_bytes` 是"先截断再写"，`open(path,"wb")` 一调用文件就成 0 字节。
+
+    密钥文件被截断＝丢凭据，而这份文件常常是一个账号唯一的一份。现在走
+    临时文件 + `os.replace`，所以这里把 `os.replace` 打桩成失败，原文件必须**一字不动**，
+    目录里也不许留临时文件。
+    """
+    from spoolkit.cli.commands import env as env_module
+
+    path = _user_env(tmp_path, monkeypatch, "QQ_AppID=old\nQQ_AppSecret=sec\n")
+    before = path.read_bytes()
+
+    def boom(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(env_module.os, "replace", boom)
+
+    code = env_command(_args(action="set", items=["QQ_AppID=new"]))
+    err = capsys.readouterr().err
+
+    assert code == 1
+    assert "写不了" in err and "Traceback" not in err
+    assert path.read_bytes() == before  # 原文件毫发无伤
+    leftovers = [p.name for p in (tmp_path / "roaming").iterdir() if p.name != ".env"]
+    assert leftovers == []  # 也没留下半个临时文件
+
+
+def test_set_成功后不留临时文件(tmp_path: Path, monkeypatch) -> None:
+    _user_env(tmp_path, monkeypatch, "QQ_AppID=old\n")
+
+    assert env_command(_args(action="set", items=["QQ_AppID=new"])) == 0
+
+    leftovers = [p.name for p in (tmp_path / "roaming").iterdir() if p.name != ".env"]
+    assert leftovers == []
+
+
+def test_set_只读目标时给人话(tmp_path: Path, monkeypatch, capsys) -> None:
+    """二轮评审 Critical：写路径的 `OSError` 没被包住 → 只读目标直接甩回溯给人。"""
+    import os
+    import stat
+
+    path = _user_env(tmp_path, monkeypatch, "QQ_AppID=old\n")
+    os.chmod(path, stat.S_IREAD)
+    try:
+        code = env_command(_args(action="set", items=["QQ_AppID=new"]))
+        err = capsys.readouterr().err
+    finally:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)  # 让临时目录删得掉
+
+    assert code == 1
+    assert "写不了" in err
+    assert "Traceback" not in err
+
+
+def test_import_only不像键名时不回显(tmp_path: Path, monkeypatch, capsys) -> None:
+    """`--only` 这个位置上打错的常常是密钥本身（少打了键名）——别原样回显。"""
+    _user_env(tmp_path, monkeypatch)
+    looks_like_secret = "102abcSECRETVALUE"
+
+    code = env_command(_args(action="import", source="whatever.env", only=[looks_like_secret]))
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert looks_like_secret not in captured.out
+    assert looks_like_secret not in captured.err
+
+
+def test_set_认各种export写法(tmp_path: Path, monkeypatch) -> None:
+    """`EXPORT` / `Export` / 制表符都要认：不认就等于那一行对我们隐形，于是追加一份。"""
+    path = _user_env(tmp_path, monkeypatch, "EXPORT QQ_AppID=old\nexport\tQQ_AppSecret=s\n")
+
+    assert env_command(_args(action="set", items=["QQ_AppID=new", "QQ_AppSecret=t"])) == 0
+
+    text = path.read_text(encoding="utf-8")
+    assert text.count("QQ_AppID") == 1 and text.count("QQ_AppSecret") == 1
+    assert text.startswith("EXPORT QQ_AppID=new")  # 前缀原样留住
+    assert load_env_file(path) == {"QQ_AppID": "new", "QQ_AppSecret": "t"}

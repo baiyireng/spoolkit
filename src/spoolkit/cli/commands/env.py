@@ -5,29 +5,40 @@
 更不会记得**哪些名字是被认的**。没有它，起一条机器级通道的代价就是每次重打
 `--appid/--secret`，或者把密钥写进某个随手建的文件里，然后没人知道它到底在哪。
 
-四条规矩：
+五条规矩（前四条各有用例钉着，第五条是两轮评审逼出来的）：
 
 1. **不回显值**：`list` 只印键名与位置，写入后只印遮罩过的形状（照
    `bridge.credentials.mask`）。密钥进过一次终端，就等于进过一次滚动缓冲、
-   一次截图、一次粘贴——**连报错也不例外**（这条是评审逮出来的：不合形状的参数
-   原先被原样打回 stderr，而人打错的往往正是密钥本身）。
+   一次截图、一次粘贴——**连报错也不例外**（不合形状的参数、不像键名的 `--only`
+   都只报个数）。
 2. **不动别人的行**：写入只替换同名键，注释、空行、分节、别的键原样保留。
    整份重写的代价是下一个人把手写注释挪走，然后两份配置开始漂移。
 3. **读写同一套判断**：编码（UTF-8 / UTF-8 BOM / UTF-16）与换行（CRLF / LF）
    都按原文还原。只读时读得动、一 `set` 就崩或悄悄追加一份重复键，是最难查的
    "看着能用、一改就炸"。
 4. **位置可覆盖**：`SPOOLKIT_ENV_FILE` 指到哪就写哪（测试与多套配置靠它）。
+5. **写入必须是原子的**：先写同目录临时文件再 `os.replace`。密钥文件被截断到一半
+   就**不可恢复**了——这份文件往往是一个账号唯一的一份凭据。
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import os
+import re
 import sys
+import tempfile
 from pathlib import Path
 
 from spoolkit import settings
 from spoolkit.bridge.credentials import mask
-from spoolkit.envfile import EnvFileError, load_env_file, read_env_text
+from spoolkit.envfile import (
+    EnvFileError,
+    load_env_file,
+    read_env_text,
+    split_export_prefix,
+)
 
 USAGE = (
     "用法：\n"
@@ -37,16 +48,50 @@ USAGE = (
     "  spool env import --from <工作区的 .env> [--only KEY]   从工作区搬过来"
 )
 
+# 键名的形状。`--only` 只接受这种；别的一律拒，且**不回显**（见 `_do_import`）。
+_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _atomic_write(path: Path, payload: bytes) -> None:
+    """先写同目录的临时文件，再 `os.replace` 换上去。
+
+    为什么不能直接 `write_bytes`（二轮评审逮出来的）：它是"先截断再写"——实测
+    `open(path, "wb")` 一调用，文件就已经是 0 字节了。密钥文件若在写入中途失败
+    （磁盘满、进程被杀、断电）就**不可恢复**，而这份文件常常是一个账号唯一的
+    一份凭据。临时文件 + 原子替换把结果收敛成"要么旧的、要么新的"。
+
+    临时文件建在**同目录**：跨盘改名不是原子的（`os.replace` 会退化成拷贝）。
+    `mkstemp` 在 POSIX 上就是 0600，替换过去之后权限也不会松。
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle_fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        )
+    except OSError as exc:
+        raise EnvFileError(f"写不了 {path}：{exc}") from exc
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(handle_fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())  # 断电之后也认得这份内容
+        os.replace(tmp, path)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            tmp.unlink()  # 失败就别在人家目录里留半个临时文件
+        raise EnvFileError(f"写不了 {path}：{exc}") from exc
+
 
 def _write_updates(path: Path, updates: dict[str, str]) -> None:
     """只替换同名键，其它行（注释、空行、别人的键）原样保留。
 
-    **编码与换行按原文还原**（见模块开头第 3 条）。写出用 `write_bytes`：
-    `write_text` 会按平台把 `\\n` 翻成 `\\r\\n`（Windows 上），那就白记了原文的换行符。
+    **编码与换行按原文还原**（见模块开头第 3 条）。写出走 `_atomic_write`：
+    `write_text` 除了会按平台把 `\\n` 翻成 `\\r\\n`（Windows 上），也保不住
+    "中途失败别把原文件毁掉"这件事。
     """
     if path.is_dir():
         raise EnvFileError(f"{path} 是个目录，不是 .env 文件")
-    path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file():
         text, encoding, newline = read_env_text(path)
     else:
@@ -57,14 +102,7 @@ def _write_updates(path: Path, updates: dict[str, str]) -> None:
     written: set[str] = set()
     out: list[str] = []
     for raw in text.splitlines():
-        stripped = raw.strip()
-        prefix = ""
-        probe = stripped
-        if probe.startswith("export "):
-            # `export KEY=VALUE` 是最常见的 shell 写法：认它，替换时也把前缀留住
-            # （否则 `source` 这份文件的人会发现变量没导出）。
-            prefix = "export "
-            probe = probe[len("export ") :].strip()
+        prefix, probe = split_export_prefix(raw.strip())
         if probe and not probe.startswith("#") and "=" in probe:
             key = probe.split("=", 1)[0].strip()
             if key in updates:
@@ -76,22 +114,20 @@ def _write_updates(path: Path, updates: dict[str, str]) -> None:
         if key not in written:
             out.append(f"{key}={value}")
     body = newline.join(out)
-    path.write_bytes((body + (newline if trailing else "")).encode(encoding))
+    _atomic_write(path, (body + (newline if trailing else "")).encode(encoding))
     _restrict(path)
 
 
 def _restrict(path: Path) -> None:
-    """POSIX 上收紧成 600。
+    """POSIX 上收紧成 600（`mkstemp` 本来就是 600，这里是兜底）。
 
     Windows 上**故意什么都不做**：那边改权限要另一套 API（ACL），而且多半改不对；
     假装保护过了比不保护更坏——它会让人以为这份文件已经安全了。
     """
     if sys.platform == "win32":
         return
-    try:
+    with contextlib.suppress(OSError):
         path.chmod(0o600)
-    except OSError:
-        pass
 
 
 def _parse_pairs(items: list[str]) -> tuple[dict[str, str], list[str]]:
@@ -175,8 +211,20 @@ def _do_import(source_raw: str, only: list[str]) -> int:
         print("`--only` 后面不能是空的。", file=sys.stderr)
         print(USAGE, file=sys.stderr)
         return 2
+    if any(not _KEY_RE.match(item) for item in wanted):
+        # **不回显**：`--only` 这个位置上打错的常常是密钥本身（少打了键名），
+        # 原样回显等于把它打进终端——与 `set` 那条同一个道理。
+        print(
+            f"有 {len(wanted)} 个 `--only` 里出现了不像键名的值（只认字母/数字/下划线，"
+            "且不以数字开头）。不回显内容，免得把值打进终端。",
+            file=sys.stderr,
+        )
+        print(USAGE, file=sys.stderr)
+        return 2
     source = Path(source_raw).expanduser()
     if not source.is_file():
+        # 路径要印出来（不然人不知道它找的是哪儿）；这里印的是**参数本身**，
+        # 不是内容——与"不回显值"那条不冲突。
         print(f"来源不是一个文件：{source}", file=sys.stderr)
         return 1
     table = load_env_file(source)
@@ -218,8 +266,9 @@ def env_command(args: argparse.Namespace) -> int:
         if action == "list":
             return _print_list()
     except EnvFileError as exc:
-        # 读写不了就说一句人话，别把回溯甩给人（这类失败都是"路径/编码不对"，
-        # 回溯里那几十行对判断下一步毫无帮助）。
+        # 读写不了就说一句人话，别把回溯甩给人（这类失败都是"路径/权限/编码不对"，
+        # 回溯里那几十行对判断下一步毫无帮助）。**读路径与写路径都要罩住**——
+        # 二轮评审发现的另一条 Critical 就是"只读路径罩了，写路径漏了"。
         print(str(exc), file=sys.stderr)
         return 1
     print(USAGE, file=sys.stderr)

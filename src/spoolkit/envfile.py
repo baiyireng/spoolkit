@@ -2,14 +2,14 @@
 
 为什么要单独一个模块：需要读写 `.env` 的有三处——用户级配置（`settings`）、
 通道凭据（`bridge/credentials`）、模型供应商（`llm/providers`），再加上 `spool env`
-这条命令。原先这个函数住在 `llm/gemini.py` 里，于是"只想读一个 `.env`"要先把
+这条命令。原先读函数住在 `llm/gemini.py` 里，于是"只想读一个 `.env`"要先把
 LLM 网关那一层（连带 `httpx`）import 进来；反过来让 `settings` 去依赖 `llm`
 也不成体统。
 
 规矩只有三条：
 
-1. **只有 `KEY=VALUE`**（`export KEY=VALUE` 也认——那是最常见的 shell 写法），
-   `#` 开头是注释，值两边的引号去掉；
+1. **只有 `KEY=VALUE`**（`export KEY=VALUE` 也认，大小写与空白都容错——那是最常见的
+   shell 写法，不认它等于那一行对我们隐形），`#` 开头是注释，值两边的引号去掉；
 2. **不做变量展开**（`${OTHER}` 这种）：展开会让"值到底是什么"要读两处才知道，
    而这个项目的偏好是"看得见"；
 3. **文件不存在返回空**——配置是增强，不该挡住启动。
@@ -26,7 +26,12 @@ LLM 网关那一层（连带 `httpx`）import 进来；反过来让 `settings` �
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+# `export` 的三种常见写法（`EXPORT` / `Export` 也认），后面必须是空白：
+# `exportKEY=v` 不是导出语句，而是一个键名恰好以 export 开头的变量。
+_EXPORT_RE = re.compile(r"^(export[ \t]+)(.*)$", re.IGNORECASE)
 
 
 class EnvFileError(RuntimeError):
@@ -62,12 +67,23 @@ def read_env_text(path: Path) -> tuple[str, str, str]:
     return text, encoding, newline
 
 
+def split_export_prefix(line: str) -> tuple[str, str]:
+    """把 `export KEY=VALUE` 拆成（前缀, 余下部分）。不认时前缀是空串。
+
+    写回时要**留住原文的前缀**（`EXPORT ` 就写回 `EXPORT `）：否则 `source` 这份文件
+    的人会发现变量没被导出。
+    """
+    match = _EXPORT_RE.match(line)
+    if match is None:
+        return "", line
+    return match.group(1), match.group(2).strip()
+
+
 def iter_env_items(text: str):
     """逐行给出（键, 值）。认 `export ` 前缀，跳过注释与空行。"""
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if line.startswith("export "):
-            line = line[len("export ") :].strip()
+        _, line = split_export_prefix(line)
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
