@@ -88,6 +88,57 @@ def test_空文本与纯文本原样返回() -> None:
     assert to_plain("就是把这句话说出来") == "就是把这句话说出来"
 
 
+# --- 边界：这些最容易把**代码**改坏（宁可少转，也不许改错）----------------------
+
+
+def test_取下标再调用不是链接() -> None:
+    """`parts[0](args)` 与 `[文字](链接)` 长得一模一样。
+
+    这是本节最危险的一条：真按链接渲染就变成 `parts0（args）`——**把代码改了**。
+    所以括号里必须像那么回事（含 `/` `.` `:` `#` 之一）才当链接。
+    """
+    assert to_plain("parts[0](args)") == "parts[0](args)"
+    assert to_plain("d[k](v)") == "d[k](v)"
+    assert to_plain("表格 rows[i](row) 里取值") == "表格 rows[i](row) 里取值"
+
+
+def test_中文里紧挨着的链接照旧能转() -> None:
+    """别用"前面是不是词字符"来判——中文没有空格，`详见[文档](url)` 是正常写法。"""
+    assert to_plain("详见[文档](https://x.dev/a)") == "详见文档（https://x.dev/a）"
+    assert to_plain("见[指南](guide.md)") == "见指南（guide.md）"
+
+
+def test_幂运算与解包里的星号() -> None:
+    assert to_plain("2 ** 10 是 1024") == "2 ** 10 是 1024"
+    assert to_plain("kwargs 用 **kw 传") == "kwargs 用 **kw 传"
+    assert to_plain("a ** b ** c") == "a ** b ** c"
+
+
+def test_转义过的标记只脱反斜杠() -> None:
+    """`\\*` 在 Markdown 里是"这里真的就是个星号"，脱掉反斜杠、别再去当粗体。"""
+    assert to_plain(r"这里的 \* 是字面量") == "这里的 * 是字面量"
+    assert to_plain(r"\` 不是行内代码") == "` 不是行内代码"
+
+
+def test_路径与文件名里的方括号圆括号不动() -> None:
+    assert to_plain("看 app/[id]/page.tsx") == "看 app/[id]/page.tsx"
+    assert to_plain("改 is_even(n) 的返回值") == "改 is_even(n) 的返回值"
+
+
+def test_标题尾部多余的井号也去掉() -> None:
+    assert to_plain("## 步骤一 ##") == "步骤一"
+
+
+def test_数字与纯符号的方括号不当链接() -> None:
+    assert to_plain("[0](2)") == "[0](2)"
+    assert to_plain("数组 [1, 2] 里") == "数组 [1, 2] 里"
+
+
+def test_跨行的粗体标记不硬拼() -> None:
+    """逐行处理：`**` 分在两行不该被跨行吃掉（那会把两行粘成一行）。"""
+    assert to_plain("**没写完的\n粗体在这**") == "**没写完的\n粗体在这**"
+
+
 # --- 接到桥上：按通道能力开关 --------------------------------------------------
 
 
