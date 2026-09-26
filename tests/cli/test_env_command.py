@@ -11,6 +11,8 @@
 import argparse
 from pathlib import Path
 
+import pytest
+
 from spoolkit import settings
 from spoolkit.cli.app import main
 from spoolkit.cli.commands.env import env_command
@@ -143,7 +145,12 @@ def test_import_把工作区的凭据搬到用户级(tmp_path: Path, monkeypatch
     assert "QQ_AppSecret" in out
 
 
-def test_import_来源里缺的键要点名(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_import_缺键时报个数并列出文件里有哪些键(tmp_path: Path, monkeypatch, capsys) -> None:
+    """`--only` 的值不印（它可能本身就是密钥），改为报个数 + 印**文件里真有哪些键**。
+
+    这条断言在第三轮评审后改过：原先断言"缺的键会被点名"，而那正是泄漏面
+    （`sk_live_…` 这类真密钥全是合法键名，点名等于打印它）。
+    """
     path = _user_env(tmp_path, monkeypatch)
     source = tmp_path / "ws" / ".env"
     source.parent.mkdir(parents=True, exist_ok=True)
@@ -153,7 +160,9 @@ def test_import_来源里缺的键要点名(tmp_path: Path, monkeypatch, capsys)
     err = capsys.readouterr().err
 
     assert code == 1
-    assert "QQ_AppSecret" in err
+    assert "一个都没找到" in err
+    assert "QQ_AppSecret" not in err  # 你给的值不印
+    assert "QQ_AppID" in err  # 文件里有哪些键要印出来
     assert not path.is_file()  # 一个都没搬，就别建出个空文件来
 
 
@@ -412,17 +421,52 @@ def test_set_只读目标时给人话(tmp_path: Path, monkeypatch, capsys) -> No
     assert "Traceback" not in err
 
 
-def test_import_only不像键名时不回显(tmp_path: Path, monkeypatch, capsys) -> None:
-    """`--only` 这个位置上打错的常常是密钥本身（少打了键名）——别原样回显。"""
+def test_import_only_的值一律不回显(tmp_path: Path, monkeypatch, capsys) -> None:
+    """三轮评审挖出的假保证：真实密钥形状**全是合法键名**。
+
+    `sk_live_…` / `AKIA…` / `github_pat_…` 都长得像键名，所以"只拒不像键名的"这条
+    拦不住任何真密钥；而我上一版用例挑的 `102abcSECRETVALUE` 恰是唯一会被拒的形状
+    ——**用例是照着实现写的，不是照着威胁写的**。现在 `--only` 的值一律不印。
+    """
     _user_env(tmp_path, monkeypatch)
-    looks_like_secret = "102abcSECRETVALUE"
+    source = tmp_path / "ws" / ".env"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("QQ_AppID=102000000\n", encoding="utf-8")
+    secrets = ["sk_live_51H8xSECRET", "AKIAIOSFODNN7EXAMPLE", "github_pat_11SECRET"]
 
-    code = env_command(_args(action="import", source="whatever.env", only=[looks_like_secret]))
+    # ① 一个都没命中：走"一个都没找到"那条
+    code = env_command(_args(action="import", source=str(source), only=secrets))
     captured = capsys.readouterr()
+    assert code == 1
+    for secret in secrets:
+        assert secret not in captured.out and secret not in captured.err
+    assert "QQ_AppID" in captured.err  # 印的是**文件里真有哪些键**
 
-    assert code == 2
-    assert looks_like_secret not in captured.out
-    assert looks_like_secret not in captured.err
+    # ② 部分命中：走"另有 N 个没搬"那条，同样不印值
+    code = env_command(
+        _args(action="import", source=str(source), only=["QQ_AppID", secrets[0]])
+    )
+    captured = capsys.readouterr()
+    assert code == 0
+    assert secrets[0] not in captured.out and secrets[0] not in captured.err
+
+
+def test_import_only_不误伤非常规键名(tmp_path: Path, monkeypatch) -> None:
+    """三轮评审的另一半：上一版把 `my-key` / `a.b` / 中文键拒了，而 `set` 能写、读侧能读
+
+    ——只在这条路上拦，属于自相矛盾的功能回归。
+    """
+    path = _user_env(tmp_path, monkeypatch)
+    source = tmp_path / "ws" / ".env"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("my-key=1\na.b=2\n中文键=3\n", encoding="utf-8")
+
+    code = env_command(
+        _args(action="import", source=str(source), only=["my-key", "a.b", "中文键"])
+    )
+
+    assert code == 0
+    assert load_env_file(path) == {"my-key": "1", "a.b": "2", "中文键": "3"}
 
 
 def test_set_认各种export写法(tmp_path: Path, monkeypatch) -> None:
@@ -435,3 +479,98 @@ def test_set_认各种export写法(tmp_path: Path, monkeypatch) -> None:
     assert text.count("QQ_AppID") == 1 and text.count("QQ_AppSecret") == 1
     assert text.startswith("EXPORT QQ_AppID=new")  # 前缀原样留住
     assert load_env_file(path) == {"QQ_AppID": "new", "QQ_AppSecret": "t"}
+
+
+# --- 三轮评审 Important：临时的明文密钥、软链、以及"报成功却没生效" ---
+
+
+def test_临时文件名字要落在_gitignore_的_env_规则里(tmp_path: Path, monkeypatch) -> None:
+    """临时文件里是**明文密钥**，它的名字必须被仓库的 `.gitignore`（`.env` / `.env.*`）挡住。
+
+    上一版的前缀是 `.{name}.` → `..env.XXXX.tmp`，`git check-ignore` 判定 **NOT ignored**。
+    """
+    from spoolkit.cli.commands import env as env_module
+
+    path = _user_env(tmp_path, monkeypatch, "QQ_AppID=1\n")
+    seen: list[str] = []
+    real_mkstemp = env_module.tempfile.mkstemp
+
+    def spy(*, prefix, suffix, dir):  # noqa: A002 - 与 patch 目标签名一致
+        fd, name = real_mkstemp(prefix=prefix, suffix=suffix, dir=dir)
+        seen.append(Path(name).name)
+        return fd, name
+
+    monkeypatch.setattr(env_module.tempfile, "mkstemp", spy)
+    assert env_command(_args(action="set", items=["QQ_AppID=2"])) == 0
+
+    assert seen, "没有观察到临时文件"
+    for name in seen:
+        assert name.startswith(".env.") and name.endswith(".tmp"), name
+
+
+def test_被打断时不留含密钥的临时文件(tmp_path: Path, monkeypatch, capsys) -> None:
+    """三轮评审 Important：`except OSError` 兜不住 Ctrl-C，含明文密钥的临时文件会永久累积。"""
+    from spoolkit.cli.commands import env as env_module
+
+    path = _user_env(tmp_path, monkeypatch, "QQ_AppID=old\n")
+    before = path.read_bytes()
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(env_module.os, "replace", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        env_command(_args(action="set", items=["QQ_AppID=new"]))
+
+    assert path.read_bytes() == before
+    leftovers = [p.name for p in (tmp_path / "roaming").iterdir() if p.name != ".env"]
+    assert leftovers == []  # 中断也要清干净
+
+
+def test_陈旧临时文件会被顺手扫掉(tmp_path: Path, monkeypatch, capsys) -> None:
+    """被 SIGKILL / 断电留下的临时文件没有任何代码能清理——只能在下次写入时兜住。"""
+    import os
+    import time
+
+    path = _user_env(tmp_path, monkeypatch, "QQ_AppID=old\n")
+    stale = path.parent / ".env.stale123.tmp"
+    stale.write_bytes(b"QQ_AppSecret=LEAKED-PLAINTEXT\n")
+    old = time.time() - 7200
+    os.utime(stale, (old, old))
+
+    assert env_command(_args(action="set", items=["QQ_AppID=new"])) == 0
+
+    assert not stale.exists()
+    assert load_env_file(path)["QQ_AppID"] == "new"
+
+
+def test_新鲜临时文件不会被误删(tmp_path: Path, monkeypatch) -> None:
+    """另一个进程正在写的临时文件不能被扫掉（这就是那个一小时余量的用途）。"""
+    path = _user_env(tmp_path, monkeypatch, "QQ_AppID=old\n")
+    fresh = path.parent / ".env.busy456.tmp"
+    fresh.write_bytes(b"QQ_AppID=in-flight\n")
+
+    assert env_command(_args(action="set", items=["QQ_AppID=new"])) == 0
+
+    assert fresh.exists()
+
+
+def test_软链的env要顺着写而不是换掉链接(tmp_path: Path, monkeypatch) -> None:
+    """三轮评审 Important：`os.replace` 换的是路径本身 → "报成功、真实文件没变"。"""
+    import os
+
+    real = tmp_path / "real.env"
+    real.write_text("QQ_AppID=old\n", encoding="utf-8")
+    link = tmp_path / "roaming" / ".env"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("这个平台/权限建不了符号链接（Windows 需要开发者模式或管理员）")
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(link))
+
+    assert env_command(_args(action="set", items=["QQ_AppID=new"])) == 0
+
+    assert link.is_symlink()  # 链接还在
+    assert load_env_file(real)["QQ_AppID"] == "new"  # **真实文件真的改了**
