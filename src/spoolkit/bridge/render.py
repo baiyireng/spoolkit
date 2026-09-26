@@ -1,18 +1,24 @@
-"""把模型写出来的 Markdown 折成**聊天软件能看的纯文本**。
+"""把模型写出来的 Markdown 收成**聊天软件真正渲染得出来的样子**。
 
-为什么要有这一层：模型天然爱写 Markdown（`**重点**`、``` 代码块 ```、表格、`[链接](url)`），
-而这几条通道**都是纯文本发送**——QQ 机器人走 `msg_type: 0`、Telegram 不带
-`parse_mode`、企业微信也是 text——于是那些标记会被当成字面量原样显示，
-在手机上就是一堆莫名其妙的星号和反引号。
+实测结论（2026-09-26，用户在手机 QQ 上看我们的机器人回复）：
 
-三条设计约束：
+- QQ 移动端**渲染一部分 Markdown**——标题、列表、代码块、链接都有格式效果；
+- 只有 `**加粗**` 这类**强调标记**原样显示成星号；
+- 旧版 PC QQ 会提示"不支持该格式的消息"（用户确认这是正常的）。
 
-1. **不碰模型**：这是**发送侧**的转换，提示词与模型的输出习惯一个字都不改
-   （让模型"别写 Markdown"既不可靠、又白占上下文）。
-2. **只删标记，不改内容**：代码块里的内容、标识符里的下划线（`sum_to`）、
-   乘法里的星号（`a * b`）都要原样留着——见下面每条正则的边界处理。
-3. **按通道能力开关**：默认按纯文本渲染；哪天某个通道真支持 Markdown，
-   在它的类上写 `markdown = True` 就能关掉（见 `Bridge._render`）。
+所以这里有两个层次，**按通道能力选**：
+
+| 模式 | 做什么 | 给谁 |
+|---|---|---|
+| `fix` | 只去掉客户端**不渲染**的强调标记（`**粗**`、`*斜*`、`~~删~~`），标题/列表/围栏/链接/表格原样留着 | 手机 QQ 这类"渲染一部分"的客户端 |
+| `plain` | 折成纯文本：标记全去、表格逐行、代码围栏加边界、长段落折行 | 什么都不渲染的通道（企业微信、不带 parse_mode 的 Telegram） |
+| `markdown` | 一个字不动 | 真渲染 Markdown 的通道 |
+
+**教训**：早先按"QQ 完全不支持 Markdown"处理，把标题、列表、链接全折成纯文本——
+那是把**已经在生效的排版一起删了**。能力位要按实测填，不能按印象填。
+
+一条贯穿两个模式的硬约束：**只动标记，不改内容**。代码块里的东西、`sum_to` 这类
+标识符、`a * b` 这种乘法、`parts[0](args)` 这种代码，一个字都不许被动。
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ import re
 
 # 围栏：``` 或 ~~~ 开头的那一行（可能带语言名）。内容一个字不动。
 _FENCE = re.compile(r"^\s*(?:```|~~~)")
-# 标题：`### 小标题 ##` → `小标题`（QQ 里没有字号，留着 # 只是噪音；尾部的 `##` 也去掉）
+# 标题：`### 小标题 ##` → `小标题`（只有 plain 模式才用得上）
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
 # 引用：`> 一句` → `一句`
 _QUOTE = re.compile(r"^\s{0,3}>\s?(.*)$")
@@ -29,8 +35,12 @@ _QUOTE = re.compile(r"^\s{0,3}>\s?(.*)$")
 _RULE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
 # 表格的分隔行：|---|:--:|
 _TABLE_SEP = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
+# 列表项：`- 一句` / `* 一句` / `+ 一句`（缩进留着）
+_BULLET = re.compile(r"^(\s*)[-*+]\s+(?=\S)")
 # 反斜杠转义：`\*` 表示"这里真的就是个星号"，把反斜杠脱掉、让后面的规则别碰它。
 _ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!~>|])")
+# 一句话（用于折行）：尽量在句末标点处断
+_SENTENCE = re.compile(r"[^。！？；!?;]*[。！？；!?;]|[^。！？；!?;]+")
 
 # 「链接」的括号里得**像那么回事**：含 `/` `.` `:` `#` 之一。
 #
@@ -41,12 +51,11 @@ _ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!~>|])")
 # 但那是正常写法），所以判据放在**括号里**而不是左边。
 _TARGET = r"[^)\s]*[/:.#][^)\s]*"
 
-# 行内标记。**顺序重要**：先长后短，避免 `**x**` 被 `*x*` 先吃掉一半。
+# **强调标记**：客户端不渲染的就是这几类，`fix` 模式只删它们。
 #
-# 刻意**没有** `__粗__` 这条：模型写粗体几乎都用 `**`，而 `__init__` / `__main__`
-# 这类 Python dunder 在这个项目的输出里天天出现——`__` 包起来的短词到底是粗体还是
-# 标识符，两边都猜不准，那就只认 `**`（宁可留个没删掉的标记，也别把标识符改坏）。
-_INLINE = (
+# 刻意**没有** `__粗__`：模型写粗体几乎都用 `**`，而 `__init__` / `__main__`
+# 这类 Python dunder 天天出现——两边都猜不准，宁可留个标记也别把标识符改坏。
+_EMPHASIS = (
     (re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", re.S), r"\1"),          # **粗**
     (re.compile(r"~~(?=\S)(.+?)(?<=\S)~~", re.S), r"\1"),              # ~~删~~
     # `*斜*`：内容不能以空白开头结尾，前面也不能还是 `*`（那是粗体），
@@ -54,15 +63,25 @@ _INLINE = (
     (re.compile(r"(?<!\*)\*(?=\S)([^*]+?)(?<=\S)\*(?!\*)", re.S), r"\1"),
     # `_斜_`：两侧不能挨着词字符，否则 `a_b_c` 里的 `_b_` 会被当成斜体拆掉。
     (re.compile(r"(?<![\w_])_(?=\S)([^_]+?)(?<=\S)_(?![\w_])", re.S), r"\1"),
+)
+
+# plain 模式在强调标记之外**还要**处理的东西：行内代码、链接、图片、引文标记。
+_PLAIN_EXTRA = (
     (re.compile(r"`([^`\n]+)`"), r"\1"),                               # `行内代码`
     (re.compile(rf"!\[([^\]]*)\]\(({_TARGET})\)"), r"图片：\1（\2）"),   # 图片
     (re.compile(rf"\[([^\]]+)\]\(({_TARGET})\)"), r"\1（\2）"),         # [文字](链接)
     (re.compile(r"\[([^\]]+)\]\[[^\]]*\]"), r"\1"),                    # [文字][引]
 )
 
+_INLINE = _EMPHASIS + _PLAIN_EXTRA
 
-def to_plain(text: str) -> str:
-    """Markdown → 纯文本。**只删标记**，不改写内容、不重排段落。"""
+
+def fix_markers(text: str) -> str:
+    """**只去掉客户端不渲染的强调标记**，其它一律原样留着（QQ 手机端走这条）。
+
+    标题、列表、围栏、链接、表格都不动——它们在手机 QQ 上本来就有格式效果，
+    折掉等于把排版删了。代码块内部一个字不动。
+    """
     if not text:
         return text
     out: list[str] = []
@@ -70,22 +89,112 @@ def to_plain(text: str) -> str:
     for line in str(text).splitlines():
         if _FENCE.match(line):
             in_fence = not in_fence
-            continue  # 围栏那一行本身丢掉，里面的内容留着
-        if in_fence:
-            out.append(line)  # 代码块内部一个字不动
+            out.append(line)  # 围栏本身留着：客户端认得它
             continue
-        if _RULE.match(line):
-            continue  # 分隔线：手机上留个 `---` 反而像没写完
-        if _TABLE_SEP.match(line) and "|" in line:
-            continue  # 表格的 |---|---| 那行直接去掉
-        line = _HEADING.sub(r"\1", line)
-        line = _QUOTE.sub(r"\1", line)
-        if line.lstrip().startswith("|") and line.rstrip().endswith("|"):
-            # 表格行：去掉两侧的竖线，中间的留一个带空格的竖线，读起来还是表格
-            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-            line = "  |  ".join(cells)
-        line = _ESCAPE.sub(r"\1", line)  # `\*` → `*`（先脱转义，后面的规则才认得出）
-        for pattern, repl in _INLINE:
+        if in_fence:
+            out.append(line)
+            continue
+        line = _ESCAPE.sub(r"\1", line)
+        for pattern, repl in _EMPHASIS:
             line = pattern.sub(repl, line)
         out.append(line)
     return "\n".join(out)
+
+
+def to_plain(text: str, *, wrap: int = 0) -> str:
+    """Markdown → 纯文本，并**按手机窄屏排版**（什么都不渲染的通道走这条）。
+
+    `wrap` > 0 时按句末标点软折行（不改字，只在标点后加换行）。
+    """
+    if not text:
+        return text
+    lines = str(text).splitlines()
+    out: list[str] = []
+    in_fence = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            # 围栏行换成看得见的边界：手机上等宽对齐没了，得让人知道代码从哪到哪
+            out.append("┌─ " + (line.strip().lstrip("`~").strip() or "代码") if in_fence else "└─")
+            index += 1
+            continue
+        if in_fence:
+            out.append(line)  # 代码块内部一个字不动
+            index += 1
+            continue
+        if _RULE.match(line):
+            index += 1
+            continue  # 分隔线：手机上留个 `---` 反而像没写完
+        if _TABLE_SEP.match(line) and "|" in line:
+            index += 1
+            continue  # 表格的 |---|---| 那行直接去掉
+        if line.lstrip().startswith("|") and line.rstrip().endswith("|"):
+            # 表格 → **逐行**：竖屏下 `a | b` 会折断，而"键：值"一行一条更好读。
+            # 连续几行一起处理；第一行当表头（只用来决定有没有表头）。
+            block: list[list[str]] = []
+            cursor = index
+            while cursor < len(lines) and lines[cursor].lstrip().startswith("|"):
+                row = lines[cursor].strip().strip("|")
+                if _TABLE_SEP.match(lines[cursor]) and "|" in lines[cursor]:
+                    cursor += 1
+                    continue
+                block.append([cell.strip() for cell in row.split("|")])
+                cursor += 1
+            body = block[1:] if len(block) > 1 else block
+            for row in body:
+                if not any(row):
+                    continue
+                head = row[0]
+                tail = "、".join(cell for cell in row[1:] if cell)
+                item = f"· {head}：{tail}" if tail else f"· {head}"
+                out.extend(_wrap(item, wrap))
+            index = cursor
+            continue
+        line = _HEADING.sub(r"\1", line)
+        line = _QUOTE.sub(r"\1", line)
+        line = _BULLET.sub(r"\1· ", line)  # `- ` → `· `：手机上不像减号
+        line = _ESCAPE.sub(r"\1", line)
+        for pattern, repl in _INLINE:
+            line = pattern.sub(repl, line)
+        out.extend(_wrap(line, wrap) if line.strip() else [""])
+        index += 1
+    return _collapse_blank("\n".join(out))
+
+
+def _wrap(line: str, limit: int) -> list[str]:
+    """按句末标点软折行。`limit <= 0` 表示不折。"""
+    if limit <= 0 or len(line) <= limit:
+        return [line]
+    pieces = _SENTENCE.findall(line) or [line]
+    out: list[str] = []
+    current = ""
+    for piece in pieces:
+        if current and len(current) + len(piece) > limit:
+            out.append(current)
+            current = piece
+        else:
+            current += piece
+        while len(current) > limit:
+            cut = _soft_cut(current, limit)
+            out.append(current[:cut].rstrip())
+            current = current[cut:].lstrip()
+    if current:
+        out.append(current)
+    return out
+
+
+def _soft_cut(text: str, limit: int) -> int:
+    """在标点或空格处断，尽量别把词切开；实在没有就在 limit 处硬断。"""
+    window = text[:limit]
+    for mark in ("，", ",", "、", "：", ":", " "):
+        spot = window.rfind(mark)
+        if spot >= limit // 2:
+            return spot + 1
+    return limit
+
+
+def _collapse_blank(text: str) -> str:
+    """连续空行收敛成一个：手机上三个空行就是半屏。"""
+    return re.sub(r"\n{3,}", "\n\n", text)

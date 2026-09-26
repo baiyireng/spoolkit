@@ -85,6 +85,9 @@ class QQBotChannel:
     """一个 QQ 机器人 = 这条通道。"""
 
     name = "qqbot"
+    # 手机 QQ **渲染一部分 Markdown**（标题、列表、代码块、链接都有格式效果），
+    # 实测只有 `**加粗**` 这类强调标记原样显示——所以只要 `fix`，别折成纯文本。
+    render_mode = "fix"
 
     def __init__(
         self,

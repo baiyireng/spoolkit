@@ -23,7 +23,7 @@ from typing import Callable
 from spoolkit.bridge.channel import Channel, Incoming
 from spoolkit.bridge.commands import handle as handle_command
 from spoolkit.bridge.pairing import ALLOWLIST, OPEN, PAIRING, Pairings
-from spoolkit.bridge.render import to_plain
+from spoolkit.bridge.render import fix_markers, to_plain
 from spoolkit.health import DisconnectWatch, down_line
 from spoolkit.kernel import pointers, sessions, trust as trust_module
 from spoolkit.kernel import workspaces
@@ -322,18 +322,27 @@ class Bridge:
         return Reply(user=user, text=reply, accepted=False, reason="待配对")
 
     def _render(self, text: str) -> str:
-        """按**通道能力**决定要不要把 Markdown 折成纯文本。
+        """按**通道的渲染能力**决定要不要动这段文字（在发送侧做，不碰模型）。
 
-        为什么在发送侧做：模型天然爱写 Markdown，而 QQ（`msg_type: 0`）、
-        Telegram（不带 `parse_mode`）、企业微信都是纯文本发送——`**重点**`
-        在手机上就是两颗星号。让模型"别写 Markdown"既不可靠又白占上下文，
-        所以这里只删标记、不改内容（见 `render.to_plain`）。
+        三种模式（见 `bridge/render.py` 开头那张表）：
 
-        通道可以在自己的类上写 `markdown = True` 关掉这一层（真有支持 Markdown
-        的通道时）；没写的按纯文本处理——**聊天软件默认都不渲染 Markdown**。
+        - `markdown`：一个字不动（真渲染 Markdown 的通道，或通道类上写了
+          `markdown = True`）；
+        - `fix`：只去掉客户端**不渲染**的强调标记（`**粗**`），标题/列表/围栏/
+          链接/表格都留着——**手机 QQ 实测就是这一类**；
+        - `plain`：折成纯文本并按窄屏排版（什么都不渲染的通道）。
+
+        默认按 `plain`（最保守）；通道用类属性 `render_mode` 声明自己的真实能力。
+        **这条别按印象填**：早先按"QQ 完全不支持 Markdown"处理，把已经在生效的
+        标题、列表、链接一起折掉了，那是把排版删了。
         """
-        if getattr(self.channel, "markdown", False):
+        mode = getattr(self.channel, "render_mode", None)
+        if mode is None:
+            mode = "markdown" if getattr(self.channel, "markdown", False) else "plain"
+        if mode == "markdown":
             return text
+        if mode == "fix":
+            return fix_markers(text)
         return to_plain(text)
 
     def _send(self, text: str, conversation: str) -> None:
