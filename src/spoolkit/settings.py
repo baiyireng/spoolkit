@@ -181,8 +181,18 @@ def describe_secret_search(names: Sequence[str], workspace: Path | None = None) 
             )
             continue
         present = [name for name in names if (table.get(name) or "").strip()]
+        blank = [
+            name for name in names if name in table and not (table.get(name) or "").strip()
+        ]
         if present:
             lines.append(f"  [{label}] {path} —— 里面有：{'、'.join(present)}")
+        elif blank:
+            # `QQ_AppID=`（键写了、值空着）是最容易骗过自己的写法：文件里"明明有这一行"，
+            # 但等于没配。先说清这一种，再轮到"根本没这个键"。
+            lines.append(
+                f"  [{label}] {path} —— 有这些键但值是空的（等于没配）："
+                f"{'、'.join(blank)}"
+            )
         else:
             lines.append(
                 f"  [{label}] {path} —— 没有要找的键（它有：{'、'.join(sorted(table))}）"

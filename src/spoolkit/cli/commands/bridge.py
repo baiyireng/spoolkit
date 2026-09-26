@@ -615,5 +615,30 @@ def _check(project_root: Path | None, args) -> int:
         token, source = credentials.find(project_root, *credentials.TELEGRAM_TOKEN)
         print(f"token：{credentials.mask(token)}（{source}）")
         return 0 if token else 2
+    if channel == "wecom":
+        print(
+            settings.describe_secret_search(
+                credentials.WECOM_CORP_ID
+                + credentials.WECOM_SECRET
+                + credentials.WECOM_AGENT_ID,
+                workspace=project_root,
+            )
+        )
+        corp_id, _ = credentials.find(project_root, *credentials.WECOM_CORP_ID)
+        secret, _ = credentials.find(project_root, *credentials.WECOM_SECRET)
+        agent_id, _ = credentials.find(project_root, *credentials.WECOM_AGENT_ID)
+        print(
+            f"corp_id：{credentials.mask(corp_id)}"
+            f" / secret：{credentials.mask(secret)}"
+            f" / agent_id：{credentials.mask(agent_id)}"
+        )
+        if not (corp_id and secret and agent_id):
+            print("\n缺凭据。")
+            return 2
+        # 企业微信**发**消息本机可用；**收**消息要一个公网回调 URL。`--check` 只能验
+        # 凭据在不在，验不了回调通不通——这一句必须写出来，否则又是一次
+        # "检查通过、真跑失败"（`--check` 不传代理那次就是这么骗人的）。
+        print("凭据齐全。（收消息还要一个公网回调 URL，见 docs/bridge.md）")
+        return 0
     print(f"{channel} 通道不需要凭据（或自己去 __init__ 里查）。")
     return 0

@@ -113,6 +113,8 @@
 **Files:**
 - Modify: `src/spoolkit/web/server.py`、`src/spoolkit/web/runner.py`
 - Modify: `src/spoolkit/cli/commands/serve.py`、`src/spoolkit/cli/commands/hub.py`
+- Modify: `src/spoolkit/cli/commands/bridge.py`（机器级桥**每轮** target 传 `use_cwd=False`）、
+  `src/spoolkit/cli/app.py`（`optional_root` 入口的向导不许把模型密钥写进 cwd）
 - Test: `tests/web/test_runner_registry.py`、`tests/web/test_target_endpoint.py`
 
 **要点：**
@@ -123,7 +125,13 @@
 - SSE：target 变了就退订旧的、订阅新的，并补一帧 `state`（页面不会停在旧工作区的事件流上）；
 - `--root` 给了 = 钉住（老行为不变，`/target` 拒绝切换并说明原因）；不给 = 机器级，
   初始目标走内核顺位（web 指针 → 登记表 → 选择），**不认 cwd**；
-- 同一 `(工作区, 会话)` 只允许一个在跑的任务（现有 409 语义保留）；不同 target 可同时跑。
+- 同一 `(工作区, 会话)` 只允许一个在跑的任务（现有 409 语义保留）；不同 target 可同时跑；
+- **收掉 Task 1 二轮评审留下的两处 cwd 残留**（都属"机器级入口不认 cwd"这条契约）：
+  ① `hub_command` 不给 `--root` 时 `resolve_target(client="web")` 仍 `use_cwd=True`，把 cwd
+  派生的工作区**钉**给桥子进程，于是 `cwd/.env` 仍可盖住用户级（评审实测：同一台机器上
+  hub 起的通道拿到 `D:\workSpace\agents_dev\.env` 里的凭据，而裸 `spool bridge` 说缺凭据）；
+  ② 机器级桥**每轮**解析 target 时也没传 `use_cwd=False`，而那个 root 会成为 agent 子进程
+  的工作区（模型 key 按它读 `.env`）。两处都改成"机器级不认 cwd"，与 `mcp/server.py` 对齐。
 
 **验收：** `spool web` 在任意目录起得来；`curl` 打 `/state` 能看到工作区清单；
 `POST /target` 换工作区后 `/state` 的口径跟着换。

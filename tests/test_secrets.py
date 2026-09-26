@@ -151,7 +151,8 @@ def test_显式给了root_就认那个工作区的env(tmp_path: Path, monkeypatc
 
     text = str(exc.value)
     assert str(workspace / ".env") in text
-    assert "没有要找的键" in text and "QQ_AppID" in text
+    # `QQ_AppID=`（键在、值空）要单独说，它最容易骗过自己：文件里"明明有这一行"
+    assert "有这些键但值是空的" in text and "QQ_AppID" in text
 
 
 def test_check_在机器级下不再崩(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -171,6 +172,27 @@ def test_check_在机器级下不再崩(tmp_path: Path, monkeypatch, capsys) -> 
     assert code == 2
     assert "机器级" in out
     assert "找过这些位置" in out and str(settings.env_path()) in out
+
+
+def test_check_企业微信缺凭据时不假通过(tmp_path: Path, monkeypatch, capsys) -> None:
+    """二轮评审发现：`--check --channel wecom` 原先说"不需要凭据"并 return 0。
+
+    那是**假通过**——真跑时 `_build_channel` 要 corp_id/secret/agent_id 三个值。
+    检查工具骗人比没有检查工具更贵（`--check` 不传代理那次就是同一个形状）。
+    """
+    from spoolkit.cli.commands.bridge import _check
+
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(tmp_path / "no-user.env"))
+    for name in credentials.WECOM_CORP_ID + credentials.WECOM_SECRET + (
+        credentials.WECOM_AGENT_ID
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    code = _check(None, argparse.Namespace(channel="wecom", sandbox=False, bridge_proxy=""))
+    out = capsys.readouterr().out
+
+    assert code == 2
+    assert "找过这些位置" in out
 
 
 # --- 描述："我明明填了" ---
