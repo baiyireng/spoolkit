@@ -158,6 +158,27 @@ def forget(name_or_path: str | Path) -> Path:
     return root
 
 
+def _as_workspace(root: Path, raw: str) -> Path:
+    """点名到的东西得**真的能干活**：没有 `.agent/` 就按"按路径点名"的语义往上找一层，
+    再找不到就报清楚。
+
+    为什么必须有（全分支评审的必修项）：登记表里可以有**还不是工作区**的目录
+    （`register()` 被显式参数、`ws use <路径>` 等路径调用时会登记，`known()` 只校验
+    目录存在）。于是同一个目录会出现两种结果——**按名字点名拿到它自己**（没有
+    `.agent/`，`ready=false`），**按路径点名沿祖先找到真正那个工作区**。用哪个写法
+    决定你落到哪份记忆/计划上，那是不能接受的。现在两种写法**口径一致**。
+    """
+    if (root / MARK).is_dir():
+        return root
+    found = find_root(root)
+    if found is not None:
+        return found
+    raise WorkspaceError(
+        f"{root} 还不是工作区（没有 {MARK}/）——它在登记表里不等于能干活。"
+        f"要在那儿干活先 `spool ws add {root}`。"
+    )
+
+
 def resolve_workspace(name_or_path: str | Path) -> Path:
     """名字、别名、序号（1 起）或路径。找不到就抛 `WorkspaceError`，**不猜**。"""
     raw = str(name_or_path).strip()
@@ -166,7 +187,7 @@ def resolve_workspace(name_or_path: str | Path) -> Path:
 
     aliases = load_aliases()
     if raw in aliases:
-        return aliases[raw]
+        return _as_workspace(aliases[raw], raw)
 
     candidate = Path(raw)
     if candidate.exists():
@@ -183,12 +204,12 @@ def resolve_workspace(name_or_path: str | Path) -> Path:
     if raw.isdigit():
         index = int(raw)
         if 1 <= index <= len(items):
-            return items[index - 1].root
+            return _as_workspace(items[index - 1].root, raw)
         raise WorkspaceError(f"只有 {len(items)} 个登记过的工作区，没有第 {index} 个。")
 
     exact = [item for item in items if item.root.name == raw or item.alias == raw]
     if len(exact) == 1:
-        return exact[0].root
+        return _as_workspace(exact[0].root, raw)
     if len(exact) > 1:
         listed = "\n".join(f"  {item.root}" for item in exact)
         raise WorkspaceError(

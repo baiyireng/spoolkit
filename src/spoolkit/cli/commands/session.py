@@ -57,6 +57,14 @@ def session_command(args: argparse.Namespace) -> int:
         print(f"现在用会话：{picked}")
         return 0
     if action == "rename":
+        if not title:
+            # 不给新标题就**报错，绝不静默清空**：标题是这个会话唯一的"人认得的名字"，
+            # 而它没有历史可回滚（全分支评审判它是唯一"照常使用就会损坏数据"的一条）。
+            print(
+                "改名要给新标题：`spool session rename <id|序号> 新标题`。",
+                file=sys.stderr,
+            )
+            return 2
         try:
             sessions.rename_session(root, name, title)
         except sessions.SessionError as exc:

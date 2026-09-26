@@ -259,7 +259,17 @@ class McpServer:
             # 名字 / 序号 / 别名 / 路径都认（`resolve_workspace` 那四条规则）。
             # 不能直接把名字当路径丢给 `resolve_target`：`Path("查无此区")` 会
             # 变成本机下的一个路径，于是"点名一个不存在的工作区"变成悄悄新建。
-            workspace = kernel_workspaces.resolve_workspace(named)
+            resolved = kernel_workspaces.resolve_workspace(named)
+            if self.project_root is not None and resolved != Path(self.project_root).resolve():
+                # `--root` 是主人给的**收紧手段**（MCP 这条入口没有身份级放行，
+                # `--root` 就是唯一的范围限制），所以它必须真的压得住点名，
+                # 否则"我钉住了它"是句空话。而且**既不静默照做、也不静默改道**：
+                # 点名了 b 却在 a 里干活，比直接报错更坏。
+                raise WorkspaceError(
+                    f"这条 MCP 会话被启动参数 --root 钉在 {self.project_root}，"
+                    f"不能点名 {resolved}。要按次点名，请让主人去掉 --root 再启动。"
+                )
+            workspace = resolved
         else:
             workspace = self.project_root
         return resolve_target(

@@ -319,13 +319,19 @@ def _legacy_pending() -> list[PendingCode]:
 
 
 def _approve_in_legacy(target: PendingCode) -> None:
-    """旧文件里也有这个码的话，一并标成已批准（原文件不改结构、也不删）。"""
+    """旧文件里**本来就有这个码**的话，一并标成已批准（原文件不改结构、也不删）。
+
+    只在这一种情况下动旧文件：那个码本来就是它发的。这里原先还有一句
+    `pairings.approve(target.user)` 兜底，**已删**——它会把一个从没在旧文件里
+    配过对的人写进那份**没有通道维度**的批准名单，于是"在 qqbot 上批准"会顺着
+    旧文件扩散到 telegram（另一条通道启动时 `adopt_legacy` 会把他一起认领走）。
+    反方向不需要：旧批准由启动时的 `adopt_legacy` 往机器级收，机器级的新批准
+    不必再往旧文件写（设计 §6.1：原文件不删不改，配对的管理入口仍是 `spool approve`）。
+    """
     pairings = _legacy_pairings(target.root)
     if pairings is None:
         return
-    if pairings.approve_code(target.code):
-        return
-    pairings.approve(target.user)
+    pairings.approve_code(target.code)
 
 
 def _import_legacy_codes(channel: str, root: Path, codes: tuple[tuple[str, str], ...]) -> None:
