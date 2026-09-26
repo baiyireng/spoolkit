@@ -23,6 +23,7 @@ from typing import Callable
 from spoolkit.bridge.channel import Channel, Incoming
 from spoolkit.bridge.commands import handle as handle_command
 from spoolkit.bridge.pairing import ALLOWLIST, OPEN, PAIRING, Pairings
+from spoolkit.bridge.render import to_plain
 from spoolkit.health import DisconnectWatch, down_line
 from spoolkit.kernel import pointers, sessions, trust as trust_module
 from spoolkit.kernel import workspaces
@@ -320,6 +321,21 @@ class Bridge:
         self._note(f"有人要配对：{user}（码 {code}，工作区 {target.root}）")
         return Reply(user=user, text=reply, accepted=False, reason="待配对")
 
+    def _render(self, text: str) -> str:
+        """按**通道能力**决定要不要把 Markdown 折成纯文本。
+
+        为什么在发送侧做：模型天然爱写 Markdown，而 QQ（`msg_type: 0`）、
+        Telegram（不带 `parse_mode`）、企业微信都是纯文本发送——`**重点**`
+        在手机上就是两颗星号。让模型"别写 Markdown"既不可靠又白占上下文，
+        所以这里只删标记、不改内容（见 `render.to_plain`）。
+
+        通道可以在自己的类上写 `markdown = True` 关掉这一层（真有支持 Markdown
+        的通道时）；没写的按纯文本处理——**聊天软件默认都不渲染 Markdown**。
+        """
+        if getattr(self.channel, "markdown", False):
+            return text
+        return to_plain(text)
+
     def _send(self, text: str, conversation: str) -> None:
         """发一条消息出去。**发不出去不能把桥打死**。
 
@@ -331,6 +347,7 @@ class Bridge:
         真机再踩：查完天气 SOCKS 握手超时，结论已经有了但没发出去，用户一直
         等。网络抖动要留下补发；平台拒绝不要。
         """
+        text = self._render(text)  # 渲染在**进 outbox 之前**，补发时不会二次处理
         try:
             self.channel.send(text, conversation)
         except Exception as exc:  # noqa: BLE001 - 通道各异，这里只要"别死"
