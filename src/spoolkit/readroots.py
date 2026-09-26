@@ -85,7 +85,7 @@ def render(root: Path | str) -> str:
     roots = load(root)
     if not roots:
         return (
-            "当前没有关联目录。要放开：在服务器上 `spool extra add <目录>`"
+            "当前没有关联目录。要放开：在服务器上敲 spool extra add 加目录"
             "（聊天里加不了）。"
         )
     lines = ["关联目录（读放开，写要确认后才落盘）："]

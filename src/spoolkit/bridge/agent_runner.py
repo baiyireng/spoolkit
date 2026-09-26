@@ -255,13 +255,18 @@ class AgentRunner:
                 "它想执行一条白名单外的命令：\n"
                 f"  {detail['command']}\n"
                 f"原因：{detail.get('reason') or '未说明'}\n"
-                "回 y 允许这一次、a 始终允许（本工作区）、"
-                "n 拒绝、b 这类命令本轮别再问。"
+                "回 y 允许这一次\n"
+                "a 始终允许（记在本工作区）\n"
+                "n 拒绝\n"
+                "b 这类命令本轮别再问"
             )
         count = int(snapshot.get("awaiting") or 0)
         paths = [str(item.get("path") or "?") for item in snapshot.get("diffs") or []]
-        listing = "、".join(paths[:5]) + ("…" if len(paths) > 5 else "")
+        # 一行一个路径：手机上把 `a、b、c` 挤成一行会折断，看不出改了几个文件
+        listed = "\n".join(f"  {path}" for path in paths[:5])
+        if len(paths) > 5:
+            listed += f"\n  …等 {len(paths)} 个文件"
         return (
-            f"有 {count} 处改动超出授权范围，等你确认：{listing}\n"
+            f"有 {count} 处改动超出授权范围，等你确认：\n{listed}\n"
             "回 y 应用、n 丢弃。"
         )

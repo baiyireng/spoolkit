@@ -21,24 +21,36 @@ from pathlib import Path
 from spoolkit import readroots
 
 HELP = """\
-直接说要做什么就行。例如：
+直接说要做什么就行，例如：
   看看 calc.py 里 sum_to 是什么
   把它改成长度对半切
 
-这条通道**文件**默认只能读写**当前工作区**，聊天里不开放授权口
-（别的盘 / 桌面 / 下载 / 没说在哪的文件，除非主人已在服务器上
-`spool extra add` 关联过）。查资料、跑命令不在这条限制里。
+这条通道只能读写当前工作区。
+别的盘、桌面、下载目录、没说在哪的文件都够不到；
+查资料、跑命令不在这条限制里。
+要放开某个目录：让主人在服务器上敲 spool extra add 目录，聊天里加不了。
 
-/status                        现在指着哪个工作区、哪条会话
-/ws                            登记过的工作区；`/ws use <名字|序号|路径>` 换一个
-/sessions                      这个工作区的会话；`/use <序号|id|latest>` 切
-/new [标题]                    开一条新会话，接着往它写
-/allow-read                    说明这条通道的文件边界、已关联了哪些目录
-/help                          这一页
-（另：agent 有改动等你确认时，回 y 应用、n 丢弃）
+命令（直接发这一行）：
+/status
+  现在指着哪个工作区、哪条会话
+/ws
+  列登记过的工作区
+/ws use 名字或序号
+  换一个工作区（换完不用重新配对）
+/sessions
+  列这个工作区的会话
+/use 序号或id或latest
+  切到另一条会话
+/new 标题
+  开一条新会话
+/allow-read
+  说明文件边界、已关联了哪些目录
+/help
+  这一页
 
-配对请求在**本机**处理：任意目录敲 `spool approve <码>`，或在 `spool chat` 里
-`/approve <码>`——这条通道上不开放授权口。
+agent 有改动等你确认时：回 y 应用、n 丢弃。
+配对请求在本机处理：任意目录敲 spool approve 加配对码，或 spool chat 里 /approve
+（这条通道上不开放授权口）。
 """
 
 
@@ -47,7 +59,7 @@ def workspace_scope_notice(root: Path | str) -> str:
     here = Path(root).resolve()
     extras = readroots.existing(root)
     lines = [
-        f"这条是远程聊天通道：**文件**默认只能读写当前工作区（{here}）。"
+        f"这条是远程聊天通道：只能读写当前工作区（{here}）。"
     ]
     if extras:
         listed = "、".join(str(item) for item in extras)

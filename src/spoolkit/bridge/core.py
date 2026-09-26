@@ -186,7 +186,7 @@ class Bridge:
             target = self.target_for(message.user)
         except WorkspaceError as exc:
             # 说不清这条消息该落到哪个工作区：**回一句，不进 agent**。
-            reply = f"{exc}\n（让主人先指定一个工作区，或发 `/ws use <名字>`。）"
+            reply = f"{exc}\n（让主人先指定一个工作区，或发 /ws use 名字。）"
             self._send(reply, message.conversation)
             return Reply(user=message.user, text=reply, accepted=False, reason="说不清工作区")
         except Exception as exc:  # noqa: BLE001 - 坏状态文件不许变成"没人理"
@@ -262,7 +262,7 @@ class Bridge:
         reply = (
             f"你还没被放行到 {target.root}。"
             + (f"你能碰的是：{allowed}。" if allowed else "现在哪儿都没放行。")
-            + "\n`/ws` 看能切的地方。"
+            + "\n发 /ws 看能切的地方。"
         )
         self._send(reply, message.conversation)
         return Reply(user=message.user, text=reply, accepted=False, reason="没被放行到这个工作区")
