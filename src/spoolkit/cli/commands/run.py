@@ -36,6 +36,7 @@ from spoolkit.cli.runtime import (
 )
 from spoolkit.cli.settle import settle
 from spoolkit.cli.events import EventWriter, settle_with_events
+from spoolkit.kernel.target import resolve_target
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.transcript import ASSISTANT, USER, record_message
 from spoolkit.tools.edit import PendingChanges
@@ -62,6 +63,13 @@ def _overrides(args: argparse.Namespace, project_root: Path) -> dict[str, float]
 
 def run(args: argparse.Namespace) -> int:
     """执行一次任务。"""
+    # 会话与工作区只在这里定一次（内核的解析顺序：显式 > 当前目录向上找 > 指针 >
+    # 登记表 > 当前目录）。`--session` 留空时才轮到指针，`cli` 是这条入口一直以来的
+    # 默认名——留着它，老会话与老计划才接得上。
+    target = resolve_target(
+        workspace=args.root, session=args.session, client="cli", session_fallback="cli"
+    )
+    args.root, args.session = str(target.root), target.session
     project_root = Path(args.root).resolve()
     overrides = _overrides(args, project_root)
     read_roots, bad_roots = _resolve_read_roots(args, project_root)

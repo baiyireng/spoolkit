@@ -143,3 +143,75 @@ def test_普通消息不会被当成命令(tmp_path: Path) -> None:
     channel.push("me", "帮我看看 src 里的东西")
     bridge.run_once()
     assert channel.last == "agent 跑了"
+
+
+# --- Task 6：会话那几条命令（`/sessions` `/use` `/new`）----------------------
+
+
+def test_sessions_列出会话并标出当前(tmp_path: Path) -> None:
+    from spoolkit.kernel import sessions
+
+    root = tmp_path.resolve()
+    made = sessions.create_session(root, title="修 calc.py")
+    bridge, channel, _ = _bridge(tmp_path)
+    channel.push("me", "/sessions")
+    bridge.run_once()
+    assert made in channel.last
+    assert "修 calc.py" in channel.last
+
+
+def test_use_切会话并写这条聊天的指针(tmp_path: Path) -> None:
+    from spoolkit.kernel import pointers, sessions
+
+    root = tmp_path.resolve()
+    first = sessions.create_session(root, title="甲")
+    sessions.create_session(root, title="乙")
+    bridge, channel, _ = _bridge(tmp_path)
+    channel.push("me", f"/use {first}")
+    bridge.run_once()
+
+    assert first in channel.last
+    pointer = pointers.get("chat:fake:me")
+    assert pointer is not None and pointer.session == first
+
+
+def test_new_开一条会话并写指针(tmp_path: Path) -> None:
+    from spoolkit.kernel import pointers, sessions
+
+    root = tmp_path.resolve()
+    bridge, channel, _ = _bridge(tmp_path)
+    channel.push("me", "/new 修 calc.py")
+    bridge.run_once()
+
+    pointer = pointers.get("chat:fake:me")
+    assert pointer is not None and pointer.session
+    assert sessions.read_meta(root, pointer.session)["title"] == "修 calc.py"
+    assert "新会话" in channel.last
+
+
+def test_ws_列出工作区并标出现在这个(tmp_path: Path) -> None:
+    from spoolkit.kernel import workspaces as kws
+
+    root = tmp_path.resolve()
+    kws.register(root)
+    bridge, channel, _ = _bridge(tmp_path)
+    channel.push("me", "/ws")
+    bridge.run_once()
+    assert str(root) in channel.last
+    assert "现在" in channel.last
+
+
+def test_没有聊天身份时切不了(tmp_path: Path) -> None:
+    """防御性：拿不到 client_key 就不要偷偷写别人的指针。"""
+    from spoolkit.bridge import commands
+    from spoolkit.kernel.target import Target
+
+    target = Target(
+        root=tmp_path.resolve(),
+        session="s",
+        workspace_source="explicit",
+        session_source="default",
+    )
+    assert "聊天身份" in commands.handle("/new 一", target)
+    assert "聊天身份" in commands.handle("/ws use 别的", target)
+    assert "聊天身份" in commands.handle("/use 1", target)

@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 
+from spoolkit.kernel.target import resolve_target
 from spoolkit.web.server import serve
 
 
@@ -49,12 +50,19 @@ def serve_command(args: argparse.Namespace) -> int:
 
     `--script` 也转发：网页壳的确认流程要用假模型**带脚本**本地走一遍。
     fake 不能生成代码；没有脚本时子进程会立刻退出。
+
+    会话走内核解析（client=`web`，兜底 `cli`）：`--session` 留空时用网页壳的
+    指针里那条，然后**把解析结果显式传给子进程**——不然子进程会再按自己的
+    入口规则解析一次，出现"页面显示一条、实际跑的是另一条"。
     """
+    target = resolve_target(
+        workspace=args.root, session=args.session, client="web", session_fallback="cli"
+    )
     serve(
-        Path(args.root).resolve(),
+        target.root,
         host=args.host,
         port=args.port,
-        session=args.session,
+        session=target.session,
         extra_args=extra_from_serve_args(args),
     )
     return 0

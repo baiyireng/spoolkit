@@ -3,8 +3,12 @@
 `spool --help` 是总入口；这一页把每条命令、每个参数讲清（内容与 `--help` 对齐，
 改了参数就该回来改这一页）。
 
-**所有带 `--root` 的命令**：默认自动找工作区（显式 → 往上找 `.agent/` → 全局
-登记表 → 当前目录），见 [`getting-started.md`](getting-started.md#4-在任意目录起手)。
+**所有带 `--root` 的命令**：默认自动找工作区（显式 → 往上找 `.agent/` → 客户端指向
+→ 全局登记表 → 当前目录），见 [`getting-started.md`](getting-started.md#4-在任意目录起手)。
+
+`--session` 留空（默认）表示"用**指向**里那条会话"，没有就回到该命令一直以来的
+默认名：`run` / `plan` → `cli`，`chat` → `chat`，`bridge` → `bridge`，`mcp` → `mcp`，
+`serve` / `hub` → `cli`。指向由 `spool ws use` / `spool session use` 写。
 
 ## 入口
 
@@ -14,10 +18,43 @@ spool --version      # spool 0.0.1 (spoolkit)
 spool --help
 ```
 
+## spool ws
+
+工作区管理。"在哪个工作区干活"现在是**运行时状态**，不是启动参数。
+
+```bash
+spool ws                              # 列登记过的工作区（标出当前指向哪个）
+spool ws use 我的项目                  # 按名字 / 序号 / 路径 / 别名切
+spool ws add D:\workSpace\新项目       # 建 .agent/ 并登记（等价 spool init）
+spool ws alias 我的项目 proj           # 起个短名
+spool ws forget 我的项目               # 从登记表摘掉（目录和 .agent/ 都不动）
+```
+
+`add` 就是 `spool init`：**工作区只能由人建**（`.agent/` 里装着授权策略，
+让 agent 自己开辟信任边界不行）。`ws` 自己**不带 `--root`**——它是用来选工作区的，
+不是被解析的对象。
+
+## spool session
+
+会话有了生命周期：列、建、切、改名、归档。
+
+```bash
+spool session                         # 列这个工作区的会话（标出当前那条）
+spool session --all                   # 连归档的一起列
+spool session new 修 calc.py           # 建一条（标题 = 你给的那句话）
+spool session use 2                    # 按序号 / id / latest 切
+spool session rename <id> 新标题
+spool session archive <id>             # 归档：默认不列出，数据都在，id 仍能直接进
+```
+
+**序号空间是一份**：列表里显示的编号就是 `use <序号>` 认的编号（两边都按含归档的
+完整列表编号，默认只打印没归档的行，所以序号可能有空档）。标题来自第一句目标，
+已经有标题就不覆盖。
+
 ## spool init
 
 把一个目录做成工作区（幂等）。它就是"建 `.agent/` 并登记"，`spool approve`、
-`spool session` 之类因此能在任意目录用。
+`spool session` 之类因此能在任意目录用。等价于 `spool ws add <目录>`。
 
 | 参数 | 说明 |
 |---|---|
@@ -33,14 +70,16 @@ spool --help
 
 | 参数 | 说明 |
 |---|---|
-| `配对码`（可选） | 聊天里收到的那个码；批准后这个人就能驱动这个工作区 |
-| `--root` | 工作区路径（默认自动找） |
-| `--list` | 看这个工作区放行了谁、还有哪些码在等 |
+| `配对码`（可选） | 聊天里收到的那个码 |
+| `--root` | 工作区路径（默认：当前目录向上找 → 登记表） |
+| `--ws <名字>` | 批准**旧式**的码时点名工作区（那种码没有工作区维度；登记表里多个时**必须**点名）|
+| `--list` | 看放行了谁、还有哪些码在等（机器级 + 各工作区旧文件一起列）|
 | `--revoke <用户>` | 撤销某人的放行（解绑）。他再发消息会重新拿码 |
 | `--forget <码>` | 丢掉一个还没批准的码（谁都不放行） |
 
-配对记录挂在**工作区**上（`.agent/bridge-pairings.json`），所以"换绑工作区"
-= 用 `spool bridge --root <另一个工作区>` 重启桥，并在那个工作区里重新放行。
+放行是**身份级**的（哪条通道 + 哪个用户 → 能碰哪几个工作区），存在机器级的
+`channel-trust.json` 里，所以**换工作区不用重新配对**——聊天里 `/ws use` 就行。
+旧的 `.agent/bridge-pairings.json` 由当前通道启动时自动认领（不删不改）。
 在 `spool chat` 里可以就地做同样的事：`/approve <码>`、`/approve --list`、
 `/approve --revoke <用户>`。
 
@@ -118,11 +157,11 @@ spool extra              # 列出
 | 参数 | 说明 |
 |---|---|
 | `--host` / `--port` | 监听地址与端口（默认 `127.0.0.1:8765`）|
-| `--session` | 会话名 |
+| `--session` | 会话名。留空 = 用网页壳的**指向**（`web`），没有就 `cli` |
 | `--provider` `--model` `--script` `--base-url` `--proxy` | 转发给子进程 |
 | `--policy` / `--scope` / `--allow-read` | 同上 |
 | `--web` / `--no-web` | 联网取用（**默认开**，与 CLI / QQ 同一套）；不要就 `--no-web` |
-| `--root` | 工作区路径 |
+| `--root` | 工作区路径。不给就按"当前目录 → 指向 → 登记表"解析 |
 
 页面会探当前生效的模型（llama.cpp 打 `/props`；假模型/云端不探本机端口），
 不通时顶部出红横幅。只起网页壳、不拉聊天通道时继续用这一条。
@@ -203,9 +242,11 @@ health = "tcp:127.0.0.1:1080"
 `tcp:host:port`。停掉只杀 `spool service start` 写下 pid 的孩子。
 `spool config --set` 不会抹掉 `[[service]]` / `[[mcp]]`。
 
-## spool session
+## spool session（速查）
 
 列出这个工作区里的会话（哪次干了什么、什么时候、用哪个模型）。
+完整子命令（`new` / `use` / `rename` / `archive` / `--all`）见前面
+[`spool session`](#spool-session) 那一节。
 
 ## spool policy
 
@@ -266,6 +307,12 @@ Agent 判断"像是环境坏了"时登记的诊断请求，由**你**（或你�
 以 MCP（stdio）服务的方式运行，**供别的 agent 调用**（Codex / Claude Code /
 Cursor 扮演用户下发任务）。工具、信任模型、调用序列见 [`mcp.md`](mcp.md)。
 
+`--root` 可选：不给就**服务整台机器**——每次 `delegate_task` 可以带 `workspace`
+点名一个已登记的工作区（`list_workspaces` 先看有什么），不给就用 `mcp` 的指向；
+给了 `--root` 就把整条 MCP 会话钉在那一个工作区里（想收紧时用），这时点名别的工作区
+**会报错**（它得真的压得住，不然"钉住"是句空话）。
+`--session` 留空 = 用 `mcp` 的指向，单次调用还能用 `session` 参数覆盖。
+
 ## spool mcp-servers
 
 看自己配了哪些外挂 MCP 服务；`--check` 会真连一遍，列出它们提供哪些工具。
@@ -285,8 +332,13 @@ Cursor 扮演用户下发任务）。工具、信任模型、调用序列见 [`m
 | `--bridge-proxy 地址` | **通道自己**出网走哪个代理（如 `socks5://127.0.0.1:1080`）。对准本机 `[[service]]` 里的 `tunnel`（`ssh -D`），不是模型 `--proxy` |
 | `--token` / `--appid` / `--secret` / `--sandbox` | 各通道凭据（也可写在 `.env`）|
 | `--user` / `--max-chars` / `--timeout` | 假通道的用户名 / 单条消息长度上限 / 一轮最多等多少秒 |
-| `--policy` / `--scope` / `--session` | 原样转给 agent |
+| `--policy` / `--scope` / `--session` | 原样转给 agent；`--session` 留空 = 用这条聊天的指向 |
 | `--notify-disconnect` | 通→断时给最近一次放过的聊天发一句（默认关） |
+
+`--root` **可选**（而且"不给"是有意义的取值）：给了 = 这条通道**只**服务那一个
+工作区（收紧，向后兼容）；不给 = **服务整台机器**——落到哪由"这条聊天的指向"
+决定（`chat:<通道>:<用户>`），聊天里 `/ws use <名字>` 就能换，**不用重新配对**。
+启动时会把旧 `.agent/bridge-pairings.json` 里已批准的人认领成机器级放行（不删不改）。
 
 详见 [`bridge.md`](bridge.md)。
 

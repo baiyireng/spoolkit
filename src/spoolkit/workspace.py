@@ -1,105 +1,61 @@
 """工作区：从哪来、怎么找、记在哪。
 
-为什么要有它：`.agent/` 里装着这个项目的记忆、索引、检查点与策略，所有命令都得
-先知道"说的是哪个工作区"。原先每条子命令各自把 `--root` 默认成 `"."`，于是
+**这个文件现在是一层壳。** 实现在 `spoolkit.kernel.workspaces`：那里多了命名
+（目录名、别名、序号）与客户端指向，四个入口都要用。这里保留同名导出，是因为
+外部与测试一直按 `workspace.resolve_root` / `workspace.MARK` 这些路径导入——
+改名那次已经吃过一次"旧导入路径断掉"的亏，不再吃第二次。
 
-- 在工作区的**子目录**里敲命令，它就当成另一个工作区（记忆、索引全对不上）；
-- 在别的地方敲 `spool approve <码>`，它去翻那个目录的配对文件，报"没有这个配对码"
-  ——**不是码错了，是找错了工作区**，而这句话完全指不到病根。
-
-所以规则收在一处（本模块），`main()` 只调用一次：
-
-1. `--root` 显式给了 → 用它（指定就是指定，不去改它）；
-2. 否则从当前目录**往上找** `.agent/` → 找到就用那一层；
-3. 否则查全局登记表：只有一个就用它；多个且人在终端前，列出来让他选；
-4. 都没有 → 当前目录（跟今天一样，交给具体命令去报它自己的错）。
-
-登记表落在用户级状态目录（`SPOOLKIT_STATE` 可覆盖，测试与多套状态用），
-每次"在工作区里干活"都会把它挪到最前面，所以它同时是**最近使用**的顺序。
+`resolve_root` 仍然住在这里，因为它的签名（`choose` / `interactive`）是给"人在
+终端前、登记表里有好几个"那个交互场景的，纯内核不该知道终端怎么问人。
 """
 
 from __future__ import annotations
 
-import json
-import os
 import sys
 from pathlib import Path
 from typing import Callable, Iterable
 
-MARK = ".agent"
-REGISTRY = "workspaces.json"
-STATE_ENV = "SPOOLKIT_STATE"
+from spoolkit.kernel.workspaces import (
+    ALIASES,
+    MARK,
+    REGISTRY,
+    STATE_ENV,
+    Workspace,
+    WorkspaceError,
+    aliases_path,
+    find_root,
+    forget,
+    known,
+    list_workspaces,
+    load_aliases,
+    register,
+    registry_path,
+    resolve_workspace,
+    set_alias,
+    state_dir,
+)
 
-
-class WorkspaceError(RuntimeError):
-    """工作区找不到、或者有好几个说不清是哪个。"""
-
-
-def state_dir() -> Path:
-    """这台机器上放用户级状态的地方（登记表、诊断密钥的邻居）。"""
-    override = os.environ.get(STATE_ENV)
-    if override:
-        return Path(override)
-    if sys.platform == "win32":
-        root = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
-    else:
-        root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    return root / "spoolkit"
-
-
-def registry_path() -> Path:
-    return state_dir() / REGISTRY
-
-
-def find_root(start: Path | None = None) -> Path | None:
-    """从 `start`（默认当前目录）往上找带 `.agent/` 的那一层。"""
-    here = (start or Path.cwd()).resolve()
-    for candidate in (here, *here.parents):
-        if (candidate / MARK).is_dir():
-            return candidate
-    return None
-
-
-def known() -> list[Path]:
-    """登记表里的工作区（只留**现在还在**的，顺序是最近使用在前）。"""
-    path = registry_path()
-    if not path.is_file():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    items = payload.get("workspaces") if isinstance(payload, dict) else payload
-    found: list[Path] = []
-    for item in items or []:
-        try:
-            candidate = Path(str(item)).resolve()
-        except (OSError, ValueError):
-            continue
-        if candidate.is_dir() and candidate not in found:
-            found.append(candidate)
-    return found
-
-
-def register(root: Path | str) -> None:
-    """把工作区登记下来（幂等）。登记表坏了就当空的——它是便利，不是数据。"""
-    target = Path(root).resolve()
-    order = [item for item in known() if item != target]
-    order.insert(0, target)
-    path = registry_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {"workspaces": [str(item) for item in order]},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-    except OSError:
-        # 登记不上不该挡住干活：最坏是下次还得写 --root。
-        pass
+__all__ = [
+    "ALIASES",
+    "MARK",
+    "REGISTRY",
+    "STATE_ENV",
+    "Workspace",
+    "WorkspaceError",
+    "aliases_path",
+    "find_root",
+    "forget",
+    "known",
+    "list_workspaces",
+    "load_aliases",
+    "register",
+    "registry_path",
+    "resolve_root",
+    "resolve_root_interactive",
+    "resolve_workspace",
+    "set_alias",
+    "state_dir",
+]
 
 
 def resolve_root(
@@ -108,34 +64,42 @@ def resolve_root(
     choose: Callable[[list[Path]], Path] | None = None,
     interactive: Callable[[], bool] | None = None,
 ) -> Path:
-    """按模块开头那四条规则定出工作区。"""
-    if explicit not in (None, ""):
-        return Path(str(explicit)).resolve()
+    """老签名、老行为。多出来的只是"指针"这一层兜底。"""
+    from spoolkit.kernel.target import resolve_target
 
-    found = find_root()
-    if found is not None:
-        # 顺手登记：登记表因此天然是"最近用过哪些工作区"的顺序。
-        register(found)
-        return found
+    on_ambiguous: Callable[[list[Path]], Path] | None = None
+    if choose is not None or interactive is not None:
 
-    candidates = known()
-    if len(candidates) == 1:
-        return candidates[0]
-    if len(candidates) > 1:
-        chooser = choose or _ask_which
-        is_interactive = interactive or _interactive
-        if is_interactive():
-            picked = chooser(candidates)
-            register(picked)
-            return picked
-        listed = "\n".join(f"  {item}" for item in candidates)
-        raise WorkspaceError(
-            "当前目录不是工作区，而登记表里有好几个，说不清是哪一个：\n"
-            f"{listed}\n"
-            "用 `--root <路径>` 指定一个。"
-        )
-    # 一个都没有：保持老行为（当前目录），让具体命令去报它自己的错。
-    return Path.cwd().resolve()
+        def on_ambiguous(candidates: list[Path]) -> Path:
+            asks = interactive or _interactive
+            if not asks():
+                return _ambiguous_error(candidates)
+            return (choose or _ask_which)(candidates)
+
+    return resolve_target(
+        workspace=explicit, client="cli", on_ambiguous=on_ambiguous
+    ).root
+
+
+def resolve_root_interactive(explicit: str | Path | None = None) -> Path:
+    """**CLI 专用**：说不清是哪一个时，人在终端前就问，问不了就照老文案报错。
+
+    为什么要单独一个函数：内核只认"调用方注入的 chooser"，它不认识终端
+    （设计 3.x：交互属于入口面）。而 CLI 是唯一确定"人就在终端前"的入口，
+    所以由它把 chooser 注入进来。少了这一步，登记表里有两个工作区时，
+    终端就从"弹选单"变成"报错退 2"——那是一次真回归。
+    """
+    return resolve_root(explicit, choose=_ask_which, interactive=_interactive)
+
+
+def _ambiguous_error(candidates: list[Path]) -> Path:
+    """说不清是哪一个。文案一字不改：tests/test_workspace_root.py 钉着它。"""
+    listed = "\n".join(f"  {item}" for item in candidates)
+    raise WorkspaceError(
+        "当前目录不是工作区，而登记表里有好几个，说不清是哪一个：\n"
+        f"{listed}\n"
+        "用 `--root <路径>` 指定一个。"
+    )
 
 
 def _interactive() -> bool:
@@ -146,7 +110,6 @@ def _interactive() -> bool:
 
 
 def _ask_which(candidates: Iterable[Path]) -> Path:
-    """列出来让人选。默认第一个（最近用过的那个）。"""
     items = list(candidates)
     print("当前目录不是工作区，登记表里有这几个：")
     for index, item in enumerate(items, start=1):

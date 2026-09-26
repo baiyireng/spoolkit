@@ -109,3 +109,66 @@ def test_不带参数且不是工作区时非交互打帮助(tmp_path, monkeypat
     assert main([]) == 2
     assert "usage" in capsys.readouterr().out.lower()
     assert not (plain / ".agent").exists()
+
+
+# --- Task 6：机器级的码（带着"哪条通道、哪个工作区"）----------------------------
+
+
+def test_机器级的码在任何目录都能批(tmp_path, monkeypatch, capsys) -> None:
+    """码里带着通道与工作区，所以批准不需要当前目录或 --root。"""
+    from spoolkit.kernel import trust
+
+    root = tmp_path / "ws"
+    (root / ".agent").mkdir(parents=True)
+    code = trust.ensure_code("qqbot", "openid-a", root)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert main(["approve", code]) == 0
+
+    out = capsys.readouterr().out
+    assert "已批准 openid-a" in out
+    assert trust.may_use("qqbot", "openid-a", root) is True
+
+
+def test_旧式的码要能点名工作区(tmp_path, monkeypatch, capsys) -> None:
+    """旧配对文件没有工作区维度：登记表里有多个时**必须**点名，否则说不清。"""
+    from spoolkit import workspace
+
+    a, pairings_a = _pairing_workspace(tmp_path)
+    b = tmp_path / "ws-b"
+    (b / ".agent").mkdir(parents=True)
+    workspace.register(a)
+    workspace.register(b)
+    code = pairings_a.ensure_code("openid-legacy")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert main(["approve", code]) == 2
+    err = capsys.readouterr().err
+    assert "--ws" in err
+    assert str(a) in err and str(b) in err  # 候选要列出来
+
+    assert main(["approve", code, "--ws", "ws"]) == 0  # a 的目录名就是 ws
+    assert pairings_a.is_approved("openid-legacy") is True
+
+
+def test_LIST_同时列机器级与旧文件的码(tmp_path, monkeypatch, capsys) -> None:
+    from spoolkit import workspace
+    from spoolkit.kernel import trust
+
+    root, pairings = _pairing_workspace(tmp_path)
+    workspace.register(root)
+    trust.grant("qqbot", "openid-a", [root], label="手批")
+    legacy = pairings.ensure_code("openid-legacy")
+    machine = trust.ensure_code("qqbot", "openid-b", root)
+    capsys.readouterr()
+
+    assert main(["approve", "--list"]) == 0
+
+    out = capsys.readouterr().out
+    assert "openid-a" in out  # 机器级放行的人
+    assert machine in out  # 机器级的待批准码
+    assert legacy in out  # 旧文件里的待批准码

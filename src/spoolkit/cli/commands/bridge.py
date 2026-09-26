@@ -23,6 +23,8 @@ from spoolkit.bridge.fake import FakeChannel
 from spoolkit.bridge.pairing import ALLOWLIST, OPEN, PAIRING, POLICIES, Pairings
 from spoolkit.bridge.plugins import load_channel_factories
 from spoolkit.cli.commands.serve import _web_flags
+from spoolkit.kernel import trust
+from spoolkit.kernel.target import resolve_target
 from spoolkit import readroots
 from spoolkit import settings
 from spoolkit.health import collect_rows
@@ -129,6 +131,23 @@ def pairings_for(root: Path) -> Pairings:
     return Pairings(Path(root).resolve() / ".agent" / "bridge-pairings.json")
 
 
+def _adopt_legacy(project_root: Path | None, channel: str) -> int:
+    """把旧配对文件里已批准的人认领成机器级放行（幂等、不删原文件）。
+
+    由**当前这条通道**自己做：旧文件没有通道维度，只有这条通道知道该认成谁的。
+    没给 `--root` 时登记表里的每个工作区各认领一次，互不串。
+    """
+    from spoolkit.kernel import workspaces as kernel_workspaces
+
+    roots = [project_root] if project_root is not None else kernel_workspaces.known()
+    total = 0
+    for root in roots:
+        if root is None:
+            continue
+        total += trust.adopt_legacy(root, channel)
+    return total
+
+
 def approve_command(root: Path, code: str) -> int:
     """批准一个配对码。返回进程退出码。"""
     pairings = pairings_for(root)
@@ -144,41 +163,148 @@ def approve_command(root: Path, code: str) -> int:
     return 0
 
 
+def approve_anywhere(code: str, root: Path | None, ws_name: str = "") -> int:
+    """`spool approve <码>`：先找机器级的码，再回落到工作区的旧配对文件。
+
+    机器级的码带着"请求哪个工作区、哪条通道"，所以随便在哪个目录都能批；
+    旧文件里的码没有这两个维度，得先知道是哪个工作区——`--ws` 点名，或者
+    登记表里只有一个时就用它。
+    """
+    got = trust.approve_code(code)
+    if got is not None:
+        print(f"已批准 {got.user}（通道 {got.channel} → {got.root}）")
+        return 0
+
+    target = _pick_workspace(root, ws_name)
+    if target is None:
+        return 2
+    return approve_command(target, code)
+
+
+def _pick_workspace(root: Path | None, ws_name: str) -> Path | None:
+    """要批的是旧文件里的码：得知道是哪个工作区。说不清就报错并列出候选。"""
+    from spoolkit.kernel import workspaces as kernel_workspaces
+
+    if ws_name:
+        try:
+            return kernel_workspaces.resolve_workspace(ws_name)
+        except kernel_workspaces.WorkspaceError as exc:
+            print(str(exc), file=sys.stderr)
+            return None
+    if root is not None:
+        return root
+    candidates = kernel_workspaces.known()
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        print("还没有登记过任何工作区，批不了旧式的配对码。", file=sys.stderr)
+        return None
+    listed = "\n".join(f"  {item}" for item in candidates)
+    print(
+        "登记表里有好几个工作区，说不清这个码是哪个的——"
+        "用 `spool approve <码> --ws <名字>` 点名：\n"
+        f"{listed}",
+        file=sys.stderr,
+    )
+    return None
+
+
 def approve_entry(args: argparse.Namespace) -> int:
-    """`spool approve <码>` 的入口（顶层快捷方式，见 app.py）。"""
-    root = Path(args.root).resolve()
+    """`spool approve <码>` 的入口（顶层快捷方式，见 app.py）。
+
+    工作区按三步定：`--root` 显式给的 → 当前目录向上找得到的 → 登记表里唯一的
+    那一个。机器级的码压根不需要它（码里带着工作区），所以先试机器级。
+    """
+    from spoolkit import workspace as workspace_module
+
+    explicit = str(getattr(args, "root", "") or "").strip()
+    root: Path | None
+    if explicit:
+        root = Path(explicit).resolve()
+    else:
+        root = workspace_module.find_root()
     if getattr(args, "list", False):
         return list_pairings(root)
     if getattr(args, "revoke", ""):
-        return revoke_command(root, args.revoke)
+        return revoke_command(_root_or_die(root), args.revoke)
     if getattr(args, "forget", ""):
-        return forget_command(root, args.forget)
+        return forget_command(_root_or_die(root), args.forget)
     if not args.code:
         print("给个配对码，或者用 --list / --revoke <用户>。", file=sys.stderr)
         return 2
-    return approve_command(root, args.code)
+    return approve_anywhere(args.code, root, str(getattr(args, "ws", "") or ""))
 
 
-def list_pairings(root: Path) -> int:
-    """看这个工作区的通道放行了谁、还有谁在等。"""
-    pairings = pairings_for(root)
-    print(f"工作区：{Path(root).resolve()}")
-    print(f"配对文件：{pairings.path}")
-    approved = pairings.approved
-    print(f"\n已放行（{len(approved)}）：")
-    for user in approved:
-        print(f"  {user}")
-    if not approved:
+def _root_or_die(root: Path | None) -> Path:
+    """撤销/丢码必须落在某个工作区上。没有就退回登记表（唯一时）。"""
+    if root is not None:
+        return root
+    picked = _pick_workspace(None, "")
+    if picked is None:
+        raise SystemExit(2)
+    return picked
+
+
+def _approve_targets(root: Path | None, include_legacy: bool = True) -> list[tuple[str, str, str]]:
+    """所有待批准的码：`(码, 用户, 来源)`。机器级的在前。
+
+    旧文件里的码只有"工作区"这一层知道——给定了工作区就只看它，没给就看登记表。
+    """
+    found: list[tuple[str, str, str]] = []
+    for item in trust.pending():
+        found.append((item.code, item.user, f"通道 {item.channel} → {item.root}"))
+    if not include_legacy:
+        return found
+    from spoolkit.kernel import workspaces as kernel_workspaces
+
+    scanned: set[str] = set()
+    for item_root in [*([root] if root is not None else []), *kernel_workspaces.known()]:
+        if item_root is None or str(item_root) in scanned:
+            continue
+        scanned.add(str(item_root))
+        pairings = pairings_for(item_root)
+        for code, user in pairings.pending:
+            found.append((code, user, f"旧文件 {pairings.path}"))
+    return found
+
+
+def list_pairings(root: Path | None) -> int:
+    """看放行了谁、还有谁在等。机器级与旧文件一起列。"""
+    from spoolkit.kernel import workspaces as kernel_workspaces
+
+    print(f"工作区：{root if root is not None else '整台机器（按通道/工作区列出）'}")
+    grants = trust.list_grants()
+    print(f"\n已放行（{len(grants)}）：")
+    for item in grants:
+        where = "、".join(str(path) for path in item.roots)
+        label = f"（{item.label}）" if item.label else ""
+        print(f"  {item.user}  ←  {item.channel}：{where}{label}")
+    if not grants:
         print("  （没有）")
-    pending = pairings.pending
+
+    roots = [root] if root is not None else []
+    seen: set[str] = set()
+    legacy_total = 0
+    for candidate in [*roots, *kernel_workspaces.known()]:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        pairings = pairings_for(candidate)
+        approved = pairings.approved
+        legacy_total += len(approved)
+        print(f"\n旧配对文件：{pairings.path}")
+        print(f"  已放行（{len(approved)}）：{'、'.join(approved) or '（没有）'}")
+
+    pending = _approve_targets(root)
     print(f"\n等批准的码（{len(pending)}）：")
-    for code, user in pending:
-        print(f"  {code}  ←  {user}")
+    for code, user, source in pending:
+        print(f"  {code}  ←  {user}　[{source}]")
     if not pending:
         print("  （没有）")
     if pending:
-        print("\n批准：spool approve <码>      丢掉这个码：spool approve --forget <码>")
-    if approved:
+        print("\n批准：spool approve <码>（旧式的码要加 `--ws <名字>`）")
+    if grants or legacy_total:
         print("撤销某人的放行：spool approve --revoke <用户>")
     return 0
 
@@ -256,14 +382,27 @@ def run_extra_args(args: argparse.Namespace, project_root: Path) -> list[str]:
 
 
 def bridge_command(args: argparse.Namespace) -> int:
-    project_root = Path(args.root).resolve()
-    pairings = pairings_for(project_root)
+    # `--root` 给了 = 这条通道**只**服务那一个工作区（收紧，也是向后兼容）；
+    # 不给 = 服务整台机器，落到哪由"这条聊天的指针"决定（见 kernel/pointers）。
+    project_root = Path(args.root).resolve() if str(args.root or "").strip() else None
+    pairings = pairings_for(project_root) if project_root is not None else None
 
     if getattr(args, "check", False):
         return _check(project_root, args)
 
     if args.approve:
+        if project_root is None:
+            print(
+                "`bridge --approve` 要指定工作区（旧配对文件是按工作区存的）；"
+                "用 `spool approve <码> --ws <名字>`，它会先找机器级的码。",
+                file=sys.stderr,
+            )
+            return 2
         return approve_command(project_root, args.approve)
+
+    claimed = _adopt_legacy(project_root, str(args.channel))
+    if claimed:
+        print(f"已从旧配对记录认领 {claimed} 条放行（原文件没动）。", file=sys.stderr)
 
     allowed = {str(item) for item in (getattr(args, "allow_user", []) or []) if str(item).strip()}
     access = args.access
@@ -282,11 +421,19 @@ def bridge_command(args: argparse.Namespace) -> int:
             "看现状用 `spool approve --list`。",
             file=sys.stderr,
         )
-    if pairings.approved:
-        print(f"已批准：{'、'.join(pairings.approved)}", file=sys.stderr)
-    if pairings.pending:
+    if pairings is not None:
+        if pairings.approved:
+            print(f"已批准：{'、'.join(pairings.approved)}", file=sys.stderr)
+        if pairings.pending:
+            print(
+                "待配对：" + "、".join(f"{user}（码 {code}）" for code, user in pairings.pending),
+                file=sys.stderr,
+            )
+    if project_root is None:
         print(
-            "待配对：" + "、".join(f"{user}（码 {code}）" for code, user in pairings.pending),
+            "这条通道服务整台机器（没给 --root）：谁被放行到哪些工作区，"
+            "由 `spool approve --list` 说了算；每条聊天各指一个工作区，"
+            "聊天里用 `/ws use <名字>` 换。",
             file=sys.stderr,
         )
 
@@ -295,9 +442,15 @@ def bridge_command(args: argparse.Namespace) -> int:
         "notify_disconnect", bool(getattr(args, "notify_disconnect", False))
     )
 
+    default_session = str(getattr(args, "session", "") or "bridge")
     runner = AgentRunner(
-        project_root,
-        session=args.session,
+        lambda key: resolve_target(
+            workspace=project_root,
+            session=None,
+            client=key,
+            session_fallback=default_session,
+        ),
+        default_session=default_session,
         extra_args=extra,
         timeout=args.timeout,
     )
@@ -312,6 +465,8 @@ def bridge_command(args: argparse.Namespace) -> int:
         access=access,
         root=project_root,
         notify_disconnect=notify,
+        channel_name=str(args.channel),
+        default_session=default_session,
     )
 
     if args.channel == "fake":

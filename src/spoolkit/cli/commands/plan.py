@@ -53,6 +53,7 @@ from spoolkit.cli.runtime import (
     settle_lessons,
 )
 from spoolkit.cli.settle import settle
+from spoolkit.kernel.target import resolve_target
 from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.grant import Grants
 from spoolkit.memory.lessons import record_lesson
@@ -205,6 +206,12 @@ def _plan_phase(
 
 def make_plan(args: argparse.Namespace) -> int:
     """把一个较大目标拆成可验收的步骤序列并落盘。"""
+    # 与 `run` 同一套解析：`--session` 留空时用指针里那条，没有就回到 `cli`
+    # （计划和进度是会话级的，两条命令必须落在同一条会话上）。
+    target = resolve_target(
+        workspace=args.root, session=args.session, client="cli", session_fallback="cli"
+    )
+    args.root, args.session = str(target.root), target.session
     project_root = Path(args.root).resolve()
     gateway = provider_gateway(args, project_root)
     if gateway is None:
@@ -215,12 +222,14 @@ def make_plan(args: argparse.Namespace) -> int:
         print("没有拆出任何带验收标准的步骤。", file=sys.stderr)
         return 1
 
-    # 会话名从 `ctx.args` 拿（这个函数只收 ctx，没有独立的 args）。
-    save_plan(
-        plan_path(project_root, getattr(ctx.args, "session", "cli")), plan
-    )
+    # 计划写在**这次解析出来的会话**里，与上面那句打印同一个来源。
+    # 这里原先写的是 `getattr(ctx.args, "session", "cli")`——`ctx` 在这个函数里
+    # 根本不存在（`_plan_phase` 收的才是 ctx），于是 `spool plan` 在落盘前就
+    # `NameError`，计划从来没被写下来；而"plan 排的计划 run --plan 找得到"是
+    # 计划正文写死的约束。Task 5 评审的 Critical-1 抓到的就是它。
+    save_plan(plan_path(project_root, str(args.session)), plan)
     print(plan.render())
-    print(f"\n计划已保存到 {plan_path(project_root, getattr(args, "session", "cli"))}")
+    print(f"\n计划已保存到 {plan_path(project_root, str(args.session))}")
     return 0
 
 

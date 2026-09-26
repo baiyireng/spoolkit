@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from spoolkit.cli.app import main
+from spoolkit.kernel import pointers, sessions
 from spoolkit.memory.store import init_memory_schema, record_session
 from spoolkit.store.db import open_db
 
@@ -45,4 +46,43 @@ def test_显示模型与窗口(tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out
     assert "gemini:m0" in out
     assert "8192" in out
+
+
+# --- 会话生命周期（工作区与会话内核 · Task 5）---
+
+
+def _ws(tmp_path: Path) -> Path:
+    root = tmp_path / "ws"
+    (root / ".agent").mkdir(parents=True)
+    return root.resolve()
+
+
+def test_建一条并写指针(tmp_path: Path, monkeypatch) -> None:
+    root = _ws(tmp_path)
+    monkeypatch.chdir(root)
+    assert main(["session", "new", "修 calc.py"]) == 0
+    got = pointers.get("cli")
+    assert got is not None and got.session != ""
+    assert sessions.list_sessions(root)[0].title == "修 calc.py"
+
+
+def test_切到另一条会话(tmp_path: Path, monkeypatch) -> None:
+    root = _ws(tmp_path)
+    monkeypatch.chdir(root)
+    first = sessions.create_session(root, title="A")
+    second = sessions.create_session(root, title="B")
+    assert main(["session", "use", first]) == 0
+    assert pointers.get("cli").session == first
+    assert main(["session", "use", "latest"]) == 0
+    assert pointers.get("cli").session == second
+
+
+def test_改名与归档(tmp_path: Path, monkeypatch) -> None:
+    root = _ws(tmp_path)
+    monkeypatch.chdir(root)
+    made = sessions.create_session(root, title="旧名")
+    assert main(["session", "rename", made, "新名"]) == 0
+    assert sessions.list_sessions(root)[0].title == "新名"
+    assert main(["session", "archive", made]) == 0
+    assert sessions.list_sessions(root) == []
 
