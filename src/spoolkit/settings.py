@@ -5,9 +5,12 @@
 - **工作区级**（`.agent/limits.json`、`.agent/policy.json`）：属于这个项目，
   跟着项目走，已经齐了；
 - **命令行**：一次一给，用于临时覆盖；
-- **用户级**（本模块）：属于这台机器上的你。缺了它，同一件事每天都要重打一遍
-  `--provider llamacpp --base-url http://127.0.0.1:8080`——而这类重复输入最后
-  的下场是被人做成一个 .bat，然后没人知道真正的配置在哪。
+- **用户级**（本模块 + 同目录的 `.env`）：属于这台机器上的你。缺了它，同一件事
+  每天都要重打一遍 `--provider llamacpp --base-url http://127.0.0.1:8080`——
+  而这类重复输入最后的下场是被人做成一个 .bat，然后没人知道真正的配置在哪。
+  **密钥只放 `.env`**（`%APPDATA%\\spoolkit\\.env`，见 `env_path()`），本文件只放
+  非密钥默认值：TOML 有键白名单，写错一个字母的症状是"设置了却没生效"，
+  而密钥得能随手加一行。
 
 优先级：**命令行 > 环境变量 > 用户配置 > 内置默认**。顺序不能反：命令行是
 本次运行的意图，环境变量是这次 shell 的意图，配置文件是长期默认。
@@ -34,8 +37,11 @@ hub **只探活、不启**这些进程。没写这张表时，隧道不探、不
 import os
 import sys
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from spoolkit.envfile import load_env_file
 
 # 能配置的键。写成一个白名单而不是"想存什么存什么"：
 # 配置文件的键写错一个字母，症状是"设置了但没生效"，而那种问题最难查。
@@ -80,6 +86,93 @@ def _default_dir() -> Path:
     else:
         root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     return root / "spoolkit"
+
+
+# 用户级 `.env` 的位置覆盖。测试与"多套配置"靠它隔离——**不许写死 `%APPDATA%`**。
+ENV_FILE_VAR = "SPOOLKIT_ENV_FILE"
+LEGACY_ENV_FILE_VAR = "AGENTS_DEV_ENV_FILE"
+
+
+def env_path() -> Path:
+    """用户级 `.env` 的位置：**密钥放这里，非密钥默认值放 `config.toml`**。
+
+    为什么和 `config.toml` 同目录：它们是同一层（"这台机器上的你"），分两处只会
+    让人记不住哪个在哪。为什么密钥不进 TOML：`config.toml` 有键白名单，写错一个
+    字母的症状是"设置了却没生效"；而密钥得能随手加一行、能被 `.gitignore`
+    一句话排除。
+    """
+    override = os.environ.get(ENV_FILE_VAR) or os.environ.get(LEGACY_ENV_FILE_VAR)
+    if override:
+        return Path(override)
+    return _default_dir() / ".env"
+
+
+def secret_paths(workspace: Path | None = None) -> list[tuple[str, Path]]:
+    """解析密钥时按顺序看的位置：**工作区级在前，用户级在后**。
+
+    "更具体的赢"——项目里写的那份盖住个人默认那份。`workspace=None`（机器级
+    服务：桥 / 网页壳 / MCP）就只剩用户级那一份。
+    """
+    paths: list[tuple[str, Path]] = []
+    if workspace is not None:
+        paths.append(("工作区", Path(workspace) / ".env"))
+    paths.append(("用户级", env_path()))
+    return paths
+
+
+def resolve_secret(
+    names: Sequence[str],
+    workspace: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """返回（值, 来源说明）。顺序：**环境变量 → 工作区 `.env` → 用户级 `.env`**。
+
+    `workspace` 只表示"这次运行绑定的工作区"，**不是当前目录**：机器级入口服务
+    整台机器，"你碰巧站在哪个目录"不该改变它读哪份密钥（2026-09-27 的真实事故：
+    在 `C:\\Users\\32615` 起桥，于是它去找 `C:\\Users\\32615\\.env`，而凭据在别处）。
+
+    `names` 是别名列表，**先给的先赢**（`SPOOLKIT_QQ_APPID` 排在 `QQ_AppID` 前面）。
+
+    每次调用都重读文件，不缓存：桥与网页壳是长驻进程，凭据是会被改的。
+    """
+    environment = os.environ if env is None else env
+    for name in names:
+        value = (environment.get(name) or "").strip()
+        if value:
+            return value, f"环境变量 {name}"
+    for label, path in secret_paths(workspace):
+        table = load_env_file(path)
+        for name in names:
+            value = (table.get(name) or "").strip()
+            if value:
+                return value, f"{label} {path} 里的 {name}"
+    return "", "没找到（环境变量、工作区 .env、用户级 .env 都没有）"
+
+
+def describe_secret_search(names: Sequence[str], workspace: Path | None = None) -> str:
+    """把"找过哪些位置、结果如何"写出来——**只印键名，绝不印值**。
+
+    为什么值得单独写一段：密钥类问题里最常见的一句是"我明明填了"，而只靠复现是
+    猜不出它到底看了哪儿的（`describe_missing` 就是这么来的）。
+    """
+    lines = ["找过这些位置："]
+    set_names = [name for name in names if (os.environ.get(name) or "").strip()]
+    if set_names:
+        lines.append(f"  环境变量 —— 已设置：{'、'.join(set_names)}")
+    else:
+        lines.append(f"  环境变量 —— 都没设置（认这些名字：{'、'.join(names)}）")
+    for label, path in secret_paths(workspace):
+        if not path.is_file():
+            lines.append(f"  [{label}] {path} —— 不存在")
+            continue
+        table = load_env_file(path)
+        present = [name for name in names if (table.get(name) or "").strip()]
+        if present:
+            lines.append(f"  [{label}] {path} —— 里面有：{'、'.join(present)}")
+        else:
+            keys = "、".join(sorted(table)) or "空文件"
+            lines.append(f"  [{label}] {path} —— 没有要找的键（它有：{keys}）")
+    return "\n".join(lines)
 
 
 def effective_config_path() -> Path:

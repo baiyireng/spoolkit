@@ -11,10 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from spoolkit import settings
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.gateway import ModelGateway
 from spoolkit.llm.gemini import DEFAULT_MODEL as GEMINI_MODEL
-from spoolkit.llm.gemini import GeminiGateway, load_env_file
+from spoolkit.llm.gemini import GeminiGateway
 from spoolkit.llm.llamacpp import DEFAULT_BASE_URL
 from spoolkit.llm.llamacpp import DEFAULT_MODEL as LOCAL_MODEL
 from spoolkit.llm.llamacpp import LlamaCppGateway
@@ -51,12 +52,20 @@ class Provider:
 
 
 def _resolve_key(config: ProviderConfig) -> str:
-    """密钥来源优先级：显式传入 > 环境变量 > 项目根 .env。"""
+    """密钥来源：显式传入 > 这个供应商自己的 env > 环境变量 > 工作区 `.env` > 用户级 `.env`。
+
+    后三段交给 `settings.resolve_secret`：通道凭据、网页搜索 key、模型 key
+    共用同一条链，不再各写一套（三处各写一套的下场是"这条命令能读到、
+    那条读不到"，而报错还都写着"没配"）。
+    """
     if config.api_key:
         return config.api_key
     if config.env.get("GEMINI_API_KEY"):
         return config.env["GEMINI_API_KEY"]
-    return load_env_file(config.project_root / ".env").get("GEMINI_API_KEY", "")
+    value, _ = settings.resolve_secret(
+        ("GEMINI_API_KEY",), workspace=config.project_root
+    )
+    return value
 
 
 def _build_fake(config: ProviderConfig) -> ModelGateway:
@@ -69,7 +78,8 @@ def _build_gemini(config: ProviderConfig) -> ModelGateway:
     key = _resolve_key(config)
     if not key:
         raise ProviderError(
-            "缺少 GEMINI_API_KEY：请在项目根目录的 .env 中配置，或设置同名环境变量"
+            "缺少 GEMINI_API_KEY：写进工作区 `.env`，或写进用户级那层"
+            "（`spool env` 会印出位置），或设置同名环境变量"
         )
     return GeminiGateway(
         key,
