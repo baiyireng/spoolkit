@@ -346,19 +346,36 @@ def pending_notice(root: Path) -> str:
     return "\n".join(lines)
 
 
-def run_extra_args(args: argparse.Namespace, project_root: Path) -> list[str]:
+def read_roots_args(root: Path | None) -> list[str]:
+    """这个工作区关联过的目录 → `--allow-read` 那串。
+
+    `root` 为 `None`（机器级桥：还没定服务谁）时返回空——**关联目录是工作区级的**，
+    得等这一轮的消息定下目标再算（见 `AgentRunner(read_roots_for=...)`）。
+    """
+    if root is None:
+        return []
+    out: list[str] = []
+    for item in readroots.existing(root):
+        out += ["--allow-read", str(item)]
+    return out
+
+
+def run_extra_args(args: argparse.Namespace, project_root: Path | None) -> list[str]:
     """每一轮子进程要带的参数。
 
     `--from-channel`：远程聊天通道默认只限制**读写文件**（当前工作区；
     本机 `spool extra add` 过的关联目录会转成 `--allow-read` 带下去）。
     查资料默认开 `--web`（手机上让它查天气是常见场景）；`--no-web` 关掉。
     聊天里的 `/allow-read` 加不了目录。
+
+    `project_root` 可以是 `None`：**机器级桥（不给 `--root`）启动时还不知道服务谁**，
+    关联目录那部分留给每一轮按目标算——早先这里直接把 `None` 丢给 `readroots`，
+    于是机器级桥一启动就 `TypeError`（真跑的时候才发现的）。
     """
     # `--ask-on-stdin`：events 模式默认"无人可问就拒绝"，桥这边有人可问
     # （用户就在聊天里），所以要显式打开。
     extra: list[str] = ["--ask-on-stdin", "--from-channel"]
-    for item in readroots.existing(project_root):
-        extra += ["--allow-read", str(item)]
+    extra += read_roots_args(project_root)
     extra += _web_flags(args)
     api = str(getattr(args, "web_search_api", "") or "").strip()
     if api:
@@ -452,6 +469,9 @@ def bridge_command(args: argparse.Namespace) -> int:
         ),
         default_session=default_session,
         extra_args=extra,
+        # 机器级桥（没给 --root）：关联目录得**按每一轮的目标**算——启动时还不知道
+        # 服务谁。给了 --root 的模式不用它（`extra` 里已经带了那个工作区的）。
+        read_roots_for=read_roots_args if project_root is None else None,
         timeout=args.timeout,
     )
     channel = _build_channel(args, lambda text: print(text, file=sys.stderr))

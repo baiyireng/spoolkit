@@ -11,7 +11,7 @@ from spoolkit import readroots
 from spoolkit.bridge.core import Bridge
 from spoolkit.bridge.fake import FakeChannel
 from spoolkit.bridge.pairing import Pairings
-from spoolkit.cli.commands.bridge import run_extra_args
+from spoolkit.cli.commands.bridge import read_roots_args, run_extra_args
 
 
 def _bridge(tmp_path: Path, *, access: str = "open", allowed=()) -> tuple[Bridge, FakeChannel, list[str]]:
@@ -80,6 +80,32 @@ def test_远程通道默认开联网取用() -> None:
     extra = run_extra_args(args, Path("."))
     assert "--from-channel" in extra
     assert "--web" in extra
+
+
+def test_机器级桥启动时没有工作区也不许崩(tmp_path: Path) -> None:
+    """真跑才发现的：不给 `--root` 的桥（服务整台机器）启动时 `project_root=None`，
+    而 `run_extra_args` 把它直接丢给了 `readroots.existing(None)` → `TypeError`，
+    **机器级桥根本起不来**。关联目录是工作区级的，得等每一轮定下目标再算。
+    """
+    args = argparse.Namespace(
+        provider="", model="", base_url="", script="", proxy="",
+        policy="", scope="",
+    )
+
+    extra = run_extra_args(args, None)
+
+    assert "--from-channel" in extra and "--web" in extra
+    assert "--allow-read" not in extra  # 关联目录按目标算，不在这里
+
+
+def test_关联目录按目标算(tmp_path: Path) -> None:
+    """机器级桥：每一轮那个目标工作区自己的关联目录要带上（`read_roots_args`）。"""
+    target = tmp_path / "novels"
+    target.mkdir()
+    readroots.add(tmp_path, str(target))
+
+    assert read_roots_args(None) == []  # 还没定服务谁
+    assert read_roots_args(tmp_path) == ["--allow-read", str(target.resolve())]
 
 
 def test_no_web关掉通道联网() -> None:

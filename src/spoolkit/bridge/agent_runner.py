@@ -55,6 +55,7 @@ class AgentRunner:
         session: str = "",
         default_session: str = "bridge",
         extra_args: Sequence[str] = (),
+        read_roots_for: Callable[[Path], Sequence[str]] | None = None,
         timeout: float = 900.0,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -76,6 +77,9 @@ class AgentRunner:
         self.session = str(session or default_session)
         self.project_root = None if callable(resolve) else Path(resolve)
         self.extra_args = list(extra_args)
+        # 关联目录（`--allow-read`）是**工作区级**的，机器级桥启动时还不知道服务谁，
+        # 所以它按每一轮的目标现算。给了这个回调就按目标补，不给就用 `extra_args` 里的。
+        self.read_roots_for = read_roots_for
         self.timeout = timeout
         self._clock = clock
         self._sleep = sleep
@@ -134,8 +138,11 @@ class AgentRunner:
         key = f"{target.root}\u0000{target.session}"
         runner = self._runners.get(key)
         if runner is None:
+            extra = list(self.extra_args)
+            if self.read_roots_for is not None:
+                extra += list(self.read_roots_for(target.root) or ())
             runner = Runner(
-                target.root, session=target.session, extra_args=self.extra_args
+                target.root, session=target.session, extra_args=extra
             )
             self._runners[key] = runner
         self._current = key
