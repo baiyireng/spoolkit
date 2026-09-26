@@ -191,11 +191,160 @@ def test_命令行能敲通(tmp_path: Path, monkeypatch, capsys) -> None:
 
 
 def test_命令行_命令表里有env() -> None:
-    """防"实现了但没注册"：`spool env` 必须出现在帮助里。"""
+    """防"实现了但没注册"：帮助里得真有 `env` 这一条。
+
+    断言要精确到"有一行的开头就是 env 且带着它的说明"——裸子串匹配太弱
+    （"env" 二字在帮助的别处也可能出现，比如环境变量的说明文字里）。
+    """
     import io
     import contextlib
 
     buf = io.StringIO()
     with contextlib.suppress(SystemExit), contextlib.redirect_stdout(buf):
         main(["--help"])
-    assert "env" in buf.getvalue()
+    help_text = buf.getvalue()
+
+    assert any(
+        line.strip().startswith("env ") and "用户级" in line
+        for line in help_text.splitlines()
+    ), help_text
+
+
+# --- 评审 Important：读得动、一改就炸 / 悄悄打两份 ---
+
+
+def test_set_目标是utf16时改得动(tmp_path: Path, monkeypatch, capsys) -> None:
+    """评审 Important：`list` 能读 UTF-16，`set` 却按 utf-8 读 → 直接崩。
+
+    "看着能用、一改就炸"比干脆不支持更坏。
+    """
+    path = _user_env(tmp_path, monkeypatch)
+    path.write_bytes("QQ_AppID=old\n".encode("utf-16"))
+
+    code = env_command(_args(action="set", items=["QQ_AppID=new"]))
+
+    assert code == 0
+    assert path.read_bytes()[:2] in (b"\xff\xfe", b"\xfe\xff")  # 还是 UTF-16
+    assert load_env_file(path) == {"QQ_AppID": "new"}
+
+
+def test_set_目标带bom时同键替换不打两份(tmp_path: Path, monkeypatch) -> None:
+    """评审 Important：BOM 让首行键变成 `\\ufeffQQ_AppID` → 判定成"别人的键"→ 追加。
+
+    后果是文件里留着旧密钥、而"同键替换"静默失效。
+    """
+    path = _user_env(tmp_path, monkeypatch)
+    path.write_bytes("QQ_AppID=old\n".encode("utf-8-sig"))
+
+    assert env_command(_args(action="set", items=["QQ_AppID=new"])) == 0
+
+    raw = path.read_bytes()
+    text = raw.decode("utf-8-sig")
+    assert raw[:3] == b"\xef\xbb\xbf"  # BOM 还在（原样写回）
+    assert text.count("QQ_AppID") == 1
+    assert load_env_file(path) == {"QQ_AppID": "new"}
+
+
+def test_set_保持原有的换行风格(tmp_path: Path, monkeypatch) -> None:
+    """CRLF 被整份改写成 LF，在 git 里就是"整个文件都改了"。"""
+    path = _user_env(tmp_path, monkeypatch)
+    path.write_bytes(b"# note\r\nQQ_AppID=old\r\n")
+
+    assert env_command(_args(action="set", items=["QQ_AppID=new"])) == 0
+
+    raw = path.read_bytes()
+    assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"")
+    assert load_env_file(path)["QQ_AppID"] == "new"
+
+
+def test_set_保留首尾空行(tmp_path: Path, monkeypatch) -> None:
+    path = _user_env(tmp_path, monkeypatch)
+    path.write_bytes(b"\n\nQQ_AppID=old\n\n")
+
+    assert env_command(_args(action="set", items=["QQ_AppID=new"])) == 0
+
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("\n\n") and text.endswith("\n\n")
+    assert load_env_file(path)["QQ_AppID"] == "new"
+
+
+def test_set_认export写法且留住前缀(tmp_path: Path, monkeypatch) -> None:
+    """`export KEY=VALUE` 是最常见的 shell 写法：认它，替换时也要留住 `export `。"""
+    path = _user_env(tmp_path, monkeypatch, "export QQ_AppID=old\n")
+
+    assert env_command(_args(action="set", items=["QQ_AppID=new"])) == 0
+
+    text = path.read_text(encoding="utf-8")
+    assert text.count("QQ_AppID") == 1
+    assert text.strip() == "export QQ_AppID=new"
+    assert load_env_file(path) == {"QQ_AppID": "new"}
+
+
+def test_set_不合形状的参数不回显(tmp_path: Path, monkeypatch, capsys) -> None:
+    """评审 Minor，但它是**唯一实测出来的值泄漏路径**：打错的常常就是密钥本身
+
+    （少一个 `=`），原样回显等于把它打进终端、滚动缓冲、截图。
+    """
+    _user_env(tmp_path, monkeypatch)
+    looks_like_secret = "102abcSECRETVALUE"
+
+    code = env_command(_args(action="set", items=[looks_like_secret]))
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert looks_like_secret not in captured.out
+    assert looks_like_secret not in captured.err
+    assert "不是 KEY=VALUE 的形状" in captured.err
+
+
+def test_set_目标是目录时给人话(tmp_path: Path, monkeypatch, capsys) -> None:
+    a_dir = tmp_path / "a-dir"
+    a_dir.mkdir()
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(a_dir))
+
+    code = env_command(_args(action="set", items=["QQ_AppID=x"]))
+    err = capsys.readouterr().err
+
+    assert code == 1
+    assert "是个目录" in err and "Traceback" not in err
+
+
+def test_import_only不能是空的(tmp_path: Path, monkeypatch, capsys) -> None:
+    _user_env(tmp_path, monkeypatch)
+    source = tmp_path / "ws" / ".env"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("QQ_AppID=102000000\n", encoding="utf-8")
+
+    code = env_command(_args(action="import", source=str(source), only=[""]))
+    err = capsys.readouterr().err
+
+    assert code == 2
+    assert "--only" in err
+
+
+def test_import_目标不可读时给人话(tmp_path: Path, monkeypatch, capsys) -> None:
+    """目标 `.env` 是二进制（认不出的编码）时，不许把回溯甩给人。"""
+    path = _user_env(tmp_path, monkeypatch)
+    path.write_bytes(b"\x81\x82\x83\xff\xfe\x00\x01")
+    source = tmp_path / "ws" / ".env"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("QQ_AppID=102000000\n", encoding="utf-8")
+
+    code = env_command(_args(action="import", source=str(source)))
+    err = capsys.readouterr().err
+
+    assert code == 1
+    assert "Traceback" not in err
+    assert "文本编码" in err
+
+
+def test_list_目标是目录时说明白(tmp_path: Path, monkeypatch, capsys) -> None:
+    a_dir = tmp_path / "a-dir"
+    a_dir.mkdir()
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(a_dir))
+
+    code = env_command(_args(action="list"))
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "是个目录" in out
