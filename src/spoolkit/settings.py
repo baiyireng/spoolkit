@@ -154,6 +154,11 @@ def describe_secret_search(names: Sequence[str], workspace: Path | None = None) 
 
     为什么值得单独写一段：密钥类问题里最常见的一句是"我明明填了"，而只靠复现是
     猜不出它到底看了哪儿的（`describe_missing` 就是这么来的）。
+
+    四种情况要分开说，因为它们指向完全不同的下一步：**不存在**（去建）、
+    **不是文件**（路径指到目录了）、**存在但一行都没解析出来**（多半是编码，
+    例如记事本存的 UTF-16 或非文本文件）、**没有要找的键**（那就把文件里
+    有哪些键列出来，通常一眼就能看出拼写差在哪）。
     """
     lines = ["找过这些位置："]
     set_names = [name for name in names if (os.environ.get(name) or "").strip()]
@@ -162,17 +167,36 @@ def describe_secret_search(names: Sequence[str], workspace: Path | None = None) 
     else:
         lines.append(f"  环境变量 —— 都没设置（认这些名字：{'、'.join(names)}）")
     for label, path in secret_paths(workspace):
-        if not path.is_file():
+        if not path.exists():
             lines.append(f"  [{label}] {path} —— 不存在")
             continue
+        if not path.is_file():
+            lines.append(f"  [{label}] {path} —— 不是文件（路径指到目录上了？）")
+            continue
         table = load_env_file(path)
+        if not table:
+            lines.append(
+                f"  [{label}] {path} —— 存在（{_size_hint(path)}），"
+                "但一行都没解析出来（编码？只认 KEY=VALUE 的文本）"
+            )
+            continue
         present = [name for name in names if (table.get(name) or "").strip()]
         if present:
             lines.append(f"  [{label}] {path} —— 里面有：{'、'.join(present)}")
         else:
-            keys = "、".join(sorted(table)) or "空文件"
-            lines.append(f"  [{label}] {path} —— 没有要找的键（它有：{keys}）")
+            lines.append(
+                f"  [{label}] {path} —— 没有要找的键（它有：{'、'.join(sorted(table))}）"
+            )
     return "\n".join(lines)
+
+
+def _size_hint(path: Path) -> str:
+    """给"存在但解析不出"那句配个大小：0 字节就是空文件，否则是"有东西但读不懂"。"""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "读不出大小"
+    return "空文件，0 字节" if size == 0 else f"{size} 字节"
 
 
 def effective_config_path() -> Path:

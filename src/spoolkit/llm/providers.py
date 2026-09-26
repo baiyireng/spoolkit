@@ -78,8 +78,8 @@ def _build_gemini(config: ProviderConfig) -> ModelGateway:
     key = _resolve_key(config)
     if not key:
         raise ProviderError(
-            "缺少 GEMINI_API_KEY：写进工作区 `.env`，或写进用户级那层"
-            "（`spool env` 会印出位置），或设置同名环境变量"
+            "缺少 GEMINI_API_KEY：写进工作区 `.env`，或写进用户级 `.env`"
+            f"（{settings.env_path()}），或设置同名环境变量"
         )
     return GeminiGateway(
         key,

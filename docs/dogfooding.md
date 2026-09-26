@@ -2344,3 +2344,43 @@ T6（`episode.summary` + 空 distill 兜底 + FTS OR）与 T7（工具名短环 
 （Task 6）、非环回只读（Task 7）。另外当天还发现两条**与配置层无关**的真问题，已记进账本
 deferred：`spool service start` 写 pid 失败时会留下**无人管的孤儿进程**（ssh 已拉起但 spool
 不管它），以及 `ssh` 不在 PATH 时报裸的 `[WinError 2]`、不点名缺哪个可执行文件。
+
+### 修复轮（独立评审后，同日）
+
+独立评审（不是我自查）的判定是 **Ready to merge: No**：1 条 Critical + 2 条 Important。
+
+- **[Critical] 我只改了 `settings` 层，没改调用方。** `bridge.py::_build_channel` 第一行仍是
+  `Path(getattr(args, "root", ".")).resolve()`，而 `spool bridge` 的 `--root` 缺省是**空串**
+  （`app.py` 里 `set_defaults(root="")`），`Path("")` 恰好就是 cwd → 通道拿到 `root=cwd` →
+  凭据解析**先读 `cwd/.env`，反而盖住用户级那份**；而缺凭据的文案还在教人"写进
+  `{cwd}\.env`（推荐）"。**事故的三个现象一个都没消掉**，而新增的 11 条用例只覆盖被改的那层，
+  全绿给的是假安全感（评审原话）。修法就是它给的封闭改法：`root` 只认显式 `--root`，
+  缺省 `None`（三个内置通道的 `root` 本来就只用于凭据解析）。
+- **[Important] 文案指向还不存在的 `spool env`**（那是 Task 2）：改成直接给用户级 `.env`
+  的**实际路径**（`settings.env_path()`），这样在哪个提交上都是真的。
+- **[Important] `describe_secret_search()` 零生产调用点**，而唯一能回答"凭据从哪来"的
+  `spool bridge --check` 在机器级（不给 `--root`）下**一敲就崩**（`_check(None)` →
+  `project_root / ".env"` → TypeError，批次一既有）。现在 `_check` 认 `None`、按通道挑
+  "认哪些名字"，并把 `describe_secret_search` 接进 `--check` 与三处缺凭据文案——
+  诊断函数写出来就得有人调用，否则等于没写。
+- **Minor 一并收掉**：`envfile.load_env_file` 用 `utf-8-sig` 吃掉 UTF-8 BOM（否则键名变成
+  `\ufeffQQ_AppID`），并按 BOM 认 UTF-16（记事本存的"Unicode"原先一个字都读不出）；
+  `describe_secret_search` 把四种情况分开说——**不存在 / 不是文件（路径指到目录）/ 存在但一行
+  都没解析出来（带字节数，多半是编码）/ 没有要找的键（列出它有哪些键）**。原先 UTF-16 文件会被
+  说成"空文件"，而那句话是专为"我明明填了"准备的：说错方向比不说更贵。
+
+**修复轮量到什么**：`tests/test_secrets.py` 从 11 条到 **18 条**，新增的七条里有两条专门钉**调用方**
+（`test_机器级桥不拿cwd当工作区`：cwd 里放好 `.env` 也必须报缺凭据；`test_显式给了root_就认那个
+工作区的env`：显式 `--root` 时工作区那层仍要参与），一条钉 `_check(None)` 不再崩，两条钉编码，
+一条钉四种描述状态，一条把当天的事故现场（cwd 是家目录、凭据在用户级）整条跑完。整套
+**1560 passed / 3 failed**（修复前 1553/3，差正好是新增的 7 条；那 3 条仍是本机沙箱限制）。
+
+**修复轮哪条被证伪**：
+
+- **"改了底层就算是修好了"**——本批最值钱的一条。我在 `settings` 层把 cwd 摘干净了，可调用方
+  照样把 cwd 当工作区喂进来，净效果是**优先级反转**（`cwd/.env` 压过用户级），而文档、提交信息、
+  dogfooding 三处都写着"cwd 退出密钥解析"。教训：**认领一个现象级修复时，测试必须落在现象发生的
+  那一层**（这里是 `_build_channel`／`_check` 的入口），只测被改的那层会绿得很安心。
+- 又一次在 docstring 里写 Windows 路径把模块写崩（`bridge.py` 的 `C:\Users\32615`，还是 `\U`
+  那个坑）——上一轮 `credentials.py` 刚踩过。这条已经不是"意外"，是习惯没建立起来：
+  中文注释里出现路径就该直接双反斜杠。
