@@ -894,7 +894,14 @@ def main(argv: list[str] | None = None) -> int:
     ):
         # 先交代"找过哪儿"：不然人只会看到"又问了我一遍"。
         print(settings.describe_missing())
-        onboarding.run_wizard(Path(getattr(args, "root", ".")).resolve())
+        # 向导要往 `.env` 写模型密钥，所以**它必须知道写到哪个工作区**。
+        # `optional_root` 的入口（web / hub / bridge / mcp）没给 `--root` 时
+        # `args.root` 是空串，而 `Path("")` 恰好是 cwd——照那样写，密钥会落进
+        # "你碰巧站在哪个目录"，而向导还会这么说。机器级入口没有工作区就
+        # **不给工作区**：密钥写用户级那份 `.env`（那才是"这台机器上的你"
+        # 该放密钥的地方，见 settings.env_path）。
+        wizard_root = str(getattr(args, "root", "") or "").strip()
+        onboarding.run_wizard(Path(wizard_root).resolve() if wizard_root else None)
     # 供应商相关的取值统一在这里落地一次（命令行 > 环境变量 > 用户配置），
     # 好让每条子命令看到的都是**生效值**——否则 bench 自己拼网关、
     # serve 转发参数、记忆里记的模型名，各拿各的默认，症状是"我设了但没用"。

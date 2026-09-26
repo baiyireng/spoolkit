@@ -11,8 +11,10 @@
 - **只在交互式终端里问**。管道/脚本/CI 里（stdin 不是终端）绝不弹问题——
   那会挂住别人的自动化；那种场景给一句明确的指路就够了（见 provider_gateway）。
 - **密钥不写进配置文件**。配置会被 `spool config` 打印出来，密钥写进去
-  就等于每次显示一遍。向导把密钥写进项目根的 `.env`（已在 .gitignore 里），
-  那里本来就是文档里说的位置。
+  就等于每次显示一遍。向导把密钥写进**工作区根的 `.env`**（已在 .gitignore 里），
+  `project_root=None`（机器级入口：web / hub / bridge / mcp 没给 `--root`）时
+  写**用户级那份 `.env`**（`settings.env_path()`）——那种入口没有"当前工作区"，
+  而拿 cwd 顶数的后果是密钥落进"你碰巧站在哪"，见设计 §3.2。
 
 每一条都可以**留空跳过**：现在不想填就跳过，回头用 `spool config` 或
 改 `.env` 补上，不必为了试用先准备好一切。
@@ -57,11 +59,14 @@ def needs_setup(argv: list[str] | None = None) -> bool:
 
 
 def run_wizard(
-    project_root: Path,
+    project_root: Path | None,
     ask: Callable[[str], str] = input,
     say: Callable[[str], None] = print,
 ) -> dict[str, str]:
-    """问一遍，存起来，返回存进去的值。测试里 ask/say 可注入。"""
+    """问一遍，存起来，返回存进去的值。测试里 ask/say 可注入。
+
+    `project_root=None` = 机器级入口，没有当前工作区：密钥写用户级 `.env`。
+    """
     say("还没有配置模型供应商。选一个（回车用默认）：")
     for key, (_, label) in CHOICES.items():
         say(f"  {key}) {label}")
@@ -80,8 +85,8 @@ def run_wizard(
     elif provider == "gemini":
         key = ask("GEMINI_API_KEY（留空跳过，稍后写进 .env 也行）：").strip()
         if key:
-            _write_env_key(project_root, key)
-            say(f"密钥已写入 {project_root / '.env'}（已在 .gitignore 里）")
+            where = _write_env_key(project_root, key)
+            say(f"密钥已写入 {where}（已在 .gitignore 里）")
         model = ask("模型名（留空用默认，直接回车跳过）：").strip()
         if model:
             values["model"] = model
@@ -96,9 +101,18 @@ def run_wizard(
     return values
 
 
-def _write_env_key(project_root: Path, key: str) -> None:
-    """把密钥写进项目根的 .env，替换已有的同名行。"""
-    path = project_root / ".env"
+def _write_env_key(project_root: Path | None, key: str) -> Path:
+    """把密钥写进 `.env`，替换已有的同名行。返回写到了哪儿（要印给人看）。
+
+    有当前工作区就写它根下那份（工作区级的密钥优先于用户级）；
+    `project_root=None`（机器级入口）写用户级那份——**绝不拿 cwd 顶数**。
+    """
+    path = (
+        project_root / ".env"
+        if project_root is not None
+        else settings.env_path()
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     if path.is_file():
         lines = [
@@ -108,6 +122,7 @@ def _write_env_key(project_root: Path, key: str) -> None:
         ]
     lines.append(f"GEMINI_API_KEY={key}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 def has_project_key(project_root: Path) -> bool:

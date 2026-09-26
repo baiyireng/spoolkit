@@ -24,7 +24,7 @@ from spoolkit.bridge.pairing import ALLOWLIST, OPEN, PAIRING, POLICIES, Pairings
 from spoolkit.bridge.plugins import load_channel_factories
 from spoolkit.cli.commands.serve import _web_flags
 from spoolkit.kernel import trust
-from spoolkit.kernel.target import resolve_target
+from spoolkit.kernel.target import Target, resolve_target
 from spoolkit import readroots
 from spoolkit import settings
 from spoolkit.bridge import credentials
@@ -430,6 +430,35 @@ def run_extra_args(args: argparse.Namespace, project_root: Path | None) -> list[
     return extra
 
 
+def target_resolver(project_root: Path | None, default_session: str):
+    """机器级桥**每一轮**解析目标的那个函数（`AgentRunner` 按客户端键调它）。
+
+    单独拎出来是为了能**单独测它**："桥不认 cwd"这条契约的证伪点就在这个函数
+    身上（见 tests/cli/test_machine_level_cwd.py），不必为了测它去起整条通道。
+
+    `use_cwd=False`：解析出来的 root 会成为 agent 子进程的工作区，而**模型 key
+    就按那个工作区读 `.env`**。桥是长驻进程，它的 cwd 只是启动方式的副产品，
+    跟"手机那边这条聊天想在哪干活"毫无关系——拿 cwd 凑数的后果是
+    `cwd/.env` 里的密钥**盖住**用户级那份（2026-09-27 的事故形状），
+    而裸 `spool bridge` 在同一个目录里却报"缺凭据"。内核的态度也是不猜：
+    说不清就报错，由桥回一句"让主人指定一个工作区"（设计 §3.2）。
+
+    `--root` 给了的时候这一层用不上（显式值优先），写出来是为了让"这条入口
+    不认 cwd"成为代码里的规矩，而不是靠调用顺序碰巧成立。
+    """
+
+    def resolve(client_key: str) -> Target:
+        return resolve_target(
+            workspace=project_root,
+            session=None,
+            client=client_key,
+            session_fallback=default_session,
+            use_cwd=False,
+        )
+
+    return resolve
+
+
 def bridge_command(args: argparse.Namespace) -> int:
     # `--root` 给了 = 这条通道**只**服务那一个工作区（收紧，也是向后兼容）；
     # 不给 = 服务整台机器，落到哪由"这条聊天的指针"决定（见 kernel/pointers）。
@@ -493,12 +522,7 @@ def bridge_command(args: argparse.Namespace) -> int:
 
     default_session = str(getattr(args, "session", "") or "bridge")
     runner = AgentRunner(
-        lambda key: resolve_target(
-            workspace=project_root,
-            session=None,
-            client=key,
-            session_fallback=default_session,
-        ),
+        target_resolver(project_root, default_session),
         default_session=default_session,
         extra_args=extra,
         # 机器级桥（没给 --root）：关联目录得**按每一轮的目标**算——启动时还不知道
