@@ -46,10 +46,25 @@ llama-server.exe -m <模型.gguf> --host 127.0.0.1 --port 8080 -c 8192 -ngl 99 -
 预算吃光，症状是"模型返回空内容"；`-c` 是服务端真实窗口，Agent 会**向服务端
 问**这个值（不写死），所以换模型不用改配置。
 
-云端供应商（验证 agent 循环够用了）：项目根 `.env` 里写 `GEMINI_API_KEY=...`。
+密钥分两层，**更具体的赢**：项目专用写工作区 `.env`（`<工作区>/.env`，跟着仓库走、
+由 `.gitignore` 排除），机器级/个人默认写**用户级 `.env`**——Windows
+`%APPDATA%\spoolkit\.env`，其它平台 `~/.config/spoolkit/.env`，与 `config.toml` 同目录
+（`SPOOLKIT_ENV_FILE` 可指到别处）。解析顺序只有一条，写在
+`spoolkit/settings.py::resolve_secret`：**环境变量 → 工作区 `.env` → 用户级 `.env`**。
 
-网页搜索（`research` 先搜再读）要 Tavily key：同一份 `.env` 写 `TAVILY_API_KEY=...`，
-或用户配置里 `tavily_api_key = "..."`。没有 key 时只能直接给 URL，不会去抓搜索结果页。
+云端供应商（验证 agent 循环够用了）：`GEMINI_API_KEY=...`。只在这一个项目里用就写工作区
+`.env`；想在这台机器上任何目录都能用——**包括通道、网页壳、MCP 这些机器级入口**——就写
+用户级：
+
+```powershell
+spool env set GEMINI_API_KEY=...      # 写进用户级 .env（只印键名与形状，不回显你敲的值）
+spool env                             # 它在哪、里面有哪些键；顺带印 config.toml 的路径
+spool env import --from .env          # 把工作区那份搬上去（来源文件不动）
+```
+
+网页搜索（`research` 先搜再读）要 Tavily key：`TAVILY_API_KEY=...`，两层都认（环境变量里的
+`SPOOLKIT_TAVILY_API_KEY` 也认）。旧位置是用户配置里的 `tavily_api_key = "..."`——写在那儿的
+不用搬家。没有 key 时只能直接给 URL，不会去抓搜索结果页。
 
 ## 3. 配一次，以后不用再打
 
@@ -64,8 +79,40 @@ spool config                 # 看生效值 + 每一项是从哪来的
 优先级是**命令行 > 环境变量 > 用户配置 > 内置默认**。用户配置在
 `%APPDATA%\spoolkit\config.toml`（其它平台 `~/.config/spoolkit/config.toml`）。
 
+配置分三层，**越具体越赢**：
+
+| 层 | 放什么 | 在哪 |
+|---|---|---|
+| 命令行 / 环境变量 | **这一次运行**的意图 | `--provider …` / `SPOOLKIT_PROVIDER`（改名前的 `AGENTS_DEV_*` 也认）|
+| 工作区级 | 这个项目自己的东西 | `.agent/limits.json`、`.agent/policy.json`，以及密钥的 `<工作区>/.env` |
+| 用户级 | **这台机器上的你** | `%APPDATA%\spoolkit\config.toml` + `%APPDATA%\spoolkit\.env`（其它平台 `~/.config/spoolkit/`）|
+
+两条分工别混：**密钥只放 `.env`，非密钥默认值只放 `config.toml`**。`config.toml` 的键是白名单
+（写错一个字母的症状是"设置了却没生效"，而那种问题最难查），密钥得能随手加一行、能被
+`.gitignore` 一句话排除——所以两者不同居一份文件。用户级 `.env` 与 `config.toml` 同目录，
+因为它们是同一层，分两处只会让人记不住哪个在哪。
+
+于是"从哪来"有两套顺序，都由 `spoolkit/settings.py` 一处决定，不再各写一套：
+
+- **非密钥默认值**（`spool config` 管的那些）：命令行 > 环境变量 > 用户配置 > 内置默认；
+- **密钥**：环境变量 > 工作区 `.env` > 用户级 `.env`（通道凭据、Tavily、Gemini 三处共用）。
+
+用户级 `.env` 不用去记那个路径，三条命令够了：
+
+```powershell
+spool env                                    # 路径 + 里面有哪些键（只印键名与遮罩形状，不印值）+ config.toml 路径
+spool env path                               # 只印路径（给脚本用）
+spool env set QQ_AppID=102… QQ_AppSecret=…    # 写进去：同键替换，注释/空行/别人的键原样保留
+spool env import --from .env --only GEMINI_API_KEY   # 只搬指定的键；来源文件不动
+```
+
+`set` 与 `import` **都不回显你敲进来的值**：密钥进过一次终端，就等于进过一次滚动缓冲、
+一次截图、一次粘贴——不合形状的参数只报个数，`--only` 没命中的也只报个数并列出"文件里真有
+哪些键"。写入是原子的（同目录临时文件 + 替换），失败或 Ctrl-C 不会留下含密钥的临时文件。
+
 只在这个 shell 生效的话用环境变量：`SPOOLKIT_PROVIDER`、`SPOOLKIT_BASE_URL`、
-`SPOOLKIT_MODEL`、`SPOOLKIT_PROXY`（旧的 `AGENTS_DEV_*` 名字仍然认）。
+`SPOOLKIT_MODEL`、`SPOOLKIT_PROXY`（旧的 `AGENTS_DEV_*` 名字仍然认）。`spool config` 的页脚
+印的就是这条顺序。
 
 ## 4. 在任意目录起手
 
@@ -78,7 +125,7 @@ spool                        # 什么都不带 → 进对话
 也可以省掉 `init`：**直接敲 `spool`**，它会问一句"当前目录还不是工作区，
 在这里初始化吗？"，答完就进对话。
 
-`.agent/` 就是"工作区"的标记。五种找法，按顺序：
+`.agent/` 就是"工作区"的标记。**CLI 认当前目录**（往上找 `.agent/`），顺序是：
 
 1. `--root` 显式给了 → 就是它；
 2. 从当前目录**往上找** `.agent/` —— 所以在项目的任何子目录里敲命令都对；
@@ -87,6 +134,23 @@ spool                        # 什么都不带 → 进对话
 4. 全局登记表 `%APPDATA%\spoolkit\workspaces.json`（`spool init` 会登记）——
    只有一个时用它；有多个又说不出是哪个就报错让你点名，**不猜**；
 5. 都不成立时退回当前目录（交给具体命令报它自己的错）。
+
+**机器级入口不看当前目录**（内核里的 `resolve_target(use_cwd=False)`）：
+`spool serve` / `spool hub` / `spool bridge` / `spool mcp` 不给 `--root` 时，它们服务**整台机器**，
+"你碰巧站在哪个目录"与"它服务谁"毫无关系。为什么这条要钉死：真实事故是在
+`C:\Users\32615` 敲 `spool bridge --channel qqbot …`，它去找 `C:\Users\32615\.env`，而凭据在
+`D:\workSpace\agentWorkSpace\.env` 里；更坏的是 `cwd/.env` 会**盖住**用户级那份，于是"照着
+提示在脚下建一个 .env"反而把正确配置压掉了。
+
+| 入口 | 认 cwd 吗 | 没工作区可指时 |
+|---|---|---|
+| CLI（`run` / `chat` / `plan` / `session` …）| **认**（往上找 `.agent/`）| 退回当前目录，由命令报它自己的错 |
+| `spool serve` / `spool hub` | **不认** | 以"还没有目标"起来，让你点名 |
+| `spool bridge` | **不认** | 报错，并回一句让主人先指定工作区（**一处例外**：登记表一个都没有时退回启动目录，否则装机第一天没人能完成第一次配对，见 [`bridge.md`](bridge.md)）|
+| `spool mcp` | **不认** | 每次 `delegate_task` 点名一个工作区 |
+
+说不清的时候它们**让你点名，不猜**：宁可要你打一个 `--root` 或 `/ws use`，也不拿 cwd 顶数——
+猜错的症状是"这个命令的记忆跟别的命令不是同一份"，那是最难查的一类问题。
 
 登记过多个工作区之后，给常用的起个短名，之后在哪儿都能按名字用：
 
@@ -128,6 +192,22 @@ spool hub                    # 打开 http://127.0.0.1:8765/ （网页壳）
 spool hub --channel qqbot    # 网页壳 + 聊天桥；本机 llama / 隧道用 spool service
 ```
 
+**这两条在任意目录都能起**：不给 `--root` 时它是**机器级**的——一个进程服务整台机器，
+"当前目标"可以换。初始目标按内核顺位定（网页壳的指向 → 登记表），**不认当前目录**；
+定不出来就以"还没有目标"起来（`/state` 给形状相同的空态与一句人话，`/run` / `/confirm`
+返回 409，`/events` 先等着），终端那行会打印"机器级网页壳：目标是 …"或"还没定，在页面上选"。
+给了 `--root` 就是**钉住**那一个工作区（脚本、`.bat` 靠这个），此时 `POST /target` 返回 409
+并告诉你去掉 `--root` 重启就是机器级。
+
+换目标走 `POST /target`，body 是 `{"workspace": …, "session": …}`（两个都可选）：工作区认名字 /
+序号 / 路径，会话名不点名就沿用当前那条。**切换不杀任务、不阻塞**——正在跑的那条留在它自己的
+(工作区, 会话) 里继续跑，切回去事件与历史都还在（同一个 (工作区, 会话) 复用同一个 Runner）。
+谁在跑看 `GET /state` 的 `running_targets`（带 `current` 标记）；`/events` 在目标变了时会
+**退订旧的 → 订阅新的 → 补一帧 `state`**，否则页面会一直停在旧工作区的事件流上。
+
+> 选择栏还没接：这一批落地的是后端与协议（`/state` 的 `workspaces` / `sessions` 就是给
+> 选择栏用的备选清单），换目标目前用 `POST /target`。
+
 只起网页、不拉通道也可以 `spool serve`。`--channel fake` 是**聊天通道**的本地回环
 （stdin/stdout），和 `--provider fake`（只回放 `--script` 的假模型）不是一回事。
 
@@ -157,6 +237,11 @@ spool hub --channel qqbot    # 网页壳 + 聊天桥；本机 llama / 隧道用 
 | 报 `No module named 'socksio'` | 通道要经 SOCKS 出去但缺可选依赖 | 虚拟环境 `uv pip install "httpx[socks]"`；uv 工具装的 `uv tool install --reinstall --editable ".[socks]"` |
 | 它说"环境有问题"却查不动 | 工具受限 | 它会登记一条诊断请求：`spool diagnose --list` 看，`--report` 写回结论 |
 | 外挂 MCP 工具不见了 | 连不上被跳过 | `spool mcp-servers --check` 真连一遍看报错 |
+| "我明明填了密钥" | 放错了层：机器级服务读的是**用户级** `.env`，工作区那份它看不见 | `spool env` 看用户级那层有哪些键；报错里那段"找过这些位置"会印**找过哪儿、那儿有哪些键名**（只印键名，不印值）。搬上去：`spool env import --from <工作区的 .env>` |
+| 报错说"`QQ_AppID=`有这些键但值是空的" | 键写了、值空着，等于没配 | 补上值（`spool env set QQ_AppID=…`）；空值最会骗过自己 |
+| 机器级入口说"还没有选工作区" | 没给 `--root`，而这条聊天的指向与登记表都说不清是哪一个 | `spool ws use <名字>` 点名，或给 `--root <路径>` 起；它**不会**拿当前目录顶数 |
+| 想知道桥的凭据从哪来、连不连得上 | 只看一眼，不想起通道 | `spool bridge --channel <通道> --check`（**机器级也能用**：会印凭据从哪个位置来的、遮罩后的值、以及"找过这些位置"）|
+| 网页壳里切不了工作区 | 这条壳是 `--root` 起的，只有一个目标 | 去掉 `--root` 重启（机器级），再 `POST /target` |
 
 ## 下一步
 

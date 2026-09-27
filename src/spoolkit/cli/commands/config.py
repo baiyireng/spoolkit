@@ -22,7 +22,8 @@ def _render(effective: dict[str, str], path) -> str:
             value = value[:29] + "…"
         lines.append(f"{key:<10}{value:<34}{source}")
     lines.append("")
-    lines.append("优先级：命令行 > 环境变量 AGENTS_DEV_<键名大写> > 配置文件")
+    lines.append("优先级：命令行 > 环境变量 SPOOLKIT_<键名大写> > 配置文件")
+    lines.append("（改名前的 AGENTS_DEV_<键名大写> 也认，新前缀优先）")
     lines.append("设置：spool config --set provider=llamacpp")
     lines.append("清除：spool config --reset provider")
     return "\n".join(lines)

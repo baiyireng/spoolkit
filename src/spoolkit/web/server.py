@@ -50,7 +50,13 @@ HEALTH_POLL_SECONDS = 5.0
 TARGET_POLL_SECONDS = 1.0
 
 # 机器级网页壳还没有当前目标时，`target.note` 要能告诉人下一步做什么。
-NO_TARGET_HINT = "在页面上选一个工作区，或用一个 `--root` 起服务把它钉住。"
+# 这句话会出现在 `/state` 的空态与启动提示里。**别承诺页面上还没有的东西**：
+# 选择栏是任务 4 才接上的（在那之前页面确实选不了），而 `POST /target` 现在就能用、
+# 接上之后也照样能用——所以入口只写它。
+NO_TARGET_HINT = (
+    "还没有选工作区：`POST /target` 给一个 workspace"
+    "（有哪些看 `GET /state` 的 `workspaces`），或用 `--root` 起服务把它钉住。"
+)
 
 # `_stream` 里那个"还没订阅过"的哨兵：没有它，第一圈会以为"目标没变"而不订阅。
 _UNSET = object()

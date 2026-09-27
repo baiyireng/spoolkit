@@ -73,6 +73,9 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
   验收命令的退出码才算数。没有 pytest 但改了 HTML 时，会抽出内联 JS 做语法检查。
 - **常驻入口**：`spool hub` 起网页壳，加 `--channel` 才再拉聊天桥；本机
   llama-server / SOCKS 隧道用 `spool service` 按配方启停，hub 只探活、不替你启动。
+- **机器级网页壳**：`spool serve` / `spool hub` **在任意目录都能起**——不给 `--root`
+  就是一个进程服务整台机器，当前目标（工作区 + 会话）可以换，而**切换不打断正在跑的任务**；
+  给了 `--root` 就是钉住那一个。
 - **能被别的 agent 调用**：挂成 MCP 服务，Codex / Claude Code / Cursor 可以
   扮演用户下发编排任务（[`docs/mcp.md`](docs/mcp.md)）。
 - **能被聊天驱动**：手机发一条消息 → 在工作区里跑一轮 → 结果发回来
@@ -92,20 +95,23 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 | `spool run --plan` / `--resume` | 推进已有计划的下一步 / 接着检查点继续 |
 | `spool plan --goal …` | 只拆解、落盘计划，不执行 |
 | `spool chat` | 对话式使用：多轮、共用同一个会话 |
-| `spool hub` | 常驻：网页壳；加 `--channel` 才再拉聊天桥 |
-| `spool serve` | 只起 Web UI（不拉通道） |
+| `spool hub` | 常驻：网页壳；加 `--channel` 才再拉聊天桥（**任意目录起**）|
+| `spool serve` | 只起 Web UI（不拉通道；**任意目录起**，不给 `--root` 就是机器级）|
 | `spool service` | 按本机配方启停 llama / 隧道（不写进仓库） |
 | `spool bridge --channel fake` | 只用聊天通道（telegram / qqbot / wecom 见文档） |
 | `spool mcp` / `spool mcp-servers --check` | 被别的 agent 调用 / 看自己配的外挂 MCP |
 | `spool config` `limits` `policy` `session` `revert` | 默认值 / 标定值 / 授权 / 会话 / 回滚 |
+| `spool env` | 用户级 `.env`（密钥那一层）：看路径与键名 / `set` 写入 / `import` 从工作区搬 |
 | `spool extra` `diagnose` `bench` | 关联目录 / 环境诊断 / 回归任务集 |
 
 `spool session` 有生命周期：`list`（默认）/ `new [标题]` / `use <序号|id|latest>` /
 `rename` / `archive`，`--all` 连归档的一起列。
 
 "在哪个工作区、哪条会话里干活"现在是**运行时状态**（`spool ws use`；聊天里
-`/ws use`），不是启动参数：`--root` / `--session` 变成"这一次覆盖"，`--session`
-留空就用上次那条。**换工作区不用重启、也不用重新配对**。
+`/ws use`；机器级网页壳里换目标），不是启动参数：`--root` / `--session` 变成"这一次覆盖"，
+`--session` 留空就用上次那条。**换工作区不用重启、也不用重新配对**。
+CLI 认当前目录（往上找 `.agent/`）；**机器级入口（`serve` / `hub` / `bridge` / `mcp` 不给
+`--root`）不认 cwd**——说不清就让你点名，不拿"你站在哪"顶数。
 
 逐条参数见 [`docs/cli.md`](docs/cli.md)。
 
@@ -116,14 +122,20 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 | 供应商 / 模型 / 服务地址 | 用户级默认 | `spool config --set provider=llamacpp --set base_url=<地址>`；`spool config` 看现值与来源 |
 | 同上，临时改一次 | 命令行 | `--provider llamacpp --model <名> --base-url <地址>`（优先于配置文件）|
 | 同上，只在这个 shell 生效 | 环境变量 | `SPOOLKIT_PROVIDER` / `SPOOLKIT_BASE_URL` / `SPOOLKIT_MODEL` / `SPOOLKIT_PROXY` |
-| Gemini 密钥 | 项目根 `.env` | `GEMINI_API_KEY=...`（本地模型不需要任何密钥）|
-| 通道凭据 | 项目根 `.env` | `QQ_AppID` / `QQ_AppSecret` / `SPOOLKIT_TELEGRAM_TOKEN`… |
+| Gemini 密钥 | 工作区 `.env` 或**用户级 `.env`** | `GEMINI_API_KEY=...`；机器级入口（通道 / 网页壳 / MCP）读的是用户级那层，用 `spool env set` 写（本地模型不需要任何密钥）|
+| 通道凭据 | 用户级 `.env`（收紧到单个工作区时也可放工作区 `.env`）| `QQ_AppID` / `QQ_AppSecret` / `SPOOLKIT_TELEGRAM_TOKEN`…；`spool env set KEY=VALUE`，`spool bridge --check` 看认到没有 |
+| Tavily key（网页搜索） | 工作区 `.env` 或用户级 `.env` | `TAVILY_API_KEY=...`；旧的 `tavily_api_key`（写在 `config.toml` 里）也认 |
 | 能力标定值（预算、超时、上限） | `.agent/limits.json` | `spool limits --set 名字=值`，`spool limits` 看现值与来源 |
 | 授权策略 | `.agent/policy.json` | `spool policy --set auto`（三档：ask/auto/deny）|
 | 额外关联目录 | 本机指令 | `spool extra add D:\别的地方`（读放开，写要确认；聊天里加不了）。一次性：`--allow-read` |
 
 能力标定值全部可覆盖、可回退：默认值是按本机 27B + 8K 窗口实测出来的，
 换模型或换机器就该改，`spool limits` 会告诉你每个值"现在是多少、从哪来"。
+
+配置有三层：**命令行/环境变量 > 工作区级 > 用户级**。两条分工别混——**密钥只放 `.env`**
+（解析顺序：环境变量 → 工作区 `.env` → **用户级 `.env`**，Windows `%APPDATA%\spoolkit\.env`），
+**非密钥默认值只放 `config.toml`**（`spool config`；命令行 > 环境变量 > 用户配置 > 内置默认）。
+用户级那份不用记路径：`spool env` 看、`spool env set KEY=VALUE` 写、`spool env import --from <工作区的 .env>` 搬。
 
 > **改名说明**：本项目原先叫 `agents-dev`。旧名字仍然可用——命令 `agents-dev`、
 > 环境变量 `AGENTS_DEV_*`、用户配置 `%APPDATA%\agents-dev\config.toml` 都继续认，

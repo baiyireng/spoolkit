@@ -5,6 +5,8 @@
 
 **所有带 `--root` 的命令**：默认自动找工作区（显式 → 往上找 `.agent/` → 客户端指向
 → 全局登记表 → 当前目录），见 [`getting-started.md`](getting-started.md#4-在任意目录起手)。
+**例外是机器级入口**（`serve` / `hub` / `bridge` / `mcp` 不给 `--root`）：它们服务整台机器，
+**不看当前目录**——给不给 `--root` 是两种不同的口径，见各条命令。
 
 `--session` 留空（默认）表示"用**指向**里那条会话"，没有就回到该命令一直以来的
 默认名：`run` / `plan` → `cli`，`chat` → `chat`，`bridge` → `bridge`，`mcp` → `mcp`，
@@ -153,6 +155,7 @@ spool extra              # 列出
 ## spool serve
 
 起 Web UI 壳：发目标、看步骤与工具调用、看 diff、点"应用/拒绝"。
+**在任意目录都能起**：不给 `--root` 时它服务整台机器（目标可以换），给了就是钉住那一个。
 
 | 参数 | 说明 |
 |---|---|
@@ -161,7 +164,19 @@ spool extra              # 列出
 | `--provider` `--model` `--script` `--base-url` `--proxy` | 转发给子进程 |
 | `--policy` / `--scope` / `--allow-read` | 同上 |
 | `--web` / `--no-web` | 联网取用（**默认开**，与 CLI / QQ 同一套）；不要就 `--no-web` |
-| `--root` | 工作区路径。不给就按"当前目录 → 指向 → 登记表"解析 |
+| `--root` | 工作区路径。**给了 = 钉住**这一个（老行为逐字保留，脚本 / `.bat` 靠它）|
+| （不给 `--root`） | **机器级**：一个进程服务整台机器，初始目标走内核顺位（网页壳指向 → 登记表），**不认 cwd**；定不出来就以"还没有目标"起来，页面/`POST /target` 来指定 |
+
+机器级的这张壳有两个"目标"相关的端点：
+
+- `GET /state`：在原有快照上**只增不改**地追加 `target`（`root` / `session` / `pinned` /
+  `workspace_source` / `session_source` / `note`）、`workspaces`（登记过的工作区，带 `current`）、
+  `sessions`（当前工作区的会话）、`running_targets`（谁在跑，带 `current`）；
+- `POST /target`：body `{"workspace": …, "session": …}`（两个都可选）——工作区认名字 / 序号 /
+  路径，会话不点名就沿用当前那条。**切换不杀任务、不阻塞**：在跑的那条留在自己的
+  (工作区, 会话) 里继续；切回去事件与历史都还在。`--root` 起的壳只有一个目标，这里返回 409
+  并说明去掉 `--root` 重启就是机器级；还没有目标时 `/run` `/confirm` 返回 409，`/events`
+  先等着（目标一变就退订旧的、订阅新的、补一帧 `state`）。
 
 页面会探当前生效的模型（llama.cpp 打 `/props`；假模型/云端不探本机端口），
 不通时顶部出红横幅。只起网页壳、不拉聊天通道时继续用这一条。
@@ -187,12 +202,13 @@ spool hub --channel qqbot --bridge-proxy socks5://127.0.0.1:1080
 
 | 参数 | 说明 |
 |---|---|
-| `--host` / `--port` / `--session` / `--root` | 与 `serve` 相同 |
+| `--host` / `--port` / `--session` | 与 `serve` 相同 |
+| `--root` | 与 `serve` 相同：**给了 = 钉住**那一个工作区；不给 = 机器级（不认 cwd）。钉住时桥子进程也只服务这一个，不给时桥也是机器级 |
 | `--provider` `--model` `--script` `--base-url` `--proxy` | 转发给网页壳子进程，也转给 bridge |
 | `--policy` / `--scope` / `--allow-read` / `--web*` | 同上 |
 | `--channel {fake,telegram,wecom,qqbot}` | 可选。不给就只起网页 |
 | `--access` / `--allow-user` / `--bridge-proxy` | 只在给了 `--channel` 时有意义。`--bridge-proxy` 是通道出网（对准 `tunnel` 那条 SOCKS），不是模型 `--proxy` |
-| `--token` / `--appid` / `--secret` / `--sandbox` | 通道凭据（也可写在工作区 `.env`） |
+| `--token` / `--appid` / `--secret` / `--sandbox` | 通道凭据（转给拉起的桥；**推荐写用户级 `.env`**，`spool env set` 写它——机器级通道读的就是那一层）|
 | `--notify-disconnect` | 通→断时给最近聊天发一句（默认关） |
 | `--web` / `--no-web` | 联网取用（默认开，与 `run` / 网页壳同一套）；`--no-web` 关掉 |
 
@@ -266,9 +282,56 @@ health = "tcp:127.0.0.1:1080"
 
 | 参数 | 说明 |
 |---|---|
-| `--set 键=值` | 可重复。键：`provider` `model` `base_url` `proxy` `script` `notify_disconnect` |
+| `--set 键=值` | 可重复。键：`provider` `model` `base_url` `proxy` `script` `notify_disconnect` `web_search_api` |
 | `--reset 键` | 清除一项 |
 | `--path` | 只打印配置文件路径 |
+
+**密钥不写这里**（`--set` 只动白名单，而且值会打到终端）：密钥走下面 `spool env`。
+页脚印的优先级是"命令行 > 环境变量 `SPOOLKIT_<键名大写> > 配置文件"，改名前的
+`AGENTS_DEV_<键名大写>` 也认（新前缀优先）。
+
+## spool env
+
+用户级 `.env` 的看 / 写 / 搬。管的是**这台机器上的你**，所以**不带 `--root`**、
+与在哪个工作区无关。
+
+```bash
+spool env                                    # 看：路径 + 有哪些键（只印键名与遮罩形状）+ config.toml 路径
+spool env path                               # 只印路径（给脚本用）
+spool env set KEY=VALUE [KEY=VALUE …]        # 写进去：同键替换，注释/空行/分节/别人的键原样保留
+spool env import --from <工作区的 .env> [--only KEY]…
+```
+
+| 参数 | 说明 |
+|---|---|
+| （不带） | 印用户级 `.env` 的路径、里面有哪些**键名与遮罩后的形状**，以及 `config.toml` 的路径 |
+| `path` | 只印用户级 `.env` 的路径 |
+| `set KEY=VALUE …` | 写入（可多个）。文件不存在就建 |
+| `import --from <文件>` | 把工作区那份搬上来，**来源文件不动**；要的键一个都没有时不建目标文件 |
+| `--only KEY` | `import` 时只搬这些键，可给多次 |
+
+位置是 `%APPDATA%\spoolkit\.env`（其它平台 `~/.config/spoolkit/.env`，与 `config.toml` 同目录），
+`SPOOLKIT_ENV_FILE` 可覆盖（改名前的 `AGENTS_DEV_ENV_FILE` 也认）。解析顺序
+**环境变量 → 工作区 `.env` → 用户级 `.env`**（更具体的赢），由
+`spoolkit/settings.py::resolve_secret` 一处决定，通道凭据 / Tavily / Gemini 三处共用。
+
+四条规矩：
+
+- **不回显值**：`set` 里不合 `KEY=VALUE` 形状的参数只报个数，`--only` 的任一个值一律不印
+  （它们可能本来就是密钥）——要印就印"文件里真有哪些键"。密钥进过一次终端，就等于进过一次
+  滚动缓冲、一次截图、一次粘贴，**连报错也不例外**。
+- **不动别人的行**：只替换同名键，注释、空行、分节、别的键原样保留（整份重写的代价是两份
+  配置开始漂移）。编码（UTF-8 / UTF-8 BOM / UTF-16）与换行（CRLF / LF）按原文还原，
+  符号链接**顺着写**（换掉链接本身＝"报成功、实际没生效"）。
+- **写入是原子的**：先写同目录临时文件再替换；失败（含 Ctrl-C）删掉临时文件，下次写入顺手
+  扫掉**陈旧**（超过 1 小时）的临时文件——临时文件里是明文密钥，不能就那么躺在人家目录里。
+- **权限**：POSIX 上收紧到 600；Windows 上**故意什么都不做**（那边改权限要另一套 API，
+  而且多半改不对——假装保护过了比不保护更坏）。
+
+`.env` 的读法：一行一个 `KEY=VALUE`（`export KEY=VALUE` 也认，前缀原样保留），`#` 开头是注释，
+值两边的引号去掉；**不做变量展开**（`${OTHER}` 这种会让"值到底是什么"要读两处才知道）。
+编码认 UTF-8 / UTF-8 BOM / UTF-16——Windows 记事本存 UTF-8 常带 BOM，存"Unicode"则是 UTF-16，
+不认它们的话症状是"文件里明明有这一行，它说没有"。
 
 ## spool limits
 
@@ -328,9 +391,9 @@ Cursor 扮演用户下发任务）。工具、信任模型、调用序列见 [`m
 | `--access {pairing,allowlist,open}` | 准入：`pairing`（默认，陌生人拿码）/ `allowlist`（只放行名单）/ `open`（谁都能用，会警告）|
 | `--allow-user 用户` | 白名单（可重复）；给了就切到名单模式 |
 | `--approve <码>` | 批准一个配对码然后退出 |
-| `--check` | 只看凭据与连通性（认到没有、从哪认到的、能不能连上）|
+| `--check` | 只看凭据与连通性：**认到没有、从哪认到的、连不连得上**，并印"找过这些位置"（只印键名与遮罩后的值）。**机器级（不给 `--root`）也能用** |
 | `--bridge-proxy 地址` | **通道自己**出网走哪个代理（如 `socks5://127.0.0.1:1080`）。对准本机 `[[service]]` 里的 `tunnel`（`ssh -D`），不是模型 `--proxy` |
-| `--token` / `--appid` / `--secret` / `--sandbox` | 各通道凭据（也可写在 `.env`）|
+| `--token` / `--appid` / `--secret` / `--sandbox` | 各通道凭据（**推荐写用户级 `.env`**：机器级通道读的就是那一层，`spool env set` 写它）|
 | `--user` / `--max-chars` / `--timeout` | 假通道的用户名 / 单条消息长度上限 / 一轮最多等多少秒 |
 | `--policy` / `--scope` / `--session` | 原样转给 agent；`--session` 留空 = 用这条聊天的指向 |
 | `--notify-disconnect` | 通→断时给最近一次放过的聊天发一句（默认关） |
@@ -339,6 +402,13 @@ Cursor 扮演用户下发任务）。工具、信任模型、调用序列见 [`m
 工作区（收紧，向后兼容）；不给 = **服务整台机器**——落到哪由"这条聊天的指向"
 决定（`chat:<通道>:<用户>`），聊天里 `/ws use <名字>` 就能换，**不用重新配对**。
 启动时会把旧 `.agent/bridge-pairings.json` 里已批准的人认领成机器级放行（不删不改）。
+
+**不给 `--root` 时它不看当前目录**，凭据也就只从**用户级 `.env`**（与环境变量）来：
+原先 `--root` 缺省会取 cwd，于是"你碰巧站在哪个目录"决定了它读哪份密钥——2026-09-27 的
+事故形状是：在 `C:\Users\32615` 起桥，它去找 `C:\Users\32615\.env`，而凭据好好地在
+`D:\workSpace\agentWorkSpace\.env` 里。这条口径与 `serve` / `hub` / `mcp` 一致。
+（一处例外：登记表里一个工作区都没有时，内部会退回启动目录，否则装机第一天没人能完成
+第一次配对。说得出登记表却说不清是哪个，就报错不猜。）
 
 详见 [`bridge.md`](bridge.md)。
 
@@ -353,7 +423,7 @@ Cursor 扮演用户下发任务）。工具、信任模型、调用序列见 [`m
 | `--proxy` | 抓取也走它；不给就用系统代理 |
 | `--web-search-api 名字` | 网页搜索后端。现在只接 `tavily`。不给但环境/工作区 `.env`/用户配置里有 Tavily key，也当 tavily |
 
-搜索要一把 **Tavily** key（[申请](https://tavily.com)）。来源按这个顺序：环境变量 `TAVILY_API_KEY`（或 `SPOOLKIT_TAVILY_API_KEY`）、工作区 `.env`、用户配置里的 `tavily_api_key`（手写进 `%APPDATA%\\spoolkit\\config.toml`，**不要**用 `spool config --set` 写密钥——那个命令只动白名单，会把密钥打到终端）。没 key 时研究会话会说「没配搜索，只能直接给 URL」，不会去抓搜索结果页。
+搜索要一把 **Tavily** key（[申请](https://tavily.com)）。来源按这个顺序：环境变量 `TAVILY_API_KEY`（或 `SPOOLKIT_TAVILY_API_KEY`）、工作区 `.env`、**用户级 `.env`**（`spool env set TAVILY_API_KEY=…`）、用户配置里的 `tavily_api_key`（旧位置，写在那儿的不用搬家）。**不要**用 `spool config --set` 写密钥——那个命令只动白名单，会把密钥打到终端；密钥走 `spool env`。没 key 时研究会话会说「没配搜索，只能直接给 URL」，不会去抓搜索结果页。
 
 配了之后：`research` 先搜，把标题+网址+摘要交给一轮会话；摘要够（天气这类）就停，不够再抓最相关的一页。条数 `search_result_limit`，默认 3。
 

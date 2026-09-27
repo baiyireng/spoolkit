@@ -2435,3 +2435,53 @@ deferred：`spool service start` 写 pid 失败时会留下**无人管的孤儿�
 （先退订再订阅，否则两条流会把事件推给同一个页面），而且"**还没有当前目标**"这个状态贯穿了整条链：
 `/state` 要给空态、`/run` 与 `/confirm` 要 409、`/events` 要先等着、页面还得先让人选。
 **"机器级"不是一个开关，而是一种贯穿每个端点的状态。**
+
+## 2026-09-27 · 批次二文档回写（1–3 题）+ 照文档从零走查
+
+**做了什么**：起因是用户问"这次改动比较大，项目文档、操作手册有做更新吗？你自己根据文档手册
+能够安装、运行、启动各个服务吗"。第一个问题的答案是**没有**（文档回写排在任务 7），
+而第二个问题只能实测——于是两件事一起做：把 1–3 题写进文档，并**照文档从零走一遍**。
+
+**文档**：`README.md`（特性/命令表加机器级网页壳与 `spool env`）、`docs/getting-started.md`
+（§2 密钥两层、§3 三层配置 + `spool env` 三种用法、§4 四入口 cwd 契约、§5 机器级网页壳与切换语义、
+§7 五行新症状）、`docs/cli.md`（新增 `spool env` 整节；**修掉 `serve`/`hub`/`bridge` 的 `--root` 行**
+——它们还写着"不给就按 当前目录 → 指向 → 登记表 解析"，而分支上早已是"给了=钉住、不给=机器级不认 cwd"）、
+`docs/manual.md`（配置三层与密钥链、机器级入口与 cwd 契约、网页壳目标状态与切换）、
+`docs/bridge.md`（凭据三层链 + 机器级只读用户级那层；`--check` 输出改成代码里的真实形状）。
+
+顺手修掉五处**实测出来的不实之处**：`cli/commands/config.py` 的页脚只教旧前缀 `AGENTS_DEV_`
+（现在先印 `SPOOLKIT_`，旧名另起一行说"也认"）；`.env.example` 从一行扩成两层与各通道的键；
+`app.py` 里 bridge 的 help 漏了 `qqbot`；`web/server.py` 的空态提示原本写着"**在页面上选一个工作区**"
+——**而页面上还没有选择栏**（那是任务 4），改成只指向现在就能用的 `POST /target`；
+设计档里"桥的 cwd 兜底已去掉"那句与代码不符（`bridge/core.py::target_for` 里它刻意留着），
+照实改成"收掉大半，这一处没动、为什么"。
+
+**量到什么（走查，全部实测）**：
+
+| 文档节 | 命令 | 结果 |
+|---|---|---|
+| §1 装 | `spool --version`、三个命令是否都在、全局命令跑哪份源码 | ✅ `spool 0.0.1 (spoolkit)`；三个都在；跑的是 `D:\workSpace\agents_dev\src`（= main） |
+| §3 配 | `spool config` | ✅ 生效值与来源都对（llamacpp / 8080 来自 `config.toml`） |
+| §4 工作区 | `spool ws` | ✅ 5 个工作区 + "← 当前" |
+| §4 起手 | 在**全新目录** `spool init` | ✅ 建 `.agent/`、登记到 `workspaces.json`、还提醒"这目录没 `.gitignore`" |
+| §5 跑任务 | `spool run --goal "读 calc.py，指出 sum_to 的边界问题…" --no-web` | ✅ 2 步 / 2 次模型调用 / 输入 2877 token / 模型 8.2s，答案正确 |
+| §5 网页壳 | `spool serve --port 8765` | ✅ `GET /` → 200、`/state` 正常（收尾时又验证了一次"job 被杀子进程不死"） |
+| §6 服务 | `spool service` | ✅ llama 通（`/props` 200）、tunnel 通（1080 开着） |
+| 新增 `spool env` | `env` / `env import --from … --only …` / `env set` / `env path` | ✅ 四种都对：只印键名与遮罩形状（`102***00`）、来源文件没动、同键替换 |
+
+**哪条被证伪**：
+
+- **"文档最后再补"这条做法本身被证伪**：命令全都能跑，但**文档对批次二是滞后的**
+  （`spool env` / 用户级 `.env` / 机器级网页壳 / `POST /target` / `use_cwd` 在 README+docs 里各 **0 处**），
+  而且 `cli.md` 的 `serve --root` 行**已经写错了**。过期的文档不是"晚点会补上的空档"，
+  而是**每一步都在误导人**——这次是用户先问出来才发现。所以文档回写提前到任务 3 之后做（任务 7 只留终校）。
+- **"`--editable` 装的命令改代码立即生效"对 `spool` 成立、对 `.venv` 不成立**：
+  全局 `spool` 的钩子指向 `D:\workSpace\agents_dev\src` ✓；而**主 checkout `.venv` 的钩子指向
+  `.worktrees\model-wait-heartbeat\src`**（那条没合的心跳分支）——用 `.venv\Scripts\python.exe`
+  跑就是跑别人的分支。`scripts\pytest.ps1` 靠显式 PYTHONPATH 才没被骗（与评审踩到的
+  "`pythonpath` 盖过 `PYTHONPATH`"是同源的假绿风险）。已记进 roadmap §5 与账本。
+- **写作 subagent 交回四件"发现但没改"**：三件是真问题（设计档与代码不符、`bridge.md` 标题写
+  "三条通道"却列四条、`.env.example` 只有一行）、一件是"页面里选工作区"这个**还不存在的承诺**
+  ——四件都当场修掉。**它自己把"哪些没验"写清楚了**（`spool env set` 没实跑、因为它会写真实的
+  `%APPDATA%`），我按它说的用 `SPOOLKIT_ENV_FILE` 指临时文件补跑了——**派活时要求"如实列出没验的部分"
+  是有回报的**。

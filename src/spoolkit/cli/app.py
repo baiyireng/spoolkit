@@ -611,7 +611,7 @@ def _add_mcp_servers_command(sub: argparse._SubParsersAction) -> None:
 def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
     """把工作区接到一条聊天通道上（消息驱动的 agent）。"""
     parser = sub.add_parser(
-        "bridge", help="把工作区接到聊天通道上（fake / telegram / wecom）"
+        "bridge", help="把工作区接到聊天通道上（fake / telegram / wecom / qqbot）"
     )
     parser.add_argument(
         "--channel",

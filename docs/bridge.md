@@ -8,7 +8,7 @@
                      └──────────── 回复 ← 结局/待确认 ←──┘
 ```
 
-## 三条通道
+## 四条通道
 
 | 通道 | 收消息 | 发消息 | 今天能不能用 |
 |---|---|---|---|
@@ -19,7 +19,19 @@
 
 ## 凭据从哪来
 
-**环境变量 → 项目根 `.env`**（后者优先不了一点：环境变量是"这次 shell 的意图"）。
+**环境变量 → 工作区 `.env` → 用户级 `.env`**（环境变量优先：它是"这次 shell 的意图"，
+文件是长期设置；"更具体的赢"，所以工作区那份盖住用户级那份）。这条链只有一处实现
+（`settings.resolve_secret`），通道凭据、Tavily、Gemini 三处共用——三处各写一套的下场是
+"这条命令能读到、那条读不到"，而报错还都写着"没配"。
+
+**不给 `--root` 的桥（机器级）没有"工作区那一层"**，凭据只从**用户级 `.env`**与环境变量来：
+Windows `%APPDATA%\spoolkit\.env`，其它平台 `~/.config/spoolkit/.env`（`SPOOLKIT_ENV_FILE`
+可指到别处）。为什么这么定——2026-09-27 的事故是这样的：在 `C:\Users\32615` 敲
+`spool bridge --channel qqbot …`，报"缺少 AppID 与 AppSecret"并建议写进
+`C:\Users\32615\.env`，而凭据好好地在 `D:\workSpace\agentWorkSpace\.env` 里。根因是 `--root`
+缺省取了 cwd，而 `cwd/.env` 还**盖住**了用户级那份——于是"照着提示在脚下建一个文件"会把
+正确配置静默压掉。现在机器级通道不认 cwd（与 `serve` / `hub` / `mcp` 同一条契约）。
+
 `.env` 里就写成平台给的名字，常见的几种拼写都认：
 
 ```ini
@@ -28,21 +40,40 @@ QQ_AppID=102000000
 QQ_AppSecret=xxxxxxxx
 ```
 
+写进哪一层，一句话：**只在这一个项目里当通道用 → 工作区 `.env`；想在这台机器上任何目录
+都能起桥 → 用户级 `.env`**。后者不必记路径：
+
+```powershell
+spool env set QQ_AppID=102xxxxxx QQ_AppSecret=xxxxxx   # 写进用户级 .env（不回显你敲的值）
+spool env                                             # 看它写在哪、里面有哪些键（只印键名与形状）
+spool env import --from D:\workSpace\agentWorkSpace\.env  # 把工作区那份搬上来（来源文件不动）
+```
+
 配置完先跑一次 **`--check`**：它把"认到没有、从哪认到的、连不连得上"直接说出来，
-不起通道、不跑 agent——
+**还印一份"找过这些位置"**（只印键名，不印值），不起通道、不跑 agent。
+**机器级（不给 `--root`）也能用**——这一条原先做不到：`--check` 直接按 `root/.env` 算，
+于是这台机器上唯一能回答"凭据从哪来"的命令，恰恰在最该工作的场合一敲就崩。
+
+输出**形状**（键名与遮罩后的值，形状照 `bridge/credentials.mask`）：
 
 ```
 $ spool bridge --channel qqbot --check
-工作区：D:\workSpace\spoolkit
-凭据文件：D:\workSpace\spoolkit\.env
-AppID：102***66（D:\workSpace\spoolkit\.env 里的 QQ_AppID）
-AppSecret：C73***Kj（D:\workSpace\spoolkit\.env 里的 QQ_AppSecret）
+工作区：机器级（没给 --root，服务整台机器）
+找过这些位置：
+  环境变量 —— 都没设置（认这些名字：SPOOLKIT_QQ_APPID、AGENTS_DEV_QQ_APPID、QQ_AppID、QQ_APPID）
+  [用户级] C:\Users\你\AppData\Roaming\spoolkit\.env —— 里面有：QQ_AppID、QQ_AppSecret
+AppID：102***66（用户级 C:\Users\你\AppData\Roaming\spoolkit\.env 里的 QQ_AppID）
+AppSecret：C73***Kj（用户级 C:\Users\你\AppData\Roaming\spoolkit\.env 里的 QQ_AppSecret）
 换到了 access_token：uhp***Cw
-连不上或凭据不对：取网关地址 失败（code=11298）：接口访问源IP不在白名单
+网关地址：wss://…
 ```
 
-（上面最后一行是真实的：**QQ 机器人开放平台有"IP 白名单"**，把调用方的公网
-IP 填进那个应用的白名单里才行。凭据本身是对的——否则换不到 access_token。）
+真实的失败长这样（**QQ 机器人开放平台有"IP 白名单"**，把调用方的公网 IP 填进那个应用的
+白名单里才行；凭据本身是对的——否则换不到 access_token）：
+
+```
+连不上或凭据不对：取网关地址 失败（code=11298）：接口访问源IP不在白名单
+```
 
 ### IP 白名单：借一台云主机出去（推荐）
 
@@ -107,9 +138,10 @@ $env:SPOOLKIT_WECOM_AGENT_ID = "1000002"
 spool bridge --channel wecom --allow-user zhangsan --policy ask
 ```
 
-> 环境变量也可以写在项目根 `.env` 里（推荐，不用每次开 shell 都设），
-> QQ 那两个键写成 `QQ_AppID` / `QQ_AppSecret` 就行。改名前的 `AGENTS_DEV_*`
-> 名字**仍然认**，所以已有的 .bat 不用改。
+> 凭据也可以写在 `.env` 里（推荐，不用每次开 shell 都设），QQ 那两个键写成
+> `QQ_AppID` / `QQ_AppSecret` 就行。**放在哪一层看用途**：这条桥只服务一个工作区 →
+> 工作区 `.env`；机器级（不给 `--root`）→ 用户级 `.env`（`spool env set`）。
+> 改名前的 `AGENTS_DEV_*` 名字**仍然认**，所以已有的 .bat 不用改。
 
 ## 安全模型（用之前先看这一段）
 
@@ -167,9 +199,9 @@ spool bridge --channel wecom --allow-user zhangsan --policy ask
 | 放行到这个工作区（旧式的码） | `spool approve <码> --ws <名字>`（登记表里多个工作区时**必须**点名）|
 | **解除某人的放行** | `spool approve --revoke <用户>`；他再发消息会重新拿码 |
 | 丢掉一个还没用的码 | `spool approve --forget <码>` |
-| **换到另一个工作区** | 聊天里发 `/ws use <名字|序号>`——**不重启、不重新配对** |
+| **换到另一个工作区** | 聊天里发 `/ws use <名字\|序号>`——**不重启、不重新配对**（"每条聊天一个指向"只在机器级桥下存在，钉住一个工作区的桥里没得可切）|
 | 让两个群各干各的 | 不用跑两个桥：**每个聊天一个指向**（`chat:<通道>:<用户>`），互不影响 |
-| 想收紧成"只服务一个工作区" | 启动时给 `--root <路径>`（不给 = 服务整台机器）|
+| 想收紧成"只服务一个工作区" | 启动时给 `--root <路径>`（不给 = 服务整台机器）；给了之后这条桥的凭据也从那个工作区的 `.env` 读 |
 
 注意换工作区**确实是换了一整套上下文**：记忆、索引、检查点、授权范围都挂在工作区
 上，所以每条聊天有**自己的指向**（一对"工作区 + 会话"），切换时旧会话原样还在
@@ -180,6 +212,10 @@ spool bridge --channel wecom --allow-user zhangsan --policy ask
 **这条聊天的指向 → 登记表（只有一个时）→ 登记表为空时退回桥的启动目录**。
 登记表里**有**工作区却说不清是哪一个时，**不发码**，回一句让主人先指定；
 登记表一个都没有（装机第一天）才用启动目录，否则没人能完成第一次配对。
+最后那一条是"机器级入口不认 cwd"的**唯一例外**，刻意留着：它的场合是"这台机器上还没有
+任何工作区"，而不是"你碰巧站在哪个目录"。除此之外，桥每轮解析目标、以及读凭据，都**不看
+cwd**（`bridge/core.py::target_for`、`cli/commands/bridge.py::target_resolver` 传的都是
+`use_cwd=False`）。
 
 ### 通道侧的斜杠命令
 
