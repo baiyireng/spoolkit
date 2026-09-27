@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from spoolkit.kernel import pointers as kernel_pointers
 from spoolkit.kernel import sessions as kernel_sessions
 from spoolkit.kernel import workspaces as kernel_workspaces
 from spoolkit.kernel.target import Target
@@ -181,6 +182,125 @@ def test_只给会话时工作区不变(start_server, tmp_path: Path) -> None:
     assert payload["target"]["root"] == str(a)
     assert payload["target"]["session"] == made
     assert payload["target"]["session_source"] == "explicit"
+
+
+def test_没有目标时只给会话给人话(start_server, tmp_path: Path) -> None:
+    """只给 `session`、而**还没有当前目标**时必须 400，并且说人话。
+
+    机器级壳刚起来（还没有目标）时，页面上的会话下拉是空的，但外部驱动者
+    （脚本、MCP 客户端）完全可能只发一个 `{"session": …}`。这时**不能猜**一个
+    工作区顶数——哪怕登记表里就有候选：猜错的症状是"它在一份我以为不相干的记忆里
+    干活"，而那正是内核反复拒绝做的那类猜测（`kernel/target.py` 的自述）。
+    """
+    a = _ws(tmp_path, "a")
+    b = _ws(tmp_path, "b")
+    kernel_workspaces.register(a)
+    kernel_workspaces.register(b)  # 有两个候选 → 内核说不清 → 还没有目标
+    state = build_state(None, pinned=False)
+    url = start_server(state)
+    assert _state(url)["target"]["root"] == ""
+
+    status, body = _post(url + "/target", {"session": "随便哪条"})
+
+    assert status == 400
+    payload = json.loads(body)
+    assert "workspace" in payload["error"]
+    assert "Traceback" not in body
+    assert _state(url)["target"]["root"] == "", "被拒之后目标不该动"
+
+
+# --- 指针：显式选择要写下来 ---
+
+
+def test_显式切换会写下网页壳指针(start_server, tmp_path: Path) -> None:
+    """刷新页面停得住是不够的：**重启服务**也要停住。
+
+    进程内的 `WebState` 一重启就没了，于是回到内核顺位；而多个工作区时
+    `register()` 的排序副作用（登记表里排第一）不足以让"上次选的那个"回来。
+    所以页面上的显式选择要写进 `clients.json` 的 `web` 那条。
+    """
+    a = _ws(tmp_path, "a")
+    made = kernel_sessions.create_session(a, title="换到这条")
+    state = build_state(None, pinned=False)
+    url = start_server(state)
+
+    assert _post(url + "/target", {"workspace": str(a), "session": made})[0] == 200
+
+    pointer = kernel_pointers.get("web")
+    assert pointer is not None, "显式切换没写指针：重启服务就回到内核顺位了"
+    assert pointer.workspace == a
+    assert pointer.session == made
+
+    # 重启一次（机器级、不带 --root）：初始目标就该是指针那条
+    again = build_state(None, pinned=False)
+    try:
+        payload = again.snapshot()
+    finally:
+        again.close()
+    assert payload["target"]["root"] == str(a)
+    assert payload["target"]["session"] == made
+    assert payload["target"]["workspace_source"] == "pointer"
+
+
+def test_内核顺位定出来的初始目标不写指针(start_server, tmp_path: Path) -> None:
+    """口径与 `spool ws use` 一致：**只有显式选择才写**。
+
+    登记表里只有一个工作区时，内核顺位会把它定成初始目标——那是内核推断的，
+    不是人选的结果。把它记成"上次选的"，下一次启动就会跳过更合适的候选
+    （指针排在登记表前面）。
+    """
+    root = _ws(tmp_path, "only")
+    kernel_workspaces.register(root)
+
+    state = build_state(None, pinned=False)
+    url = start_server(state)
+
+    assert _state(url)["target"]["workspace_source"] == "registry"
+    assert kernel_pointers.get("web") is None, "内核顺位定出来的目标被当成「人选过」记下来了"
+
+
+def test_空body的no_op切换不写指针(start_server, tmp_path: Path) -> None:
+    """空 body 的 `POST /target` 什么都没改，也就什么都不该记。"""
+    a = _ws(tmp_path, "a")
+    state = build_state(
+        None,
+        pinned=False,
+        target=Target(
+            root=a,
+            session="s1",
+            workspace_source="registry",
+            session_source="default",
+        ),
+    )
+    url = start_server(state)
+
+    status, body = _post(url + "/target", {})
+
+    assert status == 200, body
+    assert json.loads(body)["target"]["root"] == str(a)
+    assert kernel_pointers.get("web") is None, "没人选什么，却记了一条指针"
+
+
+def test_指针写不进去也不挡切换(start_server, tmp_path: Path, monkeypatch) -> None:
+    """指针是便利，不是数据（`kernel/pointers.py` 的自述）。
+
+    写不进去（磁盘满、状态目录没权限）时，切换**已经在进程内生效**了；这时回报
+    失败等于告诉人"没切成"，而它其实是切成了。
+    """
+    a = _ws(tmp_path, "a")
+    state = build_state(None, pinned=False)
+    url = start_server(state)
+
+    def boom(*args, **kwargs):
+        raise OSError("状态目录写不进去")
+
+    monkeypatch.setattr(kernel_pointers, "set", boom)
+
+    status, body = _post(url + "/target", {"workspace": str(a)})
+
+    assert status == 200, body
+    assert json.loads(body)["target"]["root"] == str(a)
+    assert _state(url)["target"]["root"] == str(a)
 
 
 # --- 出错时给人话 ---

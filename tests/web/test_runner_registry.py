@@ -201,3 +201,78 @@ def test_running_targets只报在跑的(tmp_path: Path) -> None:
     assert rows[0]["goal"] == "正在做的事"
     assert idle.running is False
     registry.close()
+
+
+# --- 性能契约：给页面的那一行不许探活 ---
+
+
+def test_running_targets不探活(tmp_path: Path, monkeypatch) -> None:
+    """`running_targets()` 只许走 `Runner.brief()`，不能碰 `Runner.snapshot()`。
+
+    页面每几秒轮一次 `/state`（`web/page.py` 的 `refreshBanners`），而快照会去探活
+    模型与外接配方（**走 HTTP**）。给每个在跑的目标各探一次，状态接口就变成一串等待；
+    这不是风格问题，是"页面会不会卡住"的问题。
+    """
+    from spoolkit.web import runner as runner_mod
+
+    calls = {"n": 0}
+
+    def boom(*args, **kwargs):
+        calls["n"] += 1
+        raise AssertionError("探活被调到了")
+
+    # 两个探活入口都打桩。它们被 `health_snapshot` 用 try/except 包着，所以抛异常
+    # 不会让用例变红——**计数**才是证据。
+    monkeypatch.setattr(runner_mod.health_mod, "probe_from_extra", boom)
+    monkeypatch.setattr(runner_mod.health_mod, "probe_services", boom)
+
+    registry = RunnerRegistry(lambda root, session: _Chatty(root, session=session), limit=4)
+    a, b = _ws(tmp_path, "a"), _ws(tmp_path, "b")
+    idle = registry.get(b, "闲的")
+    busy = registry.get(a, "忙的")
+    assert busy.start("正在做的事") is True
+    assert _wait(lambda: busy.running)
+
+    rows = registry.running_targets()
+
+    assert [row["session"] for row in rows] == ["忙的"]
+    assert calls["n"] == 0, "running_targets 触发了探活（状态接口会变成一串等待）"
+    assert idle.running is False
+
+    # 反证：桩是有效的——`snapshot()` 确实会探活，所以上面那个 0 不是"桩没挂上"。
+    busy.snapshot()
+    assert calls["n"] > 0
+    registry.close()
+
+
+# --- 上限的可见后果 ---
+
+
+def test_淘汰之后切回去是新对象但不动在跑的(tmp_path: Path) -> None:
+    """上限只管**空闲**的那些（标定依据写在 `DEFAULT_LIMIT` 上面）。
+
+    被淘汰的目标切回去时是**新对象**：事件留痕从头开始——这就是"上限"这个决定的
+    代价，写下来才有人知道它不是 bug。而**正在跑的一个都不许受影响**：两件事一起
+    才构成这条契约。
+    """
+    registry = RunnerRegistry(lambda root, session: _Chatty(root, session=session), limit=2)
+    a, b, c = (_ws(tmp_path, name) for name in "abc")
+
+    busy = registry.get(b, "忙的")
+    assert busy.start("在跑") is True
+    assert _wait(lambda: busy.running)
+
+    idle = registry.get(a, "看的")
+    assert idle.start("看一眼") is True
+    assert _wait(lambda: len(idle.events()) > 0), "它还没吐事件，留痕是空的就测不出从头开始"
+    idle.stop()
+    assert _wait(lambda: idle.running is False)
+
+    registry.get(c, "c 的")  # 超上限：淘汰最久没看的**空闲**目标（a）
+
+    again = registry.get(a, "看的")
+    assert again is not idle, "被淘汰的目标切回去还是旧对象（上限没起作用）"
+    assert again.events() == [], "新对象该没有事件留痕（代价是历史从头开始）"
+    assert registry.get(b, "忙的") is busy, "淘汰动了在跑的那个"
+    assert busy.running is True, "淘汰把在跑的子进程杀了"
+    registry.close()

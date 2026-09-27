@@ -15,6 +15,9 @@ SSE 每写完一条都要 flush：不 flush 的话事件攒在缓冲里，
 `/events` 是长连接而目标可能在中途被换掉：服务端发现目标变了要**退订旧的、
 订阅新的、补一帧 state**，否则页面会一直停在旧工作区的事件流上。这是这块最
 容易写错的地方。
+
+页面上选一次还会**写进网页壳指针**（`clients.json` 的 `web` 那条）：不写的话，
+刷新页面停得住、重启服务就回到内核顺位了（见 `WebState::_remember`）。
 """
 
 import json
@@ -28,6 +31,7 @@ from pathlib import Path
 from typing import Sequence
 
 from spoolkit.health import describe_change, describe_service_change, probe_from_extra, probe_services
+from spoolkit.kernel import pointers as kernel_pointers
 from spoolkit.kernel import sessions as kernel_sessions
 from spoolkit.kernel import workspaces as kernel_workspaces
 from spoolkit.kernel.sessions import SessionError
@@ -50,13 +54,17 @@ HEALTH_POLL_SECONDS = 5.0
 TARGET_POLL_SECONDS = 1.0
 
 # 机器级网页壳还没有当前目标时，`target.note` 要能告诉人下一步做什么。
-# 这句话会出现在 `/state` 的空态与启动提示里。**别承诺页面上还没有的东西**：
-# 选择栏是任务 4 才接上的（在那之前页面确实选不了），而 `POST /target` 现在就能用、
-# 接上之后也照样能用——所以入口只写它。
+# 这句话会出现在 `/state` 的空态与启动提示里。**它必须与页面一致**：页面顶上那条
+# 选择栏（工作区 / 会话两条下拉）就是"选一个工作区"的地方。改回"在页面上选"是
+# 有言在先的——Task 3 当时只能写 `POST /target`，是因为选择栏还没接上。
 NO_TARGET_HINT = (
-    "还没有选工作区：`POST /target` 给一个 workspace"
+    "还没有选工作区：在页面顶上的选择栏里选一个"
     "（有哪些看 `GET /state` 的 `workspaces`），或用 `--root` 起服务把它钉住。"
 )
+
+# 网页壳在 `clients.json` 里的键。与 `resolve_target(client=…)` 用的是同一套键，
+# 所以"页面上选的那个"就是内核顺位里"上次选的那个"（设计 §3.3）。
+POINTER_CLIENT = "web"
 
 # `_stream` 里那个"还没订阅过"的哨兵：没有它，第一圈会以为"目标没变"而不订阅。
 _UNSET = object()
@@ -262,7 +270,31 @@ class WebState:
             self._target = changed
             # 版本号一动，所有开着的事件流都会在下一圈发现自己订阅的是旧目标。
             self._version += 1
+        # 只有**显式点名**才算"人选了它"。空 body 的一次 `POST /target` 什么都不改，
+        # 也什么都不该记（`spool ws use` 同一个口径）。写指针不影响这次切换的结果。
+        self._remember(changed, explicit=bool(name or wanted))
         return 200, self.snapshot()
+
+    def _remember(self, target: Target, *, explicit: bool) -> None:
+        """把这次显式选择写进网页壳指针（`clients.json` 里 `client="web"` 那条）。
+
+        为什么要写：`WebState` 只在**进程内**，刷新页面停得住，**重启服务就回到内核
+        顺位**了；而有多个工作区时，`register()` 的排序副作用（登记表里排第一）
+        不足以让"上次选的那个"回来——登记表里排第一的可能是别的入口刚登记的。
+        指针是内核顺位里跑在最前面的那一层，写它才等于"我上次在页面上选了它"。
+
+        不写的情形：机器级启动时由内核顺位定出来的初始目标（那是内核按指针/登记表
+        推断的，不是人选的结果），以及空 body 的 no-op 切换。
+
+        写不进去**不能挡住切换**：目标已经在进程内生效了，这时报错等于告诉人
+        "没切成"，而它其实是切成了。指针是便利，不是数据（`kernel/pointers.py` 的自述）。
+        """
+        if not explicit:
+            return
+        try:
+            kernel_pointers.set(POINTER_CLIENT, target.root, target.session)
+        except (OSError, ValueError) as exc:
+            print(f"网页壳指针没写进去（切换已经生效）：{exc}", file=sys.stderr)
 
     def close(self) -> None:
         """收掉这张表里自己拉起的子进程。进程退出时调一次。"""
@@ -447,8 +479,8 @@ def _handler_for(state: WebState):
                     self._json(
                         409,
                         {
-                            "error": "还没有选工作区：先在页面上选一个"
-                            "（POST /target），再发任务。"
+                            "error": "还没有选工作区：先在页面顶上的选择栏里选一个"
+                            "（或 POST /target），再发任务。"
                         },
                     )
                     return
@@ -573,7 +605,7 @@ def build_state(
     try:
         found = resolve_target(
             session=str(session or "") or None,
-            client="web",
+            client=POINTER_CLIENT,
             session_fallback=default_session,
             use_cwd=False,
         )

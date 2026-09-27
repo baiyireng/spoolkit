@@ -317,3 +317,106 @@ def test_一个轮询窗口内来回切也要补一帧(start_server, tmp_path: P
         assert again["target"]["root"] == str(a)
     finally:
         stream.close()
+
+
+def test_还没有目标时先等着_选出来之后补一帧(
+    start_server, tmp_path: Path, monkeypatch
+) -> None:
+    """机器级壳可以带着"还没有目标"起来，而页面这时候已经把 `/events` 连上了。
+
+    那条长连接必须**先等着**（不是断掉、不是报错），并且先给一帧空态——页面正等
+    它渲染空态与引导语。目标被选出来之后，同一条连接上要补一帧新目标的 `state`，
+    **不重连浏览器**：删掉"目标变了就补帧"这个判据时，后半段会等到超时（用例变红）。
+    """
+    from spoolkit.web import server as web_server
+
+    # 心跳调快：页面关掉之后服务端**只在写的时候**才发现连接没了，默认那 15 秒会让
+    # 这条用例在收尾时白等十几秒（等待期间它什么都没测）。
+    monkeypatch.setattr(web_server, "KEEPALIVE_SECONDS", 0.5)
+
+    a = _ws(tmp_path, "a")
+    registry = RunnerRegistry(lambda root, session: _Chatty(root, session=session), limit=4)
+    state = WebState(registry, None, pinned=False)  # 还没有当前目标
+    url = start_server(state)
+    stream = _Stream(url + "/events")
+    try:
+        first = stream.next(lambda frame: frame.get("type") == "state")
+        assert first["target"]["root"] == ""
+        assert first["target"]["note"], "空态那一帧也要说得出下一步做什么"
+        assert first["workspaces"] == []
+
+        assert _post(url + "/target", {"workspace": str(a)})[0] == 200
+
+        chosen = stream.next(
+            lambda frame: frame.get("type") == "state"
+            and frame["target"]["root"] == str(a)
+        )
+        assert chosen["workspaces"], "补的那一帧要带着备选清单"
+    finally:
+        stream.close()
+
+
+def test_切走之后旧目标的监听器归零(start_server, tmp_path: Path) -> None:
+    """两条流同时收两个目标的事件＝页面把别人的历史当成自己的。
+
+    量的是**订阅数**（`Runner._listeners`）：切走必须退订旧的，而两个目标上的
+    监听器总数**最多**是 1。
+
+    为什么不是"任何时刻恒等于 1"：实现是"**先退订旧的、再订阅新的**"（顺序反了会
+    短暂地两条都订阅着，所以这两步不能调换），于是退订与订阅之间必然有一个和=0 的
+    瞬间。把那个瞬间也算违约，等于逼实现去加一把锁凑一个并不重要的数——反过来，
+    和**超过** 1 才是真串台，那一条必须钉死。
+    """
+    a, b = _ws(tmp_path, "a"), _ws(tmp_path, "b")
+    registry = RunnerRegistry(lambda root, session: _Chatty(root, session=session), limit=4)
+    state = WebState(
+        registry,
+        Target(root=a, session="s1", workspace_source="explicit", session_source="explicit"),
+        pinned=False,
+    )
+    url = start_server(state)
+
+    # 先把两个 Runner 取出来：同一个键同一个对象，切换时用的就是它们。
+    runner_a = registry.get(a, "s1")
+    runner_b = registry.get(b, "s1")
+
+    peak = [0]
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.is_set():
+            total = len(runner_a._listeners) + len(runner_b._listeners)
+            if total > peak[0]:
+                peak[0] = total
+            time.sleep(0.002)
+
+    threading.Thread(target=watch, daemon=True).start()
+    stream = _Stream(url + "/events")
+    try:
+        stream.next(
+            lambda frame: frame.get("type") == "state"
+            and frame["target"]["root"] == str(a)
+        )
+        assert _wait(lambda: len(runner_a._listeners) == 1), "连上了却没订阅当前目标"
+        assert runner_b._listeners == []
+
+        assert _post(url + "/target", {"workspace": str(b)})[0] == 200
+
+        assert _wait(lambda: len(runner_b._listeners) == 1), "切过去之后没订阅新目标"
+        assert runner_a._listeners == [], "切走之后旧的订阅还在（会串台）"
+
+        # 页面关掉（或刷新）之后也要退订。服务端**只在写的时候**才发现连接没了，
+        # 所以让 B 上先真跑起来（它每 50 毫秒写一行），再关掉这条连接——
+        # 下一行事件推不出去，就走 `_stream` 的 finally 退订。
+        # 顺序不能反：先关连接再 POST，服务端要过（心跳周期）才发现，
+        # 那会让这条用例白等十几秒，而等待期间它什么都没测。
+        assert _post(url + "/run", {"goal": "让服务端写一次"})[0] == 202
+        assert _wait(lambda: len(runner_b.events()) > 0, 10), "B 上没跑起来"
+
+        stream.close()
+        assert _wait(lambda: not runner_b._listeners, 15), "连接断了之后还没退订"
+    finally:
+        stream.close()
+        stop.set()
+
+    assert peak[0] <= 1, f"两个目标上同时挂着 {peak[0]} 个监听器"
