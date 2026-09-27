@@ -221,7 +221,10 @@ function drawTarget(state) {
   }
   if (!t.root) {
     // 空态要**引导人选**，不是摆一堆空白：候选清单就在上面那条工作区下拉里。
-    notes.push(t.note || '还没有选工作区：在上面的「工作区」下拉里选一个。');
+    // 但下拉也可能是**空的**（一个工作区都没登记过）——那时说"在上面选一个"就是死路，
+    // 所以补一句怎么造出候选来（评审逮到的就是这条）。
+    notes.push(t.note || '还没有选工作区：在上面的「工作区」下拉里选一个'
+      + '（下拉是空的就先在工作区目录里敲 spool init）。');
   }
   if (notes.length) {
     noteBox.style.display = 'block';

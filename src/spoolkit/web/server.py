@@ -57,9 +57,12 @@ TARGET_POLL_SECONDS = 1.0
 # 这句话会出现在 `/state` 的空态与启动提示里。**它必须与页面一致**：页面顶上那条
 # 选择栏（工作区 / 会话两条下拉）就是"选一个工作区"的地方。改回"在页面上选"是
 # 有言在先的——Task 3 当时只能写 `POST /target`，是因为选择栏还没接上。
+# 另外要**给出路**：登记表一个工作区都没有时，下拉是空的，光说"选一个"是死路
+# （评审逮到的），所以把"怎么造出候选"也写进去。
 NO_TARGET_HINT = (
     "还没有选工作区：在页面顶上的选择栏里选一个"
-    "（有哪些看 `GET /state` 的 `workspaces`），或用 `--root` 起服务把它钉住。"
+    "（下拉是空的就先在工作区目录里敲 `spool init`），"
+    "或用 `--root` 起服务把它钉住。"
 )
 
 # 网页壳在 `clients.json` 里的键。与 `resolve_target(client=…)` 用的是同一套键，
@@ -417,9 +420,12 @@ def _handler_for(state: WebState):
                     version, current = state.current()
                     if current is not subscribed or version != seen_version:
                         if current is not subscribed:
-                            # 目标换了（第一次连上也算"换"）：**先退订旧的，再订阅新的**。
-                            # 顺序不能反——先订阅的话，两条流会短暂地同时把事件推进
-                            # 同一个页面，而页面会把它们当成同一段历史。
+                            # 目标换了（第一次连上也算"换"）：先退订旧的，再订阅新的。
+                            # ⚠️ **别把理由写成"反了就会两条流一起推同一个页面"**——本设计里
+                            # 不可能：一条 `/events` 只有一个 `listener`，另一个订阅者的队列
+                            # 没有读者（评审把这两步对调后用例照样全绿，即无可观测后果）。
+                            # 真正的理由是卫生：不给"已经没人读的 Runner"继续攒订阅，
+                            # 并保证 finally 里退掉的正是当前这一个。
                             if listener is not None and runner is not None:
                                 runner.unsubscribe(listener)
                             runner = current
