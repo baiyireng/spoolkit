@@ -522,7 +522,12 @@ def build_state(
     # 不这么归一的话，`build_state(root)` / `serve(root)` 会静默地忽略 root、去钉
     # 指针或登记表里的**另一个**工作区（评审实测：`serve(SA)` 的实际 target 是 SB，
     # 而且一声不响）——`serve(project_root)` 是这套壳最初的签名，它的意思不能被改掉。
-    if project_root is not None and target is None:
+    #
+    # 判据只看 `project_root`，**不看 `target`**：早先写成 `and target is None` 时，
+    # `build_state(root, target=T)` 与 `serve(root, target=T)` 会得出不同的 `pinned`
+    # （复审记的就是这处不对称）。虽然当时没有调用点，但"同一组参数、两个入口两个结果"
+    # 是后面一定会踩的坑。
+    if project_root is not None:
         pinned = True
     if pinned and target is None and project_root is None:
         # 钉住却没给钉什么：这种组合没有意义，而"悄悄当成机器级"会让调用方以为

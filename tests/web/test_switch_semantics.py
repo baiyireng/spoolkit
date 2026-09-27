@@ -285,3 +285,35 @@ def test_退回旧订阅不会串台(start_server, tmp_path: Path) -> None:
         assert str(mine["text"]).startswith("A 的活-")
     finally:
         stream.close()
+
+
+def test_一个轮询窗口内来回切也要补一帧(start_server, tmp_path: Path, monkeypatch) -> None:
+    """A→B→A 落在**同一个轮询窗口**里时，也要补一帧 state。
+
+    这一条是复审逼出来的：重订阅的判据是 Runner 身份（A→B→A 之后身份还是 A，不重订是对的），
+    但"补一帧"必须另有判据——否则页面**永远不知道目标动过**。复审用探针复现过，
+    并指出这个行为当时**没有用例**（把版本号判据删掉 `tests/web` 仍然全绿），所以这里补上。
+
+    为了确定性地把它钉住：把轮询周期调大、且**不让任何任务在跑**（没有事件的话，
+    事件循环就只在周期到点时醒一次），于是两次切换必然落在同一个窗口里——
+    这时服务端能依赖的只剩"版本号变过"这一个信号。
+    """
+    from spoolkit.web import server as web_server
+
+    a, b = _ws(tmp_path, "a"), _ws(tmp_path, "b")
+    state = _machine_state(a)
+    url = start_server(state)
+    stream = _Stream(url + "/events")
+    try:
+        first = stream.next(lambda frame: frame.get("type") == "state")
+        assert first["target"]["root"] == str(a)
+
+        monkeypatch.setattr(web_server, "TARGET_POLL_SECONDS", 2.0)
+        assert _post(url + "/target", {"workspace": str(b)})[0] == 200
+        assert _post(url + "/target", {"workspace": str(a)})[0] == 200
+
+        # 版本号变过 → 必须有一帧；删掉那个判据时这里会等到超时（用例变红）。
+        again = stream.next(lambda frame: frame.get("type") == "state", timeout=8.0)
+        assert again["target"]["root"] == str(a)
+    finally:
+        stream.close()
