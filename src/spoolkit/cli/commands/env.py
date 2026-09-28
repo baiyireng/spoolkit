@@ -22,16 +22,18 @@
    （含 Ctrl-C）删掉临时文件；下一次写入顺手扫掉**陈旧的**临时文件——临时文件里是
    **明文密钥**，不能就那么躺在人家目录里。另外：目标被别的进程占着（Windows 上
    常见）时替换会失败，这时报错走人、原文件不动，关掉占用再重试即可。
+
+第 3、5 条**不在这个文件里实现**：读与写都在 `spoolkit/envfile.py`
+（`read_env_text` 读原文的三个要素、`update_env_file` 原样写回），因为**向导
+（`onboarding`）写的是同一个文件、要的是同一套判断**——那是 Task 2 评审逼出来的
+教训，两份实现迟早漂移，而漂移的代价是"看着能用、一改就炸"。这里只负责把
+参数（键值对、位置）交给它。
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
-import os
 import sys
-import tempfile
-import time
 from pathlib import Path
 
 from spoolkit import settings
@@ -39,8 +41,7 @@ from spoolkit.bridge.credentials import mask
 from spoolkit.envfile import (
     EnvFileError,
     load_env_file,
-    read_env_text,
-    split_export_prefix,
+    update_env_file,
 )
 
 USAGE = (
@@ -51,125 +52,9 @@ USAGE = (
     "  spool env import --from <工作区的 .env> [--only KEY]   从工作区搬过来"
 )
 
-# 临时文件的命名：`.env.XXXX.tmp`。**必须紧贴目标名**，因为仓库 `.gitignore` 认的是
-# `.env` 与 `.env.*`——名字离远了（例如 `..env.*`）就等于把含明文密钥的文件放进版本库视野。
-_TEMP_SUFFIX = ".tmp"
-
-# 多久没动过的临时文件算"陈旧的"。这不是标定值、也不是策略：一次写入是毫秒级，
-# 留一小时只是为了**不误删另一个正在写入的进程的临时文件**（同机并发写同一个 .env
-# 本来就罕见）。所以它取的是"远大于任何一次写入"的量级，而不是某个调优结果。
-_STALE_TEMP_SECONDS = 3600.0
-
-
-def _temp_candidates(path: Path) -> list[Path]:
-    """这个 `.env` 可能留下的临时文件（`mkstemp` 的随机段不固定）。"""
-    with contextlib.suppress(OSError):
-        return list(path.parent.glob(f"{path.name}.*{_TEMP_SUFFIX}"))
-    return []
-
-
-def _sweep_stale_temps(path: Path) -> None:
-    """扫掉陈旧的临时文件。
-
-    为什么需要它：Ctrl-C 之外的死法（被 SIGKILL、断电）**没有任何代码能清理**，
-    而临时文件里是明文密钥。所以下一次写入时顺手看一眼——这是唯一不需要守护进程
-    也能兜住的时机。
-    """
-    now = time.time()
-    for stale in _temp_candidates(path):
-        try:
-            if now - stale.stat().st_mtime < _STALE_TEMP_SECONDS:
-                continue
-            stale.unlink()
-        except OSError:
-            continue
-
-
-def _atomic_write(path: Path, payload: bytes) -> None:
-    """先写同目录的临时文件，再 `os.replace` 换上去。
-
-    为什么不能直接 `write_bytes`（二轮评审逮出来的）：它是"先截断再写"——实测
-    `open(path, "wb")` 一调用，文件就已经是 0 字节了。密钥文件若在写入中途失败
-    （磁盘满、进程被杀、断电）就**不可恢复**，而这份文件常常是一个账号唯一的
-    一份凭据。临时文件 + 原子替换把结果收敛成"要么旧的、要么新的"。
-
-    两处细节都是评审计出来的：
-
-    - **顺着符号链接写**：`os.replace` 换的是路径本身，而软链的意义是"写到它指向的
-      地方"。不 `realpath` 的话，软链 `.env` 会得到"`rc=0` 报已写入、`list` 也显示新值，
-      而真实文件仍是旧密钥"——静默的"改了不生效"。
-    - **失败时连 Ctrl-C 一起兜**：`except OSError` 只罩得住常规失败，`KeyboardInterrupt`
-      会从缝里溜走，把一份含明文密钥的临时文件留在人家目录里。
-    """
-    real = Path(os.path.realpath(path))
-    try:
-        real.parent.mkdir(parents=True, exist_ok=True)
-        _sweep_stale_temps(real)
-        handle_fd, tmp_name = tempfile.mkstemp(
-            prefix=f"{real.name}.", suffix=_TEMP_SUFFIX, dir=str(real.parent)
-        )
-    except OSError as exc:
-        raise EnvFileError(f"写不了 {path}：{exc}") from exc
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(handle_fd, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())  # 断电之后也认得这份内容
-        os.replace(tmp, real)
-    except BaseException as exc:  # noqa: BLE001 - 含 KeyboardInterrupt，见上面那条注释
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        if isinstance(exc, OSError):
-            raise EnvFileError(f"写不了 {path}：{exc}") from exc
-        raise
-
-
-def _write_updates(path: Path, updates: dict[str, str]) -> None:
-    """只替换同名键，其它行（注释、空行、别人的键）原样保留。
-
-    **编码与换行按原文还原**（见模块开头第 3 条）。写出走 `_atomic_write`：
-    `write_text` 除了会按平台把 `\\n` 翻成 `\\r\\n`（Windows 上），也保不住
-    "中途失败别把原文件毁掉"这件事。
-    """
-    if path.is_dir():
-        raise EnvFileError(f"{path} 是个目录，不是 .env 文件")
-    if path.is_file():
-        text, encoding, newline = read_env_text(path)
-    else:
-        text, encoding, newline = "", "utf-8", "\n"
-    # 原文件以换行结尾（或是刚建的空文件）就保持这个习惯：有些工具按行读，
-    # 少了最后那个换行会把最后一行当成"没写完"。
-    trailing = text.endswith(("\n", "\r")) or not text
-    written: set[str] = set()
-    out: list[str] = []
-    for raw in text.splitlines():
-        prefix, probe = split_export_prefix(raw.strip())
-        if probe and not probe.startswith("#") and "=" in probe:
-            key = probe.split("=", 1)[0].strip()
-            if key in updates:
-                out.append(f"{prefix}{key}={updates[key]}")
-                written.add(key)
-                continue
-        out.append(raw)
-    for key, value in updates.items():
-        if key not in written:
-            out.append(f"{key}={value}")
-    body = newline.join(out)
-    _atomic_write(path, (body + (newline if trailing else "")).encode(encoding))
-    _restrict(path)
-
-
-def _restrict(path: Path) -> None:
-    """POSIX 上收紧成 600（`mkstemp` 本来就是 600，这里是兜底）。
-
-    Windows 上**故意什么都不做**：那边改权限要另一套 API（ACL），而且多半改不对；
-    假装保护过了比不保护更坏——它会让人以为这份文件已经安全了。
-    """
-    if sys.platform == "win32":
-        return
-    with contextlib.suppress(OSError):
-        path.chmod(0o600)
+# 临时文件的命名、陈旧阈值与那五个写辅助（`_temp_candidates` / `_sweep_stale_temps`
+# / `_atomic_write` / `_restrict` / `_write_updates`）都搬到了 `spoolkit/envfile.py`：
+# 向导写的是同一份文件，读写的判断必须只有一处（见模块开头）。这里不再留副本。
 
 
 def _parse_pairs(items: list[str]) -> tuple[dict[str, str], list[str]]:
@@ -232,7 +117,7 @@ def _do_set(items: list[str]) -> int:
         print(USAGE, file=sys.stderr)
         return 2
     path = settings.env_path()
-    _write_updates(path, updates)
+    update_env_file(path, updates)
     print(f"已写入 {path}（只印形状，不印值）：")
     for key, value in updates.items():
         print(f"  {key} = {mask(value)}")
@@ -279,7 +164,7 @@ def _do_import(source_raw: str, only: list[str]) -> int:
         print(f"{source} 里有这些键：{'、'.join(sorted(table))}", file=sys.stderr)
         return 1
     target = settings.env_path()
-    _write_updates(target, picked)
+    update_env_file(target, picked)
     print(f"从 {source} 搬到 {target}（{len(picked)} 个键；**来源文件没动**）：")
     for key in sorted(picked):
         print(f"  {key} = {mask(picked[key])}")

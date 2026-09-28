@@ -374,7 +374,10 @@ def test_set_写失败时原文件毫发无伤(tmp_path: Path, monkeypatch, caps
     临时文件 + `os.replace`，所以这里把 `os.replace` 打桩成失败，原文件必须**一字不动**，
     目录里也不许留临时文件。
     """
-    from spoolkit.cli.commands import env as env_module
+    # 写路径（原子替换与临时文件）现在住在 `envfile`——与向导共用同一份实现，
+    # 所以打桩点跟着实现走。打在 `env.py` 上会**静默失效**（那个模块已经没有
+    # `os` / `tempfile`），结果是这条用例假绿。
+    from spoolkit import envfile as env_module
 
     path = _user_env(tmp_path, monkeypatch, "QQ_AppID=old\nQQ_AppSecret=sec\n")
     before = path.read_bytes()
@@ -489,7 +492,10 @@ def test_临时文件名字要落在_gitignore_的_env_规则里(tmp_path: Path,
 
     上一版的前缀是 `.{name}.` → `..env.XXXX.tmp`，`git check-ignore` 判定 **NOT ignored**。
     """
-    from spoolkit.cli.commands import env as env_module
+    # 写路径（原子替换与临时文件）现在住在 `envfile`——与向导共用同一份实现，
+    # 所以打桩点跟着实现走。打在 `env.py` 上会**静默失效**（那个模块已经没有
+    # `os` / `tempfile`），结果是这条用例假绿。
+    from spoolkit import envfile as env_module
 
     path = _user_env(tmp_path, monkeypatch, "QQ_AppID=1\n")
     seen: list[str] = []
@@ -510,7 +516,10 @@ def test_临时文件名字要落在_gitignore_的_env_规则里(tmp_path: Path,
 
 def test_被打断时不留含密钥的临时文件(tmp_path: Path, monkeypatch, capsys) -> None:
     """三轮评审 Important：`except OSError` 兜不住 Ctrl-C，含明文密钥的临时文件会永久累积。"""
-    from spoolkit.cli.commands import env as env_module
+    # 写路径（原子替换与临时文件）现在住在 `envfile`——与向导共用同一份实现，
+    # 所以打桩点跟着实现走。打在 `env.py` 上会**静默失效**（那个模块已经没有
+    # `os` / `tempfile`），结果是这条用例假绿。
+    from spoolkit import envfile as env_module
 
     path = _user_env(tmp_path, monkeypatch, "QQ_AppID=old\n")
     before = path.read_bytes()
