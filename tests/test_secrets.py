@@ -325,3 +325,114 @@ def test_事故现场_在别处起桥也能拿到用户级凭据(tmp_path: Path,
 
     assert value == "102000000"
     assert str(user_env) in source
+
+
+# --- `.env` 的写法（**向导与 `spool env` 共用同一条路**，评审 I-1） ---
+#
+# 为什么写路径也要一组用例：向导的落点这一批从"工作区 `.env`"变成了**用户级**
+# 那份（`%APPDATA%\spoolkit\.env`）＝这台机器上**全部凭据**所在。老写法是
+# `read_text` + `write_text`：先截断再写（写一半失败＝所有密钥不可恢复）、
+# 只认 UTF-8（记事本存的 UTF-16 会**在写之前**就抛 UnicodeDecodeError，
+# 于是 `spool bridge` / `spool web` 整个起不来）、也不保留原编码与换行。
+# 现在两条写路径都走 `envfile.update_env_file`。
+
+
+def _update(path: Path, **updates: str) -> None:
+    from spoolkit.envfile import update_env_file
+
+    update_env_file(path, updates)
+
+
+def test_utf16的目标改得动且仍是utf16(tmp_path: Path) -> None:
+    """记事本存"Unicode"的 `.env`：能改，而且**改完还是 UTF-16**。
+
+    这条同时钉住"崩"与"悄悄转码"两种坏法：转成 UTF-8 之后 git 会显示整个文件都动了，
+    而人下一次拿记事本打开又会看到乱码。
+    """
+    from spoolkit.envfile import load_env_file
+
+    path = tmp_path / ".env"
+    path.write_bytes("QQ_AppID=old\nOTHERS=1\n".encode("utf-16"))
+
+    _update(path, QQ_AppID="new")
+
+    raw = path.read_bytes()
+    assert raw[:2] in (b"\xff\xfe", b"\xfe\xff"), "写完必须还是 UTF-16（带 BOM）"
+    assert load_env_file(path) == {"QQ_AppID": "new", "OTHERS": "1"}
+
+
+def test_带bom的目标同键替换只剩一行(tmp_path: Path) -> None:
+    """UTF-8 BOM 的目标：同键替换后**只剩一行**（不追加重复键），而且 BOM 还在。
+
+    "只剩一行"是向导最容易踩的坑：老写法若没认出这一行（BOM 让键名变成
+    `\\ufeffGEMINI_API_KEY`），它就会在下面**再追加一份**，于是文件里两行同名键、
+    读到的却还是旧值。
+    """
+    path = tmp_path / ".env"
+    path.write_bytes("GEMINI_API_KEY=old\nOTHERS=1\n".encode("utf-8-sig"))
+
+    _update(path, GEMINI_API_KEY="new")
+
+    raw = path.read_bytes()
+    assert raw[:3] == b"\xef\xbb\xbf"
+    text = raw.decode("utf-8-sig")
+    assert text.count("GEMINI_API_KEY") == 1
+    assert "GEMINI_API_KEY=new" in text
+    assert "OTHERS=1" in text
+
+
+def test_crlf的目标换行照旧(tmp_path: Path) -> None:
+    """整份改写成 LF 在 git 里就是"整个文件都改了"——换行要按原文还原。"""
+    path = tmp_path / ".env"
+    path.write_bytes("QQ_AppID=old\r\nOTHERS=1\r\n".encode("utf-8"))
+
+    _update(path, QQ_AppID="new")
+
+    text = path.read_bytes().decode("utf-8")
+    assert text == "QQ_AppID=new\r\nOTHERS=1\r\n"
+
+
+def test_注释与别人的键原样保留_同前缀的键不被误删(tmp_path: Path) -> None:
+    """向导老写法按"行首是不是 GEMINI_API_KEY"删行，会把 `GEMINI_API_KEY_BACKUP`
+
+    一起删掉。写契约只替换**同名键**，别人的行（含注释、空行）一个字节都不动。
+    """
+    path = tmp_path / ".env"
+    path.write_bytes(
+        "# 我的备注\n\nGEMINI_API_KEY=old\nGEMINI_API_KEY_BACKUP=keep-me\n".encode("utf-8")
+    )
+
+    _update(path, GEMINI_API_KEY="new")
+
+    text = path.read_bytes().decode("utf-8")
+    assert "# 我的备注" in text
+    assert "GEMINI_API_KEY_BACKUP=keep-me" in text
+    assert "GEMINI_API_KEY=new" in text
+    assert "GEMINI_API_KEY=old" not in text
+
+
+def test_替换失败时原文件一字不动且不留临时文件(tmp_path: Path, monkeypatch) -> None:
+    """`os.replace` 失败（Windows 上目标被别的进程占着很常见）＝原文件毫发无伤。
+
+    这条是那个"先截断再写"的直接证伪：`open(path,"wb")` 一调用文件就已经是 0 字节，
+    所以只要实现退回 `write_bytes`/`write_text`，下面这个断言立刻红。
+    """
+    from spoolkit import envfile
+
+    roaming = tmp_path / "roaming"
+    path = roaming / ".env"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes("QQ_AppID=old\nQQ_AppSecret=sec\n".encode("utf-8"))
+    before = path.read_bytes()
+
+    def boom(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(envfile.os, "replace", boom)
+
+    with pytest.raises(envfile.EnvFileError) as exc:
+        envfile.update_env_file(path, {"QQ_AppID": "new"})
+
+    assert "写不了" in str(exc.value) and "Traceback" not in str(exc.value)
+    assert path.read_bytes() == before  # 一字不动
+    assert [p.name for p in roaming.iterdir()] == [".env"]  # 也没留含明文密钥的临时文件

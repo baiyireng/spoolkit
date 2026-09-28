@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from spoolkit import settings
+from spoolkit import envfile, settings
 from spoolkit.llm.gemini import load_env_file
 from spoolkit.llm.llamacpp import DEFAULT_BASE_URL
 
@@ -112,22 +112,20 @@ def _write_env_key(project_root: Path | None, key: str) -> Path:
 
     有当前工作区就写它根下那份（工作区级的密钥优先于用户级）；
     `project_root=None`（机器级入口）写用户级那份——**绝不拿 cwd 顶数**。
+
+    写法走 `envfile.update_env_file`，与 `spool env` 是**同一份实现**（Task 2 三轮
+    评审做出来的那一套）：原子写（同目录临时文件 + `os.replace`；写一半失败或被打断
+    都不留半个文件、也不留含明文密钥的临时文件）、编码与换行按原文还原、注释与别人的
+    键原样保留。落点改成用户级之后这三条不再是讲究：那份文件是**这台机器上全部凭据**
+    所在，而老写法（`read_text`/`write_text`）一遇到记事本存的 UTF-16 就会在**写之前**
+    崩掉整个向导，于是 `spool bridge` / `spool web` 直接起不来。
     """
     path = (
         project_root / ".env"
         if project_root is not None
         else settings.env_path()
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = []
-    if path.is_file():
-        lines = [
-            line
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if not line.strip().startswith("GEMINI_API_KEY")
-        ]
-    lines.append(f"GEMINI_API_KEY={key}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    envfile.update_env_file(path, {"GEMINI_API_KEY": key})
     return path
 
 

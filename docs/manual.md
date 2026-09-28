@@ -119,6 +119,10 @@
 代码里这件事只写在一处：`kernel/target.py::resolve_target(use_cwd=False)`。不认 cwd 的入口
 只认**显式参数、客户端指向、登记表**；说不清就报错让人点名，**不拿 cwd 顶数**。
 
+**迁移口径**：`serve` / `hub` 不给 `--root` 时**不再认 cwd**，是本批唯一一处默默改掉的老行为——
+`cd 某个项目 && spool serve` 从"服务这个项目"变成"机器级起来、页面先空着"，老习惯请改写成
+`spool serve --root .`（或先 `spool ws add` 登记一次）。
+
 为什么这条要写死——2026-09-27 的真实事故：在 `C:\Users\32615`（家目录）敲
 `spool bridge --channel qqbot …`，它去找 `C:\Users\32615\.env`，而凭据好好地在
 `D:\workSpace\agentWorkSpace\.env` 里。当时的 `--root` 缺省是空串，而 `Path("")` 恰好就是
