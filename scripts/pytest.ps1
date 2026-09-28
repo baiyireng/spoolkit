@@ -29,6 +29,10 @@
        $env:PYTEST_HANG_SECONDS = '45'   # 单条用例超时，默认 90 秒
        # 卡住之后：看下面的"进度日志"，里面最后一行就是凶手；
        # 下一轮用 -k 'not <用例名>' 把已判定的挂死项排掉，先让其余部分跑完。
+
+   进度日志的位置**已经有人设了就不覆盖**（`$env:PYTEST_HANG_LOG`）：几个 pytest
+   并发跑时共用一份日志，会让"读日志找凶手"的那一方看到别的轮次的 START/END，
+   报出根本没收集的用例卡死（`pytest_bounded.ps1` 就是靠这条每轮指自己的文件）。
 #>
 [CmdletBinding()]
 param(
@@ -66,9 +70,19 @@ $env:PYTEST_DEBUG_TEMPROOT = $tempRoot
 
 # ④ 挂死防护：行缓冲（被杀也留证据）+ 进度日志写到仓库里（好读）
 $env:PYTHONUNBUFFERED = '1'
-$progressLog = Join-Path $mainRepo '.tmp\pytest-progress.log'
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent $progressLog) | Out-Null
-$env:PYTEST_HANG_LOG = $progressLog
+# **有人显式设了 PYTEST_HANG_LOG 就不覆盖**：进度日志是"所有并发 pytest 共用一份"
+# 的那一类东西，两边往同一个文件里追加 START/END，读日志的那一方就会看到
+# "有 START 没有 END"——也就是**根本没收集的用例被报成卡死**（本批真踩过：
+# `pytest_bounded.ps1` 只跑了两个文件，却被报出 3 条 `tests/kernel` / `tests/llm`
+# 的"卡死"并写进隔离表）。所以让调用方（`pytest_bounded.ps1` 每轮一份自己的日志）
+# 能指自己的文件，是这一层唯一的解法。自己跑时才用默认那份。
+if (-not $env:PYTEST_HANG_LOG) {
+    $env:PYTEST_HANG_LOG = Join-Path $mainRepo '.tmp\pytest-progress.log'
+}
+# 下面印的是**真正用的那一份**（可能是调用方指的），否则人不知道该去哪儿看堆栈。
+$progressLog = $env:PYTEST_HANG_LOG
+$logDir = Split-Path -Parent $progressLog
+if ($logDir) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
 
 # ⑤ rg：PATH 里没有再去找常见位置
 if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
@@ -91,7 +105,7 @@ if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
 Write-Host "repo     : $Repo"
 Write-Host "python   : $python"
 Write-Host "temproot : $tempRoot"
-Write-Host "进度日志 : $progressLog   （卡住时看这里最后一行；单条超时 $($env:PYTEST_HANG_SECONDS) 秒可调）"
+Write-Host "进度日志 : $progressLog   （卡住时看这里最后一行；单条超时 $($env:PYTEST_HANG_SECONDS) 秒可调，默认 90）"
 Write-Host ""
 
 Push-Location $Repo

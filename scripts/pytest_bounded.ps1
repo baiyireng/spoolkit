@@ -12,10 +12,15 @@
 "先把没挂的那些跑完，看看还有没有别的问题"。这个脚本就干这件事：
 
 1. 跑一轮（带防护）；
-2. 读进度日志：**最后一行是"开始 X"而没有对应的"结束 X"** → X 就是挂死项；
+2. 读**这一轮自己的**进度日志：**最后一行是"开始 X"而没有对应的"结束 X"** → X 就是挂死项；
 3. 把 X 追加记进 `-QuarantineFile`（默认 `.tmp\pytest-quarantine.txt`，带时间戳与原因），
    然后 `-k "not X"` 重跑，最多 `-Rounds` 轮（默认 3）——一轮排掉一个挂死项；
 4. 最后打印：隔离了哪些、其余部分的**真实**通过/失败情况。
+
+⚠️ 每轮用的是**自己那份**进度日志（`.tmp\pytest-progress-<时间戳>-<进程号>-r<轮次>.log`，
+每轮开跑前印出来）。共用一份是不行的：并发跑的另一个 pytest 会往同一个文件里追加
+START/END，于是这一轮读到**别人的**"有 START 没有 END"，把根本没被收集的用例报成
+卡死（本批真踩过）。日志文件因此不再固定在 `.tmp\pytest-progress.log`。
 
 "自行解决"的边界要说清：它**不修**挂死的用例，也不假装没发生——只是把"一条挂死拖垮整轮"
 变成"一条挂死被记账、其余照跑"。要不要修、怎么修，看堆栈（进度日志里有）。
@@ -40,13 +45,27 @@ param(
 $ErrorActionPreference = 'Stop'
 $mainRepo = Split-Path -Parent $PSScriptRoot
 if (-not $QuarantineFile) { $QuarantineFile = Join-Path $mainRepo '.tmp\pytest-quarantine.txt' }
-$progressLog = Join-Path $mainRepo '.tmp\pytest-progress.log'
+$logDir = Join-Path $mainRepo '.tmp'
 $runner = Join-Path $PSScriptRoot 'pytest.ps1'
 
 $excluded = New-Object System.Collections.ArrayList
 
 for ($round = 1; $round -le $Rounds; $round++) {
     $env:PYTEST_HANG_SECONDS = "$HangSeconds"
+    # **每轮一份自己的进度日志**（名字带时间戳 + 进程号 + 轮次）。
+    #
+    # 为什么必须是"自己的"：进度日志是**所有并发 pytest 共用一份**的那类东西。
+    # 只指定两个文件跑这一轮时，另一个正在跑的整套测试仍在往同一份日志里追加
+    # START/END，于是这一轮读到的就是**别轮的**"有 START 没有 END"——报出
+    # 根本没被收集的用例卡死，还写进隔离表（本批真踩过：只给两个文件，却被报出
+    # `tests/kernel` / `tests/llm` 的 3 条"卡死"，那一轮的真实汇总却是 44 passed）。
+    # 它同时通过 `PYTEST_HANG_LOG` 传给子调用（`pytest.ps1` 已经设过就不覆盖）。
+    $progressLog = Join-Path $logDir (
+        'pytest-progress-{0}-{1}-r{2}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $PID, $round
+    )
+    $env:PYTEST_HANG_LOG = $progressLog
+    # 万一名字撞上（同一秒 + 同一个进程号 + 同一轮），旧文件里的 START/END 会被
+    # 当成这一轮的——那是同一个假挂死，所以这里照样先清一次。
     Remove-Item -LiteralPath $progressLog -ErrorAction SilentlyContinue
 
     $extra = @()
@@ -59,6 +78,8 @@ for ($round = 1; $round -le $Rounds; $round++) {
     } else {
         Write-Host "第 $round 轮：先跑一遍（单条超时 ${HangSeconds}s）"
     }
+    # 每轮都印出来：不印的话人根本不知道去哪儿看堆栈（子调用也会印一遍它的）。
+    Write-Host "本轮进度日志：$progressLog"
 
     # 注意别用 `$args`：那是 PowerShell 的自动变量，赋值与展开都不按你想的来
     # （踩过：`-Repo` 被当成位置参数的值传进去，报"找不到路径 -Repo"）。
