@@ -1,11 +1,11 @@
 ﻿<#
-跑全套测试。把本机（Windows + 文件沙箱）会拦住的四件事一次设好。
+跑全套测试。把本机（Windows + 文件沙箱）会拦住的五件事一次设好。
 
     scripts\pytest.ps1                                  # 跑主 checkout
     scripts\pytest.ps1 -Repo .worktrees\ws-session-kernel  # 跑某个 worktree
     scripts\pytest.ps1 tests\kernel                      # 只跑一部分（参数原样透传）
 
-为什么需要它——四条都是踩过的坑，别再手抄漏一条：
+为什么需要它——五条都是踩过的坑，别再手抄漏一条：
 
 1. **PYTHONPATH 必须指向被跑的那份源码。** `spool` 是 editable 装到主
    checkout 的；在 worktree 里不设这条，测试 import 到的是 main 那份 spoolkit
@@ -19,6 +19,16 @@
 4. **PATH 里要有 rg**（`tools/search.py` 依赖），沙箱给的 PATH 通常只有
    preset-runtime，ripgrep 找不到会连带 `test_search*` / `test_view` / `test_verify`
    一起红——那不是回归。
+5. **挂死要变成"有堆栈的失败"，不能把调用方一起拖死。** 用例里有等 stdin、
+   等 socket、等子进程退出的东西，挂在一次 pytest 里的代价是三倍：输出被块缓冲、
+   杀掉后连"停在哪条"都没留下；跑测试的那条命令不返回，整轮工作丢失；残留进程
+   还会毒化后面几次运行。靠 `scripts/pytest_hang_guard.py`（只用标准库的
+   `faulthandler`）解决：逐条用例计时，到点打印**全线程堆栈**再退出，并把正在跑的
+   用例名逐行 flush 进进度日志。可调：
+
+       $env:PYTEST_HANG_SECONDS = '45'   # 单条用例超时，默认 90 秒
+       # 卡住之后：看下面的"进度日志"，里面最后一行就是凶手；
+       # 下一轮用 -k 'not <用例名>' 把已判定的挂死项排掉，先让其余部分跑完。
 #>
 [CmdletBinding()]
 param(
@@ -46,15 +56,21 @@ if (-not (Test-Path -LiteralPath $python)) {
 $env:PYTHONPATH = @((Join-Path $Repo 'src'), $PSScriptRoot) -join ';'
 $env:PYTHONIOENCODING = 'utf-8'
 
-# ② 插件：本进程 + 派生出去的 pytest 子进程都要带
-$env:PYTEST_ADDOPTS = '-p pytest_sandbox_compat'
+# ② 插件：本进程 + 派生出去的 pytest 子进程都要带（挂死防护同理）
+$env:PYTEST_ADDOPTS = '-p pytest_sandbox_compat -p pytest_hang_guard'
 
 # ③ 临时根：仓库外、每次新建
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("spoolkit-pytest-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
 $env:PYTEST_DEBUG_TEMPROOT = $tempRoot
 
-# ④ rg：PATH 里没有再去找常见位置
+# ④ 挂死防护：行缓冲（被杀也留证据）+ 进度日志写到仓库里（好读）
+$env:PYTHONUNBUFFERED = '1'
+$progressLog = Join-Path $mainRepo '.tmp\pytest-progress.log'
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $progressLog) | Out-Null
+$env:PYTEST_HANG_LOG = $progressLog
+
+# ⑤ rg：PATH 里没有再去找常见位置
 if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA 'Programs\cursor\resources\app\node_modules\@vscode\ripgrep\bin'),
@@ -75,11 +91,12 @@ if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
 Write-Host "repo     : $Repo"
 Write-Host "python   : $python"
 Write-Host "temproot : $tempRoot"
+Write-Host "进度日志 : $progressLog   （卡住时看这里最后一行；单条超时 $($env:PYTEST_HANG_SECONDS) 秒可调）"
 Write-Host ""
 
 Push-Location $Repo
 try {
-    & $python -m pytest -q -p no:cacheprovider -p pytest_sandbox_compat @PytestArgs
+    & $python -m pytest -q -p no:cacheprovider -p pytest_sandbox_compat -p pytest_hang_guard @PytestArgs
     exit $LASTEXITCODE
 }
 finally {
