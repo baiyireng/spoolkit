@@ -24,6 +24,7 @@ from spoolkit.cli.commands.revert import revert_command
 from spoolkit.cli.commands.run import run
 from spoolkit.cli.commands.serve import serve_command
 from spoolkit.cli.commands.hub import hub_command
+from spoolkit.cli.commands.shortcuts import qq_command, web_command
 from spoolkit.cli.commands.diagnose import diagnose_command
 from spoolkit.cli.commands.session import session_command
 from spoolkit.cli.commands.ws import ws_command
@@ -239,17 +240,22 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=run)
 
 
-def _add_web_args(parser: argparse.ArgumentParser) -> None:
+def _add_web_args(parser: argparse.ArgumentParser, default: bool | None = True) -> None:
     """联网取用（research / web_fetch / web_read）。
 
     **默认开**：QQ、网页壳、CLI 同一套能力。网页内容仍按不可信资料处理
     （里面的「指令」不是用户指令；内网地址硬拦）。不要就 `--no-web`。
     白名单/黑名单/上限一律由调用方给，这里不写死。
+
+    `default=None` 是给**短命令**（`web` / `qq`）用的第三个取值：
+    "用户没表态"。它们的默认值来自用户配置 `[channel.<名字>]`，而 argparse
+    只要写了 `default=True`，解析完就成了一次"显式给的"，配置里那个
+    `web = false` 永远盖不过它——这正是"设置了却没生效"的形状。
     """
     parser.add_argument(
         "--web",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=default,
         help="联网取用（默认开）：research 查资料；--no-web 关掉",
     )
     parser.add_argument(
@@ -365,8 +371,26 @@ def _add_ws_command(sub: argparse._SubParsersAction) -> None:
     # 注意：`ws` 自己**不带** --root，它是用来选工作区的，不是被解析的对象。
 
 
-def _add_serve_command(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("serve", help="启动 Web UI 壳")
+def _add_serve_parser(
+    sub: argparse._SubParsersAction,
+    name: str,
+    help_text: str,
+    *,
+    func,
+    web_default: bool | None = True,
+    description: str = "",
+) -> argparse.ArgumentParser:
+    """`serve` / `hub` / `web` 共用的那组参数（三者的参数面本来就一样）。
+
+    放在一处是因为**参数面分叉的症状是"这条命令能设、那条不能"**：短命令
+    `spool web` 的契约就是"等价于 `spool hub` 不带通道"，它多一个少一个参数
+    都算说话不算数。`qq` 不在这里——它的参数面是 `bridge` 那一套。
+
+    `description` 与 `help_text` 是两处地方：`help_text` 只在 `spool --help`
+    那张命令表里出现，`description` 才是 `spool web --help` 自己的第一屏。
+    短命令要靠后者说清"我是机器级的、任意目录可用"，否则人得先读设计文档。
+    """
+    parser = sub.add_parser(name, help=help_text, description=description or None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -390,45 +414,50 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
         metavar="目录",
         help="授权额外可读目录（可重复），转发给子进程",
     )
-    _add_web_args(parser)
+    _add_web_args(parser, default=web_default)
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     # `--root` 不给时不要替它自动找一个：留给内核按"当前目录 → 网页壳指针 →
     # 登记表"退。少了这一条，从任何工作区目录敲 `spool serve` 都会被填成
     # `explicit`，`client="web"` 那层指向永远读不到（Task 6 评审的 Important-1）。
-    parser.set_defaults(func=serve_command, optional_root=True)
+    # `web_default` 只用来给 `--web` 定默认值，不进 Namespace：留一个没人读的
+    # 属性在 `args` 上，下一个读它的人会以为它管着什么。
+    parser.set_defaults(func=func, optional_root=True)
+    return parser
+
+
+def _add_serve_command(sub: argparse._SubParsersAction) -> None:
+    _add_serve_parser(sub, "serve", "启动 Web UI 壳", func=serve_command)
+
+
+def _add_web_command(sub: argparse._SubParsersAction) -> None:
+    """`spool web`：机器级网页壳的短命令（= `hub` 不带通道）。
+
+    为什么值得一个短命令：网页壳是**机器级**的（不给 `--root` 就不认 cwd，
+    进去再选工作区），可它的名字却叫 `hub`——而"在任意目录敲一下就能起手"
+    这件事，短本身就有一半功劳。`hub` 原样保留、语义不变。
+    """
+    _add_serve_parser(
+        sub,
+        "web",
+        "起机器级网页壳（= hub 不带通道；任意目录可用，进去再选工作区）",
+        func=web_command,
+        web_default=None,
+        description=(
+            "机器级网页壳：**任意目录**都能起（不认 cwd），不给 --root 就不钉工作区，"
+            "进去再选工作区与会话。等价于 `spool hub` 不带 --channel 的那一半；"
+            "hub 有的参数它都有。要连聊天通道就用 `spool hub --channel …` 或 `spool qq`。"
+        ),
+    )
 
 
 def _add_hub_command(sub: argparse._SubParsersAction) -> None:
     """产品内核：网页壳 + 可选 bridge。不启 llama / 隧道。"""
-    parser = sub.add_parser(
+    parser = _add_serve_parser(
+        sub,
         "hub",
-        help="起网页壳；声明了通道才再拉 bridge（不启 llama-server / 隧道）",
+        "起网页壳；声明了通道才再拉 bridge（不启 llama-server / 隧道）",
+        func=hub_command,
     )
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument(
-        "--session", default="", help="会话名。留空 = 用网页壳的指针，没有就 cli"
-    )
-    parser.add_argument("--provider", default="")
-    parser.add_argument("--model", default="")
-    parser.add_argument(
-        "--script",
-        default="",
-        help="仅测试回放：fake 的应答脚本。fake 不能写代码，真实任务不要走这条",
-    )
-    parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
-    parser.add_argument("--proxy", default="")
-    parser.add_argument("--policy", default="")
-    parser.add_argument("--scope", default="")
-    parser.add_argument(
-        "--allow-read",
-        action="append",
-        default=[],
-        metavar="目录",
-        help="授权额外可读目录（可重复），转发给子进程",
-    )
-    _add_web_args(parser)
-    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.add_argument(
         "--channel",
         default="",
@@ -468,7 +497,99 @@ def _add_hub_command(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="模型/外接服务从通变断时，给最近聊天发一句（默认关，避免刷屏）",
     )
-    parser.set_defaults(func=hub_command, optional_root=True)
+    # `optional_root` 与 func 已由 `_add_serve_parser` 设好，这里不再重复。
+
+
+def _add_qq_command(sub: argparse._SubParsersAction) -> None:
+    """`spool qq`：按用户配置起 QQ 官方机器人通道。
+
+    **长参数全部有默认值**（`[channel.qqbot]` + 三层配置），命令行仍可覆盖；
+    凭据走用户级 `.env`（机器级入口不认 cwd）。它就是"在 `C:\\Users\\32615`
+    直接敲一下就能起来"的那条命令——用户真这么报过一次，而当时要敲六个参数。
+    """
+    parser = sub.add_parser(
+        "qq",
+        help="起 QQ 官方机器人通道（= bridge --channel qqbot；默认值来自用户配置 [channel.qqbot]）",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="一轮任务最多等多少秒；不给则用 [channel.qqbot] 里的 timeout，再不然 900",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="只看凭据与连通性，不起通道（等价于 bridge --check）",
+    )
+    parser.add_argument(
+        "--bridge-proxy",
+        default=None,
+        metavar="地址",
+        help="通道自己出网走哪个代理；不给则用 [channel.qqbot] 的 proxy",
+    )
+    parser.add_argument("--token", default="", help="（QQ 用不到；留给通道插件）")
+    parser.add_argument("--appid", default="", help="QQ 机器人的 AppID（或用用户级 .env）")
+    parser.add_argument("--secret", default="", help="QQ 机器人的 AppSecret（或用用户级 .env）")
+    parser.add_argument(
+        "--sandbox", action="store_true", help="QQ 机器人用沙箱环境（sandbox.api.sgroup.qq.com）"
+    )
+    parser.add_argument(
+        "--access",
+        choices=("pairing", "allowlist", "open"),
+        default="pairing",
+        help="通道准入：pairing（默认）/ allowlist（只放行 --allow-user）/ open（谁都行）",
+    )
+    parser.add_argument(
+        "--allow-user",
+        action="append",
+        default=[],
+        metavar="用户",
+        help="白名单（可重复，按 openid）；给了就切到名单模式",
+    )
+    parser.add_argument("--user", default="local", help="假通道里模拟的用户名（QQ 用不到）")
+    parser.add_argument("--max-chars", type=int, default=4000, help="单条消息长度上限")
+    parser.add_argument(
+        "--approve", default="", metavar="配对码", help="批准一个配对码然后退出"
+    )
+    parser.add_argument(
+        "--policy",
+        choices=POLICIES,
+        default=None,
+        help="子进程的授权策略；不给则用 [channel.qqbot] 的 policy（再不然空=按已保存的设置）",
+    )
+    parser.add_argument(
+        "--scope",
+        default=None,
+        help="允许自动落盘的范围；不给则用 [channel.qqbot] 的 scope（`--scope \"\"` 是不许落盘）",
+    )
+    parser.add_argument(
+        "--session", default="", help="会话名。留空 = 用这条聊天的指向，没有就 bridge"
+    )
+    parser.add_argument(
+        "--notify-disconnect",
+        action="store_true",
+        help="模型/外接服务从通变断时，给最近聊天发一句（默认关）",
+    )
+    _add_provider_args(parser, default="")
+    # `default=None`：这三个的默认值来自 `[channel.qqbot]`，而 argparse 只要写了
+    # 一个非 None 的默认值，解析完就成了一次"显式给的"——配置永远盖不过它。
+    _add_web_args(parser, default=None)
+    parser.add_argument(
+        "--script",
+        default="",
+        help="仅测试回放：fake 的应答脚本 JSON。真实任务不要走这条",
+    )
+    parser.add_argument(
+        "--allow-read",
+        action="append",
+        default=[],
+        metavar="目录",
+        help="授权额外可读目录（可重复，一次性，不写进配置）",
+    )
+    # `--root` 不给仍是**有意义的取值**：服务整台机器，落到哪由"这条聊天的
+    # 指针"决定。所以默认空串 + optional_root，main() 不会拿 cwd 顶数。
+    parser.set_defaults(func=qq_command, optional_root=True, channel="qqbot", root="")
 
 
 def _add_diagnose_command(sub: argparse._SubParsersAction) -> None:
@@ -843,6 +964,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_session_command(sub)
     _add_serve_command(sub)
     _add_hub_command(sub)
+    _add_web_command(sub)
+    _add_qq_command(sub)
     _add_diagnose_command(sub)
     _add_limits_command(sub)
     _add_config_command(sub)

@@ -29,6 +29,40 @@ def _render(effective: dict[str, str], path) -> str:
     return "\n".join(lines)
 
 
+def _render_channels() -> list[str]:
+    """`[channel.<名字>]` 那几节现在是什么（短命令 `spool qq` 用的就是它）。
+
+    为什么值得印：这一节是**人手写进 TOML 的**（`--set` 管不到子表），于是它是
+    全仓里唯一一处"配错了不会有任何反馈"的地方——写错一个键名，症状就是
+    `spool qq` 的某个参数悄悄回到默认值。印出来 + 把认不出的键指出来，
+    是这里唯一能给的反馈。
+    """
+    names = settings.known_channels()
+    if not names:
+        return []
+    lines = ["", "通道默认值（短命令 spool qq / 网页壳用；命令行仍可覆盖）："]
+
+    def _shape(value) -> str:
+        # 值照印：这一节是**非密钥**（密钥走 `spool env`），而"我明明配了"的唯一
+        # 解药就是看见它现在到底是多少。形状照 `settings.KEYS` 那张表：`spool config`
+        # 一直是把生效值打出来的。
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return "（空）" if str(value) == "" else str(value)
+
+    for name in names:
+        values = settings.channel_options(name)
+        lines.append(f"  [channel.{name}]（{settings.effective_config_path()}）")
+        for key in settings.CHANNEL_KEYS:
+            lines.append(
+                f"    {key:<8}{_shape(values.options[key]):<10}{values.source(key)}"
+            )
+        notes = values.notes()
+        if notes:
+            lines.extend(f"  ⚠ {line}" for line in notes.splitlines())
+    return lines
+
+
 def config_command(args: argparse.Namespace) -> int:
     path = settings.config_path()
     _, problem = settings.read_config(path)
@@ -75,4 +109,7 @@ def config_command(args: argparse.Namespace) -> int:
         effective[key] = value
         effective[f"{key}_source"] = source
     print(_render(effective, path))
+    channels = _render_channels()
+    if channels:
+        print("\n".join(channels))
     return 0

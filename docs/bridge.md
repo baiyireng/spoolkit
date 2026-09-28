@@ -143,6 +143,67 @@ spool bridge --channel wecom --allow-user zhangsan --policy ask
 > 工作区 `.env`；机器级（不给 `--root`）→ 用户级 `.env`（`spool env set`）。
 > 改名前的 `AGENTS_DEV_*` 名字**仍然认**，所以已有的 .bat 不用改。
 
+## 用户配置：`[channel.<名字>]`
+
+起一条通道要敲的那几个参数（`--bridge-proxy` / `--policy` / `--scope` / `--timeout` /
+`--web`）**没有一个属于"这一次"**，它们是这台机器上这条通道的默认值。所以它们可以写进
+用户配置文件（`spool config --path` 那份）的一个子表里：
+
+```toml
+[channel.qqbot]
+proxy   = "socks5://127.0.0.1:1080"   # 通道自己出网；等价于 --bridge-proxy
+policy  = "ask"                       # 子进程的授权策略
+scope   = "**"                        # 允许自动落盘的范围
+timeout = 240                         # 一轮最多等多少秒（与 --timeout 同一个单位：秒）
+web     = true                        # 联网取用
+```
+
+这五个键就是 `spool qq` 会补的那五个。这一节里还认一个 `root`（`spool config` 会把它
+一起印出来），但**短命令不从配置里读它**：工作区是在 `main()` 那一步解析的，那时
+"没给 `--root`"（机器级）与"给了空串"已经是同一个值，回过头再拿配置去补就等于把
+"服务整台机器"这条契约改掉。要钉住工作区，在命令行上给：`spool qq --root D:\某个工作区`。
+
+这个子表**只有短命令 `spool qq` 用**（`spool web` 没有通道名，读不了它）。
+`spool bridge` / `spool hub` 的参数默认值一个字没变——改长命令等于改既有行为。
+
+优先级 **命令行 > 环境变量 > 用户配置 > 内置默认**：
+
+| 层 | 长什么样 |
+|---|---|
+| 命令行 | `spool qq --policy ask --timeout 240`。**给了就到此为止**，包括给空串（`--scope ""` = 不许自动落盘）|
+| 环境变量 | `SPOOLKIT_CHANNEL_QQBOT_PROXY` / `..._POLICY` / `..._SCOPE` / `..._TIMEOUT` / `..._WEB`（旧前缀 `AGENTS_DEV_CHANNEL_*` 也认，新的优先）|
+| 用户配置 | 上面那个 `[channel.qqbot]` |
+| 内置默认 | `proxy=""`、`policy=""`、`scope=""`、`timeout=900`、`web=true` |
+
+```powershell
+spool qq                    # 参数全来自上面那张表
+spool qq --check            # 只看凭据与连通性，不起通道
+spool qq --policy auto      # 这一次改一个
+```
+
+起手第一屏会印出生效值与来源（在 stderr 上）——**只印这一层真的用上了的那五个键**：
+
+```
+[channel.qqbot] 本次生效：proxy=socks5://127.0.0.1:1080(用户配置 [channel.qqbot] …)、
+policy=ask(用户配置 …)、scope=**（用户配置 …）、timeout=240.0(用户配置 …)、web=false(用户配置 …)
+```
+
+为什么要印：这几个值生效在**别的进程**里（桥、网页壳），出问题时唯一能回答"它到底读了
+哪一份"的就是这一行。同理，**这一节里写错的键名会在起手时被指出来**——`proxi` 这种拼写
+的症状是"设置了却没生效"，不说出来就只能靠复现去猜：
+
+```
+[channel.qqbot] 里这些键不认识（等于没配）：proxi
+    可用的键：proxy、policy、scope、timeout、web、root
+```
+
+`spool config` 也会把每一节现在是什么、每个值来自哪一层印出来。`spool config --set`
+**不会**把这一节写丢（它保留 `[channel.*]` / `[[mcp]]` / `[[service]]` 这些子表）。
+
+> `proxy` 指的是**通道自己出网**那条路（`--bridge-proxy`，通常对准本机 `[[service]]`
+> 里名叫 `tunnel` 的 SOCKS），**不是**模型供应商的 `--proxy`。写错会让代理一路传进
+> agent 子进程、把模型请求也塞进那条隧道——那是两个完全不同的东西。
+
 ## 安全模型（用之前先看这一段）
 
 聊天通道等于把 agent 挂出去了，所以三件事必须同时成立：

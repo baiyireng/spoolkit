@@ -57,6 +57,7 @@ def _build_channel(args, log) -> object:
                 "Telegram 需要 token。三种给法：\n"
                 f"  1) 写进用户级 .env：{settings.env_path()}\n"
                 "       SPOOLKIT_TELEGRAM_TOKEN=123456:ABC...\n"
+                f"     （等价：spool env set SPOOLKIT_TELEGRAM_TOKEN=…）\n"
                 "  2) 设环境变量 SPOOLKIT_TELEGRAM_TOKEN"
                 "（改名前的 AGENTS_DEV_TELEGRAM_TOKEN 也认）\n"
                 "  3) 命令行 --token。怎么建机器人见 docs/bridge.md\n\n"
@@ -102,20 +103,7 @@ def _build_channel(args, log) -> object:
             on_note=log,
         )
         if not (channel.app_id and channel.secret):
-            raise SystemExit(
-                "QQ 官方机器人需要 AppID 与 AppSecret。三种给法：\n"
-                f"  1) 写进用户级 .env：{settings.env_path()}"
-                "（推荐：通道是机器级服务，密钥就该放这一层）\n"
-                "       QQ_AppID=102xxxxxx\n"
-                "       QQ_AppSecret=xxxxxxxx\n"
-                "  2) 设环境变量 SPOOLKIT_QQ_APPID / SPOOLKIT_QQ_SECRET"
-                "（改名前的 AGENTS_DEV_* 也认）\n"
-                "  3) 命令行 --appid / --secret\n"
-                "（在 QQ 机器人开放平台建应用后能看到；沙箱加 --sandbox）\n\n"
-                + settings.describe_secret_search(
-                    credentials.QQ_APP_ID + credentials.QQ_SECRET, workspace=root
-                )
-            )
+            raise SystemExit(qq_credentials_help(root))
         # 收事件是长连接，起后台线程；桥那边只是 poll。
         channel.start()
         log("QQ 机器人通道已起：网关长连接在后台，消息进来就交给 agent。")
@@ -137,6 +125,41 @@ def _build_channel(args, log) -> object:
     if factories:
         log(f"装载过的通道插件：{'、'.join(sorted(factories))}")
     raise SystemExit(f"没有这种通道：{args.channel}")
+
+
+def qq_credentials_help(root: Path | None) -> str:
+    """缺 QQ 凭据时那一段话：**三种给法 + 找过哪些位置**。
+
+    单独拎出来是因为它现在有两个出口（`spool bridge --channel qqbot` 与短命令
+    `spool qq`），而这两条路必须说**同一句话**——同一件事两种说法，人会以为
+    它们读的不是同一份配置。
+
+    第一句指到 `spool env`：那是"写用户级 `.env`"的**命令**，而报错里原先只给
+    一个路径——人在手机上看到"写进 `%APPDATA%\\spoolkit\\.env`"，得自己回去开
+    记事本。`describe_secret_search` 在后面把"找过哪儿、那儿有哪些键名"列出来
+    （**只印键名，不印值**）。
+    """
+    lines = [
+        "QQ 官方机器人需要 AppID 与 AppSecret。三种给法：",
+        "  1) 写进用户级 .env（推荐：通道是机器级服务，密钥就该放这一层）：",
+        "       spool env set QQ_AppID=102xxxxxx QQ_AppSecret=xxxxxx",
+        f"     或者直接编辑 {settings.env_path()}",
+        "  2) 设环境变量 SPOOLKIT_QQ_APPID / SPOOLKIT_QQ_SECRET"
+        "（改名前的 AGENTS_DEV_* 也认）",
+        "  3) 命令行 --appid / --secret",
+        "（在 QQ 机器人开放平台建应用后能看到；沙箱加 --sandbox）",
+    ]
+    if root is not None:
+        # 钉住了一个工作区时那一份 `.env` 也在查找链上，而且**更具体、更优先**。
+        # 不说这一句的话，"我照提示写进用户级了却没生效"会变成下一个问题。
+        lines.append(f"（这条通道绑着工作区 {root}，它自己的 .env 优先于用户级那份）")
+    lines.append("")
+    lines.append(
+        settings.describe_secret_search(
+            credentials.QQ_APP_ID + credentials.QQ_SECRET, workspace=root
+        )
+    )
+    return "\n".join(lines)
 
 
 def _fake_loop(bridge: Bridge, channel: FakeChannel, user: str) -> int:

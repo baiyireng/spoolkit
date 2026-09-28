@@ -136,7 +136,8 @@ spool                        # 什么都不带 → 进对话
 5. 都不成立时退回当前目录（交给具体命令报它自己的错）。
 
 **机器级入口不看当前目录**（内核里的 `resolve_target(use_cwd=False)`）：
-`spool serve` / `spool hub` / `spool bridge` / `spool mcp` 不给 `--root` 时，它们服务**整台机器**，
+`spool serve` / `spool hub` / `spool web` / `spool bridge` / `spool qq` / `spool mcp`
+不给 `--root` 时，它们服务**整台机器**，
 "你碰巧站在哪个目录"与"它服务谁"毫无关系。为什么这条要钉死：真实事故是在
 `C:\Users\32615` 敲 `spool bridge --channel qqbot …`，它去找 `C:\Users\32615\.env`，而凭据在
 `D:\workSpace\agentWorkSpace\.env` 里；更坏的是 `cwd/.env` 会**盖住**用户级那份，于是"照着
@@ -145,12 +146,27 @@ spool                        # 什么都不带 → 进对话
 | 入口 | 认 cwd 吗 | 没工作区可指时 |
 |---|---|---|
 | CLI（`run` / `chat` / `plan` / `session` …）| **认**（往上找 `.agent/`）| 退回当前目录，由命令报它自己的错 |
-| `spool serve` / `spool hub` | **不认** | 以"还没有目标"起来，让你点名 |
-| `spool bridge` | **不认** | 报错，并回一句让主人先指定工作区（**一处例外**：登记表一个都没有时退回启动目录，否则装机第一天没人能完成第一次配对，见 [`bridge.md`](bridge.md)）|
+| `spool serve` / `spool hub` / `spool web` | **不认** | 以"还没有目标"起来，让你点名 |
+| `spool bridge` / `spool qq` | **不认** | 报错，并回一句让主人先指定工作区（**一处例外**：登记表一个都没有时退回启动目录，否则装机第一天没人能完成第一次配对，见 [`bridge.md`](bridge.md)）|
 | `spool mcp` | **不认** | 每次 `delegate_task` 点名一个工作区 |
 
 说不清的时候它们**让你点名，不猜**：宁可要你打一个 `--root` 或 `/ws use`，也不拿 cwd 顶数——
 猜错的症状是"这个命令的记忆跟别的命令不是同一份"，那是最难查的一类问题。
+
+两条**短命令**就是给"在任意目录敲一下就能起手"这件事准备的。它们是上面两条的短写，
+参数面与行为完全一致，`serve` / `hub` / `bridge` **原样保留、语义不变**：
+
+```powershell
+spool web        # = spool hub 不带通道：机器级网页壳，进去再选工作区与会话
+spool qq         # = spool bridge --channel qqbot：参数来自用户配置，不认 cwd
+spool qq --check # 先看一眼凭据认到没有、从哪认到的（不起通道）
+```
+
+`spool qq` 那几个参数（通道出网的代理、授权策略、落盘范围、超时、要不要联网）默认从用户配置
+的 `[channel.qqbot]` 小节来，按 **命令行 > 环境变量 > 用户配置 > 内置默认** 算，命令行永远
+压得住；凭据走**用户级 `.env`**（`spool env set QQ_AppID=… QQ_AppSecret=…`）。所以"在
+`C:\Users\你` 直接敲一下"真的能起来。怎么写见 [`bridge.md`](bridge.md)，命令参数见
+[`cli.md`](cli.md)。
 
 登记过多个工作区之后，给常用的起个短名，之后在哪儿都能按名字用：
 

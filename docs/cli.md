@@ -5,12 +5,12 @@
 
 **所有带 `--root` 的命令**：默认自动找工作区（显式 → 往上找 `.agent/` → 客户端指向
 → 全局登记表 → 当前目录），见 [`getting-started.md`](getting-started.md#4-在任意目录起手)。
-**例外是机器级入口**（`serve` / `hub` / `bridge` / `mcp` 不给 `--root`）：它们服务整台机器，
-**不看当前目录**——给不给 `--root` 是两种不同的口径，见各条命令。
+**例外是机器级入口**（`serve` / `hub` / `web` / `bridge` / `qq` / `mcp` 不给 `--root`）：
+它们服务整台机器，**不看当前目录**——给不给 `--root` 是两种不同的口径，见各条命令。
 
 `--session` 留空（默认）表示"用**指向**里那条会话"，没有就回到该命令一直以来的
-默认名：`run` / `plan` → `cli`，`chat` → `chat`，`bridge` → `bridge`，`mcp` → `mcp`，
-`serve` / `hub` → `cli`。指向由 `spool ws use` / `spool session use` 写。
+默认名：`run` / `plan` → `cli`，`chat` → `chat`，`bridge` / `qq` → `bridge`，`mcp` → `mcp`，
+`serve` / `hub` / `web` → `cli`。指向由 `spool ws use` / `spool session use` 写。
 
 ## 入口
 
@@ -219,6 +219,25 @@ spool hub --channel qqbot --bridge-proxy socks5://127.0.0.1:1080
 桥给最近聊天发一句：默认关；`--notify-disconnect` 或
 `spool config --set notify_disconnect=true` 打开。只在通→断时发，冷却 5 分钟。
 
+## spool web
+
+机器级网页壳的短命令：**等价于 `spool hub` 不带 `--channel`**——参数面与 `hub` 逐字相同
+（共用同一份参数定义），`hub` 的行为它一步不差。在**任意目录**都能起；不给 `--root`
+就不钉工作区，进去再选。
+
+```bash
+spool web                      # 任意目录：起网页壳，进去再选工作区与会话
+spool web --port 9000
+spool web --no-web             # 关掉联网取用
+spool web --root D:\某个工作区  # 给了就钉住这一个（老行为）
+```
+
+为什么要这条：网页壳本来就是**机器级**的（不认 cwd），可它的名字叫 `hub`；而
+"在任意目录敲一下就能起手"这件事，**名字短本身就有一半功劳**。
+
+`hub` **原样保留、语义不变**（老脚本、`.bat`、文档都靠它）。要连聊天通道，用
+[`spool hub --channel …`](#spool-hub) 或 [`spool qq`](#spool-qq)。
+
 ## spool service
 
 本机外接配方的快捷入口：按用户配置里的 `[[service]]` 拉起 / 停掉 / 列出。
@@ -291,6 +310,14 @@ health = "tcp:127.0.0.1:1080"
 **密钥不写这里**（`--set` 只动白名单，而且值会打到终端）：密钥走下面 `spool env`。
 页脚印的优先级是"命令行 > 环境变量 `SPOOLKIT_<键名大写> > 配置文件"，改名前的
 `AGENTS_DEV_<键名大写>` 也认（新前缀优先）。
+
+这份文件里还能有**子表**：`--set` 管不到它们，但也**不会把它们写丢**（`save` 原样保留）。
+
+- `[channel.<名字>]`：短命令 [`spool qq`](#spool-qq) 的默认值（`proxy` / `policy` /
+  `scope` / `timeout` / `web`）。它是人手写进 TOML 的，所以 `spool config`
+  会把每一节现在是什么、每个值来自哪一层印出来，**并把认不出的键名指出来**——
+  写错一个字母的症状正是"设置了却没生效"。小节怎么写见 [`bridge.md`](bridge.md)。
+- `[[mcp]]` / `[[service]]`：外挂工具与本机外接配方（见 [`spool service`](#spool-service)）。
 
 ## spool env
 
@@ -414,7 +441,38 @@ Cursor 扮演用户下发任务）。工具、信任模型、调用序列见 [`m
 
 详见 [`bridge.md`](bridge.md)。
 
-## 联网取用参数（`run` / `chat` / `mcp` / `serve` / `bridge` 都有）
+## spool qq
+
+按用户配置起 **QQ 官方机器人**通道：**等价于 `spool bridge --channel qqbot …`**，
+只是那六个参数全都有默认值了。
+
+```bash
+spool qq                                  # 参数全来自用户配置与用户级 .env
+spool qq --check                          # 只看凭据与连通性（不起通道）
+spool qq --policy ask --scope "**" --timeout 240 --no-web
+spool qq --root D:\某个工作区              # 给了就钉住这一个；不给 = 机器级
+```
+
+默认值按 **命令行 > 环境变量 > 用户配置 `[channel.qqbot]` > 内置默认** 算出来，
+**命令行永远压得住**（包括"给了空串"，例如 `--scope ""` = 不许自动落盘）。
+起手第一屏会把生效值与"每个值是从哪一份来的"一起印在 stderr 上——这几个值生效在
+别的进程里，出问题时唯一能回答"它读了哪一份"的就是这一行。
+
+| 参数 | 说明 |
+|---|---|
+| `--timeout` / `--policy` / `--scope` / `--bridge-proxy` / `--web` `--no-web` | **不给**就用 `[channel.qqbot]` 里的同名键；给了一切以命令行为准 |
+| `--check` | 同 `bridge --check`：只验凭据与连通性 |
+| `--root` | 给了 = 只服务那一个工作区；不给 = 机器级（不认 cwd）|
+| `--appid` / `--secret` / `--sandbox` / `--access` / `--allow-user` / `--user` / `--max-chars` / `--approve` / `--session` / `--notify-disconnect` / `--provider` `--model` … | 与 [`spool bridge`](#spool-bridge) 同名同义 |
+
+**凭据走用户级 `.env`**（`spool env set QQ_AppID=… QQ_AppSecret=…`）：这是机器级入口，
+**不看 cwd**。缺凭据时它**在建通道那一步就停住**（不起长连接、不连网关），把三种给法、
+"找过哪些位置"以及能照着敲的下一步一起印出来。
+
+`bridge` 的参数默认值**一个字没动**：`[channel.*]` 只给短命令当默认值，改长命令等于改
+既有行为，那是另一件事。用户配置小节见 [`bridge.md`](bridge.md) 的「用户配置」一节。
+
+## 联网取用参数（`run` / `chat` / `mcp` / `serve` / `hub` / `web` / `bridge` / `qq` 都有）
 
 | 参数 | 说明 |
 |---|---|
