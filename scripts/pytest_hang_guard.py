@@ -7,35 +7,39 @@
 1. **证据归零**：pytest 的输出重定向到文件时是块缓冲，进程被杀之后日志**一个字节都没有**
    ——连"停在哪条用例"都问不出来（本批真的出现过 0 字节日志）；
 2. **调用方一起死**：跑测试的是人/agent 的一条命令，命令不返回，整轮工作就丢了
-   （本批我自己的 tool call 连续三次被挂断）；
+   （本批我的 tool call 连续三次被挂断，另一个实现者因此空转了 6.5 小时）；
 3. **残留毒化**：被杀之后可能留下子进程或半开端口，让后面几次运行也不正常。
 
 **做法**（只用标准库，不引新依赖）：
 
-- `faulthandler.dump_traceback_later(秒数, exit=True)`：到点把**所有线程的堆栈**打到
-  stderr，然后**真的退出**。于是"挂住"变成"有堆栈的失败"，而且不会有残留。
+- `faulthandler.dump_traceback_later(秒数, exit=True)`：到点把**所有线程的堆栈**写出来，
+  然后**真的退出**。于是"挂住"变成"有堆栈的失败"，而且不会有残留。
   逐条用例重新计时（setup 时先 `cancel_dump_traceback_later()` 再 arm），
   这样"哪一条挂了"和"它卡在哪一行"一次就拿到。
-- **逐条 flush 的进度行**：每条用例开始前把它写进 `PYTEST_HANG_LOG`（默认
-  `.tmp/pytest-progress.log`）并 flush，所以即使进程被杀，日志最后一行就是凶手。
+- **堆栈写进同一个进度日志文件**（`PYTEST_HANG_LOG`），**不是 fd 2**。
+  这是踩出来的：pytest 会捕获 fd 2，`faulthandler` 默认往那儿写，于是堆栈**被 pytest 吃掉**，
+  日志里那句"堆栈见 progress.log"变成**空头支票**（真发生过）。所以 `enable(file=…)` 与
+  `dump_traceback_later(file=…)` 都显式指到日志文件。
+- **逐条 flush 的进度行**：每条用例开始前写 `START <nodeid>`、结束写 `END <nodeid>`
+  （`scripts/pytest_bounded.ps1` 靠"有 START 没有 END"认出凶手），另外写一行 `HANG <nodeid>`。
+  **机器读的标记只用 ASCII**：中文标记在"按 ANSI 读"的调用方那里会整片读歪，
+  比较全部失配、于是驱动脚本**误报"没有卡死"**（也真发生过）。
 - **超时可配**：`PYTEST_HANG_SECONDS`（默认 90 秒）。**不写死在代码里**——慢机器上
   真跑模型/子进程的用例本来就慢，这个值是给调用方拧的。
-
-用法（`scripts/pytest.ps1` 已经默认带上这个插件，所以正常跑就有保护）：
-
-    $env:PYTEST_HANG_SECONDS = '45'      # 可选：改超时
-    .\\scripts\\pytest.ps1 -Repo .worktrees\\x tests\\cli
-    # 若某条挂住：日志里会有 "=== 卡住：<用例名> ===" 与全线程堆栈，
-    # 进程退出码非零，下一轮可以用 -k 'not <用例名>' 把已知的挂死项排掉继续。
 """
 
 from __future__ import annotations
 
 import faulthandler
 import os
+import sys
 from pathlib import Path
 
 DEFAULT_SECONDS = 90.0
+
+# 堆栈要写进去的那个文件。开着不关：进程退出时由操作系统收尾，而它的全部意义
+# 就是"进程没能正常退出时也留下话"。
+_fault_file = None
 
 
 def _seconds() -> float:
@@ -69,22 +73,34 @@ def _mark(text: str) -> None:
         pass
 
 
+def _fault_stream():
+    """堆栈该写到哪儿：**优先日志文件**，开不出来才退回 stderr。
+
+    为什么不能直接用它默认的 fd 2：pytest 会把 fd 2 捕获走，堆栈于是被吞掉，
+    留给人一句"堆栈见 progress.log"的空头支票（本批真发生过，靠 `-s` 重跑才拿到堆栈）。
+    """
+    global _fault_file
+    if _fault_file is None:
+        try:
+            _fault_file = _log_path().open("a", encoding="utf-8", errors="replace")
+        except OSError:
+            return sys.stderr
+    return _fault_file
+
+
 def pytest_configure(config) -> None:  # noqa: ARG001 - pytest 钩子签名
     seconds = _seconds()
-    _mark(f"=== 本轮开始，单条用例超时 {seconds:g} 秒；卡住会打印全线程堆栈并退出 ===")
-    faulthandler.enable()
-    faulthandler.dump_traceback_later(seconds, exit=True)
+    stream = _fault_stream()
+    _mark(f"=== 本轮开始，单条用例超时 {seconds:g} 秒；卡住会把全线程堆栈写进本文件 ===")
+    faulthandler.enable(file=stream)
+    faulthandler.dump_traceback_later(seconds, exit=True, file=stream)
 
 
 def pytest_runtest_setup(item) -> None:
-    """逐条重新计时：上一条跑完了就把计时器收回，这一条重新 armed。
-
-    日志里**同时**写人类看的行与机器看的行。机器标记**只用 ASCII**（`START`/`END`/`HANG`）：
-    中文标记会被"按 ANSI 读的调用方"整片读歪，`-like '开始 *'` 永远不匹配，
-    于是自动隔离的驱动脚本会**误报"没有卡死"**——本批真踩过这一次。
-    """
+    """逐条重新计时：上一条跑完了就把计时器收回，这一条重新 armed。"""
+    stream = _fault_stream()
     faulthandler.cancel_dump_traceback_later()
-    faulthandler.dump_traceback_later(_seconds(), exit=True)
+    faulthandler.dump_traceback_later(_seconds(), exit=True, file=stream)
     _mark(f"HANG {item.nodeid}")
     _mark(f"START {item.nodeid}")
 
