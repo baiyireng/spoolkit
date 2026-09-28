@@ -77,12 +77,15 @@ def _report_channel(values: settings.ChannelValues, *, stream=None) -> None:
     # "本次生效"，把没生效的键印成生效值，就正是这套东西要消灭的那种病
     # （"终端说用它、实际跑另一条"）。`root` 因此不在这一行里——它由 `main()`
     # 解析（`--root` 给没给在那里已经定死），短命令不从配置里补它。
-    # 空值也照印：`policy=（空）(内置默认)` 与 `policy=ask(用户配置 …)` 是两条
-    # 不同的结论，而这行就是给人下结论用的。
+    # 值一律**按值本身印**（`settings.display_channel_value`）：空值印「（空）」，
+    # 但 `web = false` 必须印 `false`、`--timeout 0` 必须印 `0.0`——按真假判空
+    # 会把这两个真实取值印成「（空）」，与"根本没给"在字面上不可区分
+    # （`docs/bridge.md` 的样例写的是 `web=false(用户配置 …)`，那才是对的）。
     print(
         f"[channel.{values.name}] 本次生效："
         + "、".join(
-            f"{key}={values.options[key] or '（空）'}({values.source(key)})"
+            f"{key}={settings.display_channel_value(values.options[key])}"
+            f"({values.source(key)})"
             for key, _ in _CHANNEL_OPTION_KEYS
         ),
         file=out,

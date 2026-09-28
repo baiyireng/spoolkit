@@ -373,6 +373,122 @@ def test_起手那行说得出每个值是从哪来的(
     assert "root=" not in err, "没生效的键不许印进「本次生效」那一行"
 
 
+def test_起手行把配置里的false按值印出来(
+    capsys, monkeypatch, config_file: Path
+) -> None:
+    """`web = false` 必须印 `false`，**不许**印「（空）」。
+
+    这一行的值列原先写的是 `value or '（空）'`——按**真假**判空，于是 `False`
+    与 `0.0` 都被印成「（空）」，与"根本没给"在字面上不可区分。而文档写的
+    （`docs/bridge.md`：`web=false(用户配置 …)`）才是有用的那一边：它是"我明明
+    配了 `web = false`，"能不能一眼看出来"的分界。
+    证伪法：把 `settings.display_channel_value(...)` 换回 `... or '（空）'`，
+    下面两条立刻变红。
+    """
+    _write(config_file, "[channel.qqbot]\nweb = false\n")
+    monkeypatch.setattr(
+        "spoolkit.cli.commands.shortcuts.bridge_command", lambda args: 0
+    )
+
+    assert shortcuts.qq_command(_parse("qq", [])) == 0
+
+    err = capsys.readouterr().err
+    assert "web=false(用户配置" in err, "配置里的 false 要按值印"
+    assert "web=（空）" not in err
+
+
+def test_起手行把环境变量里的false也按值印出来(
+    capsys, monkeypatch, config_file: Path
+) -> None:
+    """四层里哪一层给的 `false` 都算数（这一层原先同样印成「（空）」）。"""
+    monkeypatch.setenv("SPOOLKIT_CHANNEL_QQBOT_WEB", "false")
+    monkeypatch.setattr(
+        "spoolkit.cli.commands.shortcuts.bridge_command", lambda args: 0
+    )
+
+    assert shortcuts.qq_command(_parse("qq", [])) == 0
+
+    err = capsys.readouterr().err
+    assert "web=false(环境变量 SPOOLKIT_CHANNEL_QQBOT_WEB)" in err
+
+
+def test_起手行把timeout0与没给分开(
+    capsys, monkeypatch, config_file: Path
+) -> None:
+    """`--timeout 0` 与"没给 `--timeout`"必须是两条不同的结论。
+
+    `0.0` 是 `float` 里的假值，真假判空会把它印成「timeout=（空）(命令行)」——
+    而没给的时候那一行印的是 `timeout=900.0(内置默认)`。两条一模一样的输出，
+    等于这一行对"它到底读了哪一份"这个问题撒了谎。
+    印的是 `0.0` 而不是 `0`：生效值就是 `float`（`_coerce_channel_value` 转的），
+    同一个位置上的 `240` 一直印 `240.0`，只把 0 印成 `0` 会让这一行自相矛盾。
+    """
+    monkeypatch.setattr(
+        "spoolkit.cli.commands.shortcuts.bridge_command", lambda args: 0
+    )
+
+    assert shortcuts.qq_command(_parse("qq", [])) == 0
+    assert "timeout=900.0(内置默认)" in capsys.readouterr().err
+
+    assert shortcuts.qq_command(_parse("qq", ["--timeout", "0"])) == 0
+    err = capsys.readouterr().err
+    assert "timeout=0.0(命令行)" in err
+    assert "（空）(命令行)" not in err
+
+
+def test_真的没给才印空(
+    capsys, monkeypatch, config_file: Path
+) -> None:
+    """「（空）」只留给**真的没给**：内置默认的 `""` 是空，`false`/`0` 不是。"""
+    monkeypatch.setattr(
+        "spoolkit.cli.commands.shortcuts.bridge_command", lambda args: 0
+    )
+
+    assert shortcuts.qq_command(_parse("qq", [])) == 0
+
+    err = capsys.readouterr().err
+    for key in ("proxy", "policy", "scope"):
+        assert f"{key}=（空）(内置默认)" in err, f"{key} 内置默认就是空串，要印「（空）」"
+    assert "web=true(内置默认)" in err, "内置默认的 web 是 true，不是空"
+
+
+def test_起手行说得出timeout不是正数(
+    capsys, monkeypatch, config_file: Path
+) -> None:
+    """`timeout = -5` 不许悄悄生效：它是"一轮最多等多少秒"，负数等于每轮当场到点。
+
+    退回内置默认（900 秒）并且**在起手时说出口**——只退不说，就是最难查的那种
+    "我明明配了却不是我写的意思"。
+    """
+    _write(config_file, "[channel.qqbot]\ntimeout = -5\n")
+    captured: dict = {}
+    monkeypatch.setattr(
+        "spoolkit.cli.commands.shortcuts.bridge_command",
+        lambda args: captured.update(args=args) or 0,
+    )
+
+    assert shortcuts.qq_command(_parse("qq", [])) == 0
+
+    err = capsys.readouterr().err
+    assert "大于 0" in err and "timeout" in err
+    assert captured["args"].timeout == 900.0, "用不了的值要退回下一层，不能原样递给桥"
+
+
+def test_短命令不读的键与config标出来的一致() -> None:
+    """`spool config` 标"短命令不读"的那几个键，必须正好是短命令真不读的那几个。
+
+    两处各写一份名单，早晚会走散——走散的后果是**配了 root 的人以为它生效**
+    （这一节印的形状与生效值那几行一模一样），或者反过来，把一个真在生效的键
+    标成"不读"、让人白改一气。
+    """
+    from spoolkit.cli.commands import config as config_cmd
+
+    read_by_shortcuts = {key for key, _ in shortcuts._CHANNEL_OPTION_KEYS}
+    assert set(settings.CHANNEL_KEYS) - read_by_shortcuts == set(
+        config_cmd._NOT_READ_BY_SHORTCUTS
+    ), "两张名单要对得上：短命令读的 + 不读的 = 全部可配的键"
+
+
 # --- ③ 凭据从用户级 .env 来，cwd 里的那份不算数 ------------------------------
 
 

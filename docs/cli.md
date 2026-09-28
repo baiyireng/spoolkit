@@ -315,8 +315,11 @@ health = "tcp:127.0.0.1:1080"
 
 - `[channel.<名字>]`：短命令 [`spool qq`](#spool-qq) 的默认值（`proxy` / `policy` /
   `scope` / `timeout` / `web`）。它是人手写进 TOML 的，所以 `spool config`
-  会把每一节现在是什么、每个值来自哪一层印出来，**并把认不出的键名指出来**——
-  写错一个字母的症状正是"设置了却没生效"。小节怎么写见 [`bridge.md`](bridge.md)。
+  会把每一节现在是什么、每个值来自哪一层印出来，**并把认不出的键名指出来**，
+  取值写错的也一样（`policy = "AUTO"`、`timeout = -5` 会在 `spool qq` 起手时说明
+  并退回默认值）——写错一个字母的症状正是"设置了却没生效"。这一节里还认一个
+  `root`，但**短命令不读它**，所以它那一行带着"短命令不读这一项"的注记。
+  小节怎么写见 [`bridge.md`](bridge.md)。
 - `[[mcp]]` / `[[service]]`：外挂工具与本机外接配方（见 [`spool service`](#spool-service)）。
 
 ## spool env

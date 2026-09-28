@@ -44,8 +44,9 @@ web     = true
 它是**子表而不是扁平键**：通道是按名字来的，插件还能注册新通道，扁平键会把
 "有哪些通道"写死在白名单里（`[[mcp]]` / `[[service]]` 是同一条理由）。优先级
 仍是**命令行 > 环境变量 > 用户配置 > 内置默认**，环境变量名是
-`SPOOLKIT_CHANNEL_<通道名>_<键>`。认不出的键名**要说出口**——写错一个字母的
-症状是"设置了却没生效"。
+`SPOOLKIT_CHANNEL_<通道名>_<键>`。认不出的键名**要说出口**，取值写错的
+（`policy = "AUTO"`、`timeout = -5`）**同样要说出口**——写错一个字母的症状是
+"设置了却没生效"，而那种问题只靠复现查不出来。
 
 改名（`agents-dev` → `spoolkit`）时留了一层兼容：**新位置没有文件而旧位置有，
 就继续读旧的那份**。所以已经配好的人一个字都不用改；等他下次 `config --set`，
@@ -60,6 +61,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from spoolkit.envfile import load_env_file
+from spoolkit.policy import POLICIES
 
 # 能配置的键。写成一个白名单而不是"想存什么存什么"：
 # 配置文件的键写错一个字母，症状是"设置了但没生效"，而那种问题最难查。
@@ -401,6 +403,11 @@ def _dump_table_item(item: dict) -> list[str]:
 # 每个通道能配的键（值 = 内置默认）。`timeout` 的单位是**秒**，与
 # `spool bridge --timeout`（默认 900 秒）同一个口径——单位不一致是"配了却没生效"
 # 里最难查的一种。
+#
+# ⚠️ 这六项**不是都被短命令读**：`shortcuts._CHANNEL_OPTION_KEYS` 只认五个，
+# `root` 不在里面（工作区在 `main()` 那一步就解析完了，短命令不许回头拿配置补它）。
+# 配在文件里却不生效的键必须**看起来就与别人不一样**，所以 `spool config` 会把它
+# 标出来（`commands/config.py` 的 `_NOT_READ_BY_SHORTCUTS`，另有测试钉住两处一致）。
 CHANNEL_KEYS: dict[str, object] = {
     "proxy": "",  # 通道自己出网走的代理，等价于 --bridge-proxy
     "policy": "",  # 子进程的授权策略（ask / auto / deny）
@@ -417,6 +424,14 @@ CHANNEL_ENV_PREFIX = "CHANNEL_"
 # 而环境变量永远是字符串）。
 _CHANNEL_NUMERIC = ("timeout",)
 _CHANNEL_BOOL = ("web",)
+
+# 认得的取值**只有这几个**的键：它们是**枚举**，不是自由文本。
+# 命令行那条路上 argparse 的 `choices` 已经把拼错的挡在门外，而配置文件
+# 原先谁都不看——`policy = "AUTO"` 会静默通过，然后在 `cli/settle.py` 里
+# 落到"问"那一条路上。那正是本任务反复要消灭的形状："我明明配了自动，它还在问我"。
+# **空串是合法取值**（等于没表态：`resolve_policy` 见到假值就去读已保存的策略）。
+# 取值表借 `policy.POLICIES`，不另抄一份——抄一份的下场是两处慢慢走散。
+_CHANNEL_ENUM: dict[str, tuple[str, ...]] = {"policy": POLICIES}
 
 
 def _channel_env_key(name: str, key: str) -> str:
@@ -447,6 +462,15 @@ def _coerce_channel_value(key: str, value):
 
     `None` 表示"这个值用不了"，由调用方**说出来**（`ChannelValues.issues`）并
     退回下一层——静默跳过正是"设置了却没生效"的来源。
+
+    三条判定，都只做这一层该做的事（"这个值读不读得懂"）：
+
+    - 开关（`web`）：认 `true/false`、`1/0`、`yes/no`、`on/off`（大小写不论）。
+      宽容是故意的：环境变量那一层永远是字符串，`SPOOLKIT_CHANNEL_QQBOT_WEB=no`
+      是自然的写法，而且这两种写法**都不会改变"配了什么"**——`yes` 就是"开"；
+    - 数字（`timeout`）：要能当秒数，而且要**大于 0**（判定依据见
+      `_channel_value_problem`）；
+    - 枚举（`policy`）：取值表里没有就说不出口（`policy.POLICIES`）。
     """
     if key in _CHANNEL_BOOL:
         if isinstance(value, bool):
@@ -459,9 +483,61 @@ def _coerce_channel_value(key: str, value):
         return None
     if key in _CHANNEL_NUMERIC:
         try:
-            return float(value)
+            seconds = float(value)
         except (TypeError, ValueError):
             return None
+        return seconds if seconds > 0 else None
+    if key in _CHANNEL_ENUM:
+        text = str(value).strip()
+        return text if text == "" or text in _CHANNEL_ENUM[key] else None
+    return str(value)
+
+
+def _channel_value_problem(key: str, raw) -> str:
+    """`_coerce_channel_value` 认不出这个值时，**具体是哪一种认不出**。
+
+    为什么要分开说：`timeout = "很久"` 与 `timeout = -5` 都落在同一句"这个值用不了"
+    上，但下一步要改的地方完全不同——一个是类型写错了，另一个是没写正数。只说
+    "读不成该有的类型"，第二种人会被指到错的方向去（诊断说假话比不说更坏）。
+
+    `timeout` 的下界定在 **> 0** 的依据：它是"一轮最多等多少秒"，消费方是
+    `bridge/agent_runner.py` 的 `deadline = now + timeout`——0 与负数意味着
+    **每一轮当场就到点**，人看到的是"它说超过 -5 秒还没结束，先不等了"。同一仓里
+    `tools/exec.py` 对命令超时的写法就是拒绝（"timeout 必须在 1 到 N 秒之间"），
+    这里沿用同一条口径：认不出来就退回下一层，而不是把 -5 原样递给桥。
+    """
+    if key in _CHANNEL_NUMERIC:
+        try:
+            seconds = float(raw)
+        except (TypeError, ValueError):
+            return f"读不成数字（现在写的是 {raw!r}）"
+        return f"要的是大于 0 的秒数（现在写的是 {seconds:g}）"
+    if key in _CHANNEL_BOOL:
+        return f"读不成真假（现在写的是 {raw!r}；写 true / false）"
+    if key in _CHANNEL_ENUM:
+        return (
+            f"不在认得的取值里（现在写的是 {raw!r}；"
+            f"可用：{'、'.join(_CHANNEL_ENUM[key])}）"
+        )
+    return f"读不成该有的类型（现在写的是 {raw!r}）"
+
+
+def display_channel_value(value) -> str:
+    """把一个通道值印成人看的样子。`spool qq` 的起手行与 `spool config` 共用。
+
+    两条规矩，都是"印出来的字必须与生效值对得上"：
+
+    - **只有"没给"（`None` / 空串）才印「（空）」**。原先起手行写的是
+      `value or '（空）'`，那是按**真假**判空：`web = false` 印成「web=（空）」、
+      `--timeout 0` 印成「timeout=（空）」，与"根本没给"在字面上不可区分——
+      而这一行的全部意义就是"它到底读了哪一份"。文档写得对（`docs/bridge.md` 的
+      样例是 `web=false(用户配置 …)`），错的是代码这边；
+    - 真假值印 `true` / `false`：它照 TOML 的写法，与配置文件里能对得上号。
+    """
+    if value is None or value == "":
+        return "（空）"
+    if isinstance(value, bool):
+        return "true" if value else "false"
     return str(value)
 
 
@@ -480,7 +556,9 @@ class ChannelValues:
     #: 这一节里认不出的键名。**必须说出来**：写错一个字母的症状是
     #: "设置了却没生效"，而那种问题只靠复现是查不出来的。
     unknown: tuple[str, ...] = ()
-    #: 值存在但读不成该有的类型（`timeout = "很久"` 之类）。
+    #: 值存在但**用不了**：读不成该有的类型（`timeout = "很久"`）、不在认得的
+    #: 取值里（`policy = "AUTO"`）、或者不是正数（`timeout = -5`）。
+    #: 用不了就退回下一层，并且**说出来**——静默跳过正是"设置了却没生效"。
     issues: tuple[str, ...] = ()
 
     def source(self, key: str) -> str:
@@ -546,7 +624,7 @@ def resolve_channel_options(
             if converted is None:
                 issues.append(
                     f"{key} 的环境变量 {from_env_source.removeprefix('环境变量 ')} "
-                    f"读不成该有的类型，这一层跳过"
+                    f"{_channel_value_problem(key, from_env)}，这一层跳过"
                 )
             else:
                 values[key] = converted
@@ -556,8 +634,7 @@ def resolve_channel_options(
             converted = _coerce_channel_value(key, section[key])
             if converted is None:
                 issues.append(
-                    f"{key} 的值读不成该有的类型（现在写的是 "
-                    f"{section[key]!r}），这一层跳过"
+                    f"{key} 的值{_channel_value_problem(key, section[key])}，这一层跳过"
                 )
             else:
                 values[key] = converted
