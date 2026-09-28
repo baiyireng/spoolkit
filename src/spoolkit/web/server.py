@@ -18,8 +18,14 @@ SSE 每写完一条都要 flush：不 flush 的话事件攒在缓冲里，
 
 页面上选一次还会**写进网页壳指针**（`clients.json` 的 `web` 那条）：不写的话，
 刷新页面停得住、重启服务就回到内核顺位了（见 `WebState::_remember`）。
+
+**非回环地址上只读**（设计 §3.7）：判据是**实际绑定的 host**（不是命令行那一层），
+所以绑定地址一变，`/run` 与 `/confirm` 一律 403。判据放在这里而不是 CLI 里，是因为
+CLI 不是唯一的入口——测试与嵌入代码直接 `serve(host=…)` / `build_server(…, host, …)`，
+安全边界不能靠"大家都会走命令行"来成立。
 """
 
+import ipaddress
 import json
 import queue
 import sys
@@ -72,6 +78,44 @@ POINTER_CLIENT = "web"
 # `_stream` 里那个"还没订阅过"的哨兵：没有它，第一圈会以为"目标没变"而不订阅。
 _UNSET = object()
 
+#: 非回环绑定时给人看的那句话（终端与 403 响应体共用同一句）。
+#:
+#: 为什么要说"要驱动它就在本机来"：这条壳只读是**故意的**（设计 §3.7：远程可写要
+#: 单独一个开关，先想清楚鉴权与传输），所以不能只说"403"，得给出路——否则人只会
+#: 以为壳坏了，然后去关掉整个安全检查。
+REMOTE_READONLY_NOTE = (
+    "只能看，不能驱动：这条壳绑在非回环地址上，本批不实现远程可写。"
+    "要发任务 / 确认改动，就在本机开一个网页壳，或者把 --host 绑回 127.0.0.1。"
+)
+
+
+def is_loopback_host(host: str) -> bool:
+    """这个绑定地址是不是**只有本机够得着**。
+
+    为什么是一个单独的函数并单测它：这条判据是安全边界（非回环 = 只读），而它的
+    输入是命令行 / 嵌入调用给的一个字符串，写法多得是——`127.0.0.1`、`::1`、
+    `localhost`、`[::1]`、`LOCALHOST` 都得认；`0.0.0.0`、`::` 反而不算（它们是
+    "所有网卡"，正好是最该收紧的那一种）。
+
+    认不出来的名字（DNS 名、拼错的地址）**按远程办**：这里宁可错杀。反过来的
+    代价是"我以为只是本机、其实全网可达"，那是这两种错里唯一不能接受的一种。
+    所以这条函数不看 DNS、不发请求——解析结果还可能变，判据得是确定的。
+    """
+    text = str(host or "").strip().lower()
+    if text.startswith("[") and text.endswith("]"):
+        # `--host [::1]` 是常见写法（照 URL 里的写法来）。
+        text = text[1:-1]
+    text = text.rstrip(".")
+    if not text:
+        # 空串在 `HTTPServer` 里的意思是 INADDR_ANY（所有网卡），不是"本机"。
+        return False
+    if text == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return False
+
 
 def _empty_snapshot(extra_args: Sequence[str] = (), extra_health=None) -> dict:
     """还没有当前目标时的快照：字段一个不少，值全是空态。
@@ -105,6 +149,10 @@ class WebState:
     的约定），而"现在在看哪个工作区、哪条会话"是整个进程的状态，必须共享。
 
     `version` 是给 SSE 用的：它一变就说明目标换了，那条长连接该退订旧的、订阅新的。
+
+    `_readonly`（非回环 = 只读）也挂在这上面：handler 是每个连接一个实例，而
+    "这条壳绑在哪"同样是整个进程的属性。`build_server` 绑好端口后调
+    `set_bound_host` 把它填上——**填的是实际绑定的地址**，不是命令行里那个字符串。
     """
 
     def __init__(
@@ -131,6 +179,30 @@ class WebState:
         self._extra_health = extra_health
         self._lock = threading.Lock()
         self._version = 0
+        # 还没绑端口时（`build_state` 单独用、测试直接 `snapshot()`）当作 loopback：
+        # 那时它还没有"够得着它的人"这件事，而 `build_server` 一定会紧接着把它填上。
+        self._host = "127.0.0.1"
+        self._readonly = False
+
+    # --- 绑定地址与只读（设计 §3.7）---
+
+    def set_bound_host(self, host: str) -> bool:
+        """记下**实际绑定的**地址，返回这条壳是不是只读。
+
+        传进来的必须是 `httpd.server_address[0]`（真正绑上去的那个），不是请求的
+        那个字符串：`localhost` 到底落到 `127.0.0.1` 还是 `::1`、`0.0.0.0` 到底是不是
+        真的全网可达，只有绑完才知道。
+        """
+        self._host = str(host or "")
+        self._readonly = not is_loopback_host(self._host)
+        return self._readonly
+
+    def bound_host(self) -> str:
+        return self._host
+
+    def readonly(self) -> bool:
+        """非回环绑定时为真：`/run` 与 `/confirm` 403，切换不落盘。"""
+        return self._readonly
 
     # --- 当前目标 ---
 
@@ -164,6 +236,11 @@ class WebState:
         data["target"] = self._target_payload(target)
         data["workspaces"] = _workspace_rows(target)
         data["sessions"] = _session_rows(target)
+        # 只读要**说在状态里**，不能只体现在 403 上：页面得在点按钮之前就知道
+        # "这里只能看"（点一下被拒是最后一秒才告诉人）。`host` 一起给，页面那句
+        # 提示才说得出"绑在哪个地址上"。
+        data["readonly"] = self._readonly
+        data["host"] = self._host
         # 名字是 `running_targets` 而不是 `running`：`Runner.snapshot()` 里的
         # `running` 是**当前目标那一个**的布尔值，页面上的按钮直接读它
         # （`setRunning(state.running)`）。把它换成一张表＝改已有语义，
@@ -236,7 +313,11 @@ class WebState:
             workspace_source = "explicit"
             # 显式挑过的排到登记表最前面——与 `resolve_target` 对显式值的处理一致
             # （下次不带 `--root` 起服务时先看到的还是它）。写不进去不挡切换。
-            kernel_workspaces.register(root)
+            #
+            # **非回环时不写**：登记表和网页壳指针一样，是这台机器上**持久**的状态，
+            # 而远程来的那一下只是"想看看那边"（见 `_remember` 里那条口径）。
+            if not self._readonly:
+                kernel_workspaces.register(root)
         else:
             if prev is None:
                 return 400, {
@@ -289,10 +370,19 @@ class WebState:
         不写的情形：机器级启动时由内核顺位定出来的初始目标（那是内核按指针/登记表
         推断的，不是人选的结果），以及空 body 的 no-op 切换。
 
+        **非回环（只读壳）也不写**（设计 §3.7）：这一条是"远程只能看"的落地点。
+        `POST /target` 仍然放行——它改的只是"这个进程现在看谁"，不驱动任何东西
+        （在跑的任务不会被它碰到）；但**落盘是另一回事**：指针会留到下次启动，
+        等于让一个网络来的人改这台机器的持久状态，而本批没有任何鉴权来兜底。
+        所以线划在"改进程内视图可以，改机器级持久状态不行"，而不是"整个 /target 拒掉"：
+        拒掉的话远程连"看一眼别的工作区"都做不到，而那是这个功能存在的理由。
+
         写不进去**不能挡住切换**：目标已经在进程内生效了，这时报错等于告诉人
         "没切成"，而它其实是切成了。指针是便利，不是数据（`kernel/pointers.py` 的自述）。
         """
         if not explicit:
+            return
+        if self._readonly:
             return
         try:
             kernel_pointers.set(POINTER_CLIENT, target.root, target.session)
@@ -375,7 +465,11 @@ def _handler_for(state: WebState):
 
         def _body(self) -> dict:
             length = int(self.headers.get("Content-Length") or 0)
-            if length <= 0 or length > MAX_BODY:
+            if length <= 0:
+                return {}
+            if length > MAX_BODY:
+                # 太大不收，但**要读完**：见 `_drain_body` 的理由。
+                self._drain_body()
                 return {}
             raw = self.rfile.read(length)
             try:
@@ -383,6 +477,31 @@ def _handler_for(state: WebState):
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return {}
             return payload if isinstance(payload, dict) else {}
+
+        def _drain_body(self) -> None:
+            """把请求体读掉（丢弃），**回话之前**必须做。
+
+            为什么这不是洁癖，两个后果都是真的：
+
+            - 客户端用 keep-alive 时，**没读完的字节会被当成下一个请求的行**——
+              第二个响应变成 http.server 自己发的 400/501，而不是我们发的那一个
+              （报错还说"Bad request syntax"，看起来像客户端发了坏包）；
+            - 客户端说 `Connection: close` 时（urllib 默认就是这样），带着没读完的
+              接收数据去关 socket，Windows 发的是 **RST 不是 FIN**，客户端会在收
+              那一口响应时随机拿到 `ConnectionAbortedError`——**随机**是关键：
+              本批真踩过，403 那条路径原先没读 body，单跑那个文件全绿、跑整个
+              `tests/web` 就红一条，症状与代码毫无关系的样子。
+
+            读的字节数以 `Content-Length` 为准，分块丢弃：body 可以很大，不必整个
+            装进内存。它撒谎（说得多、发得少）时 `read` 会一直等到客户端关连接——
+            这一点与 `_body()` 原先的行为一致，没有变坏。
+            """
+            remaining = int(self.headers.get("Content-Length") or 0)
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, MAX_BODY))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
 
         # --- GET ---
 
@@ -456,6 +575,20 @@ def _handler_for(state: WebState):
             finally:
                 if listener is not None and runner is not None:
                     runner.unsubscribe(listener)
+                # 事件流一旦收场，这条连接就**明确关掉**（别留给基类去读"下一个请求"）。
+                #
+                # 这一句是踩出来的：客户端（urllib / 浏览器 / 测试）走人之后，服务端要到
+                # 下次写才发现对方不在了（心跳 15 秒一次），而那时内核早已收到过 RST——
+                # 基类接着去读下一个请求，就在 `rfile.readline` 上抛 ConnectionAbortedError，
+                # 由 socketserver 打成一段回溯进 **stderr**：
+                #
+                #     Exception occurred during processing of request from ('127.0.0.1', …)
+                #
+                # 症状极难查：它出现在**十几秒之后、完全不相干的用例里**（本批真踩过：
+                # 一个已经没人读的 `/events` 在 20 秒后把回溯打进了 pytest 的 stderr），
+                # 而 `scripts/pytest.ps1` 见到子进程写 stderr 就当致命错误——整轮被掐掉。
+                # SSE 本来就是一连接一条流（浏览器重连也是新开一条），关掉不吃亏。
+                self.close_connection = True
 
         def _push(self, payload: dict) -> None:
             line = json.dumps(payload, ensure_ascii=False)
@@ -472,6 +605,25 @@ def _handler_for(state: WebState):
                     str(payload.get("session") or ""),
                 )
                 self._json(status, body)
+                return
+
+            # 驱动这一台机器的两个端点：非回环绑定一律 403（设计 §3.7）。
+            #
+            # 为什么判在**这里**、而且排在最前面：安全边界不能"看 payload 再决定"。
+            # 排在后头的话，一个远程请求会因为"缺少 goal"拿到 400——那说明它已经
+            # 进到业务分支里了，而"远程不许驱动"这句话就不再是这条壳的性质。
+            if self.path in ("/run", "/confirm") and state.readonly():
+                # 请求体先读掉再回话：不读的话这条连接上会留下残字节（keep-alive 时
+                # 被当成下一个请求），close 时还会触发 RST——见 `_drain_body`。
+                self._drain_body()
+                self._json(
+                    403,
+                    {
+                        "error": f"{REMOTE_READONLY_NOTE}（这条壳绑在 "
+                        f"{state.bound_host()} 上）",
+                        "readonly": True,
+                    },
+                )
                 return
 
             if self.path == "/run":
@@ -640,8 +792,17 @@ def build_server(source: WebState | Runner, host: str, port: int) -> ThreadingHT
 
     参数既可以是 `WebState`（机器级：一个 target 状态 + 一张表），也可以是
     单个 `Runner`（老用法：它被当成一个**钉住的**目标）。
+
+    只读判据在**绑好端口之后**用实际绑上的地址定（`server_address[0]`）：
+    `localhost` 落到哪个协议栈由系统决定，`0.0.0.0` 是不是真全网可达也只有绑完
+    才知道。判据不能放在 CLI 那一层——测试与嵌入代码直接调这里。
     """
-    return ThreadingHTTPServer((host, port), _handler_for(_as_state(source)))
+    state = _as_state(source)
+    httpd = ThreadingHTTPServer((host, port), _handler_for(state))
+    address = getattr(httpd, "server_address", None)
+    bound = address[0] if isinstance(address, tuple) and address else host
+    state.set_bound_host(str(bound))
+    return httpd
 
 
 def serve(
@@ -661,6 +822,9 @@ def serve(
 
     `target` 可选：调用方已经把目标连"来源说明"一起解析好了就原样给过来，
     免得这里再解析一遍、把来源记错（`serve_command` 走这条）。
+
+    `host` 给了非回环地址时这条壳**只读**（设计 §3.7）：起手就往终端说明"只能看"，
+    具体拦在 handler 里（判据是实际绑定的地址，见 `build_server`）。
     """
     # 与 `build_state` 里同一条归一（那里也有一份，因为它是个公开入口）：
     # 给了 `project_root` 就是钉住它。这里还要这份，是因为下面那句提示语
@@ -677,6 +841,13 @@ def serve(
     )
     httpd = build_server(state, host, port)
     print(f"Web UI: http://{host}:{httpd.server_port}/")
+    if state.readonly():
+        # 起手就说，别让人自己发现：绑了非回环地址之后，页面上那个「开始」按钮
+        # 点下去只会得到 403，而"为什么"不该等踩到才知道（设计 §3.7）。
+        print(
+            f"绑在 {state.bound_host()} 上（非回环）：{REMOTE_READONLY_NOTE}",
+            file=sys.stderr,
+        )
     if not pinned:
         where = state.target()
         print(

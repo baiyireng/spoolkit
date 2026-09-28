@@ -391,7 +391,12 @@ def _add_serve_parser(
     短命令要靠后者说清"我是机器级的、任意目录可用"，否则人得先读设计文档。
     """
     parser = sub.add_parser(name, help=help_text, description=description or None)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="监听地址（默认只绑本机）。绑非回环地址（如 0.0.0.0）时是**只读**壳："
+        "能看页面与事件，/run 与 /confirm 返回 403（本批不实现远程可写）",
+    )
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--session", default="", help="会话名。留空 = 用网页壳的指针，没有就 cli"

@@ -30,7 +30,7 @@ Windows `%APPDATA%\spoolkit\.env`，其它平台 `~/.config/spoolkit/.env`（`SP
 `spool bridge --channel qqbot …`，报"缺少 AppID 与 AppSecret"并建议写进
 `C:\Users\32615\.env`，而凭据好好地在 `D:\workSpace\agentWorkSpace\.env` 里。根因是 `--root`
 缺省取了 cwd，而 `cwd/.env` 还**盖住**了用户级那份——于是"照着提示在脚下建一个文件"会把
-正确配置静默压掉。现在机器级通道不认 cwd（与 `serve` / `hub` / `mcp` 同一条契约）。
+正确配置静默压掉。现在机器级通道不认 cwd（与 `serve` / `hub` / `web` / `mcp` 同一条契约）。
 
 `.env` 里就写成平台给的名字，常见的几种拼写都认：
 

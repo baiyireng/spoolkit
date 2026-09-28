@@ -159,7 +159,7 @@ spool extra              # 列出
 
 | 参数 | 说明 |
 |---|---|
-| `--host` / `--port` | 监听地址与端口（默认 `127.0.0.1:8765`）|
+| `--host` / `--port` | 监听地址与端口（默认 `127.0.0.1:8765`）。绑**非回环**地址（`0.0.0.0`、局域网地址）时这条壳**只读**：页面与事件照常，`/run` 与 `/confirm` 返回 403 并说明"远程只能看"（本批不实现远程可写，起手那行也会说）。判据是**实际绑上的地址**，`127.0.0.1` / `::1` / `localhost` 都算回环 |
 | `--session` | 会话名。留空 = 用网页壳的**指向**（`web`），没有就 `cli` |
 | `--provider` `--model` `--script` `--base-url` `--proxy` | 转发给子进程 |
 | `--policy` / `--scope` / `--allow-read` | 同上 |
@@ -171,7 +171,8 @@ spool extra              # 列出
 
 - `GET /state`：在原有快照上**只增不改**地追加 `target`（`root` / `session` / `pinned` /
   `workspace_source` / `session_source` / `note`）、`workspaces`（登记过的工作区，带 `current`）、
-  `sessions`（当前工作区的会话）、`running_targets`（谁在跑，带 `current`）；
+  `sessions`（当前工作区的会话）、`running_targets`（谁在跑，带 `current`）、
+  `readonly` / `host`（这条壳是不是只读、实际绑在哪儿）；
 - `POST /target`：body `{"workspace": …, "session": …}`（两个都可选）——工作区认名字 / 序号 /
   路径，会话不点名就沿用当前那条。**切换不杀任务、不阻塞**：在跑的那条留在自己的
   (工作区, 会话) 里继续；切回去事件与历史都还在。页面顶上那条选择栏发的就是它，
@@ -179,6 +180,13 @@ spool extra              # 列出
   `--root` 起的壳只有一个目标，这里返回 409 并说明去掉 `--root` 重启就是机器级；
   还没有目标时 `/run` `/confirm` 返回 409，`/events` 先等着（目标一变就退订旧的、
   订阅新的、补一帧 `state`）。
+
+驱动这台机器的另两个端点：`POST /run`（`{"goal": …}`）与 `POST /confirm`（`{"apply": …}`）。
+**绑了非回环地址时它们一律 403**（body 里 `readonly: true` 加一句人话：只能看，不能驱动，
+要驱动就在本机开一个或绑回 `127.0.0.1`）；判据排在业务分支**之前**，所以连 goal 都不给也是
+403。只读壳里 `POST /target` **照常可用，但不写任何东西**——网页壳指向与工作区登记表都不落盘
+（它改的只是"这个进程现在看谁"，不驱动任务）。完整口径见
+[`manual.md` 的"非回环地址上只读"](manual.md#非回环地址上只读设计-37)。
 
 页面会探当前生效的模型（llama.cpp 打 `/props`；假模型/云端不探本机端口），
 不通时顶部出红横幅。只起网页壳、不拉聊天通道时继续用这一条。
@@ -204,7 +212,7 @@ spool hub --channel qqbot --bridge-proxy socks5://127.0.0.1:1080
 
 | 参数 | 说明 |
 |---|---|
-| `--host` / `--port` / `--session` | 与 `serve` 相同 |
+| `--host` / `--port` / `--session` | 与 `serve` 相同（**含"绑非回环地址就只读"那条**）|
 | `--root` | 与 `serve` 相同：**给了 = 钉住**那一个工作区；不给 = 机器级（不认 cwd）。钉住时桥子进程也只服务这一个，不给时桥也是机器级 |
 | `--provider` `--model` `--script` `--base-url` `--proxy` | 转发给网页壳子进程，也转给 bridge |
 | `--policy` / `--scope` / `--allow-read` / `--web*` | 同上 |
@@ -228,9 +236,14 @@ spool hub --channel qqbot --bridge-proxy socks5://127.0.0.1:1080
 ```bash
 spool web                      # 任意目录：起网页壳，进去再选工作区与会话
 spool web --port 9000
+spool web --host 0.0.0.0       # 给别的机器看：只读（/run 与 /confirm 403）
 spool web --no-web             # 关掉联网取用
 spool web --root D:\某个工作区  # 给了就钉住这一个（老行为）
 ```
+
+`--host` 给了非回环地址（`0.0.0.0` 是常见的那个）就是**只读壳**：页面、`/state`、`/events`
+照常，`/run` 与 `/confirm` 返回 403 并说明"远程只能看"（本批不实现远程可写）；起手那行也会说。
+`hub` 与 `serve` 同一条口径——它们共用同一份参数定义与同一个 `serve()`。
 
 为什么要这条：网页壳本来就是**机器级**的（不认 cwd），可它的名字叫 `hub`；而
 "在任意目录敲一下就能起手"这件事，**名字短本身就有一半功劳**。

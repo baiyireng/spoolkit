@@ -73,9 +73,10 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
   验收命令的退出码才算数。没有 pytest 但改了 HTML 时，会抽出内联 JS 做语法检查。
 - **常驻入口**：`spool hub` 起网页壳，加 `--channel` 才再拉聊天桥；本机
   llama-server / SOCKS 隧道用 `spool service` 按配方启停，hub 只探活、不替你启动。
-- **机器级网页壳**：`spool serve` / `spool hub` **在任意目录都能起**——不给 `--root`
+- **机器级网页壳**：`spool serve` / `spool hub` / `spool web` **在任意目录都能起**——不给 `--root`
   就是一个进程服务整台机器，当前目标（工作区 + 会话）可以换，而**切换不打断正在跑的任务**；
-  给了 `--root` 就是钉住那一个。
+  给了 `--root` 就是钉住那一个。绑到非回环地址（`--host 0.0.0.0`）时这条壳**只读**：
+  页面、状态与事件照常，发任务与确认改动返回 403（远程可写不在本批）。
 - **能被别的 agent 调用**：挂成 MCP 服务，Codex / Claude Code / Cursor 可以
   扮演用户下发编排任务（[`docs/mcp.md`](docs/mcp.md)）。
 - **能被聊天驱动**：手机发一条消息 → 在工作区里跑一轮 → 结果发回来
@@ -97,6 +98,8 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 | `spool chat` | 对话式使用：多轮、共用同一个会话 |
 | `spool hub` | 常驻：网页壳；加 `--channel` 才再拉聊天桥（**任意目录起**）|
 | `spool serve` | 只起 Web UI（不拉通道；**任意目录起**，不给 `--root` 就是机器级）|
+| `spool web` | 机器级网页壳的短命令（= `hub` 不带通道，任意目录起，进去再选工作区）|
+| `spool qq` | 起 QQ 通道（= `bridge --channel qqbot`；默认值来自用户配置 `[channel.qqbot]`）|
 | `spool service` | 按本机配方启停 llama / 隧道（不写进仓库） |
 | `spool bridge --channel fake` | 只用聊天通道（telegram / qqbot / wecom 见文档） |
 | `spool mcp` / `spool mcp-servers --check` | 被别的 agent 调用 / 看自己配的外挂 MCP |
@@ -110,8 +113,8 @@ spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测
 "在哪个工作区、哪条会话里干活"现在是**运行时状态**（`spool ws use`；聊天里
 `/ws use`；机器级网页壳里换目标），不是启动参数：`--root` / `--session` 变成"这一次覆盖"，
 `--session` 留空就用上次那条。**换工作区不用重启、也不用重新配对**。
-CLI 认当前目录（往上找 `.agent/`）；**机器级入口（`serve` / `hub` / `bridge` / `mcp` 不给
-`--root`）不认 cwd**——说不清就让你点名，不拿"你站在哪"顶数。
+CLI 认当前目录（往上找 `.agent/`）；**机器级入口（`serve` / `hub` / `web` / `bridge` /
+`qq` / `mcp` 不给 `--root`）不认 cwd**——说不清就让你点名，不拿"你站在哪"顶数。
 
 逐条参数见 [`docs/cli.md`](docs/cli.md)。
 

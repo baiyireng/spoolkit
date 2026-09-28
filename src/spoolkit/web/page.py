@@ -73,9 +73,12 @@ HTML = """<!DOCTYPE html>
   #pairing .code { font-weight:700; letter-spacing:0.06em; }
   #health { display:none; padding:8px 14px; background:#3d1515; color:#f0a0a0;
             border-bottom:1px solid #5c2020; }
+  #readonly { display:none; padding:8px 14px; background:#2a1f3d; color:#d0bfff;
+              border-bottom:1px solid #443066; }
 </style>
 </head>
 <body>
+<div id="readonly"></div>
 <div id="bar">
   <span class="meta">工作区</span>
   <select id="ws"></select>
@@ -116,6 +119,9 @@ const whereBox = document.getElementById('where');
 const noteBox = document.getElementById('target-note');
 const elseBox = document.getElementById('elsewhere');
 let running = false, decided = false;
+// 这条壳绑在非回环地址上时，服务端只放行"看"：/run 与 /confirm 一律 403，
+// 页面必须在**点之前**说出来（点一下被拒是最后一秒才告诉人）。
+let readonly = false;
 let session = 'cli';
 let pendings = [];
 let historyDrawn = false;
@@ -299,7 +305,7 @@ function drawHistory(messages) {
 
 function setRunning(value) {
   running = value;
-  startBtn.disabled = value;
+  startBtn.disabled = value || readonly;
   startBtn.textContent = value ? '运行中…' : '开始';
 }
 
@@ -318,6 +324,8 @@ function applyState(state) {
   // 目标先画：它变了就**整屏重绑**（服务端在目标变了时会补一帧 state，
   // 那一帧也要走这条重绑，不能只更新横幅）。
   if (drawTarget(state)) { resetView(); }
+  // 只读必须在 setRunning / showActions **之前**定下来：那两处都按它决定按钮长什么样。
+  showReadonly(state);
   const target = state.target || {};
   session = target.session || state.session || session;
   const usage = state.usage || {};
@@ -406,6 +414,7 @@ async function refreshBanners() {
     const response = await fetch('/state');
     if (!response.ok) { return; }
     const state = await response.json();
+    showReadonly(state);
     showPairings(state.pairings);
     showHealth(state.health);
     showElsewhere(state);
@@ -424,10 +433,30 @@ function showCommandAsk(detail) {
 }
 
 function showActions() {
+  // 只读壳里没有可点的东西。按钮摆出来、点下去被 403 拒，是骗人：
+  // 人只会以为是坏了，然后去关掉那个"看起来多余"的检查（服务端那道才是权威）。
+  if (readonly) { return; }
   decided = false;
   actions.style.display = 'flex';
   document.getElementById('apply').disabled = false;
   document.getElementById('reject').disabled = false;
+}
+
+// 非回环绑定 = 只读（设计 §3.7）。这一句要说全三件事：为什么、能看什么、
+// 想驱动怎么办——只说"403"会让人以为壳坏了。
+function showReadonly(state) {
+  readonly = Boolean(state.readonly);
+  const box = document.getElementById('readonly');
+  if (!readonly) {
+    box.style.display = 'none';
+    box.replaceChildren();
+    return;
+  }
+  const where = state.host ? '（绑在 ' + state.host + ' 上）' : '';
+  box.style.display = 'block';
+  box.textContent = '这条壳绑在非回环地址上' + where + '：只能看，不能驱动——'
+    + '发任务与确认改动会被拒。要驱动它，就在本机开一个网页壳'
+    + '（或把 --host 绑回 127.0.0.1）。工作区与会话仍可切换，那只是换"在看谁"。';
 }
 
 function onEvent(event) {
