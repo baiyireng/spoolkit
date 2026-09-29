@@ -50,6 +50,7 @@ from spoolkit.cli.runtime import (
     counter_for,
     open_memory,
     provider_gateway,
+    bind_model_wait,
     settle_lessons,
 )
 from spoolkit.cli.settle import settle
@@ -216,6 +217,7 @@ def make_plan(args: argparse.Namespace) -> int:
     gateway = provider_gateway(args, project_root)
     if gateway is None:
         return 2
+    bind_model_wait(gateway, args)
 
     plan = _plan_phase(gateway, project_root, args)
     if not plan.steps:
@@ -732,6 +734,7 @@ def enter_autonomous(args: argparse.Namespace, project_root: Path) -> int:
     gateway = provider_gateway(args, project_root)
     if gateway is None:
         return 2
+    bind_model_wait(gateway, args)
     return autonomous(args, project_root, gateway)
 
 
@@ -740,4 +743,5 @@ def enter_advance(args: argparse.Namespace, project_root: Path) -> int:
     gateway = provider_gateway(args, project_root)
     if gateway is None:
         return 2
+    bind_model_wait(gateway, args)
     return advance_plan(args, project_root, gateway)

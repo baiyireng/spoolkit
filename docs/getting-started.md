@@ -259,7 +259,7 @@ spool hub --channel qqbot    # 网页壳 + 聊天桥；本机 llama / 隧道用 
 | 命令说"当前目录不是工作区" | 这里确实没有 `.agent/`，登记表里也没有 | `spool init`，或用 `--root <路径>` |
 | `没有这个配对码` | **看错了工作区**（不是码错） | 报错里会写它看的是哪个文件；旧式的码用 `spool approve <码> --ws <名字>` 点名工作区，或先 `spool init` 登记 |
 | 模型返回空内容 | 思考内容吃光了输出预算 | llama-server 加 `--reasoning off` |
-| 终端几分钟没有新行 | llama.cpp 是非流式的，整段生成完才打印 | 等它返回。假模型缺脚本会立刻退出，不会替你写代码 |
+| 终端几分钟没有新行 | llama.cpp 非流式，整段生成完才返回 | 满 15 秒会报「模型生成中，已等待…」；仍等到现有上限。假模型缺脚本会立刻退出，不会替你写代码 |
 | 假模型立刻退出 / 不写代码 | 用了 `--provider fake` 却没给 `--script`，或把它当没 LLM 的兜底 | 真实任务用 llamacpp / gemini。fake **只回放脚本** |
 | 网页起来了但手机没消息 | 用了 `serve`，或 `hub` 没加 `--channel` | 常驻带聊天：`spool hub --channel …` |
 | 输出被截断 | 输出预算不够 | 看 `.agent/limits.json`；它支持续写与分轮，真要调就 `spool limits --set 名字=值` |

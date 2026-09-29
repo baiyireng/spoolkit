@@ -204,11 +204,12 @@ def chat_command(args: argparse.Namespace) -> int:
     )
     args.root, args.session = str(target.root), target.session
     project_root = Path(args.root).resolve()
-    from spoolkit.cli.runtime import provider_gateway
+    from spoolkit.cli.runtime import bind_model_wait, provider_gateway
 
     gateway = provider_gateway(args, project_root)
     if gateway is None:
         return 2
+    bind_model_wait(gateway, args)
     window = resolve_window(gateway, args.window)
     model_name = f"{args.provider}:{args.model or '默认'}"
     memory = None

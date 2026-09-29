@@ -2218,6 +2218,16 @@ T6（`episode.summary` + 空 distill 兜底 + FTS OR）与 T7（工具名短环 
 - llama.cpp 心跳 / 空闲超时：生成仍是非流式，终端可能几分钟没新行。
 - T8 本地长文切块：工作区大文件还是 `read_file`。
 
+---
+
+## 2026-09-22 · 模型等待心跳
+
+**任务**：llama.cpp `stream: false` 时三端长时间无输出，人以为挂死。
+
+**做了**：`WaitingGateway` 满 15 秒心跳；散文 stderr、`--events` 发 `wait`；网页灰字。不改超时、不接流式。
+
+**没做**：SSE / 空闲杀请求 / T8。
+
 
 ---
 

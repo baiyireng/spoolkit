@@ -477,6 +477,12 @@ function onEvent(event) {
     add(data.text, data.ok ? 'dim' : 'bad');
     return;
   }
+  if (data.type === 'wait') {
+    var text = '模型生成中，已等待 ' + data.elapsed + 's';
+    if (data.limit) { text += ' / 上限 ' + data.limit + 's'; }
+    add(text, 'dim');
+    return;
+  }
   if (data.type === 'diff') {
     pendings.push({path: data.path, text: data.text});
     showPending(pendings);

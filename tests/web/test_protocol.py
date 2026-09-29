@@ -4,6 +4,7 @@ from spoolkit.web.protocol import (
     DIFF,
     FINAL,
     NOTE,
+    WAIT,
     Event,
     parse_line,
 )
@@ -67,4 +68,20 @@ def test_note事件被接受() -> None:
     assert parsed is not None
     assert parsed.type == NOTE
     assert parsed.data["text"] == "数字核对：…"
+
+
+def test_wait事件被接受() -> None:
+    parsed = parse_line(Event(WAIT, {"elapsed": 15, "limit": 491}).to_line())
+    assert parsed is not None
+    assert parsed.type == WAIT
+    assert parsed.data["elapsed"] == 15
+    assert parsed.data["limit"] == 491
+    assert "type" not in parsed.data
+
+
+def test_wait可以没有limit() -> None:
+    parsed = parse_line(Event(WAIT, {"elapsed": 15}).to_line())
+    assert parsed is not None
+    assert parsed.type == WAIT
+    assert "limit" not in parsed.data
 
