@@ -29,6 +29,7 @@ from spoolkit.cli.commands.session import session_command
 from spoolkit.cli.commands.ws import ws_command
 from spoolkit.cli.commands.limits import limits_command
 from spoolkit.cli.commands.config import config_command
+from spoolkit.cli.commands.env import env_command
 from spoolkit.cli.commands.chat import chat_command
 from spoolkit.cli.commands.bridge import approve_entry, bridge_command
 from spoolkit.cli.commands.init import init_command
@@ -347,6 +348,32 @@ def _add_session_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("title", nargs="?", default="", help="`new` 或 `rename` 时的标题")
     parser.add_argument("--all", action="store_true", help="连归档的一起列")
     parser.set_defaults(func=session_command)
+
+
+def _add_env_command(sub: argparse._SubParsersAction) -> None:
+    """`spool env`：用户级 `.env`（密钥那一层）。
+
+    **不带 `--root`**：这条命令管的是"这台机器上的你"，与在哪个工作区无关。
+    """
+    parser = sub.add_parser(
+        "env", help="用户级 .env：看位置与键名 / 写入 / 从工作区搬"
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "path", "set", "import"],
+    )
+    parser.add_argument(
+        "items", nargs="*", default=[], help="`set` 时给 KEY=VALUE，可给多个"
+    )
+    parser.add_argument(
+        "--from", dest="source", default="", help="`import` 时的来源 .env"
+    )
+    parser.add_argument(
+        "--only", action="append", default=[], help="`import` 时只搬这些键，可给多次"
+    )
+    parser.set_defaults(func=env_command)
 
 
 def _add_ws_command(sub: argparse._SubParsersAction) -> None:
@@ -846,6 +873,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_diagnose_command(sub)
     _add_limits_command(sub)
     _add_config_command(sub)
+    _add_env_command(sub)
     _add_chat_command(sub)
     _add_mcp_command(sub)
     _add_mcp_servers_command(sub)
