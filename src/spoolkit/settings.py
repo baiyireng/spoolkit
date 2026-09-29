@@ -29,6 +29,25 @@
 
 hub **只探活、不启**这些进程。没写这张表时，隧道不探、不拉。
 
+通道的默认值写在 `[channel.<名字>]` 子表里（`proxy` / `policy` / `scope` /
+`timeout` / `web` / `root`），给 `spool qq` 这类短命令当默认值用：
+
+```toml
+[channel.qqbot]
+proxy   = "socks5://127.0.0.1:1080"   # 等价于 --bridge-proxy
+policy  = "ask"
+scope   = "**"
+timeout = 240                          # 秒，与 spool bridge --timeout 同一个单位
+web     = true
+```
+
+它是**子表而不是扁平键**：通道是按名字来的，插件还能注册新通道，扁平键会把
+"有哪些通道"写死在白名单里（`[[mcp]]` / `[[service]]` 是同一条理由）。优先级
+仍是**命令行 > 环境变量 > 用户配置 > 内置默认**，环境变量名是
+`SPOOLKIT_CHANNEL_<通道名>_<键>`。认不出的键名**要说出口**，取值写错的
+（`policy = "AUTO"`、`timeout = -5`）**同样要说出口**——写错一个字母的症状是
+"设置了却没生效"，而那种问题只靠复现查不出来。
+
 改名（`agents-dev` → `spoolkit`）时留了一层兼容：**新位置没有文件而旧位置有，
 就继续读旧的那份**。所以已经配好的人一个字都不用改；等他下次 `config --set`，
 配置写到新位置，旧的那份留在原地当备份（不再读）。
@@ -42,6 +61,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from spoolkit.envfile import load_env_file
+from spoolkit.policy import POLICIES
 
 # 能配置的键。写成一个白名单而不是"想存什么存什么"：
 # 配置文件的键写错一个字母，症状是"设置了但没生效"，而那种问题最难查。
@@ -291,11 +311,13 @@ def _quote(value: str) -> str:
 
 
 def save(values: dict[str, str], path: Path | None = None) -> Path:
-    """写白名单里的键，并保留 `[[mcp]]` / `[[service]]` 以及白名单以外的
-    顶层标量（例如人手写的 `tavily_api_key`）。
+    """写白名单里的键，并保留 `[channel.*]` / `[[mcp]]` / `[[service]]` 以及
+    白名单以外的顶层标量（例如人手写的 `tavily_api_key`）。
 
-    数组表不在 KEYS 里；以前整文件重写会把它们抹掉——
-    `spool config --set` 一次，外挂工具、本机配方和搜索 key 就丢了。
+    数组表与子表都不在 KEYS 里；以前整文件重写会把它们抹掉——
+    `spool config --set` 一次，外挂工具、本机配方、通道默认值和搜索 key 就丢了。
+    通道那一节尤其亏：它是人手写进去的（`--set` 管不到子表），丢了之后
+    `spool qq` 只是"参数回到了默认值"，不会报任何错。
     """
     target = path or config_path()
     existing, error = read_config(target)
@@ -311,7 +333,7 @@ def save(values: dict[str, str], path: Path | None = None) -> Path:
         if key in values and values[key] != "":
             lines.append(f"{key} = {_quote(values[key])}")
     for key, raw in existing.items():
-        if key in KEYS or key in ("mcp", "service"):
+        if key in KEYS or key in ("mcp", "service", "channel"):
             continue
         if isinstance(raw, (str, int, float, bool)):
             lines.append(f"{key} = {_toml_value(raw)}")
@@ -322,6 +344,23 @@ def save(values: dict[str, str], path: Path | None = None) -> Path:
             lines.append("")
             lines.append(f"[[{table}]]")
             lines.extend(_dump_table_item(item))
+    # 通道小节放在最后：它们是子表，混在顶层标量中间会让 TOML 的归属变难读
+    # （顶层键写进 `[channel.x]` 之后会变成那个子表的键——这是真会改语义的一种）。
+    channels = existing.get("channel")
+    if isinstance(channels, dict):
+        for name in sorted(str(item) for item in channels):
+            section = channels.get(name)
+            if not isinstance(section, dict):
+                continue
+            lines.append("")
+            lines.append(f"[channel.{name}]")
+            lines.extend(
+                f"{key} = {_toml_value(value)}"
+                for key, value in section.items()
+                # None 不是 TOML 值（`tomllib` 也解析不出来），原样写回去会写出一份
+                # **读不回来**的配置——那比丢一节更坏。
+                if value is not None
+            )
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
 
@@ -348,6 +387,282 @@ def _dump_table_item(item: dict) -> list[str]:
     keys = [key for key in order if key in item]
     keys.extend(key for key in item if key not in keys)
     return [f"{key} = {_toml_value(item[key])}" for key in keys]
+
+
+# --- 通道的默认值：`[channel.<名字>]` --------------------------------------
+#
+# 为什么单独开一节而不是往 `KEYS` 里再塞几个键：这些值**不属于某一个工作区**，
+# 而是"这台机器上这条通道怎么起"——QQ 出网走哪条 SOCKS、默认什么授权策略、
+# 一轮等多久。原先起一条通道要敲六个参数（`--channel qqbot --bridge-proxy … --policy
+# ask --scope "**" --timeout 240 --web`），而这六个没有一个属于"这一次"。
+#
+# 为什么不用扁平键（`channel_qqbot_proxy` 之类）：通道是按名字来的，**可能有插件
+# 注册的新通道**，扁平键会把"有哪些通道"写死在白名单里；子表 `[channel.<名字>]`
+# 谁都能加一节，核心不认识它也能读出来。
+
+# 每个通道能配的键（值 = 内置默认）。`timeout` 的单位是**秒**，与
+# `spool bridge --timeout`（默认 900 秒）同一个口径——单位不一致是"配了却没生效"
+# 里最难查的一种。
+#
+# ⚠️ 这六项**不是都被短命令读**：`shortcuts._CHANNEL_OPTION_KEYS` 只认五个，
+# `root` 不在里面（工作区在 `main()` 那一步就解析完了，短命令不许回头拿配置补它）。
+# 配在文件里却不生效的键必须**看起来就与别人不一样**，所以 `spool config` 会把它
+# 标出来（`commands/config.py` 的 `_NOT_READ_BY_SHORTCUTS`，另有测试钉住两处一致）。
+CHANNEL_KEYS: dict[str, object] = {
+    "proxy": "",  # 通道自己出网走的代理，等价于 --bridge-proxy
+    "policy": "",  # 子进程的授权策略（ask / auto / deny）
+    "scope": "",  # 允许自动落盘的范围
+    "timeout": 900.0,
+    "web": True,
+    "root": "",  # 钉住的工作区；留空 = 服务整台机器
+}
+
+# 通道键 → 环境变量名的中段。`SPOOLKIT_CHANNEL_QQBOT_PROXY`、旧前缀同形。
+CHANNEL_ENV_PREFIX = "CHANNEL_"
+
+# 环境变量里要按数字读的键（配置文件里 `timeout = 240` 是 TOML 整数，
+# 而环境变量永远是字符串）。
+_CHANNEL_NUMERIC = ("timeout",)
+_CHANNEL_BOOL = ("web",)
+
+# 认得的取值**只有这几个**的键：它们是**枚举**，不是自由文本。
+# 命令行那条路上 argparse 的 `choices` 已经把拼错的挡在门外，而配置文件
+# 原先谁都不看——`policy = "AUTO"` 会静默通过，然后在 `cli/settle.py` 里
+# 落到"问"那一条路上。那正是本任务反复要消灭的形状："我明明配了自动，它还在问我"。
+# **空串是合法取值**（等于没表态：`resolve_policy` 见到假值就去读已保存的策略）。
+# 取值表借 `policy.POLICIES`，不另抄一份——抄一份的下场是两处慢慢走散。
+_CHANNEL_ENUM: dict[str, tuple[str, ...]] = {"policy": POLICIES}
+
+
+def _channel_env_key(name: str, key: str) -> str:
+    """`qqbot` + `proxy` → `QQBOT_PROXY`。连字符按环境变量的习惯写成下划线。"""
+    return f"{name}_{key}".upper().replace("-", "_")
+
+
+def load_channels(path: Path | None = None) -> dict[str, dict]:
+    """用户配置里的 `[channel.<名字>]` 各小节，**原样**返回（不做类型转换）。
+
+    读不到、读坏了都返回空——通道默认值是增强，不该挡住启动（与 `[[mcp]]` /
+    `[[service]]` 同一条契约）。非字典的那些（例如人手写了个
+    `channel = "qqbot"`）跳过：它们连"键值对"都不是，说不成是配置。
+    """
+    payload, _ = read_config(path)
+    raw = payload.get("channel")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(name): dict(item)
+        for name, item in raw.items()
+        if isinstance(item, dict)
+    }
+
+
+def _coerce_channel_value(key: str, value):
+    """从配置文件/环境变量读来的值 → 该有的类型。认不出返回 `None`。
+
+    `None` 表示"这个值用不了"，由调用方**说出来**（`ChannelValues.issues`）并
+    退回下一层——静默跳过正是"设置了却没生效"的来源。
+
+    三条判定，都只做这一层该做的事（"这个值读不读得懂"）：
+
+    - 开关（`web`）：认 `true/false`、`1/0`、`yes/no`、`on/off`（大小写不论）。
+      宽容是故意的：环境变量那一层永远是字符串，`SPOOLKIT_CHANNEL_QQBOT_WEB=no`
+      是自然的写法，而且这两种写法**都不会改变"配了什么"**——`yes` 就是"开"；
+    - 数字（`timeout`）：要能当秒数，而且要**大于 0**（判定依据见
+      `_channel_value_problem`）；
+    - 枚举（`policy`）：取值表里没有就说不出口（`policy.POLICIES`）。
+    """
+    if key in _CHANNEL_BOOL:
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return None
+    if key in _CHANNEL_NUMERIC:
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return None
+        return seconds if seconds > 0 else None
+    if key in _CHANNEL_ENUM:
+        text = str(value).strip()
+        return text if text == "" or text in _CHANNEL_ENUM[key] else None
+    return str(value)
+
+
+def _channel_value_problem(key: str, raw) -> str:
+    """`_coerce_channel_value` 认不出这个值时，**具体是哪一种认不出**。
+
+    为什么要分开说：`timeout = "很久"` 与 `timeout = -5` 都落在同一句"这个值用不了"
+    上，但下一步要改的地方完全不同——一个是类型写错了，另一个是没写正数。只说
+    "读不成该有的类型"，第二种人会被指到错的方向去（诊断说假话比不说更坏）。
+
+    `timeout` 的下界定在 **> 0** 的依据：它是"一轮最多等多少秒"，消费方是
+    `bridge/agent_runner.py` 的 `deadline = now + timeout`——0 与负数意味着
+    **每一轮当场就到点**，人看到的是"它说超过 -5 秒还没结束，先不等了"。同一仓里
+    `tools/exec.py` 对命令超时的写法就是拒绝（"timeout 必须在 1 到 N 秒之间"），
+    这里沿用同一条口径：认不出来就退回下一层，而不是把 -5 原样递给桥。
+    """
+    if key in _CHANNEL_NUMERIC:
+        try:
+            seconds = float(raw)
+        except (TypeError, ValueError):
+            return f"读不成数字（现在写的是 {raw!r}）"
+        return f"要的是大于 0 的秒数（现在写的是 {seconds:g}）"
+    if key in _CHANNEL_BOOL:
+        return f"读不成真假（现在写的是 {raw!r}；写 true / false）"
+    if key in _CHANNEL_ENUM:
+        return (
+            f"不在认得的取值里（现在写的是 {raw!r}；"
+            f"可用：{'、'.join(_CHANNEL_ENUM[key])}）"
+        )
+    return f"读不成该有的类型（现在写的是 {raw!r}）"
+
+
+def display_channel_value(value) -> str:
+    """把一个通道值印成人看的样子。`spool qq` 的起手行与 `spool config` 共用。
+
+    两条规矩，都是"印出来的字必须与生效值对得上"：
+
+    - **只有"没给"（`None` / 空串）才印「（空）」**。原先起手行写的是
+      `value or '（空）'`，那是按**真假**判空：`web = false` 印成「web=（空）」、
+      `--timeout 0` 印成「timeout=（空）」，与"根本没给"在字面上不可区分——
+      而这一行的全部意义就是"它到底读了哪一份"。文档写得对（`docs/bridge.md` 的
+      样例是 `web=false(用户配置 …)`），错的是代码这边；
+    - 真假值印 `true` / `false`：它照 TOML 的写法，与配置文件里能对得上号。
+    """
+    if value is None or value == "":
+        return "（空）"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+@dataclass(frozen=True)
+class ChannelValues:
+    """一个通道算出来的默认值：**值、来源、以及说不出口的那些**。
+
+    为什么把"来源"也带回来：这些值生效在别的进程里（桥、网页壳），出问题时
+    唯一能回答"它到底用了哪一份"的就是这几个字。命令行那一层由调用方给，
+    所以这里只说环境变量 / 用户配置 / 内置默认这三层。
+    """
+
+    name: str
+    options: dict[str, object] = field(default_factory=dict)
+    sources: dict[str, str] = field(default_factory=dict)
+    #: 这一节里认不出的键名。**必须说出来**：写错一个字母的症状是
+    #: "设置了却没生效"，而那种问题只靠复现是查不出来的。
+    unknown: tuple[str, ...] = ()
+    #: 值存在但**用不了**：读不成该有的类型（`timeout = "很久"`）、不在认得的
+    #: 取值里（`policy = "AUTO"`）、或者不是正数（`timeout = -5`）。
+    #: 用不了就退回下一层，并且**说出来**——静默跳过正是"设置了却没生效"。
+    issues: tuple[str, ...] = ()
+
+    def source(self, key: str) -> str:
+        return self.sources.get(key, "未设置")
+
+    def notes(self) -> str:
+        """给人看的一两行：这一节里有什么不对。没问题时返回空串。"""
+        lines = []
+        if self.unknown:
+            lines.append(
+                f"[channel.{self.name}] 里这些键不认识（等于没配）："
+                f"{'、'.join(self.unknown)}\n"
+                f"    可用的键：{'、'.join(CHANNEL_KEYS)}"
+            )
+        for problem in self.issues:
+            lines.append(f"[channel.{self.name}] {problem}")
+        return "\n".join(lines)
+
+
+def resolve_channel_options(
+    name: str,
+    overrides: dict[str, object] | None = None,
+    env: dict[str, str] | None = None,
+    path: Path | None = None,
+) -> ChannelValues:
+    """一个通道的默认值，按**命令行 > 环境变量 > 用户配置 > 内置默认**算出来。
+
+    `overrides` 是命令行那一层：**给了的键（哪怕给的是空串）就到此为止**——
+    命令行是"这一次的意图"，它压得住其余三层。"给没给"由调用方判定：
+    短命令的 argparse 默认值是 `None`（空串在这里是合法取值，例如
+    `--scope ""` 表示"不许自动落盘"）。
+
+    环境变量的名字是 `SPOOLKIT_CHANNEL_<通道名>_<键>`（旧前缀
+    `AGENTS_DEV_CHANNEL_<通道名>_<键>` 也认，新前缀优先），例如
+    `SPOOLKIT_CHANNEL_QQBOT_PROXY`。新前缀优先这条与 `settings.resolve` 一致。
+
+    每次调用都重读文件，不缓存：桥与网页壳是长驻进程，配置是会被改的。
+    """
+    override = dict(overrides or {})
+    environment = os.environ if env is None else env
+    section = load_channels(path).get(name) or {}
+    unknown = tuple(sorted(str(key) for key in section if str(key) not in CHANNEL_KEYS))
+    issues: list[str] = []
+
+    values: dict[str, object] = {}
+    sources: dict[str, str] = {}
+    for key, builtin in CHANNEL_KEYS.items():
+        if key in override:
+            values[key] = override[key]
+            sources[key] = "命令行"
+            continue
+        from_env = ""
+        for prefix in (ENV_PREFIX, LEGACY_ENV_PREFIX):
+            variable = prefix + CHANNEL_ENV_PREFIX + _channel_env_key(name, key)
+            raw = (environment.get(variable) or "").strip()
+            if raw:
+                # 来源要报**实际用上的那个名字**：报了新前缀而人设的是旧前缀，
+                # 他会去改一个本来就没设的变量。
+                from_env, from_env_source = raw, f"环境变量 {variable}"
+                break
+        if from_env:
+            converted = _coerce_channel_value(key, from_env)
+            if converted is None:
+                issues.append(
+                    f"{key} 的环境变量 {from_env_source.removeprefix('环境变量 ')} "
+                    f"{_channel_value_problem(key, from_env)}，这一层跳过"
+                )
+            else:
+                values[key] = converted
+                sources[key] = from_env_source
+                continue
+        if key in section:
+            converted = _coerce_channel_value(key, section[key])
+            if converted is None:
+                issues.append(
+                    f"{key} 的值{_channel_value_problem(key, section[key])}，这一层跳过"
+                )
+            else:
+                values[key] = converted
+                sources[key] = f"用户配置 [channel.{name}] {effective_config_path()}"
+                continue
+        values[key] = builtin
+        sources[key] = "内置默认"
+    return ChannelValues(
+        name=name,
+        options=values,
+        sources=sources,
+        unknown=unknown,
+        issues=tuple(issues),
+    )
+
+
+def channel_options(name: str, path: Path | None = None) -> ChannelValues:
+    """`[channel.<name>]` 这一段**本身**的默认值（不含命令行那一层）。
+
+    `spool config` 与 `spool bridge --check` 用它回答"我配了没"；
+    短命令用 `resolve_channel_options`（多一层命令行）。
+    """
+    return resolve_channel_options(name, path=path)
+
+
+def known_channels(path: Path | None = None) -> list[str]:
+    """用户配置里写了哪些通道小节（排序后）。没写就是空。"""
+    return sorted(load_channels(path))
 
 
 def resolve(key: str, flag: str = "", env: dict[str, str] | None = None) -> tuple[str, str]:

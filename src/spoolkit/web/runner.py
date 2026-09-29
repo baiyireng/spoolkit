@@ -41,6 +41,46 @@ EVENT_LOG = 400
 # 截断后的最近几轮（`conversational_prompt`），不是这份完整回放。
 HISTORY_LIMIT = 20
 
+# 收子进程时等多久才升级成强杀。与 `cli/commands/hub.py::CHILD_WAIT` 同一个
+# 量级（那边管的是桥子进程）：长驻进程收到 terminate 后要收尾（关通道、写状态），
+# 给太短会把"自己能收干净"的那条路直接跳过去。
+STOP_WAIT = 8.0
+
+
+def health_snapshot(
+    extra_args: Sequence[str] = (),
+    extra_health=None,
+) -> dict:
+    """模型（以及 hub 可选附带的通道）通不通。给人看的，不进模型上下文。
+
+    单独拎成模块级函数：机器级网页壳在**还没有当前目标**时也要能给出这一块
+    （页面横幅读的就是它），而那时连一个 Runner 都还没有。探活失败不得把状态
+    接口弄挂——探活是增强。
+    """
+    try:
+        model = health_mod.probe_from_extra(list(extra_args))
+    except Exception as exc:
+        model = {
+            "ok": False,
+            "name": "model",
+            "target": "",
+            "detail": f"探活失败：{exc}",
+        }
+    payload = {"model": model}
+    try:
+        payload["services"] = list(health_mod.probe_services())
+    except Exception:
+        payload["services"] = []
+    if extra_health is None:
+        return payload
+    try:
+        extra = extra_health() or {}
+    except Exception:
+        return payload
+    if isinstance(extra, dict):
+        payload.update(extra)
+    return payload
+
 
 class Runner:
     """管理一次 agent 子进程的运行。"""
@@ -142,6 +182,23 @@ class Runner:
             thread.start()
             return True
 
+    def stop(self, timeout: float = STOP_WAIT) -> None:
+        """收掉**自己拉起的**那个子进程。没在跑时是空操作。
+
+        照 `cli/commands/hub.py::stop_children` 的做法：先 terminate（让它自己
+        收尾），到点还不退就 kill。别人的进程这里一概不碰。
+        """
+        with self._lock:
+            process = self._process
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=timeout)
+
     def confirm(self, apply: bool) -> bool:
         """把用户的决定写进子进程的 stdin。"""
         return self.answer("y" if apply else "n")
@@ -207,32 +264,24 @@ class Runner:
         data["health"] = self._health_snapshot()
         return data
 
+    def brief(self) -> dict:
+        """一行状态：给"别处还有哪些目标在跑"用（页面上的那条提示）。
+
+        刻意**不是** `snapshot()`：快照会去探活模型与外接配方（走 HTTP），
+        而这一行只需要"在不在跑、在做什么"。页面每几秒轮一次 `/state`，
+        给每个在跑的 Runner 各探一次活，状态接口就会变成一串等待。
+        """
+        with self._lock:
+            return {
+                "running": self.running,
+                "finished": self._finished,
+                "awaiting": self._awaiting,
+                "goal": self._goal,
+            }
+
     def _health_snapshot(self) -> dict:
         """模型（以及 hub 可选附带的通道）通不通。给人看的。"""
-        try:
-            model = health_mod.probe_from_extra(self.extra_args)
-        except Exception as exc:
-            model = {
-                "ok": False,
-                "name": "model",
-                "target": "",
-                "detail": f"探活失败：{exc}",
-            }
-        payload = {"model": model}
-        try:
-            payload["services"] = list(health_mod.probe_services())
-        except Exception:
-            payload["services"] = []
-        extra_fn = self._extra_health
-        if extra_fn is None:
-            return payload
-        try:
-            extra = extra_fn() or {}
-        except Exception:
-            return payload
-        if isinstance(extra, dict):
-            payload.update(extra)
-        return payload
+        return health_snapshot(self.extra_args, self._extra_health)
 
     def _pending_pairings(self) -> list[dict]:
         """待批准的配对码。给人看的，不进模型上下文。"""

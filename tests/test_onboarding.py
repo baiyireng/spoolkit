@@ -96,3 +96,24 @@ def test_非交互环境下不认为可以问(config_file: Path, monkeypatch) ->
 
     monkeypatch.setattr(onboarding.sys, "stdin", _NotATty())
     assert onboarding.interactive() is False
+
+
+def test_机器级向导写用户级env_遇utf16不崩且仍是utf16(config_file: Path) -> None:
+    """评审 I-1 的回归：用户级那份 `.env` 是记事本存的 UTF-16。
+
+    老写法 `path.read_text(encoding="utf-8")` 会在**写之前**抛 `UnicodeDecodeError`，
+    于是整个向导——连带 `spool bridge` / `spool web` 的起手——崩在启动路径上。
+    现在读写都走 `envfile`（与 `spool env` 同一份实现）：读得动、写得回、编码不变。
+    """
+    user_env = settings.env_path()
+    user_env.parent.mkdir(parents=True, exist_ok=True)
+    user_env.write_bytes("OTHERS=1\n".encode("utf-16"))
+    ask, _ = _scripted({"选择": "2", "GEMINI_API_KEY": "sk-utf16", "模型名": ""})
+
+    onboarding.run_wizard(None, ask=ask, say=lambda _line: None)
+
+    raw = user_env.read_bytes()
+    assert raw[:2] in (b"\xff\xfe", b"\xfe\xff"), "写完必须还是 UTF-16"
+    text = raw.decode("utf-16")
+    assert "GEMINI_API_KEY=sk-utf16" in text
+    assert "OTHERS=1" in text  # 别人的键没被动

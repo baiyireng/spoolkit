@@ -51,12 +51,35 @@ def serve_command(args: argparse.Namespace) -> int:
     `--script` 也转发：网页壳的确认流程要用假模型**带脚本**本地走一遍。
     fake 不能生成代码；没有脚本时子进程会立刻退出。
 
-    会话走内核解析（client=`web`，兜底 `cli`）：`--session` 留空时用网页壳的
-    指针里那条，然后**把解析结果显式传给子进程**——不然子进程会再按自己的
-    入口规则解析一次，出现"页面显示一条、实际跑的是另一条"。
+    目标有两种口径：
+
+    - **给了 `--root`**：钉住这一个工作区（老行为逐字保留：脚本、`.bat` 都靠它）。
+      会话仍走内核解析（client=`web`，兜底 `cli`），并**把解析结果显式传给
+      子进程**——不然子进程会再按自己的入口规则解析一次，出现"页面显示一条、
+      实际跑的是另一条"；
+    - **没给 `--root`**：机器级。**这里不解析任何目标**（设计 §3.2：机器级入口
+      不认 cwd，"我碰巧站在哪个目录"不该决定这个服务服务谁）。初始目标由内核
+      顺位在服务里定，定不出来就先空着——页面来选。
     """
+    explicit = str(getattr(args, "root", "") or "").strip()
+    if not explicit:
+        serve(
+            None,
+            host=args.host,
+            port=args.port,
+            session=str(getattr(args, "session", "") or ""),
+            extra_args=extra_from_serve_args(args),
+            pinned=False,
+        )
+        return 0
     target = resolve_target(
-        workspace=args.root, session=args.session, client="web", session_fallback="cli"
+        workspace=args.root,
+        session=args.session,
+        client="web",
+        session_fallback="cli",
+        # 显式给了工作区时这一层本来就用不上（显式值优先）；写出来是为了把
+        # "这条入口不认 cwd"钉在代码里，而不是靠调用顺序碰巧成立。
+        use_cwd=False,
     )
     serve(
         target.root,
@@ -64,5 +87,9 @@ def serve_command(args: argparse.Namespace) -> int:
         port=args.port,
         session=target.session,
         extra_args=extra_from_serve_args(args),
+        # `target` 一起给过去：`/state` 要交代"这条目标是谁定的"（显式 / 指针 /
+        # 登记表），让服务自己再解析一遍会把"来自指针"记成"显式给的"。
+        pinned=True,
+        target=target,
     )
     return 0

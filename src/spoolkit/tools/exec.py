@@ -135,6 +135,16 @@ def validate_command(argv: list[str]) -> str | None:
                     "node --check 只接受 .js 文件。HTML 文件不能直接检查——"
                     "系统会自动从 HTML 里提取内联 JS 做语法检查，你不需要手动做。"
                 )
+            # 目标路径里不许有 shell 元字符。原因很具体：Windows 上 node 常常是
+            # `.cmd` 垫片（nvm/volta/pnpm/本机 DSH 都是），`resolve_argv` 得把它包成
+            # `cmd /c <垫片> …` 才起得来，而 `cmd` 会把 `& | ^ < > %` 重新当元字符。
+            # 不收这一条，包装就等于在本模块"不经过 shell"的边界上开了个口子。
+            if any(ch in target for ch in "&|^<>%"):
+                return (
+                    "node --check 的目标路径里不能有 shell 元字符（& | ^ < > %）："
+                    "Windows 上 node 可能是 `.cmd` 垫片，得经 cmd.exe 起它，"
+                    "而那些字符在 cmd 里有特殊含义。换成普通文件名。"
+                )
             return None
         return "node 只允许 --check（语法检查），不允许执行脚本"
 
@@ -146,21 +156,43 @@ def resolve_argv(argv: list[str], root: Path) -> list[str]:
 
     模型不该知道也不该猜「用哪个解释器」——那是环境细节，不是任务信息。
     优先项目自带虚拟环境，其次当前解释器。
+
+    **Windows 上的 `.cmd` 垫片**：`node` 这类命令常常不是 `.exe`，而是一个
+    `.cmd` 垫片（nvm-for-windows、volta、pnpm 装的都是；本机 DSH 提供的 node 也是
+    `ELECTRON_RUN_AS_NODE=1 "…DeepSeek Harness.exe"`）。`subprocess` 在 Windows 上
+    只按 `PATH` 找 `.exe`/`.com`，于是直接 spawn 会报「找不到命令: node」——
+    **而那个命令明明装着**，报错还把人往"没装"的方向带。这里把它包成
+    `cmd /c <垫片> …`（只有这一种形状，见下）。
+
+    为什么**只对 `node` 且只对 `--check`** 这么做：经 `cmd.exe` 起进程等于让
+    `&`/`|`/`%` 重新变成元字符，而本模块自述的边界之一是"不经过 shell"。
+    `validate_command` 已经把 `node` 限死在 `--check <file.js>`，并且**拒绝目标路径里
+    出现 shell 元字符**（见那里的注释）——两条凑齐，这条包装才是安全的。
+    其它 `.cmd` 命令一律维持原样（找不到就是找不到，不改边界）。
     """
-    if not argv or argv[0] not in ("python", "python3", "pytest"):
+    if not argv:
         return argv
+    if argv[0] in ("python", "python3", "pytest"):
+        candidates = (
+            root / ".venv" / "Scripts" / "python.exe",
+            root / ".venv" / "bin" / "python",
+        )
+        interpreter = next(
+            (str(path) for path in candidates if path.exists()), sys.executable
+        )
 
-    candidates = (
-        root / ".venv" / "Scripts" / "python.exe",
-        root / ".venv" / "bin" / "python",
-    )
-    interpreter = next(
-        (str(path) for path in candidates if path.exists()), sys.executable
-    )
+        if argv[0] == "pytest":
+            return [interpreter, "-m", "pytest", *argv[1:]]
+        return [interpreter, *argv[1:]]
 
-    if argv[0] == "pytest":
-        return [interpreter, "-m", "pytest", *argv[1:]]
-    return [interpreter, *argv[1:]]
+    if argv[0] in ("node", "node.exe"):
+        import os
+        import shutil
+
+        found = shutil.which(argv[0])
+        if found and os.name == "nt" and Path(found).suffix.lower() in (".cmd", ".bat"):
+            return ["cmd", "/c", found, *argv[1:]]
+    return argv
 
 
 def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
