@@ -16,6 +16,12 @@ import pytest
 def _isolate_user_config(tmp_path_factory, monkeypatch):
     path = tmp_path_factory.mktemp("user-config") / "config.toml"
     monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    # 用户级 `.env`（密钥那一层）同理：开发机上真写过一份的话，测试就会读到
+    # 别人的 QQ / Tavily / Gemini 密钥，症状是"在我这儿能过"。
+    monkeypatch.setenv(
+        "SPOOLKIT_ENV_FILE", str(tmp_path_factory.mktemp("user-env") / ".env")
+    )
+    monkeypatch.delenv("AGENTS_DEV_ENV_FILE", raising=False)
     # 旧名字也要堵住：改名兼容让我们**继续读** `AGENTS_DEV_*`，
     # 若它从开发机泄漏进来，测试就会变成"在我这儿能过"。
     monkeypatch.delenv("AGENTS_DEV_CONFIG", raising=False)

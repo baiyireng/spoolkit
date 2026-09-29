@@ -2298,3 +2298,107 @@ T6（`episode.summary` + 空 distill 兜底 + FTS OR）与 T7（工具名短环 
 人专属按钮、非环回只读）**——它消费的接口就是本批产出的 `resolve_target` /
 `sessions.*` / `trust.*`，开工前照设计文档 §5.3 另写一份计划。另外本轮没碰
 多模态（T5）与 weft 联动。
+
+## 2026-09-27 · 批次二 Task 1：用户级 `.env` 与统一密钥解析
+
+**做了什么**：密钥解析从"三处各写一套"收成一条链，并补上**用户级**那一层。
+起因是当天真踩到的一次：在 `C:\Users\32615` 敲 `spool bridge --channel qqbot …`，
+报"缺少 AppID 与 AppSecret"、并建议把密钥写进 `C:\Users\32615\.env`——而凭据在
+`D:\workSpace\agentWorkSpace\.env` 里。根因是 `_build_channel` 的 `root` 缺省取了 cwd，
+于是**一条"服务整台机器"的桥，密钥查找根居然是"你站在哪个目录"**。
+
+- 新增 `spoolkit/envfile.py`：`.env` 的读法从 `llm/gemini.py` 搬出来——需要它的还有
+  用户级配置与通道凭据两层，而它们不该为了读一个 `.env` 把 LLM 网关（连同 `httpx`）
+  拖进来；`gemini.load_env_file` 保留同名转出，老导入路径（含用例）全部照旧。
+  读不出来（不存在 / 没权限 / 编码不对）一律当"没有这份文件"，而不是让命令崩在启动路径上。
+- `settings` 新增 `env_path()` / `secret_paths()` / `resolve_secret()` /
+  `describe_secret_search()`：顺序 **环境变量 → 工作区 `.env` → 用户级 `.env`**
+  （"更具体的赢"）；用户级位置 `%APPDATA%\spoolkit\.env`，`SPOOLKIT_ENV_FILE` 可覆盖，
+  与 `config.toml` 同目录——**密钥只放 `.env`，`config.toml` 只放非密钥默认值**。
+- **cwd 退出密钥解析**：工作区那一份只认调用方传进来的工作区；机器级服务
+  （`workspace=None`）只剩用户级那份。三个消费者接同一条链：通道凭据、Tavily 的 key、
+  Gemini 的 key（`TAVILY_API_KEY` 与 `SPOOLKIT_TAVILY_API_KEY` 的先后**故意没动**，
+  免得两处都设过的人升级后行为悄悄变了）。
+- `tests/conftest.py` 补一条隔离：`SPOOLKIT_ENV_FILE` 指向临时文件——开发机上真写过
+  用户级 `.env` 的话，测试会读到别人的密钥（与"用户配置泄漏进测试"同一个形状）。
+
+**量到什么**：
+
+- 新增 **11 条**用例（`tests/test_secrets.py`）。整套从 `main` 的 **1542 passed / 3 failed**
+  到本任务后的 **1553 passed / 3 failed**，两边差正好 11。那 3 条始终是本机沙箱的既有限制
+  （`test_service_command`×2 不许起子进程、`test_js_verify`×1 找不到 node），不是本任务引入的。
+- 回归用例钉住的正是当天的现场：`workspace=None` 且 cwd 里放着 `.env` → **解析不到**
+  （改之前会读到）。另有：工作区那份盖住用户级、环境变量盖住两份文件、别名先给的先赢、
+  `describe_secret_search()` 里**键名要说出来、值一个字符都不许出现**。
+
+**哪条被证伪**：
+
+- **中文注释 + Windows 路径混排会把模块写崩**：我把 `C:\Users\32615\.env` 直接写进普通
+  docstring，`\U` 是 Unicode 转义 → `credentials.py` 直接 `SyntaxError`；
+  `settings.py` 里 `%APPDATA%\spoolkit` 的 `\s` 只是警告，但同一个坑。修法是原始串或双反斜杠。
+- 原 `load_env_file` 只在 `path.exists()` 上判空，读权限异常会往外抛；搬进 `envfile.py` 时
+  改成"读不出就返回空"。**这条不是被证伪的设计，是我搬动时顺手加固的**，记在这里，
+  免得以后有人把它当行为回归去查。
+
+**没做什么**：`spool env`（Task 2）、网页壳接内核（Task 3–5）、短命令 `spool web`/`spool qq`
+（Task 6）、非环回只读（Task 7）。另外当天还发现两条**与配置层无关**的真问题，已记进账本
+deferred：`spool service start` 写 pid 失败时会留下**无人管的孤儿进程**（ssh 已拉起但 spool
+不管它），以及 `ssh` 不在 PATH 时报裸的 `[WinError 2]`、不点名缺哪个可执行文件。
+
+### 修复轮（独立评审后，同日）
+
+独立评审（不是我自查）的判定是 **Ready to merge: No**：1 条 Critical + 2 条 Important。
+
+- **[Critical] 我只改了 `settings` 层，没改调用方。** `bridge.py::_build_channel` 第一行仍是
+  `Path(getattr(args, "root", ".")).resolve()`，而 `spool bridge` 的 `--root` 缺省是**空串**
+  （`app.py` 里 `set_defaults(root="")`），`Path("")` 恰好就是 cwd → 通道拿到 `root=cwd` →
+  凭据解析**先读 `cwd/.env`，反而盖住用户级那份**；而缺凭据的文案还在教人"写进
+  `{cwd}\.env`（推荐）"。**事故的三个现象一个都没消掉**，而新增的 11 条用例只覆盖被改的那层，
+  全绿给的是假安全感（评审原话）。修法就是它给的封闭改法：`root` 只认显式 `--root`，
+  缺省 `None`（三个内置通道的 `root` 本来就只用于凭据解析）。
+- **[Important] 文案指向还不存在的 `spool env`**（那是 Task 2）：改成直接给用户级 `.env`
+  的**实际路径**（`settings.env_path()`），这样在哪个提交上都是真的。
+- **[Important] `describe_secret_search()` 零生产调用点**，而唯一能回答"凭据从哪来"的
+  `spool bridge --check` 在机器级（不给 `--root`）下**一敲就崩**（`_check(None)` →
+  `project_root / ".env"` → TypeError，批次一既有）。现在 `_check` 认 `None`、按通道挑
+  "认哪些名字"，并把 `describe_secret_search` 接进 `--check` 与三处缺凭据文案——
+  诊断函数写出来就得有人调用，否则等于没写。
+- **Minor 一并收掉**：`envfile.load_env_file` 用 `utf-8-sig` 吃掉 UTF-8 BOM（否则键名变成
+  `\ufeffQQ_AppID`），并按 BOM 认 UTF-16（记事本存的"Unicode"原先一个字都读不出）；
+  `describe_secret_search` 把四种情况分开说——**不存在 / 不是文件（路径指到目录）/ 存在但一行
+  都没解析出来（带字节数，多半是编码）/ 没有要找的键（列出它有哪些键）**。原先 UTF-16 文件会被
+  说成"空文件"，而那句话是专为"我明明填了"准备的：说错方向比不说更贵。
+
+**修复轮量到什么**：`tests/test_secrets.py` 从 11 条到 **18 条**，新增的七条里有两条专门钉**调用方**
+（`test_机器级桥不拿cwd当工作区`：cwd 里放好 `.env` 也必须报缺凭据；`test_显式给了root_就认那个
+工作区的env`：显式 `--root` 时工作区那层仍要参与），一条钉 `_check(None)` 不再崩，两条钉编码，
+一条钉四种描述状态，一条把当天的事故现场（cwd 是家目录、凭据在用户级）整条跑完。整套
+**1560 passed / 3 failed**（修复前 1553/3，差正好是新增的 7 条；那 3 条仍是本机沙箱限制）。
+
+**修复轮哪条被证伪**：
+
+- **"改了底层就算是修好了"**——本批最值钱的一条。我在 `settings` 层把 cwd 摘干净了，可调用方
+  照样把 cwd 当工作区喂进来，净效果是**优先级反转**（`cwd/.env` 压过用户级），而文档、提交信息、
+  dogfooding 三处都写着"cwd 退出密钥解析"。教训：**认领一个现象级修复时，测试必须落在现象发生的
+  那一层**（这里是 `_build_channel`／`_check` 的入口），只测被改的那层会绿得很安心。
+- 又一次在 docstring 里写 Windows 路径把模块写崩（`bridge.py` 的 `C:\Users\32615`，还是 `\U`
+  那个坑）——上一轮 `credentials.py` 刚踩过。这条已经不是"意外"，是习惯没建立起来：
+  中文注释里出现路径就该直接双反斜杠。
+
+**二轮评审（修复轮之后）**：**Ready to merge: Yes** —— 上一轮的 Critical 与两条 Important 由
+评审**亲手复验**（cwd 里有 `.env` 也必须报缺凭据；机器级 `--check` exit 2、不崩、不联网、
+答得出"凭据从哪来"）。它又找出 5 条 Minor，其中两条我当场收掉（都在这一轮已动过的函数里）：
+
+- `--check --channel wecom` 原先说"不需要凭据"并 `return 0` —— **假通过**（真跑要 corp_id /
+  secret / agent_id 三个值）。检查工具骗人比没有检查工具更贵，`--check` 不传代理那次就是
+  同一个形状（"检查通过、真跑失败"），所以这条不该等。现在返回 2 并列出找过的位置。
+- `QQ_AppID=`（键在、值空）原被描述成"没有要找的键"，自相矛盾——文件里"明明有这一行"却等于
+  没配，正是"我明明填了"里最难自查的一种。现在单独说"有这些键但值是空的（等于没配）"。
+
+另三条按评审给的归属交给 **Task 3**（`hub` 与机器级桥**每轮** target 的 cwd 残留、向导把模型
+密钥写进 cwd），已经写进施工单 Task 3 的 Files 与要点。**评审的价值不只是找错，还在于把
+"这算谁的"钉清楚**——否则那些残留会以"下一个人以为已经修了"的形式活很久。
+
+> 数字更正：二轮评审指出本节前面写的"18 条 / 1560"是**修复轮那一刻**的数；
+> 二轮收尾又补了一条 wecom 用例，所以**分支末端的实际数字是 `test_secrets.py` 19 条、
+> 整套 1561 passed / 3 failed**。评审连这种 off-by-one 都会去数——这正是"先量再说"的价值。

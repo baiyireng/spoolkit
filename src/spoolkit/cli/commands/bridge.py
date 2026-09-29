@@ -27,11 +27,25 @@ from spoolkit.kernel import trust
 from spoolkit.kernel.target import resolve_target
 from spoolkit import readroots
 from spoolkit import settings
+from spoolkit.bridge import credentials
 from spoolkit.health import collect_rows
 
 
 def _build_channel(args, log) -> object:
-    root = Path(getattr(args, "root", ".")).resolve()
+    """按通道建适配器。
+
+    `root` **只表示"这次运行绑定了哪个工作区"**，它不是当前目录。`--root` 的缺省
+    是空串，而 `Path("")` 恰好就是 cwd——原先是
+    `Path(getattr(args, "root", ".")).resolve()`，于是"服务整台机器"的桥（不给
+    `--root`）把 **cwd 当成了工作区**：凭据解析先读 `cwd/.env`，**反倒盖住用户级
+    那一份**，而缺凭据的文案又推荐人往 `cwd/.env` 里写（照做的人会得到一个静默
+    压过正确配置的文件）。2026-09-27 的事故正是这个形状：在 `C:\\Users\\32615`
+    起桥，它去找 `C:\\Users\\32615\\.env`，而凭据在别处。
+
+    所以现在的规矩是：**没给 `--root` 就是 `None`**，凭据只从用户级那层来。
+    """
+    raw_root = str(getattr(args, "root", "") or "").strip()
+    root = Path(raw_root).resolve() if raw_root else None
     if args.channel == "fake":
         return FakeChannel()
     if args.channel == "telegram":
@@ -41,9 +55,14 @@ def _build_channel(args, log) -> object:
         if not channel.token:
             raise SystemExit(
                 "Telegram 需要 token。三种给法：\n"
-                f"  1) 写进 {root}\\.env：AGENTS_DEV_TELEGRAM_TOKEN=...\n"
-                "  2) 设环境变量 AGENTS_DEV_TELEGRAM_TOKEN\n"
-                "  3) 命令行 --token。怎么建机器人见 docs/bridge.md"
+                f"  1) 写进用户级 .env：{settings.env_path()}\n"
+                "       SPOOLKIT_TELEGRAM_TOKEN=123456:ABC...\n"
+                "  2) 设环境变量 SPOOLKIT_TELEGRAM_TOKEN"
+                "（改名前的 AGENTS_DEV_TELEGRAM_TOKEN 也认）\n"
+                "  3) 命令行 --token。怎么建机器人见 docs/bridge.md\n\n"
+                + settings.describe_secret_search(
+                    credentials.TELEGRAM_TOKEN, workspace=root
+                )
             )
         return channel
     if args.channel == "wecom":
@@ -52,10 +71,19 @@ def _build_channel(args, log) -> object:
         channel = WeComChannel(root=root)
         if not (channel.corp_id and channel.secret and channel.agent_id):
             raise SystemExit(
-                "企业微信需要三个值，写进 "
-                f"{root}\\.env 或者设成环境变量：\n"
-                "  AGENTS_DEV_WECOM_CORP_ID / AGENTS_DEV_WECOM_SECRET / "
-                "AGENTS_DEV_WECOM_AGENT_ID\n（怎么建自建应用见 docs/bridge.md）"
+                "企业微信需要 corp_id / secret / agent_id 三个值。两种给法：\n"
+                f"  1) 写进用户级 .env：{settings.env_path()}\n"
+                "       SPOOLKIT_WECOM_CORP_ID=ww...\n"
+                "       SPOOLKIT_WECOM_SECRET=...\n"
+                "       SPOOLKIT_WECOM_AGENT_ID=1000002\n"
+                "  2) 设同名环境变量（改名前的 AGENTS_DEV_WECOM_* 也认）\n"
+                "（怎么建自建应用见 docs/bridge.md）\n\n"
+                + settings.describe_secret_search(
+                    credentials.WECOM_CORP_ID
+                    + credentials.WECOM_SECRET
+                    + credentials.WECOM_AGENT_ID,
+                    workspace=root,
+                )
             )
         log("企业微信通道：发消息本机可用；**收**消息需要公网回调 URL（见文档）")
         return channel
@@ -76,13 +104,17 @@ def _build_channel(args, log) -> object:
         if not (channel.app_id and channel.secret):
             raise SystemExit(
                 "QQ 官方机器人需要 AppID 与 AppSecret。三种给法：\n"
-                f"  1) 写进 {root}\\.env（推荐，已被 .gitignore 排除）：\n"
+                f"  1) 写进用户级 .env：{settings.env_path()}"
+                "（推荐：通道是机器级服务，密钥就该放这一层）\n"
                 "       QQ_AppID=102xxxxxx\n"
                 "       QQ_AppSecret=xxxxxxxx\n"
                 "  2) 设环境变量 SPOOLKIT_QQ_APPID / SPOOLKIT_QQ_SECRET"
                 "（改名前的 AGENTS_DEV_* 也认）\n"
                 "  3) 命令行 --appid / --secret\n"
-                "（在 QQ 机器人开放平台建应用后能看到；沙箱加 --sandbox）"
+                "（在 QQ 机器人开放平台建应用后能看到；沙箱加 --sandbox）\n\n"
+                + settings.describe_secret_search(
+                    credentials.QQ_APP_ID + credentials.QQ_SECRET, workspace=root
+                )
             )
         # 收事件是长连接，起后台线程；桥那边只是 poll。
         channel.start()
@@ -97,7 +129,7 @@ def _build_channel(args, log) -> object:
         return factory(
             {
                 "name": args.channel,
-                "root": str(args.root),
+                "root": str(root or ""),
                 "token": getattr(args, "token", ""),
                 "proxy": getattr(args, "proxy", ""),
             }
@@ -518,25 +550,36 @@ def bridge_command(args: argparse.Namespace) -> int:
         channel.close()
 
 
-def _check(project_root: Path, args) -> int:
+def _check(project_root: Path | None, args) -> int:
     """`--check`：只看凭据与连通性，**不起通道、不跑 agent**。
 
     初次配置最需要的就这一句：**它到底认到我的凭据没有、从哪认到的**。
     没有它，配错了只能靠"机器人不回话"来猜。
+
+    `project_root` 可以是 `None`（机器级桥，没给 `--root`）：那时根本没有"工作区
+    那一层"，凭据只从用户级 `.env` 与环境变量来。原先这里直接算
+    `project_root / ".env"`，于是这台机器上唯一能回答"凭据从哪来"的命令，在
+    **机器级下一敲就崩**（`TypeError`）——而那恰恰是它最该工作的场合。
     """
     from spoolkit.bridge import credentials
 
-    print(f"工作区：{project_root}")
-    print(f"凭据文件：{project_root / '.env'}"
-          + ("" if (project_root / ".env").is_file() else "（不存在）"))
+    if project_root is None:
+        print("工作区：机器级（没给 --root，服务整台机器）")
+    else:
+        print(f"工作区：{project_root}")
     channel = args.channel
     if channel == "qqbot":
+        print(
+            settings.describe_secret_search(
+                credentials.QQ_APP_ID + credentials.QQ_SECRET, workspace=project_root
+            )
+        )
         app_id, id_source = credentials.find(project_root, *credentials.QQ_APP_ID)
         secret, secret_source = credentials.find(project_root, *credentials.QQ_SECRET)
         print(f"AppID：{credentials.mask(app_id)}（{id_source}）")
         print(f"AppSecret：{credentials.mask(secret)}（{secret_source}）")
         if not (app_id and secret):
-            print("\n缺凭据。写进 .env 就行：QQ_AppID=… 与 QQ_AppSecret=…")
+            print("\n缺凭据。")
             return 2
         from spoolkit.bridge.qqbot import QQBotChannel
 
@@ -564,8 +607,38 @@ def _check(project_root: Path, args) -> int:
         print("\n凭据可用。（真正跑起来：去掉 --check）")
         return 0
     if channel == "telegram":
+        print(
+            settings.describe_secret_search(
+                credentials.TELEGRAM_TOKEN, workspace=project_root
+            )
+        )
         token, source = credentials.find(project_root, *credentials.TELEGRAM_TOKEN)
         print(f"token：{credentials.mask(token)}（{source}）")
         return 0 if token else 2
+    if channel == "wecom":
+        print(
+            settings.describe_secret_search(
+                credentials.WECOM_CORP_ID
+                + credentials.WECOM_SECRET
+                + credentials.WECOM_AGENT_ID,
+                workspace=project_root,
+            )
+        )
+        corp_id, _ = credentials.find(project_root, *credentials.WECOM_CORP_ID)
+        secret, _ = credentials.find(project_root, *credentials.WECOM_SECRET)
+        agent_id, _ = credentials.find(project_root, *credentials.WECOM_AGENT_ID)
+        print(
+            f"corp_id：{credentials.mask(corp_id)}"
+            f" / secret：{credentials.mask(secret)}"
+            f" / agent_id：{credentials.mask(agent_id)}"
+        )
+        if not (corp_id and secret and agent_id):
+            print("\n缺凭据。")
+            return 2
+        # 企业微信**发**消息本机可用；**收**消息要一个公网回调 URL。`--check` 只能验
+        # 凭据在不在，验不了回调通不通——这一句必须写出来，否则又是一次
+        # "检查通过、真跑失败"（`--check` 不传代理那次就是这么骗人的）。
+        print("凭据齐全。（收消息还要一个公网回调 URL，见 docs/bridge.md）")
+        return 0
     print(f"{channel} 通道不需要凭据（或自己去 __init__ 里查）。")
     return 0

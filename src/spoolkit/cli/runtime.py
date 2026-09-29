@@ -6,7 +6,6 @@
 
 import atexit
 import json
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,7 +42,6 @@ from spoolkit.tools.fs import list_dir_spec, read_file_spec
 from spoolkit.tools.webfetch import web_fetch_spec, web_read_spec
 from spoolkit.fetch.client import WebPolicy
 from spoolkit.fetch.search import TavilySearch, UnconfiguredSearch
-from spoolkit.llm.gemini import load_env_file
 from spoolkit.tools.webfetch import WebAccess
 from spoolkit.tools.websearch import web_search_spec
 from spoolkit.tools.grant import Grants
@@ -525,8 +523,9 @@ def web_search_backend(args, project_root: Path | None = None):
     """网页搜索后端。现在只接 Tavily；没有 key 就不装。
 
     名字：`--web-search-api` / 配置 `web_search_api`。空着且有 Tavily key
-    就当 tavily。key 来源：环境变量 `TAVILY_API_KEY`（或
-    `SPOOLKIT_TAVILY_API_KEY`）、工作区 `.env`、用户配置里的 `tavily_api_key`。
+    就当 tavily。key 来源与其它密钥同一条链：环境变量 `TAVILY_API_KEY`
+    （或 `SPOOLKIT_TAVILY_API_KEY`）、工作区 `.env`、用户级 `.env`，
+    最后还认旧位置——用户配置里的 `tavily_api_key`。
     没配时研究会话里的 web_search 会说「没配搜索，只能直接给 URL」。
     """
     wanted = str(getattr(args, "web_search_api", "") or "").strip()
@@ -542,14 +541,17 @@ def web_search_backend(args, project_root: Path | None = None):
 
 
 def _tavily_api_key(project_root: Path | None) -> str:
-    for name in ("TAVILY_API_KEY", "SPOOLKIT_TAVILY_API_KEY"):
-        value = (os.environ.get(name) or "").strip()
-        if value:
-            return value
-    if project_root is not None:
-        value = load_env_file(Path(project_root) / ".env").get("TAVILY_API_KEY", "").strip()
-        if value:
-            return value
+    """Tavily 的 key：环境变量 → 工作区 `.env` → 用户级 `.env` → 用户配置。
+
+    两个环境变量名的**先后不动**（原来是 `TAVILY_API_KEY` 在前），免得同一个
+    key 在两处都设过的人，行为在升级后悄悄变了。最后那条是旧位置：
+    写进 `config.toml` 的人不用搬家。
+    """
+    value, _ = settings.resolve_secret(
+        ("TAVILY_API_KEY", "SPOOLKIT_TAVILY_API_KEY"), workspace=project_root
+    )
+    if value:
+        return value
     payload, _ = settings.read_config()
     raw = payload.get("tavily_api_key")
     if isinstance(raw, str) and raw.strip():
