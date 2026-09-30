@@ -143,7 +143,7 @@ def test_别的失败不冒充模型故障(dom: dict) -> None:
     assert dom["failure_unknown"] is None
     # 画出来还是「失败：<原文>」这个老形状，不套模型那一套。
     assert dom["failure_plain"] == "失败：工具 read_file 失败：文件不存在"
-    assert dom["failure_blocks"] == 0
+    assert dom["failure_plain_blocks"] == 0
 
 
 def test_只按错误文本也能认出来(dom: dict) -> None:

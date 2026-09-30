@@ -359,7 +359,9 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
     out.address_fallback = ctx.explainFailure('Connection refused', null).lines[0];
 
     // 画出来之后长什么样：认不出来的是"原来的词 + 原文"，认出来的是块。
+    const beforePlain = ids.get('stream').querySelectorAll('.failure').length;
     ctx.showFailure('失败：', '工具 read_file 失败：文件不存在', null);
+    out.failure_plain_blocks = ids.get('stream').querySelectorAll('.failure').length - beforePlain;
     const plain = ids.get('stream').querySelectorAll('.sys-line');
     out.failure_plain = plain[plain.length - 1].textContent;
     const before = ids.get('stream').querySelectorAll('.failure').length;
