@@ -86,6 +86,40 @@ def test_注册recall后才提recall(tmp_path: Path) -> None:
     )
     registry.register(recall_spec(session))
     assert "recall" in build_workflow(registry)
+
+
+def test_注册search_history后才提它并且说清默认不检索(tmp_path: Path) -> None:
+    """历史不进上下文是**有意**的，所以这条提示必须同时给两半：
+
+    「默认不检索」与「什么时候才检索」。只说有这个工具，模型要么每轮都查
+    （等于把历史塞回上下文），要么一次都不查（等于没有这个能力）。
+    """
+    from spoolkit.memory.tools import search_history_spec
+
+    registry = _full_registry(tmp_path)
+    assert "search_history" not in build_workflow(registry)
+
+    conn = open_db(tmp_path / "h.db")
+    init_memory_schema(conn)
+    session = MemorySession(
+        conn=conn,
+        hot_path=tmp_path / "memory.md",
+        counter=OfflineTokenCounter(),
+        context_window=8192,
+    )
+    registry.register(
+        search_history_spec(
+            session,
+            tmp_path,
+            default_limit=5,
+            max_limit=20,
+            snippet_chars=240,
+        )
+    )
+    text = build_workflow(registry)
+    assert "search_history" in text
+    assert "默认不进上下文" in text
+    assert "这个问题是从哪来的" in text
 def test_开了联网就必须写明_网页不可信():
     """工具和边界必须一起出现。
 

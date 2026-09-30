@@ -345,17 +345,31 @@ def _add_bench_command(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_session_command(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("session", help="会话管理：列 / 建 / 切 / 改名 / 归档")
+    parser = sub.add_parser("session", help="会话管理：列 / 建 / 切 / 改名 / 归档 / 查历史")
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.add_argument(
         "action",
         nargs="?",
         default="list",
-        choices=["list", "new", "use", "rename", "archive"],
+        choices=["list", "new", "use", "rename", "archive", "search"],
     )
-    parser.add_argument("name", nargs="?", default="", help="会话 id / 序号 / latest")
+    parser.add_argument(
+        "name", nargs="?", default="", help="会话 id / 序号 / latest；`search` 时是关键词"
+    )
     parser.add_argument("title", nargs="?", default="", help="`new` 或 `rename` 时的标题")
     parser.add_argument("--all", action="store_true", help="连归档的一起列")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="`search` 最多几条（`0` = 按标定值 history_search_limit）",
+    )
+    parser.add_argument(
+        "--since", default="", help="`search` 只看这个时间起（2026-09-27 或 2026-09-27 14:03）"
+    )
+    parser.add_argument(
+        "--until", default="", help="`search` 只看这个时间止；只给日期按当天 00:00 算"
+    )
     parser.set_defaults(func=session_command)
 
 

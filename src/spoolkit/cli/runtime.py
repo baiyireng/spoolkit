@@ -29,7 +29,7 @@ from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.lessons import match_lessons, prune_lessons, record_outcome
 from spoolkit.memory.session import MemorySession
 from spoolkit.memory.store import check_binding, init_memory_schema, record_session
-from spoolkit.memory.tools import recall_spec
+from spoolkit.memory.tools import recall_spec, search_history_spec
 from spoolkit.memory.transcript import conversational_prompt, recent_messages, render_transcript
 from spoolkit.memory.distill import distill
 from spoolkit.store.db import init_schema, open_db
@@ -442,6 +442,24 @@ def assemble_loop(
         # 主循环用的注册表在这里构造，所以 recall 也必须在这里注册，
         # 否则提示词会提到一个只有派发路径才有的工具。
         registry.register(recall_spec(parts.memory))
+        # 历史消息的检索入口。历史本身不进上下文，这条路是模型**主动**去取
+        # 「这个问题是从哪来的」。三个数字都从标定表来：它们直接决定回灌多少
+        # 字，写死在工具里就等于绕过了「预算可调、来源可查」这条规矩。
+        registry.register(
+            search_history_spec(
+                parts.memory,
+                project_root,
+                default_limit=int(
+                    limits.resolve("history_search_limit", settings.overrides)[0]
+                ),
+                max_limit=int(
+                    limits.resolve("history_search_max", settings.overrides)[0]
+                ),
+                snippet_chars=int(
+                    limits.resolve("history_snippet_chars", settings.overrides)[0]
+                ),
+            )
+        )
 
     # 供应商能给出真实分词时就用真实的：预算建立在估算上，中文/代码混排时
     # 偏差足以让本地判定放行、服务端拒绝（实测提示词 9772 > 上限 8192）。

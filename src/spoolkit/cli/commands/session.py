@@ -13,7 +13,15 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from spoolkit import limits
 from spoolkit.kernel import pointers, sessions
+from spoolkit.memory.transcript import (
+    no_hits_text,
+    parse_moment,
+    render_history_hits,
+    search_messages,
+)
+from spoolkit.store.db import open_db
 
 CLIENT = "cli"
 
@@ -37,6 +45,9 @@ def session_command(args: argparse.Namespace) -> int:
     action = str(getattr(args, "action", "list") or "list")
     name = str(getattr(args, "name", "") or "").strip()
     title = str(getattr(args, "title", "") or "").strip()
+
+    if action == "search":
+        return _search(root, name, args)
 
     if action == "new":
         # `spool session new <标题>`：`new` 后面那一个位置参数**就是标题**（设计
@@ -81,6 +92,71 @@ def session_command(args: argparse.Namespace) -> int:
         print("已归档（数据还在，只是默认不列出；`spool session --all` 看得到）")
         return 0
     return _list(root, include_archived=bool(getattr(args, "all", False)))
+
+
+def _search(root: Path, query: str, args: argparse.Namespace) -> int:
+    """`spool session search <关键词>`：检索历史消息，给片段 + 出处。
+
+    和模型那个 `search_history` 走**同一个** `search_messages`：两条路的口径
+    （命中排序、片段长度、脱敏、时间范围）只有一份，不各写一套。
+    默认跨本工作区的全部会话——「这句话是从哪来的」的答案往往在别的会话里。
+    """
+    if not query:
+        print("要给关键词：`spool session search <关键词>`。", file=sys.stderr)
+        return 2
+
+    path = root / ".agent" / "memory.db"
+    if not path.is_file():
+        print("这个工作区还没有任何会话。", file=sys.stderr)
+        return 2
+
+    overrides = limits.load_overrides(root)
+    wanted = int(getattr(args, "limit", 0) or 0)
+    max_limit = int(limits.resolve("history_search_max", overrides)[0])
+    # `0` = 没给（argparse 的默认值），按标定值；给了就越界判定，别静默改成别的数。
+    if wanted and not 1 <= wanted <= max_limit:
+        print(f"--limit 必须在 1 到 {max_limit} 之间（不给 = 按标定值）。", file=sys.stderr)
+        return 2
+    limit = wanted or int(limits.resolve("history_search_limit", overrides)[0])
+    snippet_chars = int(limits.resolve("history_snippet_chars", overrides)[0])
+
+    try:
+        since = (
+            parse_moment(args.since, label="--since")
+            if str(getattr(args, "since", "") or "").strip()
+            else None
+        )
+        until = (
+            parse_moment(args.until, label="--until")
+            if str(getattr(args, "until", "") or "").strip()
+            else None
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    conn = open_db(path)
+    try:
+        hits = search_messages(
+            conn,
+            query,
+            limit=limit,
+            snippet_chars=snippet_chars,
+            since=since,
+            until=until,
+        )
+    finally:
+        conn.close()
+
+    if not hits:
+        print(no_hits_text(query))
+        # 没命中给 1：脚本里"搜到没搜到"要能直接判，别混进"用法错"(2)。
+        return 1
+    titles = {
+        item.id: item.title for item in sessions.list_sessions(root, include_archived=True)
+    }
+    print(render_history_hits(hits, titles))
+    return 0
 
 
 def _list(root: Path, include_archived: bool = False) -> int:

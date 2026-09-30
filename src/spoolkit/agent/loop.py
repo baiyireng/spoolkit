@@ -228,6 +228,11 @@ def build_workflow(
     if registry.get("recall") is not None:
         lines.append(T.WORKFLOW_RECALL)
 
+    if registry.get("search_history") is not None:
+        # 紧挨着 recall：两条都是「过去的事按需取」，而这条的关键是
+        # 「默认不检索」——不说清，模型会把它当成每轮必做的动作。
+        lines.append(T.WORKFLOW_HISTORY)
+
     if registry.get("run_command") is not None:
         lines.append(T.WORKFLOW_RUN)
         # 紧跟「怎么验证」：它是"验证命令本身写错"那一类失败的补丁

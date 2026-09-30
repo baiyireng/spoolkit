@@ -13,6 +13,7 @@ from spoolkit.llm.tokenizer import TokenCounter
 from spoolkit.memory.archive import ArchiveResult, archive_task
 from spoolkit.memory.hot import hot_budget, read_hot, render_hot, trim_to_budget
 from spoolkit.memory.store import search_episodes, search_memories, touch_memory
+from spoolkit.memory.transcript import MessageHit, search_messages
 
 
 class MemorySession:
@@ -67,6 +68,32 @@ class MemorySession:
             for row in events
         )
         return "\n".join(lines)
+
+    def search_history(
+        self,
+        query: str,
+        *,
+        limit: int,
+        snippet_chars: int,
+        session: str = "",
+        since: float | None = None,
+        until: float | None = None,
+    ) -> list[MessageHit]:
+        """按关键词检索聊天往来（历史消息）。
+
+        默认**跨会话**：新会话里问「这个问题是从哪来的」时，答案往往就在
+        别的会话里；只看一条会话就传 `session`。这是**主动取用**的入口——
+        历史本身仍然不进上下文。
+        """
+        return search_messages(
+            self._conn,
+            query,
+            limit=limit,
+            snippet_chars=snippet_chars,
+            session=session,
+            since=since,
+            until=until,
+        )
 
     def archive(
         self,

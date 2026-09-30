@@ -153,6 +153,21 @@ KNOBS: tuple[Knob, ...] = (
         "上述每条往来最多留多少字；再长截断，避免把整段答复塞回窗口",
     ),
     Knob(
+        "history_search_limit", 5, CAPABILITY,
+        "search_history 一次默认回几条历史消息。与 recall 的 5 对齐：每条都要"
+        "占上下文，而历史检索答的是「来源」这种定位问题，不需要一次给全",
+    ),
+    Knob(
+        "history_search_max", 20, CAPABILITY,
+        "search_history 一次最多几条。再多就是把整段历史灌回窗口——"
+        "而历史不进上下文正是短上下文成立的前提；窗口大的模型可以调大",
+    ),
+    Knob(
+        "history_snippet_chars", 240, CAPABILITY,
+        "search_history 每条片段最多多少字。与 recent_chat_chars 对齐："
+        "同一份往来的两种看法，单条截断的口径不该有两套",
+    ),
+    Knob(
         "episode_final_chars", 400, CAPABILITY,
         "事件摘要里任务结论最多留多少字（按本机 27B / 8K 标定）",
     ),
