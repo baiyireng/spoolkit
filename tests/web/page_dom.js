@@ -370,6 +370,8 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
     });
     out.failure_blocks = ids.get('stream').querySelectorAll('.failure').length - before;
 
-    console.log(JSON.stringify(out, null, 2));
+    // 结果就是这一行 JSON（断言在 test_page_dom.py 里）：走 stdout，不用 console
+    // ——它是这个测试台的**输出通道**，不是页面里的调试日志（页面里一行都没有）。
+    process.stdout.write(JSON.stringify(out, null, 2) + '\n');
   });
 });
