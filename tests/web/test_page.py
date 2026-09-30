@@ -69,9 +69,21 @@ def test_页面能发起运行与确认() -> None:
 
 
 def test_页面有待确认面板() -> None:
+    """待确认不再是 HTML 里的常驻占位 + 常驻按钮条，而是**有待确认内容才建**的一张卡片。
+    """
     assert "pending" in HTML
     assert "应用" in HTML
     assert "拒绝" in HTML
+    assert "showPending" in HTML
+    assert ".ask-card" in HTML, "没有那张卡片的样式挂点"
+    # 不许有 DOM 占位：空框本身会让"有东西在等我"，而空按钮还能被 Tab 到。
+    assert 'id="tray"' not in HTML
+    assert 'id="pending"' not in HTML
+    assert 'id="actions"' not in HTML
+    assert 'id="apply"' not in HTML
+    assert 'id="reject"' not in HTML
+    # 卡片挂在**对话流**里（不是浮在输入条上方的常驻横幅）。
+    assert "appendNode(node)" in _body("ensureCard")
 
 
 def test_页面在事件流断开时提示() -> None:
@@ -104,23 +116,34 @@ def test_页面能按快照重建待确认面板() -> None:
 
 
 def test_页面按快照显示模型断开() -> None:
-    """配对横幅是待批准；模型不通是另一条，不能复用「应用/拒绝」。"""
+    """配对是待批准；模型不通是另一条，不能复用「应用/拒绝」。
+
+    这一条现在是右上角的**浮动通知**（`.toast`），不是横幅带里的一行。
+    """
     assert "showHealth" in HTML
-    assert 'id="health"' in HTML
+    assert 'id="toasts"' in HTML
     assert "模型连不上" in HTML
     assert "state.health" in HTML
+    # 探活那条通知要说四件事，四句复用 `explainFailure`（不另写一套）。
+    body = _body("showHealth")
+    assert "explainFailure(" in body, "探活那条没有复用失败那套说法"
+    assert "modelDownLine(" in body
+    assert "showToast(" in body
 
 
 def test_页面也报外接配方断开() -> None:
-    """llama / 隧道是本机配方，不通时走同一条横幅，不另开按钮。"""
-    assert "health.services" in HTML
+    """llama / 隧道是本机配方，不通时走同一条通知，不另开按钮。"""
+    assert "services" in HTML
     assert "连不上" in HTML
+    body = _body("showHealth")
+    assert "item.ok === false" in body
+    assert "showToast(" in body
 
 
-def test_探活横幅说得出什么时候探的与还没探过() -> None:
+def test_探活那条通知说得出什么时候探的与还没探过() -> None:
     """探活挪到后台之后（`web/probe.py`），`/state` 给的是**最近一次**结果。
 
-    所以横幅必须说得出"几秒前探过"（陈旧值可以接受，**静默的**陈旧值不行），
+    所以那条通知必须说得出"几秒前探过"（陈旧值可以接受，**静默的**陈旧值不行），
     而"还没探过"既不是通也不是断——三条分支缺一个就红。行为数字（那句话真的
     被画出来）在 `test_page_dom.py` 里。
     """
@@ -142,12 +165,16 @@ def test_探活横幅说得出什么时候探的与还没探过() -> None:
 
 
 def test_页面按快照显示待批准的配对码() -> None:
-    """给人看的一行，不进模型上下文。不能复用「应用/拒绝」——那是落盘确认。"""
+    """给人看的一条通知。不能复用「应用/拒绝」——那是落盘确认。"""
     assert "pairings" in HTML
     assert "showPairings" in HTML
     assert "spool approve" in HTML
-    assert 'id="pairing"' in HTML
+    assert 'id="toasts"' in HTML
     assert "/state" in HTML
+    # 配对码要人做决定（去终端敲一条命令），所以是**只能手动关**的那一档。
+    body = _body("showPairings")
+    assert "kind: 'ask'" in body
+    assert "pruneToasts('pairing'" in body, "批准完了那一条不会自己收掉"
 
 
 def test_脚本里没有能把脚本提前收掉的序列() -> None:
@@ -180,8 +207,8 @@ def test_页面显示模型等待心跳() -> None:
     assert "上限" in HTML
 
 
-def test_等待心跳不占用探活横幅() -> None:
-    """红色 #health 是连不上，不是还在生成。"""
+def test_等待心跳不占用探活那条通知() -> None:
+    """探活那条（模型连不上）不是"还在生成"：两者混在一起，人会以为模型挂了。"""
     script = _script()
     wait_at = script.find("data.type === 'wait'")
     assert wait_at != -1
@@ -601,6 +628,116 @@ def test_页面上的错误文本先遮蔽密钥() -> None:
     assert "redact(" in _body("showHealth")
 
 
+# --- ① 通知：右上角的浮动气泡，两类分得清 ---
+
+
+def _rule(selector: str) -> str:
+    """把样式表里 `selector { … }` 那一条抠出来（这几条里没有嵌套花括号）。"""
+    style = HTML[HTML.find("<style>") : HTML.find("</style>")]
+    at = style.find(selector + " {")
+    assert at != -1, f"样式表里没有 {selector}"
+    return style[at : style.find("}", at) + 1]
+
+
+def test_通知是右上角的浮动气泡而不是横幅() -> None:
+    """失败与提示以前挤在同一条横幅带里：一条早就没意义的旧提示会把新错误挤下去，
+    而它自己不会走。现在通知走 `#toasts`——固定在右上角的一列。
+    """
+    assert 'id="toasts"' in HTML
+    box = _rule(".toasts")
+    assert "position:fixed" in box, "通知没有浮起来"
+    assert "top:" in box and "bottom:" not in box, "通知锚在底部会压住输入条"
+    assert "flex-direction:column" in box, "通知没有排成一列（会互相盖住）"
+    assert "gap:8px" in box, "两条通知之间没有间隙"
+    # 单个气泡自己不许绝对定位：那是"叠在一起"的写法。
+    assert "position:absolute" not in _rule(".toast")
+    # 横幅带上只剩"这是哪一种壳 / 有没有目标"这类模式说明。
+    for gone in ('id="health"', 'id="pairing"', 'id="elsewhere"'):
+        assert gone not in HTML, f"{gone} 还留在横幅带上"
+
+
+def test_手机宽度下通知不越界() -> None:
+    """左栏在 860px 以下收成抽屉；通知整块也要跟着收进来，不许顶出屏幕。"""
+    mobile = HTML[HTML.find("@media (max-width:860px)") :][:1200]
+    assert ".toasts {" in mobile
+    assert "left:10px" in mobile and "right:10px" in mobile
+    assert "width:auto" in mobile
+
+
+def test_每条通知都能关掉两条以上给全部关闭() -> None:
+    """人得能自己把一条通知赶走，不然"能自动消失的那一档"就变成唯一出路。"""
+    assert 'id="toast-all"' in HTML
+    assert "全部关闭" in HTML
+    assert "toastAllBtn.onclick = closeAllToasts" in _script()
+
+    close = _body("closeToast")
+    assert "removeChild(" in close, "关掉只是藏起来，节点还留着"
+    assert "clearTimeout(" in close, "关掉了却留着那个自动消失的定时器"
+
+    # 关闭键里只有一个图标：得有个读屏念得出来的名字。
+    assert "aria-label" in _body("showToast")
+    assert "'关掉这条通知'" in _body("showToast")
+
+    # 人点关闭键：记下"这一份内容人不要了"，下一拍轮询别又放回来。
+    assert "toastDismissed[key] = toastSigs[key]" in _body("dismissToast")
+    assert "if (!have && toastDismissed[key] === sig)" in _body("showToast")
+
+    chrome = _body("syncToastChrome")
+    assert "toastOrder.length > 0" in chrome, "一条都没有时那一列还在"
+    assert "toastOrder.length > 1" in chrome, "只有一条时就摆出「全部关闭」"
+
+
+def test_提示自己会消失而错误不许自己消失() -> None:
+    """两类：`info` 几秒后自己走；错误 / 警告 / 要人决策的一律留到人关为止。"""
+    assert "const AUTO_CLOSE_MS = 5000;" in _script()
+    toast = _body("showToast")
+    assert "if (spec.kind === 'info')" in toast, "自动消失没有按类分：错误也会自己走"
+    assert "setTimeout(" in toast
+    # 失败那条是 error：它永远不排自动消失的定时器。
+    failure = _body("notifyFailure")
+    assert "kind: 'error'" in failure
+
+
+def test_失败通知复用上一轮那套说法() -> None:
+    """四件事（哪一步 / 地址 / 可能原因 / 下一步）由 `explainFailure` 给，
+    不另写一套；页面上的原文一律先过 `redact`。
+    """
+    body = _body("showFailure")
+    assert "explainFailure(text, extra)" in body
+    assert "notifyFailure(head, text, parts)" in body, "失败只在对话流里躺着，没有弹出来"
+    assert "add(head + redact(text), 'bad')" in body, "认不出来的错误改了口径"
+
+    notice = _body("notifyFailure")
+    assert "redact(" in notice
+    assert "usefulLine(" in notice
+    # 请求被拒（409/403）也算失败：摆进对话区的同时弹一条，别只在控制台里丢。
+    post = _body("post")
+    assert "add('请求被拒绝：' + why, 'bad')" in post
+    assert "notifyFailure('请求被拒绝：'" in post
+
+
+def test_历史不加那句给用户看的说明() -> None:
+    """原来这里写着"之前的往来（给人看的，不进模型上下文）"——那是**说给实现者听的**。
+
+    改法：那句话不再出现在页面上；历史消息本身一条都不许少（用户要看得到过去
+    说过什么），分隔线留着当视觉界线，历史那几条多一个 `history` 类（略淡）。
+    行为数字（4 条历史一条不少、分隔线上一个字都没有）在 `test_page_dom.py` 里。
+    """
+    script = _script()
+    assert "之前的往来" not in script, "那句说给实现者听的话还在页面上"
+    assert "不进模型上下文" not in script, "实现细节还写在页面脚本里"
+
+    history = _body("drawHistory")
+    assert "history-sep" in history, "历史与这一趟之间的界线没了"
+    # 分隔线只是**一条线**：里面一个字都不写（`::before`/`::after` 画的线）。
+    assert "textContent" not in history, "分隔线上还写着字"
+    # 历史消息照旧画出来，只是多一个类。
+    assert "makeBubble(" in history
+    assert "'history'" in history, "历史没有可辨认的类（略淡那一档）"
+    assert "fillRich(bubble, item.content)" in history, "历史正文没画出来"
+    assert ".msg.history" in HTML, "没有略淡那一条样式"
+
+
 # --- ① 删除会话 ---
 
 
@@ -789,6 +926,70 @@ def test_只读时发送键不出现也不可点() -> None:
 def test_只读时审批按钮也不摆出来() -> None:
     body = _body("showActions")
     assert "if (readonly) { return; }" in body
+    # 更狠一层：只读壳里连那两个按钮节点都不建（藏起来的空按钮还能被 Tab 到）。
+    assert "if (!readonly)" in _body("ensureCard")
+
+
+# --- ② 待确认：对话流里的卡片 ---
+
+
+def test_待确认卡片与ChatGPT的调用卡片同形() -> None:
+    """卡片上有四样：谁的、哪个文件或哪条命令、diff 摘要、应用 / 拒绝。
+
+    挂点都在类名上（改了类名，那几块就散了）：`.ask-card` / `.ask-who` /
+    `.ask-kind` / `.ask-body` / `.ask-actions`。
+    """
+    for cls in (".ask-card", ".ask-who", ".ask-kind", ".ask-body", ".ask-actions"):
+        assert cls in HTML, f"卡片少了 {cls} 这一块"
+    card = _body("ensureCard")
+    assert "appendNode(node)" in card, "卡片没有挂进对话流"
+    assert "'应用'" in card and "'拒绝'" in card
+    assert "apply.onclick" in card and "reject.onclick" in card, "按钮写了却没绑上"
+
+    pending = _body("showPending")
+    assert "targetLabel()" in pending, "卡片没写清是哪个工作区、哪条会话"
+    assert "处改动待确认" in pending
+    assert "diffBox(" in pending
+    # 同一份待确认内容（补帧 / 重连）只更新不重建：diff 可能有几百行。
+    assert "cardSig === sig" in pending
+
+    summary = _body("diffSummary")
+    assert "startsWith('+')" in summary and "startsWith('-')" in summary
+
+
+def test_确认之后卡片变成状态行() -> None:
+    """点完不再是横幅、也不再是问句：就地变成"已应用 / 已拒绝"的一行记录。"""
+    settle = _body("settleCard")
+    assert "'已应用：'" in settle and "'已拒绝：'" in settle
+    assert "ask-row" in settle
+    assert "card = null;" in settle, "状态行没让出「当前那张卡片」的位置"
+    # 下一份待确认另起一张卡片，不是把状态行改回问句。
+    assert "if (card) { return card; }" in _body("ensureCard")
+
+    decide = _body("decide")
+    assert "post('/confirm', {apply})" in decide
+    assert "settleCard(apply ? 'applied' : 'rejected')" in decide
+    assert "if (cardApply) { cardApply.disabled = true; }" in decide, "点一次没有禁用"
+    # 被拒（409 没有待确认 / 403 只读）：退回"等你点"，别停在已应用上骗人。
+    assert "decided = false;" in decide
+
+
+def test_没有待确认内容时整块UI从页面上拿掉() -> None:
+    """`awaiting` 缺了 / 是 0 都按"没有待确认内容"办：**节点也拿掉**。"""
+    clear = _body("clearPending")
+    assert "removeCard();" in clear, "只是藏起来，DOM 里还占着地方"
+    assert "if (!card) { decided = false; return; }" in clear, "缺字段时要能安全早退"
+    drop = _body("removeCard")
+    assert "removeChild(card)" in drop
+    assert "card = null;" in drop
+    # 换目标整屏重绑：卡片没了，引用与状态要一起清。
+    reset = _body("resetView")
+    assert "card = null;" in reset and "cardAsking = false;" in reset
+
+    state = _body("applyState")
+    assert "if (state.awaiting) { showActions(); } else { clearPending(); }" in state, (
+        "服务端说没有待确认时卡片不消失"
+    )
 
 
 def test_pinned时选择也点不动() -> None:

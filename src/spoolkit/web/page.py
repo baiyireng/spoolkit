@@ -5,8 +5,8 @@
 
 这里刻意做得很薄——不持有状态、不做业务判断，只渲染事件、发请求
 （`/run`、`/confirm`、`/target`、`/session/delete|restore`、`/session/new`，
-以及轮 `/state` 取横幅），
-以及把快照里的待批准配对码、模型通断、当前目标、"已移除的会话"和"别处还有谁在跑"画出来。
+以及轮 `/state` 补通知），
+以及把待批准的配对码、模型通断、"别处还有谁在跑"和当前目标画出来。
 配对和探活都不进模型上下文，也不能点「应用/拒绝」来批准或重连——那两个按钮是落盘确认。
 前端出错只能靠人看出来，所以它必须小到一眼能看完。
 
@@ -36,6 +36,18 @@
 - **会话的「移除」是两次点击**：第一下只把那一行变成确认态，第二下才发请求；
   服务端把它按**归档**处理（数据不动、可恢复），已移除的那几条在左栏单独一段里
   点「恢复」就回来。
+- **通知是右上角的浮动气泡，不是横幅**：失败与提示以前挤在同一条横幅带里，现在各走
+  各自的层（`#toasts`）。每条一个关闭键，两条以上时多一个「全部关闭」；`info` 那一档
+  几秒后自己消失，**错误与要人决策的两档不会**——人没看到就没了，比不提示更糟。
+  同一个 key 的同一份内容只**更新**不重建（轮询每 3 秒一拍，重建就是每 3 秒抖一次），
+  人手动关掉之后同一份内容不再弹回来（内容真变了才回）。
+- **待确认是对话流里的一张卡片，不是常驻横幅**：有待确认内容时才建节点（`.ask-card`，
+  与 ChatGPT 的工具调用卡片同一挂：谁的 / 哪个文件或哪条命令 / diff 摘要 / 两个按钮），
+  没有的时候**这块 UI 在页面上不存在**——没有 DOM 占位、也没有可聚焦的空按钮。
+  点完「应用/拒绝」它就变成一行"已应用 / 已拒绝"的状态行留在对话流里。只读壳（非回环）
+  下那两个按钮根本不建（既有契约：点一下被 403 拒是骗人）。
+- **历史不加"给人看"的说明**：从记忆库取出来的往来仍然画在对话流里（略淡 + 一条分隔线），
+  但不再写"这是给人看的、不进模型上下文"这类实现细节——那是说给实现者听的。
 - **失败要说人话**：`final` 失败与 `error` 事件都走 `showFailure`——把
   "连模型那一步失败了"翻译成「哪一步 / 哪个地址 / 可能为什么 / 下一步敲什么」，
   而不是甩一行原始异常。线索优先用服务端**只增**的 `error: {stage, url, kind}`，
@@ -172,21 +184,60 @@ HTML = """<!DOCTYPE html>
   .ok { color:var(--ok); }
   .bad { color:var(--bad); }
 
-  /* ── 横幅区（只读 / 目标说明 / 别处在跑 / 模型不通 / 配对码） ── */
+  /* ── 横幅区：只放"这是哪一种壳 / 现在有没有目标"这类**模式与目标说明** ──
+     失败与提示**不在这里**：它们走右上角的浮动气泡（见下面的 `.toasts`），
+     因为一条已经没意义的旧提示不该把新错误挤下去，而它自己又不会走。 */
   .banner { display:none; padding:7px 14px; font-size:13px;
             border-bottom:1px solid var(--line-soft); }
   #readonly { background:var(--ro-bg); color:var(--ro-text);
               border-bottom-color:var(--ro-line); }
   #target-note { background:var(--info-bg); color:var(--info-text);
                  border-bottom-color:var(--info-line); }
-  #elsewhere { background:var(--warn-bg); color:var(--warn-text);
-               border-bottom-color:var(--warn-line); }
-  #health { background:var(--danger-bg); color:var(--danger-text);
-            border-bottom-color:var(--danger-line); }
-  #pairing { background:var(--pair-bg); color:var(--pair-text);
-             border-bottom-color:var(--pair-line); }
-  #pairing .code { font-weight:700; letter-spacing:.06em; }
   .hidden { display:none !important; }
+
+  /* ── 通知：右上角的浮动气泡。可堆叠（竖着排，不叠在一起）、每条一个关闭键；
+        `info` 自己会走，**`error` / `warn` / `ask` 不会**——错误在人看到之前消失，
+        比不提示更糟。固定在右上：**不遮输入条，也不遮对话流里那张待确认卡片**。 */
+  .toasts { display:none; position:fixed; z-index:30; top:56px; right:14px;
+            width:min(360px, calc(100vw - 28px)); max-height:70vh;
+            overflow-y:auto; flex-direction:column; gap:8px; }
+  .toasts.show { display:flex; }
+  .toast-all { display:none; align-self:flex-end; padding:4px 12px;
+               border-radius:999px; border:1px solid var(--line);
+               background:var(--panel-2); color:var(--text-dim);
+               cursor:pointer; font-size:12px; }
+  .toast-all.show { display:inline-flex; }
+  .toast-all:hover { color:var(--text); border-color:var(--text-dim); }
+  .toast { display:flex; align-items:flex-start; gap:8px;
+           border:1px solid var(--line); border-radius:12px;
+           padding:9px 10px 9px 12px; background:var(--panel-2);
+           color:var(--text); font-size:13px; overflow-wrap:anywhere;
+           box-shadow:0 8px 26px rgba(0,0,0,.34); }
+  .toast-body { flex:1 1 auto; min-width:0; }
+  .toast-title { font-weight:600; }
+  .toast-line { margin-top:3px; color:var(--text-dim); }
+  .toast-raw { margin-top:6px; color:var(--text-faint);
+               font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
+  .toast-close { flex:0 0 auto; width:24px; height:24px; padding:0; border:0;
+                 border-radius:6px; background:transparent; color:var(--text-dim);
+                 cursor:pointer; display:flex; align-items:center;
+                 justify-content:center; }
+  .toast-close:hover { background:var(--bubble-user); color:var(--text); }
+  .toast-close svg { width:14px; height:14px; }
+  .pair-code { font:12.5px/1.55 var(--mono); font-weight:700;
+               letter-spacing:.06em; }
+  .toast.info { border-color:var(--info-line); background:var(--info-bg);
+                color:var(--info-text); }
+  .toast.warn { border-color:var(--warn-line); background:var(--warn-bg);
+                color:var(--warn-text); }
+  .toast.error { border-color:var(--danger-line); background:var(--danger-bg);
+                 color:var(--danger-text); }
+  .toast.ask { border-color:var(--pair-line); background:var(--pair-bg);
+               color:var(--pair-text); }
+  .toast.info .toast-line, .toast.info .toast-close,
+  .toast.warn .toast-line, .toast.warn .toast-close,
+  .toast.error .toast-line, .toast.error .toast-close,
+  .toast.ask .toast-line, .toast.ask .toast-close { color:inherit; opacity:.82; }
 
   /* ── 顶条：抽屉开关 + 当前目标（"我在哪儿"必须一眼看得出） ── */
   #top {
@@ -313,27 +364,43 @@ HTML = """<!DOCTYPE html>
               scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
   .msg.user .code { border-color:var(--line); }
 
-  /* 历史分隔：给人看的，不进模型上下文 */
+  /* 历史：一条分隔线 + 略淡。**不在页面上写任何实现说明**——
+     用户要看的只是"以前说过什么"。 */
   .history-sep { display:flex; align-items:center; gap:10px;
                  color:var(--text-faint); font-size:12px; }
   .history-sep::before, .history-sep::after { content:""; flex:1;
                  border-top:1px solid var(--line-soft); }
+  .msg.history { opacity:.86; }
 
-  /* 待确认 / 待批准：出现时才浮出来，浮在输入条上方（不随输出滚走） */
-  #tray { display:flex; flex-direction:column; gap:8px; padding:0 18px;
-          max-width:800px; width:100%; margin:0 auto; }
-  #tray:empty { display:none; }
-  #actions { display:none; gap:8px; justify-content:flex-end; }
-  #actions button { padding:7px 16px; border-radius:9px; border:0; cursor:pointer; }
-  #apply { background:var(--ok); color:#fff; }
-  #reject { background:transparent; color:var(--text); border:1px solid var(--line); }
-  #actions button:disabled { opacity:.5; cursor:default; }
-  #pending { color:var(--text-dim); font-size:13px; }
-  #pending .diff { border:1px solid var(--line); border-radius:10px; padding:8px 10px;
-                   margin:6px 0 0; background:var(--code-bg); overflow-x:auto;
-                   font:12.5px/1.55 var(--mono); }
+  /* ── 待确认：**对话流里**的一张卡片（ChatGPT 的工具调用卡片那一挂） ──
+     没有待确认内容时它整个不存在：HTML 里没有这块的占位，节点也不建。
+     一个空框会让人以为"有东西在等我"，而框里那两个按钮是空的、还能被 Tab 到。 */
+  .ask-card { align-self:stretch; border:1px solid var(--line);
+              border-radius:12px; background:var(--panel-2);
+              padding:10px 12px; min-width:0; }
+  .ask-head { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .ask-who { font-weight:600; font-size:13px; }
+  .ask-kind { color:var(--text-dim); font-size:12px; }
+  .ask-body { margin-top:6px; min-width:0; }
+  .ask-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:9px; }
+  .ask-actions button { padding:7px 16px; border-radius:9px; border:0;
+                        cursor:pointer; font-size:13.5px; }
+  .ask-apply { background:var(--ok); color:#fff; }
+  .ask-reject { background:transparent; color:var(--text);
+                border:1px solid var(--line); }
+  .ask-actions button:disabled { opacity:.5; cursor:default; }
+  /* 点完之后留下的那一行状态：与工具结果同一挂，不再是一张等你点的卡片。 */
+  .ask-row { align-self:stretch; border-left:3px solid var(--line);
+             border-radius:0 8px 8px 0; padding:6px 10px; font-size:13px;
+             color:var(--text-dim); background:var(--panel-2); }
+  .ask-row.ok { border-left-color:var(--ok); color:var(--ok); }
+  .ask-row.bad { border-left-color:var(--bad); color:var(--bad); }
+  .diff { border:1px solid var(--line); border-radius:10px; padding:8px 10px;
+          margin:6px 0 0; background:var(--code-bg); overflow-x:auto;
+          font:12.5px/1.55 var(--mono); }
   .diff .add { color:var(--ok); } .diff .del { color:var(--bad); }
   .diff .dim { color:var(--text-dim); }
+  .diff .head { overflow-wrap:anywhere; }
 
   /* ── 底部输入条：浮动观察 + 外部依赖，不抢输入 ── */
   #thinking { position:absolute; right:22px; bottom:104px; z-index:5;
@@ -391,7 +458,9 @@ HTML = """<!DOCTYPE html>
     #stream { padding:14px 12px 20px; }
     .msg.user { max-width:92%; }
     #composer { padding:8px 10px calc(10px + env(safe-area-inset-bottom)); }
-    #tray { padding:0 10px; }
+    /* 手机宽度：气泡不越界——左边也压住，别让它顶出屏幕；高低再收一档，
+       免得整列通知把对话流里那张卡片盖住。 */
+    .toasts { top:52px; left:10px; right:10px; width:auto; max-height:45vh; }
     #thinking { right:12px; bottom:96px; }
     #toBottom { right:12px; bottom:56px; }
   }
@@ -404,9 +473,7 @@ HTML = """<!DOCTYPE html>
 <body>
 <div id="readonly" class="banner"></div>
 <div id="target-note" class="banner"></div>
-<div id="elsewhere" class="banner"></div>
-<div id="health" class="banner"></div>
-<div id="pairing" class="banner"></div>
+<div id="toasts"><button id="toast-all" type="button" class="toast-all">全部关闭</button></div>
 <div id="top">
   <button id="menu" title="会话列表" aria-label="会话列表"></button>
   <span id="where" class="empty">连接中…</span>
@@ -432,13 +499,6 @@ HTML = """<!DOCTYPE html>
     <div id="stream"></div>
     <div id="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span>正在思考</div>
     <button id="toBottom" title="回到最新" aria-label="回到最新"></button>
-    <div id="tray">
-      <div id="pending" class="dim">当前没有待确认的改动。</div>
-      <div id="actions">
-        <button id="apply">应用</button>
-        <button id="reject">拒绝</button>
-      </div>
-    </div>
     <div id="composer">
       <div class="box">
         <textarea id="goal" rows="1" placeholder="给 agent 发消息…"></textarea>
@@ -458,18 +518,18 @@ const ICON = {
   menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"></path><path d="M4 12h16"></path><path d="M4 17h16"></path></svg>',
   send: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 12l15-7-6 7 6 7z"></path></svg>',
   down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"></path><path d="M6 13l6 6 6-6"></path></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg>',
 };
 
 const stream = document.getElementById('stream');
-const pending = document.getElementById('pending');
-const actions = document.getElementById('actions');
 const meta = document.getElementById('meta');
 const conn = document.getElementById('conn');
 const sendBtn = document.getElementById('send');
 const goalBox = document.getElementById('goal');
 const whereBox = document.getElementById('where');
 const noteBox = document.getElementById('target-note');
-const elseBox = document.getElementById('elsewhere');
+const toastsBox = document.getElementById('toasts');
+const toastAllBtn = document.getElementById('toast-all');
 // 两条原生选择器：HTML 里它们是给左栏两段兜底的可访问控件，值也由 drawTarget
 // 一起填（fillSelect）——切换只走这一条路径（行点击最终也落到 switchTarget 上）。
 const wsBox = document.getElementById('ws');
@@ -504,14 +564,182 @@ let armed = '';
 let lastState = {};
 // 模型是不是正在生成。"正在思考"与发送键的可用性都由它推。
 let thinking = false;
+// 对话流里那张"待确认"卡片。`card` 为 null 就是**页面上没有这块 UI**——
+// 不是隐藏、也没有 DOM 占位（一个空框会让人以为"有东西在等我"）。
+let card = null;
+// 卡片是不是还在"等你点"。点完（或服务端说没有待确认了）它就不再是问句，
+// 只剩一行"已应用 / 已拒绝"的状态。
+let cardAsking = false;
+// 卡片上那两个按钮。只读壳里**根本不建**，所以这里可以是 null。
+let cardApply = null;
+let cardReject = null;
+// 卡片上那一份待确认内容的签名：同一份内容只更新不重建（补帧会一遍遍送同一份）。
+let cardSig = '';
 
-// 等待时那一行里**不许**出现探活横幅的名字：红色 #health 说的是"连不上"，
+// 等待时那一行里**不许**出现探活那条通知的名字：红色的"连不上"说的是模型，
 // 不是"还在生成"（两者混在一起，人会以为模型挂了）。
 const WAIT_PREFIX = '模型生成中，已等待';
 // 左栏里"在跑"的标记：它自己会消失，所以必须随每一帧状态重画。
 const RUN_MARK = '正在跑';
 // 钉住（--root）时两段列表都只读。用类而不是 disabled：这里是 div 行，不是控件。
 const LOCK = 'lock';
+// 只有 `info` 那一档的提示自己会走（几秒）；错误与要人决策的那些**永远不自动消失**
+// ——在人看到之前消失，比不提示更糟。
+const AUTO_CLOSE_MS = 5000;
+
+/* ── 通知：右上角的浮动气泡（可关、可堆叠） ──
+   为什么不是横幅：横幅那条带子是"这一页现在是什么"，通知是"刚刚发生了什么"。
+   混在一起时，一条早就没意义的旧提示会把新错误挤下去，而它自己不会走。
+
+   三条性质：
+   ① 每条一个关闭键，两条以上时多一个「全部关闭」；
+   ② 同一个 key 的同一份内容只**更新**不重建——`/state` 是 3 秒一拍，
+      重建就是每 3 秒抖一次；人手动关掉的那一份内容不再自己弹回来
+      （内容真变了才回：错误换了、那条提示消失了又回来）；
+   ③ 位置固定在右上：不遮输入条，也不遮对话流里那张待确认卡片。 */
+const toastNodes = {};
+const toastSigs = {};
+const toastOrder = [];
+const toastDismissed = {};
+
+// 通知栈的外观：一条都没有时整块不存在；两条以上才给「全部关闭」。
+function syncToastChrome() {
+  toastsBox.classList.toggle('show', toastOrder.length > 0);
+  toastAllBtn.classList.toggle('show', toastOrder.length > 1);
+}
+
+// 关掉一条（返回是不是真关掉了一条）。
+function closeToast(key) {
+  const node = toastNodes[key];
+  if (!node) { return false; }
+  if (node._timer) { clearTimeout(node._timer); node._timer = 0; }
+  if (node.parentNode) { node.parentNode.removeChild(node); }
+  delete toastNodes[key];
+  delete toastSigs[key];
+  const at = toastOrder.indexOf(key);
+  if (at >= 0) { toastOrder.splice(at, 1); }
+  syncToastChrome();
+  return true;
+}
+
+// 人点的关闭键：记下"这一份内容人不要了"，下一拍轮询别把它又放回来。
+function dismissToast(key) {
+  toastDismissed[key] = toastSigs[key] || '';
+  closeToast(key);
+}
+
+function closeAllToasts() {
+  for (const key of toastOrder.slice()) { closeToast(key); }
+}
+
+// 往一个盒子里填若干行：只在**行数变多**时建节点，行数变少时删掉多的，
+// 内容没变的那几行一个字都不动（同"数据没变就一个节点都不重建"那条既有取舍）。
+function fillToastLines(box, lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    let line = box.children[index];
+    if (!line) {
+      line = document.createElement('div');
+      line.className = 'toast-line';
+      box.appendChild(line);
+    }
+    if (line.textContent !== lines[index]) { line.textContent = lines[index]; }
+  }
+  while (box.children.length > lines.length) { box.removeChild(box.lastChild); }
+}
+
+// 建 / 更新一条通知。`spec`：{key, source, kind, title, lines, raw}
+//   kind: 'info'（自己消失）/ 'warn' / 'error' / 'ask'（后三档只能手动关）
+//   source: 给 `pruneToasts` 用——这一拍没再出现的那几条（模型又通了、
+//           别处那条跑完了）要自己收掉。
+function showToast(spec) {
+  const key = String(spec.key);
+  const lines = spec.lines || [];
+  const sig = JSON.stringify([spec.kind, spec.title, lines, spec.raw || '']);
+  const have = toastNodes[key];
+  if (have && toastSigs[key] === sig) { return have; }
+  if (!have && toastDismissed[key] === sig) {
+    // 人刚关掉的就是这一份：状态类通知（轮询一遍遍送同一份）不再弹。
+    // 但他**刚点出来**的一次性提示要照常出现——那是他自己那个动作的回执。
+    if (spec.kind !== 'info') { return null; }
+    delete toastDismissed[key];
+  }
+  let node = have;
+  if (!node) {
+    node = document.createElement('div');
+    node.dataset.key = key;
+    const body = document.createElement('div');
+    body.className = 'toast-body';
+    const title = document.createElement('div');
+    title.className = 'toast-title';
+    const linesBox = document.createElement('div');
+    linesBox.className = 'toast-lines';
+    const raw = document.createElement('div');
+    raw.className = 'toast-raw';
+    body.appendChild(title);
+    body.appendChild(linesBox);
+    body.appendChild(raw);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'toast-close';
+    close.title = '关掉这条通知';
+    // 按钮里只有一个图标，读屏得有个名字（只给 title 是不够稳的）。
+    close.setAttribute('aria-label', '关掉这条通知');
+    close.innerHTML = ICON.close;
+    close.onclick = (function (which) {
+      return function () { dismissToast(which); };
+    })(key);
+    node.appendChild(body);
+    node.appendChild(close);
+    node._parts = {title: title, lines: linesBox, raw: raw};
+    toastNodes[key] = node;
+    toastOrder.push(key);
+    toastsBox.appendChild(node);
+  }
+  node._source = spec.source || '';
+  if (node._kind !== spec.kind) {
+    node._kind = spec.kind;
+    node.className = 'toast ' + spec.kind;
+  }
+  node._parts.title.textContent = spec.title;
+  fillToastLines(node._parts.lines, lines);
+  node._parts.raw.textContent = spec.raw || '';
+  node._parts.raw.style.display = spec.raw ? 'block' : 'none';
+  toastSigs[key] = sig;
+  if (node._timer) { clearTimeout(node._timer); node._timer = 0; }
+  // 只有 `info` 自己消失。错误、警告、要人决策的一律留到人点关闭为止。
+  if (spec.kind === 'info') {
+    node._timer = setTimeout(function () { closeToast(key); }, AUTO_CLOSE_MS);
+  }
+  syncToastChrome();
+  return node;
+}
+
+// 这一拍没再出现的那几条（同一个来源的）：收掉。
+function pruneToasts(source, keep) {
+  for (const key of toastOrder.slice()) {
+    const node = toastNodes[key];
+    if (!node || node._source !== source) { continue; }
+    if (!keep[key]) { closeToast(key); }
+  }
+}
+
+// 一次性提示：操作做成了这类回执，自己会走，不必人去关。
+function notifyInfo(title, lines) {
+  return showToast({key: 'info|' + title, source: 'info', kind: 'info',
+    title: title, lines: lines || []});
+}
+
+// 失败通知：右上角弹出来，**只能手动关**。四件事（哪一步 / 地址 / 可能原因 /
+// 下一步敲什么）由 `explainFailure` 给，这里只负责把它摆进气泡——不另写一套。
+function notifyFailure(head, text, parts) {
+  const title = parts === null ? head + redact(text) : parts.head;
+  return showToast({
+    key: 'failure|' + head + '|' + redact(usefulLine(text)).slice(0, 120),
+    source: 'failure', kind: 'error', title: title,
+    lines: parts === null ? [] : parts.lines,
+    raw: parts === null ? '' : parts.raw,
+  });
+}
 
 function buildColumn() {
   const col = document.createElement('div');
@@ -535,8 +763,9 @@ function makeMsg(kind) {
   return wrap;
 }
 
-function makeBubble(kind, text) {
+function makeBubble(kind, text, cls) {
   const wrap = makeMsg(kind);
+  if (cls) { wrap.classList.add(cls); }
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   bubble.textContent = text;
@@ -742,10 +971,13 @@ function explainFailure(text, extra) {
   };
 }
 
-// 对话流里的那一块。认不出来的错误仍按**原来的画法**画（不假装懂）：
+// 失败要说人话，而且**要弹出来**：失败是通知，不该只在对话流里躺着等人自己往下翻。
+// 对话流里那一块仍然留着——那是这一趟干过什么的记录。
+// 认不出来的错误仍按**原来的画法**画（不假装懂）：
 // `head` 就是原来那个词——`final` 是「失败：」、`error` 事件是「错误：」。
 function showFailure(head, text, extra) {
   const parts = explainFailure(text, extra);
+  notifyFailure(head, text, parts);
   if (parts === null) { add(head + redact(text), 'bad'); return; }
   const stick = atBottom();
   const wrap = makeMsg('system');
@@ -785,16 +1017,18 @@ function drawHistory(messages) {
   if (!items.length || drawn === items.length) { return; }
   const stick = atBottom();
   if (drawn === 0) {
+    // 一条**光秃秃的分隔线**：以前这里挂着一句说给实现者听的话，那不是给用户看的。
+    // 历史本身照旧画出来（见下面的 `.history`：略淡，但一条都不少）。
     const sep = document.createElement('div');
     sep.className = 'history-sep';
-    sep.textContent = '之前的往来（给人看的，不进模型上下文）';
     appendNode(sep);
   }
   for (let index = drawn; index < items.length; index += 1) {
     const item = items[index];
     const bubble = makeBubble(
       item.role === 'user' ? 'user' : 'assistant',
-      ''
+      '',
+      'history'
     );
     fillRich(bubble, item.content);
   }
@@ -1228,53 +1462,77 @@ function short(text, limit) {
 }
 
 // 「别处还有一条在跑」：切走不杀任务（设计 §3.4），页面就必须**说得出**这件事，
-// 不能让它看起来只有一条。这一行不走事件流——别的目标上起来的任务，在本目标的
+// 不能让它看起来只有一条。这一条不走事件流——别的目标上起来的任务，在本目标的
 // 事件流上什么都没有，只能按 `/state` 的 `running_targets` 轮出来。
+// 它是"看一眼就该知道"的提示（`warn`，要人自己关）：轮询每 3 秒会送同一份，
+// 内容没变就只更新那一个节点。
 function showElsewhere(state) {
+  const keep = {};
   const others = (state.running_targets || []).filter(function (row) {
     return !row.current;
   });
-  elseBox.replaceChildren();
-  if (!others.length) {
-    elseBox.style.display = 'none';
-    return;
-  }
-  elseBox.style.display = 'block';
   for (const row of others) {
-    const line = document.createElement('div');
-    line.textContent = '别处还有一条在跑：' + (row.name || row.root)
-      + '（会话 ' + row.session + '）— ' + short(row.goal, 60)
-      + (row.awaiting ? '（在等你确认）' : '');
-    elseBox.appendChild(line);
+    const key = 'elsewhere|' + (row.root || '') + '|' + (row.session || '');
+    keep[key] = true;
+    const lines = ['会话 ' + row.session + ' — ' + short(row.goal, 60)];
+    if (row.awaiting) { lines.push('它在等你确认'); }
+    showToast({
+      key: key, source: 'elsewhere', kind: 'warn',
+      title: '别处还有一条在跑：' + (row.name || row.root),
+      lines: lines,
+    });
   }
+  pruneToasts('elsewhere', keep);
 }
 
-// 重绑这一屏：目标换了，旧的输出、待确认面板、历史进度都属于**上一个**目标。
+// 重绑这一屏：目标换了，旧的输出、待确认卡片、历史进度都属于**上一个**目标。
 function resetView() {
   stream.replaceChildren();
   drawn = 0;
   armed = '';
-  clearPending();
-  actions.style.display = 'none';
+  // 卡片节点已经跟着 `replaceChildren` 一起没了：引用与状态也得一起清，
+  // 否则下一帧会以为"卡片还在"，往一个已经不在页面上的节点上写东西。
+  card = null;
+  cardAsking = false;
+  cardApply = null;
+  cardReject = null;
+  cardSig = '';
+  decided = false;
+  pendings = [];
   updateToBottom();
 }
 
-function showPending(items) {
-  if (!items.length) { clearPending(); return; }
-  pendings = items;
-  pending.innerHTML = '';
-  pending.className = '';
-  for (const item of items) { pending.appendChild(diffBox(item.path, item.text)); }
+/* ── 对话流里的待确认卡片 ──
+   有待确认内容时才建节点；没有的时候这块 UI **在页面上不存在**（HTML 里没有占位、
+   也没有可聚焦的空按钮）。点完「应用/拒绝」它就变成一行状态，留在对话流里当记录。
+   只读壳里那两个按钮**根本不建**：点一下被 403 拒是骗人，而藏起来的空按钮还能被 Tab 到。 */
+
+// 卡片上写的"谁的"：机器级壳服务整台机器，只说"有 1 处改动待确认"，
+// 人根本不知道自己批的是哪个工作区、哪条会话里的东西。
+function targetLabel() {
+  const t = (lastState || {}).target || {};
+  if (!t.root) { return '还没有目标'; }
+  return '工作区 ' + t.root + ' · 会话 ' + (t.session || '');
+}
+
+// diff 摘要：几行加、几行减。看正文之前先给一个"改了多少"。
+function diffSummary(text) {
+  let adds = 0, dels = 0;
+  for (const raw of String(text || '').split('\\n')) {
+    if (raw.startsWith('+') && !raw.startsWith('+++')) { adds += 1; }
+    if (raw.startsWith('-') && !raw.startsWith('---')) { dels += 1; }
+  }
+  return '+' + adds + ' -' + dels + ' 行';
 }
 
 function diffBox(path, text) {
   const box = document.createElement('div');
   box.className = 'diff';
   const head = document.createElement('div');
-  head.className = 'dim';
-  head.textContent = '待确认：' + path;
+  head.className = 'dim head';
+  head.textContent = path + '  ' + diffSummary(text);
   box.appendChild(head);
-  for (const raw of text.split('\\n')) {
+  for (const raw of String(text || '').split('\\n')) {
     const line = document.createElement('div');
     line.className = raw.startsWith('+') ? 'add'
       : raw.startsWith('-') ? 'del' : 'dim';
@@ -1282,6 +1540,122 @@ function diffBox(path, text) {
     box.appendChild(line);
   }
   return box;
+}
+
+// 建（或复用）那张卡片。它挂在对话流的最后：ChatGPT 那一挂的"工具调用卡片"也是这样，
+// 出现在**对话里**，而不是一个永远浮在输入条上方的空框。
+function ensureCard() {
+  if (card) { return card; }
+  const node = document.createElement('div');
+  node.dataset.state = 'asking';
+  const head = document.createElement('div');
+  head.className = 'ask-head';
+  const who = document.createElement('span');
+  who.className = 'ask-who';
+  const kind = document.createElement('span');
+  kind.className = 'ask-kind';
+  head.appendChild(who);
+  head.appendChild(kind);
+  const body = document.createElement('div');
+  body.className = 'ask-body';
+  node.appendChild(head);
+  node.appendChild(body);
+  node._who = who;
+  node._kind = kind;
+  node._body = body;
+  node._what = '';
+  node._foot = null;
+  cardApply = null;
+  cardReject = null;
+  if (!readonly) {
+    const foot = document.createElement('div');
+    foot.className = 'ask-actions';
+    const apply = document.createElement('button');
+    apply.type = 'button';
+    apply.className = 'ask-apply';
+    apply.textContent = '应用';
+    apply.onclick = function () { decide(true); };
+    const reject = document.createElement('button');
+    reject.type = 'button';
+    reject.className = 'ask-reject';
+    reject.textContent = '拒绝';
+    reject.onclick = function () { decide(false); };
+    foot.appendChild(apply);
+    foot.appendChild(reject);
+    node.appendChild(foot);
+    node._foot = foot;
+    cardApply = apply;
+    cardReject = reject;
+  }
+  node.className = 'ask-card';
+  appendNode(node);
+  card = node;
+  cardAsking = true;
+  decided = false;
+  return node;
+}
+
+// 卡片上问的是什么（结算时那一行状态要用它）。
+function cardWhat() {
+  return card ? String(card._what || '') : '';
+}
+
+// 没有待确认内容了：**把这块 UI 从页面上拿掉**（不是隐藏）。
+function removeCard() {
+  if (card && card.parentNode) { card.parentNode.removeChild(card); }
+  card = null;
+  cardAsking = false;
+  cardApply = null;
+  cardReject = null;
+  cardSig = '';
+  decided = false;
+}
+
+// 确认完了：卡片**就地**变成一行"已应用 / 已拒绝"，留在对话流里当记录
+// （它不是横幅）。同时把"当前那张卡片"这个位置让出来：以后又有待确认的东西，
+// 是另起一张新卡片，而不是把这一行状态改回问句。
+function settleCard(outcome) {
+  if (!card || !cardAsking) { return; }
+  const node = card;
+  const what = cardWhat();
+  const stick = atBottom();
+  card = null;
+  cardAsking = false;
+  cardApply = null;
+  cardReject = null;
+  cardSig = '';
+  const line = document.createElement('div');
+  line.className = 'ask-done';
+  line.textContent = (outcome === 'applied' ? '已应用：' : '已拒绝：') + what
+    + '（' + targetLabel() + '）';
+  node.className = 'ask-row ' + (outcome === 'applied' ? 'ok' : 'bad');
+  node._foot = null;
+  node.replaceChildren(line);
+  if (stick) { scrollDown(); }
+  updateToBottom();
+}
+
+function showPending(items) {
+  if (!items.length) { clearPending(); return; }
+  pendings = items;
+  // 同一份待确认内容（补帧 / 重连后的一帧）只更新，不重建：
+  // diff 正文可能有几百行，重建一次就是白干一次。
+  const sig = JSON.stringify(['diffs', items.map(function (one) {
+    return [one.path, one.text];
+  })]);
+  if (card && cardAsking && cardSig === sig) { return; }
+  const node = ensureCard();
+  cardSig = sig;
+  const stick = atBottom();
+  node.dataset.state = 'asking';
+  node._what = items.length + ' 处改动';
+  node._who.textContent = targetLabel();
+  node._kind.textContent = items.length + ' 处改动待确认';
+  node._body.replaceChildren();
+  for (const item of items) { node._body.appendChild(diffBox(item.path, item.text)); }
+  if (node._foot) { node._foot.style.display = 'flex'; }
+  if (stick) { scrollDown(); }
+  updateToBottom();
 }
 
 function setRunning(value) {
@@ -1313,10 +1687,15 @@ function setMeta(steps) {
   meta.textContent = session + ' · ' + (steps || 0) + ' 步';
 }
 
-function clearPending() {
+// 服务端说"没有待确认内容了"（或确认完了）。`outcome` 给 'applied' / 'rejected'
+// 时卡片变成那一行状态；不给时**把这块 UI 整个拿掉**（页面上不留空框）。
+function clearPending(outcome) {
   pendings = [];
-  pending.className = 'dim';
-  pending.textContent = '当前没有待确认的改动。';
+  if (!card) { decided = false; return; }
+  // 已经结算过的那一行状态是记录，留着（它不是横幅，是"这一趟批过什么"）。
+  if (!cardAsking) { return; }
+  if (outcome === 'applied' || outcome === 'rejected') { settleCard(outcome); return; }
+  removeCard();
 }
 
 function keyFor(root, name) {
@@ -1346,45 +1725,38 @@ function applyState(state) {
   const usage = state.usage || {};
   setMeta(usage.steps);
   setRunning(running);
-  // 断线重连时事件已经漏掉了，只能按快照把待确认面板整个重建出来。
-  // 空表**不动**面板：等命令授权时这里没有 diff，而那条"要执行：…"正摆在那里。
+  // 断线重连时事件已经漏掉了，只能按快照把那张卡片整个重建出来。
+  // 空表**不动**卡片：等命令授权时这里没有 diff，而那条"要执行：…"正摆在那里。
   const pendingItems = state.diffs || [];
   if (pendingItems.length) { showPending(pendingItems); }
   // 等命令授权时**没有 diff**：不把那条命令显示出来，按钮就是盲操作。
   const asking = state.awaiting_detail || {};
   if (state.awaiting && asking.command) { showCommandAsk(asking); }
-  if (state.awaiting) { showActions(); } else { actions.style.display = 'none'; }
+  // `awaiting` 缺了 / 是空 = 服务端说"没有待确认内容"：卡片收掉（缺字段按没有处理）。
+  if (state.awaiting) { showActions(); } else { clearPending(); }
   drawHistory(state.messages);
   showPairings(state.pairings);
   showHealth(state.health);
   showElsewhere(state);
 }
 
-// 配对码给人看，不进模型上下文。批准发生在另一个进程
-// （本机敲 spool approve 加码），所以还要短轮询 /state，这一行才会自己消失。
+// 配对码给人看。批准发生在另一个进程（本机敲 spool approve 加码），
+// 所以还要短轮询 /state，这一条才会自己消失。
 // 不能复用「应用/拒绝」：点应用会走 /confirm 去落盘改动。
 function showPairings(items) {
-  const box = document.getElementById('pairing');
-  if (!items || !items.length) {
-    box.style.display = 'none';
-    box.replaceChildren();
-    return;
+  const keep = {};
+  for (const item of (items || [])) {
+    const key = 'pairing|' + item.code;
+    keep[key] = true;
+    showToast({
+      key: key, source: 'pairing', kind: 'ask',
+      title: '待批准的通道配对请求（来自手机 / 聊天通道）',
+      lines: ['在本机终端敲：spool approve ' + item.code,
+              '来自：' + item.user,
+              '点「应用」不会批准配对（那是落盘确认）。'],
+    });
   }
-  box.style.display = 'block';
-  box.replaceChildren();
-  const head = document.createElement('div');
-  head.textContent = '有 ' + items.length +
-    ' 个待批准的通道配对请求（来自手机/聊天通道）。在本机终端批准；点「应用」不会批准配对。';
-  box.appendChild(head);
-  for (const item of items) {
-    const line = document.createElement('div');
-    const cmd = document.createElement('span');
-    cmd.className = 'code';
-    cmd.textContent = 'spool approve ' + item.code;
-    line.appendChild(cmd);
-    line.appendChild(document.createTextNode('  ←  ' + item.user));
-    box.appendChild(line);
-  }
+  pruneToasts('pairing', keep);
 }
 
 // 「这是什么时候探的」必须说得出：探活挪到后台之后，`/state` 给的是**最近一次**
@@ -1412,54 +1784,67 @@ function modelDownLine(kind, where, ago) {
 }
 
 function showHealth(health) {
-  const box = document.getElementById('health');
-  const bits = [];
+  const keep = {};
   const info = health || {};
   const model = info.model || {};
   if (model.ok === false) {
-    // 横幅上也**说人话**：光摆一句 `timed out`，人只会以为壳坏了。
-    // 什么时候探的 + 可能原因 + 下一步，与对话流里那一块同一套说法（`failure*`），
-    // 但这里的"下一步"给的是**探活**该做的事：没人在等生成，所以不套用
-    // "把活拆小再发"（那是生成超时的下一步）。分类优先用服务端**只增**的 `kind`。
+    // 失败通知要说全四件事：哪一步 / 哪个地址 / 可能为什么 / 下一步敲什么。
+    // 四句都由 `explainFailure` 给（与对话流里那一块**同一套**说法，不另写一套），
+    // 分类优先用服务端**只增**的 `kind`；"什么时候探的"由 `probedAgo` 补上——
+    // 探活挪到后台之后 `/state` 给的是最近一次结果，静默的陈旧值等于假话。
     const where = model.target ? '（' + model.target + '）' : '';
     const kind = model.kind || failureKind(model.detail) || 'connect';
-    const why = kind === 'slow'
-      ? '模型服务在、但没在超时内回话（在加载模型 / 太慢 / 卡住）'
-      : kind === 'server'
-        ? '服务在、但回话不是 200（参数不对 / 上下文超限 / 刚重启）'
-        : failureCause('connect');
-    bits.push(modelDownLine(kind, where, probedAgo(info))
-      + '：可能原因：' + why
-      + '；下一步：' + failureNext(kind === 'server' ? 'server' : 'connect'));
+    const parts = explainFailure(model.detail, {kind: kind, url: model.target});
+    const lines = (parts && parts.lines ? parts.lines : []).slice();
+    if (kind === 'slow' && lines.length) {
+      // 探活超时的下一步**不是**"把活拆小再发"（这里没人在等生成）：
+      // 该做的是去看模型进程还在不在。
+      lines[lines.length - 1] = '下一步：`spool service list` 看模型进程还在不在'
+        + '（刚起 / 在加载模型就再等一会儿）';
+    }
+    const key = 'health|model';
+    keep[key] = true;
+    showToast({
+      key: key, source: 'health', kind: 'error',
+      title: modelDownLine(kind, where, probedAgo(info)),
+      lines: lines,
+      raw: parts && parts.raw ? parts.raw : redact(model.detail || ''),
+    });
   } else if (info.state === 'unknown') {
     // 后台探活刚起来：说"还没探过"，**不画成"通了"**（那是静默的假话）。
-    bits.push('本机模型：还没探过（后台正在探，几秒后这里会自己更新）。');
+    // 这一条是状态不是错误：模型一探通它自己就收了（不用人关）。
+    const key = 'health|unknown';
+    keep[key] = true;
+    showToast({
+      key: key, source: 'health', kind: 'warn',
+      title: '本机模型：还没探过（后台正在探，几秒后这里会自己更新）。',
+      lines: [],
+    });
   }
-  const services = (health && health.services) || [];
-  for (const item of services) {
+  for (const item of (info.services || [])) {
     if (item.ok === false) {
-      const where = item.target ? '（' + item.target + '）' : '';
-      bits.push((item.name || '外接服务') + '连不上' + where
-        + '：' + redact(item.detail || '连不上'));
+      const key = 'health|service|' + (item.name || '外接服务');
+      keep[key] = true;
+      showToast({
+        key: key, source: 'health', kind: 'error',
+        title: (item.name || '外接服务') + '连不上'
+          + (item.target ? '（' + item.target + '）' : ''),
+        lines: [redact(item.detail || '连不上')],
+      });
     }
   }
-  const bridge = (health && health.bridge) || {};
+  const bridge = info.bridge || {};
   if (bridge.name && bridge.ok === false) {
-    const where = bridge.target ? '（' + bridge.target + '）' : '';
-    bits.push('通道已退出' + where);
+    const key = 'health|bridge';
+    keep[key] = true;
+    showToast({
+      key: key, source: 'health', kind: 'error',
+      title: '通道已退出' + (bridge.target ? '（' + bridge.target + '）' : ''),
+      lines: [],
+    });
   }
-  if (!bits.length) {
-    box.style.display = 'none';
-    box.replaceChildren();
-    return;
-  }
-  box.style.display = 'block';
-  box.replaceChildren();
-  for (const text of bits) {
-    const line = document.createElement('div');
-    line.textContent = text;
-    box.appendChild(line);
-  }
+  // 这一拍没再出现的（模型又通了、外接服务起来了）：收掉。
+  pruneToasts('health', keep);
 }
 
 // 短轮询 /state。这几样都**不一定伴随事件**：配对码是另一个进程在批，
@@ -1477,25 +1862,53 @@ async function refreshBanners() {
   } catch (err) { /* 轮询失败就等下一拍，横幅停在上一帧 */ }
 }
 
-// 「它想跑一条白名单外的命令」——把这句和被问的东西一起摆在按钮上面。
+// 「它想跑一条白名单外的命令」——把被问的东西摆进卡片：要执行什么、为什么。
 // 授权和落盘是两件事：一个是问"能不能跑"，一个是问"要不要写入"，
 // 混成一句「有 1 处改动待确认」，人根本不知道自己在批什么。
 function showCommandAsk(detail) {
-  showPending([{
-    path: '要执行：' + detail.command,
-    text: '原因：' + (detail.reason || '未说明') +
-          '\\n（点「应用」= 允许这一次；要长期允许，去 .agent/grants.json）'
-  }]);
+  const sig = JSON.stringify(['command', detail.command, detail.reason || '']);
+  if (card && cardAsking && cardSig === sig) { return; }
+  const node = ensureCard();
+  cardSig = sig;
+  const stick = atBottom();
+  node.dataset.state = 'asking';
+  node._what = '命令 ' + detail.command;
+  node._who.textContent = targetLabel();
+  node._kind.textContent = '命令授权待确认';
+  node._body.replaceChildren();
+  const box = document.createElement('div');
+  box.className = 'diff';
+  const head = document.createElement('div');
+  head.className = 'dim head';
+  head.textContent = '要执行：';
+  const cmd = document.createElement('span');
+  cmd.className = 'pair-code';
+  cmd.textContent = String(detail.command);
+  head.appendChild(cmd);
+  box.appendChild(head);
+  const why = document.createElement('div');
+  why.className = 'dim';
+  why.textContent = '原因：' + (detail.reason || '未说明');
+  box.appendChild(why);
+  const how = document.createElement('div');
+  how.className = 'dim';
+  how.textContent = '点「应用」= 允许这一次；要长期允许，去 .agent/grants.json';
+  box.appendChild(how);
+  node._body.appendChild(box);
+  if (node._foot) { node._foot.style.display = 'flex'; }
+  if (stick) { scrollDown(); }
+  updateToBottom();
 }
 
+// 卡片上那两个按钮的可用态。只读壳里**连按钮都没建**（见 ensureCard），
+// 所以这里第一句就是只读早退——那是既有契约：点一下被 403 拒是骗人。
 function showActions() {
-  // 只读壳里没有可点的东西。按钮摆出来、点下去被 403 拒，是骗人：
-  // 人只会以为是坏了，然后去关掉那个"看起来多余"的检查（服务端那道才是权威）。
   if (readonly) { return; }
+  if (!card || !cardAsking || !card._foot) { return; }
   decided = false;
-  actions.style.display = 'flex';
-  document.getElementById('apply').disabled = false;
-  document.getElementById('reject').disabled = false;
+  card._foot.style.display = 'flex';
+  if (cardApply) { cardApply.disabled = false; }
+  if (cardReject) { cardReject.disabled = false; }
 }
 
 // 非回环绑定 = 只读（设计 §3.7）。这一句要说全三件事：为什么、能看什么、
@@ -1544,7 +1957,7 @@ function onEvent(event) {
     return;
   }
   // 模型等待心跳（既有协议，见 docs/superpowers/specs/2026-09-21-*）。
-  // 这一行**只是"还在生成"**，不占探活横幅：红色 #health 说的是连不上。
+  // 这一行**只是"还在生成"**，不占探活那条通知：红色的"连不上"说的是模型。
   // 同时把「正在思考」点亮——同一件事的两种画法，不新造事件。
   if (data.type === 'wait') {
     setThinking(true);
@@ -1590,7 +2003,6 @@ function onEvent(event) {
     } else {
       showFailure('失败：', data.text, data.error);
     }
-    actions.style.display = 'none';
     clearPending();
     return;
   }
@@ -1610,8 +2022,9 @@ function connect() {
 }
 
 // 一个 POST：成功返回响应体（`/target` 的响应体就是新的完整状态），
-// 失败**说人话**——`error` 直接摆到对话区里，不往控制台一丢了事
-// （本地单机壳没人开着 devtools，"点了一下什么都没发生"是最坏的那种失败）。
+// 失败**说人话**——既摆在对话区里（记录），也**弹**一条只能手动关的错误通知
+// （不往控制台一丢了事：本地单机壳没人开着 devtools，"点了一下什么都没发生"
+// 是最坏的那种失败）。
 async function post(url, payload) {
   const response = await fetch(url, {
     method: 'POST',
@@ -1620,7 +2033,9 @@ async function post(url, payload) {
   });
   const detail = await response.json().catch(() => ({}));
   if (!response.ok) {
-    add('请求被拒绝：' + (detail.error || response.status), 'bad');
+    const why = String(detail.error || response.status);
+    add('请求被拒绝：' + why, 'bad');
+    notifyFailure('请求被拒绝：', why, explainFailure(why, null));
     return null;
   }
   return detail;
@@ -1687,7 +2102,9 @@ async function act(url, payload, note) {
   }
   armed = '';
   applyState(next);
-  add(note, 'dim');
+  // 做成了的回执走**自己会消失**的那种提示（几秒）：这一件事的持久记录是左栏
+  // 那两段本身（会话移到了"已移除"里 / 又回到列表里），不必在对话流里再摆一行。
+  notifyInfo(note);
 }
 
 // 「新建会话」：会话**按工作区**存，而服务端有了一条真的建会话的路
@@ -1769,18 +2186,27 @@ document.getElementById('menu').onclick = function () {
   if (document.body.classList.contains('drawer')) { closeDrawer(); } else { openDrawer(); }
 };
 scrim.onclick = closeDrawer;
+toastAllBtn.onclick = closeAllToasts;
 
-function decide(apply) {
+// 「应用 / 拒绝」：两个按钮是在建卡片时现绑的（`ensureCard`）——没有待确认内容时
+// 页面上根本没有这两个按钮，也就没有可聚焦的空控件。
+async function decide(apply) {
   // 点一次就禁用：重复写 stdin 会让后续的 input() 拿到意外的输入。
-  if (decided) { return; }
+  if (decided || !cardAsking) { return; }
   decided = true;
-  document.getElementById('apply').disabled = true;
-  document.getElementById('reject').disabled = true;
-  post('/confirm', {apply});
+  if (cardApply) { cardApply.disabled = true; }
+  if (cardReject) { cardReject.disabled = true; }
+  const next = await post('/confirm', {apply});
+  if (next === null) {
+    // 被拒（409 没有待确认 / 只读 403）：卡片退回"等你点"，别停在"已应用"上骗人。
+    // 理由已经由 post() 摆进对话区与通知里了。
+    decided = false;
+    if (cardApply) { cardApply.disabled = false; }
+    if (cardReject) { cardReject.disabled = false; }
+    return;
+  }
+  settleCard(apply ? 'applied' : 'rejected');
 }
-
-document.getElementById('apply').onclick = () => decide(true);
-document.getElementById('reject').onclick = () => decide(false);
 
 buildColumn();
 syncSend();
