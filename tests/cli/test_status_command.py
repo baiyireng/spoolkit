@@ -183,9 +183,16 @@ def test_没配过供应商也算关键(tmp_path, monkeypatch, capsys) -> None:
 
 
 def test_云端供应商时本机模型不判(tmp_path, monkeypatch, capsys) -> None:
-    """provider=gemini：本机 8080 探不通也不算关键 → 0（"全好"的另一种形状）。"""
+    """provider=gemini：本机模型探不通也不算关键 → 0（"全好"的另一种形状）。
+
+    ⚠️ **为什么要把 `base_url` 指到一个关着的端口**：这条原来只写 `provider = "gemini"`，
+    于是它断言的那句"不影响退出码"**取决于本机 8080 上恰好没有模型服务**——机器上 llama 一起来
+    （本机真会这样），模型那一行就变成"正常"，这句话不再出现，用例就红了。**测试不该看环境的脸色**：
+    这里显式把地址指到一个按构造就没人监听的端口（1 号端口我们永远不会占用），
+    使"模型探不通"成为**用例自己造出来的前提**，而不是碰运气。
+    """
     config = _isolate(tmp_path, monkeypatch)
-    _write(config, 'provider = "gemini"\n')
+    _write(config, 'provider = "gemini"\nbase_url = "http://127.0.0.1:1"\n')
     code = _run(["--timeout", "0.2", "--json"])
     payload = _payload(capsys.readouterr().out)
     assert code == 0
