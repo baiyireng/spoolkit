@@ -30,7 +30,12 @@ from spoolkit.memory.lessons import match_lessons, prune_lessons, record_outcome
 from spoolkit.memory.session import MemorySession
 from spoolkit.memory.store import check_binding, init_memory_schema, record_session
 from spoolkit.memory.tools import recall_spec, search_history_spec
-from spoolkit.memory.transcript import conversational_prompt, recent_messages, render_transcript
+from spoolkit.memory.transcript import (
+    conversational_prompt,
+    deictic_reminder,
+    recent_messages,
+    render_transcript,
+)
 from spoolkit.memory.distill import distill
 from spoolkit.store.db import init_schema, open_db
 from spoolkit.tools.edit import PendingChanges, register_edit_tools
@@ -643,13 +648,32 @@ def distiller_for(args, gateway, memory):
 
 
 def prompt_for_turn(memory, session_id: str, goal: str, overrides=None) -> str:
-    """通道/网页：把最近几轮（截断）拼进本轮提示。没有上一轮就只给当前目标。"""
+    """通道/网页：把最近几轮（截断）+ 更早那一段的摘要拼进本轮提示。
+
+    指代词那**一行**提醒也挂在这里，而不是各个入口各写一遍：
+    `conversational_prompt` 自己会加同一句（它拿到的是同一个 goal），
+    两边拼出来的字符串一样，所以 `_with_reminder` 之外不需要去重；
+    没有记忆（`memory is None`）时退化成「那一行 + 当前这句话」，
+    免得一条指令把原话挤掉。
+
+    两段大小都来自标定表（`recent_chat_*` / `history_digest_*`）：
+    写死在这里就等于绕过了「预算可调、来源可查」这条规矩。
+    """
+    reminder = deictic_reminder(goal)
     if memory is None:
-        return goal
+        return f"{reminder}\n\n当前：{goal}" if reminder else goal
     turns = int(limits.resolve("recent_chat_turns", overrides)[0])
     chars = int(limits.resolve("recent_chat_chars", overrides)[0])
+    digest_turns = int(limits.resolve("history_digest_turns", overrides)[0])
+    digest_chars = int(limits.resolve("history_digest_chars", overrides)[0])
     return conversational_prompt(
-        memory._conn, session_id, goal, turns=turns, max_chars=chars
+        memory._conn,
+        session_id,
+        goal,
+        turns=turns,
+        max_chars=chars,
+        digest_turns=digest_turns,
+        digest_chars=digest_chars,
     )
 
 

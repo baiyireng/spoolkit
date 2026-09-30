@@ -359,6 +359,18 @@ def _add_session_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("title", nargs="?", default="", help="`new` 或 `rename` 时的标题")
     parser.add_argument("--all", action="store_true", help="连归档的一起列")
     parser.add_argument(
+        "--all-sessions",
+        dest="all_sessions",
+        action="store_true",
+        help="`search` 跨会话：查本工作区的全部会话（不给就只查当前会话）",
+    )
+    parser.add_argument(
+        "--from-session",
+        dest="from_session",
+        default="",
+        help="`search` 只看这一条会话（不给 = 当前会话；`--all-sessions` 优先）",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=0,

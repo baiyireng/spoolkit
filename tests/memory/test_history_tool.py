@@ -59,6 +59,9 @@ def test_工具名与说明(tmp_path: Path) -> None:
     assert spec.brief == "检索历史消息"
     # 说明里必须点出「历史默认不进上下文」：模型的工具表只有这一行可见。
     assert "历史" in spec.description and "出处" in spec.description
+    # 作用域口径也必须在说明里：默认只查当前会话，跨会话要显式。
+    assert "默认只查当前会话" in spec.description
+    assert 'session="*"' in spec.description
     assert set(spec.parameters["properties"]) == {
         "query",
         "limit",
@@ -68,19 +71,38 @@ def test_工具名与说明(tmp_path: Path) -> None:
     }
     assert spec.parameters["required"] == ["query"]
     assert spec.parameters["additionalProperties"] is False
+    assert "全部会话" in spec.parameters["properties"]["session"]["description"]
     conn.close()
 
 
-def test_检索到另一个会话的消息并给出处(tmp_path: Path) -> None:
+def test_默认只查当前会话(tmp_path: Path) -> None:
+    """作用域默认收在会话一级：别的会话里的话，不给 `session` 就取不到。"""
+    root = _root(tmp_path)
+    spec, conn = _spec(root)  # 这条 MemorySession 的会话 id 是 "default"
+    record_message(conn, "上次排查", USER, "归档那条命令为什么这么写")
+    result = spec.handler({"query": "归档"})
+    assert result.ok is True
+    assert "上次排查" not in result.content
+    assert "没有找到" in result.content
+    # 空结果的文案要说清「默认只查了当前会话」+ 跨会话怎么显式要。
+    assert "只查了当前会话" in result.content
+    assert 'session="*"' in result.content
+    conn.close()
+
+
+def test_显式跨会话才查别的会话并标出来源(tmp_path: Path) -> None:
     root = _root(tmp_path)
     spec, conn = _spec(root)
     record_message(conn, "上次排查", USER, "归档那条命令为什么这么写")
     record_message(conn, "现在", USER, "接着说")
-    result = spec.handler({"query": "归档"})
+    result = spec.handler({"query": "归档", "session": "*"})
     assert result.ok is True
     assert "上次排查" in result.content
     assert "你" in result.content
     assert "命中第" in result.content
+    # 跨会话那一次，抬头要点明「来自多条会话」，每条自带来源会话。
+    assert "来自多条会话" in result.content
+    assert "本工作区的全部会话" in result.content
     conn.close()
 
 
@@ -90,13 +112,13 @@ def test_会话标题进出处(tmp_path: Path) -> None:
     spec, conn = _spec(root)
     record_message(conn, "alpha", USER, "归档要加锁")
     kernel_sessions.write_meta(root, "alpha", title="修 calc.py", created_at=1.0)
-    assert "修 calc.py" in spec.handler({"query": "归档"}).content
+    assert "修 calc.py" in spec.handler({"query": "归档", "session": "*"}).content
     conn.close()
 
 
 def test_没命中时明说没找到(tmp_path: Path) -> None:
     spec, conn = _spec(_root(tmp_path))
-    record_message(conn, "s", USER, "无关的话")
+    record_message(conn, "default", USER, "无关的话")
     result = spec.handler({"query": "完全无关的词"})
     assert result.ok is True
     assert "没有找到" in result.content
@@ -139,7 +161,7 @@ def test_片段长度标定值坏掉时给说法(tmp_path: Path) -> None:
 def test_limit_在范围内按它给(tmp_path: Path) -> None:
     spec, conn = _spec(_root(tmp_path))
     for index in range(6):
-        record_message(conn, "s", USER, f"归档任务{index}")
+        record_message(conn, "default", USER, f"归档任务{index}")
     result = spec.handler({"query": "归档", "limit": 2})
     assert result.content.count("\n- ") == 2
     conn.close()
@@ -172,7 +194,7 @@ def test_没命中时不提别的会话的命中(tmp_path: Path) -> None:
 
 def test_密钥不进结果(tmp_path: Path) -> None:
     spec, conn = _spec(_root(tmp_path))
-    record_message(conn, "s", USER, "QQ_AppSecret=abcdef123456 先放着")
+    record_message(conn, "default", USER, "QQ_AppSecret=abcdef123456 先放着")
     content = spec.handler({"query": "QQ_AppSecret"}).content
     assert "abcdef123456" not in content
     conn.close()

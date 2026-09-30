@@ -19,6 +19,7 @@ from spoolkit.memory.transcript import (
     no_hits_text,
     parse_moment,
     render_history_hits,
+    resolve_scope,
     search_messages,
 )
 from spoolkit.store.db import open_db
@@ -94,12 +95,30 @@ def session_command(args: argparse.Namespace) -> int:
     return _list(root, include_archived=bool(getattr(args, "all", False)))
 
 
+def _default_session(root: Path) -> str:
+    """这条命令的「当前会话」：指针里那条；没有指针就用最近活跃的那条。
+
+    指针为空（没切过会话）时退回 `latest`，与 `spool session use latest` 同一个
+    含义——默认作用域必须在**每条**入口上都指得出一个具体的会话，否则
+    「默认当前会话」会退化成「默认全部会话」，那正是这次要改掉的东西。
+    """
+    here = _current_session(root)
+    if here:
+        return here
+    listed = sessions.list_sessions(root, include_archived=True)
+    return listed[0].id if listed else ""
+
+
 def _search(root: Path, query: str, args: argparse.Namespace) -> int:
     """`spool session search <关键词>`：检索历史消息，给片段 + 出处。
 
-    和模型那个 `search_history` 走**同一个** `search_messages`：两条路的口径
-    （命中排序、片段长度、脱敏、时间范围）只有一份，不各写一套。
-    默认跨本工作区的全部会话——「这句话是从哪来的」的答案往往在别的会话里。
+    和模型那个 `search_history` 走**同一个** `search_messages` 与同一个
+    `resolve_scope`：两条路的口径（排序、片段长度、脱敏、时间范围、作用域）
+    只有一份，不各写一套。
+
+    **默认只查当前会话**（指针里那条，没有就用最近活跃的那条）；跨会话要
+    显式 `--all-sessions`（等价 `session="*"`），也可以用 `--session` 点名
+    某一条。工作区边界不动：跨工作区依旧不查。
     """
     if not query:
         print("要给关键词：`spool session search <关键词>`。", file=sys.stderr)
@@ -119,6 +138,24 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
         return 2
     limit = wanted or int(limits.resolve("history_search_limit", overrides)[0])
     snippet_chars = int(limits.resolve("history_snippet_chars", overrides)[0])
+
+    # 作用域：`--all-sessions` 是显式的「全部」；`--from-session` 点名一条；
+    # 两个都没给才是当前会话（`resolve_scope` 认的空串/`*` 与它同一份规则）。
+    # 用 `--from-session` 而不是 `--session`：后者在各入口里是**运行用的会话**
+    # （内核解析、写指针），`session` 子命令借它当检索作用域会让两件事同名。
+    named = str(getattr(args, "from_session", "") or "").strip()
+    if getattr(args, "all_sessions", False):
+        named = "*"
+    current = _default_session(root)
+    if not named and not current:
+        print(
+            "这个工作区还没有会话，说不出「当前会话」是哪个："
+            "用 `--all-sessions` 查全部，或 `--from-session <会话>` 点名一条。",
+            file=sys.stderr,
+        )
+        return 2
+    scope = resolve_scope(named, current)
+    cross_session = not scope.session
 
     try:
         since = (
@@ -142,6 +179,7 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
             query,
             limit=limit,
             snippet_chars=snippet_chars,
+            session=scope.session,
             since=since,
             until=until,
         )
@@ -149,13 +187,24 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
         conn.close()
 
     if not hits:
-        print(no_hits_text(query))
+        print(
+            no_hits_text(
+                query, scope_said=scope.description, cross_session=cross_session
+            )
+        )
         # 没命中给 1：脚本里"搜到没搜到"要能直接判，别混进"用法错"(2)。
         return 1
     titles = {
         item.id: item.title for item in sessions.list_sessions(root, include_archived=True)
     }
-    print(render_history_hits(hits, titles))
+    print(
+        render_history_hits(
+            hits,
+            titles,
+            cross_session=cross_session,
+            scope_said=scope.description,
+        )
+    )
     return 0
 
 

@@ -1,8 +1,8 @@
 """按查询检索历史消息（`search_messages`）。
 
 这一层的行为是「历史不进上下文，但要能按需取回来」，所以用例盯三件事：
-**跨会话**能不能取到、**出处**够不够追溯、**边界**（范围/数量/转义/脱敏）
-是不是说清楚了。
+**跨会话**是显式的（默认只查当前会话）、**出处**够不够追溯、**边界**
+（范围/数量/转义/脱敏）是不是说清楚了。
 """
 
 from pathlib import Path
@@ -16,6 +16,7 @@ from spoolkit.memory.transcript import (
     record_message,
     redact_secrets,
     render_history_hits,
+    resolve_scope,
     search_messages,
 )
 from spoolkit.store.db import open_db
@@ -49,24 +50,42 @@ def _at(conn, message_id: int, stamp: float) -> None:
     conn.commit()
 
 
-def test_命中另一个会话里的历史(tmp_path: Path) -> None:
-    """「这个问题是从哪来的」——答案常常写在**别的**会话里。"""
+def test_点名一条会话就只查那一条(tmp_path: Path) -> None:
+    """「这个问题是从哪来的」——答案常常写在**别的**会话里，但要点名才去取。"""
     conn = _conn(tmp_path)
     record_message(conn, "旧的排查", USER, "先看看归档会不会丢东西")
     record_message(conn, "现在", USER, "继续刚才那件事")
-    hits = _search(conn, "归档")
+    hits = _search(conn, "归档", session="旧的排查")
     assert len(hits) == 1
     assert hits[0].session_id == "旧的排查"
+    assert _search(conn, "归档", session="现在") == []
     conn.close()
 
 
-def test_默认跨会话(tmp_path: Path) -> None:
+def test_库这一层_空会话名就是全部会话(tmp_path: Path) -> None:
+    """`search_messages` 的 `session=""` 是**显式**的"全部"，不是默认值。
+
+    默认值在 `resolve_scope` 里（当前会话），这一层保留空串=全部，是为了让
+    「全部」有一个明确的名字，而不是让空参数顺手变成跨会话。
+    """
     conn = _conn(tmp_path)
     record_message(conn, "a", USER, "归档要加锁")
     record_message(conn, "b", ASSISTANT, "归档已经加锁了")
-    sessions = {hit.session_id for hit in _search(conn, "归档")}
+    sessions = {hit.session_id for hit in _search(conn, "归档", session="")}
     assert sessions == {"a", "b"}
     conn.close()
+
+
+def test_作用域解析的三种说法() -> None:
+    """默认收在会话一级：`""` → 当前会话；`"*"` → 全部；别的 → 点名那一条。"""
+    assert resolve_scope("", "现在") == ("现在", "当前会话 现在")
+    assert resolve_scope("   ", "现在").session == "现在"
+    assert resolve_scope("current", "现在").session == "现在"
+    assert resolve_scope("*", "现在") == ("", "本工作区的全部会话")
+    assert resolve_scope("all", "现在").session == ""
+    assert resolve_scope("上次排查", "现在") == ("上次排查", "会话 上次排查")
+    # 没有当前会话时不能编一个名字出来：description 要如实说"当前会话"。
+    assert resolve_scope("", "") == ("", "当前会话")
 
 
 def test_只看一条会话(tmp_path: Path) -> None:
@@ -109,10 +128,39 @@ def test_没命中要说清在哪个范围里没找到(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     record_message(conn, "s", USER, "无关的话")
     assert _search(conn, "完全无关的词") == []
-    said = no_hits_text("完全无关的词")
+    said = no_hits_text("完全无关的词", scope_said="当前会话 现在")
     assert "没有找到" in said
-    assert "全部会话" in said and "工作区" in said
+    assert "当前会话 现在" in said and "工作区" in said
     assert "完全无关的词" in said
+    # 默认只查了当前会话 → 文案必须告诉它跨会话怎么显式要。
+    assert "只查了当前会话" in said
+    assert 'session="*"' in said and "--all-sessions" in said
+    conn.close()
+
+
+def test_跨会话时没命中的文案不再劝它跨会话() -> None:
+    """已经跨了会话还劝「要跨会话就…」，是在说一句已经做过的事。"""
+    said = no_hits_text(
+        "完全无关的词", scope_said="本工作区的全部会话", cross_session=True
+    )
+    assert "本工作区的全部会话" in said
+    assert "只查了当前会话" not in said
+    assert 'session="*"' not in said
+
+
+def test_跨会话时每条都标出来源会话(tmp_path: Path) -> None:
+    """默认只查当前会话之后，跨会话那一次的**来源**就是第一信息。"""
+    conn = _conn(tmp_path)
+    record_message(conn, "alpha", USER, "归档要加锁")
+    record_message(conn, "beta", ASSISTANT, "归档已经加锁了")
+    hits = _search(conn, "归档")
+    text = render_history_hits(
+        hits, {"alpha": "修 calc.py"}, cross_session=True, scope_said="本工作区的全部会话"
+    )
+    assert "来自多条会话" in text
+    assert "本工作区的全部会话" in text
+    assert "会话 alpha" in text and "会话 beta" in text
+    assert "修 calc.py" in text
     conn.close()
 
 
