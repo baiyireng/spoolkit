@@ -118,12 +118,13 @@
 | 端点 | 说明 |
 |---|---|
 | `GET /` | 页面 |
-| `GET /state` | 快照，**只增不改**地追加 `target`（`root`/`session`/`pinned`/`workspace_source`/`session_source`/`note`）、`workspaces`、`sessions`、`running_targets`（谁在跑，带 `current`）、`readonly`、`host`。没有目标时给形状相同的空态 |
+| `GET /state` | 快照，**只增不改**地追加 `target`（`root`/`session`/`pinned`/`workspace_source`/`session_source`/`note`）、`workspaces`、`sessions`、`running_targets`（谁在跑，带 `current`）、`readonly`、`host`。`health` 里也**只增**了 `state`（`up`/`slow`/`down`/`unknown`）、`probed_at`（epoch 秒）、`age_s`（离现在多久）、`url`：探活在**后台**，这里给的是最近一次结果与"它是什么时候探的"。没有目标时给形状相同的空态 |
 | `GET /events` | 事件流。目标变了会**退订旧的 → 订阅新的 → 补一帧 `state`**，页面据此整屏重绑，不必重连 `EventSource` |
 | `POST /target` | body `{"workspace": …, "session": …}`（都可选）：工作区认名字 / 序号 / 路径，会话不点名就沿用当前那条。**切换不杀任务、不阻塞**；显式选一次会写进网页壳指向（`clients.json` 的 `web`），刷新与重启都停得住 |
+| `POST /session/new` | body `{"session": …, "title": …}`（都可选）：**建**一条会话（复用 `kernel_sessions.create_session`，存储位置与 `spool session new` 一模一样）。`session` 给了就按它建——只用中文 / 字母 / 数字 / `_` / `-` / `.`，**撞名 409**、**名字非法 400**（空串、斜杠、超长…），都说人话；不给就照既有约定自动生成 id（时间戳 + 两位随机）。**不写指针**：建一条不等于选了它，页面接着用它返回的名字发 `POST /target` 切过去 |
 | `POST /run` / `POST /confirm` | body `{"goal": …}` 起一轮 / body `{"apply": …}` 回答待确认的改动 |
 
-返回码：`/target` 在钉住的壳里 **409**、名字对不上 **400**、还没有目标又没给 `workspace` **400**；`/run` 没有目标 **409**、没有 `goal` **400**、已在跑 **409**、起好了 **202**；`/confirm` 没有目标或没有待确认的改动 **409**。**绑了非回环地址时 `/run` 与 `/confirm` 一律 403**（响应体里 `readonly: true`，判据排在业务分支**之前**，所以连 goal 都不给也是 403）；只读壳里 `POST /target` **照常可用但不写任何东西**（它改的只是"这个进程现在看谁"）。判据是**实际绑上的地址**：`127.0.0.1` / `::1` / `localhost` 的各种写法算回环，`0.0.0.0` / `::` 不算，认不出来的名字按远程办。页面会探当前生效的模型（llama.cpp 打 `/props`），不通时顶部出红横幅。
+返回码：`/target` 在钉住的壳里 **409**、名字对不上 **400**、还没有目标又没给 `workspace` **400**；`/session/new` 名字非法 **400**、撞名 **409**、还没有目标 **409**、建好了 **200**（响应体 `{"ok": true, "session": <新名字>, "title": …}`）；`/run` 没有目标 **409**、没有 `goal` **400**、已在跑 **409**、起好了 **202**；`/confirm` 没有目标或没有待确认的改动 **409**。**绑了非回环地址时写端点一律 403**（`/run`、`/confirm`、`/session/delete`、`/session/restore`、`/session/new`——同一张 `WRITE_PATHS` 表，响应体里 `readonly: true`，判据排在业务分支**之前**，所以连 goal 都不给也是 403）；只读壳里 `POST /target` **照常可用但不写任何东西**（它改的只是"这个进程现在看谁"）。判据是**实际绑上的地址**：`127.0.0.1` / `::1` / `localhost` 的各种写法算回环，`0.0.0.0` / `::` 不算，认不出来的名字按远程办。页面会探当前生效的模型（llama.cpp 打 `/props`），不通时顶部出红横幅——探活在**后台线程**里按 3 秒的节拍做，所以 `/state` 与 `/target` 不等它（见 `rationale.md#网页壳与切换`）。
 
 ## spool hub
 

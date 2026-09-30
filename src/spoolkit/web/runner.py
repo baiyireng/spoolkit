@@ -50,15 +50,21 @@ STOP_WAIT = 8.0
 def health_snapshot(
     extra_args: Sequence[str] = (),
     extra_health=None,
+    *,
+    timeout: float = health_mod.PROBE_TIMEOUT_SECONDS,
 ) -> dict:
     """模型（以及 hub 可选附带的通道）通不通。给人看的，不进模型上下文。
 
     单独拎成模块级函数：机器级网页壳在**还没有当前目标**时也要能给出这一块
     （页面横幅读的就是它），而那时连一个 Runner 都还没有。探活失败不得把状态
     接口弄挂——探活是增强。
+
+    这个函数**会发 HTTP**（等一口网络）。网页壳的请求路径不许直接调它：那边
+    有后台探针（`web/probe.py`）把结果算好，`Runner.snapshot(health=…)` 收下。
+    直接调它的地方是：桥 / MCP / 测试，以及没有后台探针的老用法。
     """
     try:
-        model = health_mod.probe_from_extra(list(extra_args))
+        model = health_mod.probe_from_extra(list(extra_args), timeout=timeout)
     except Exception as exc:
         model = {
             "ok": False,
@@ -268,7 +274,7 @@ class Runner:
             if listener in self._listeners:
                 self._listeners.remove(listener)
 
-    def snapshot(self) -> dict:
+    def snapshot(self, *, health: dict | None = None) -> dict:
         """当前状态。SSE 每次连接的首帧就是它。
 
         快照必须在锁内取完整的一份：分几次取的话，中间可能有事件进来，
@@ -276,6 +282,11 @@ class Runner:
 
         配对请求读磁盘、不进模型上下文：锁外读，别让文件 I/O 堵住确认按钮。
         探活走 HTTP，同样放锁外，失败也不得把状态接口弄挂。
+
+        `health` 给定就**直接用**（网页壳的后台探针已经把结果算好了：那条路上
+        一次请求不该等一口网络，见 `web/probe.py`）；不给就照老样子同步探一次
+        ——`Runner` 单独用时（桥、MCP、测试）没有那个探针，那里也没有"点一下
+        切换卡三秒"这回事。
         """
         with self._lock:
             final = dict(self._final) if self._final else None
@@ -296,15 +307,16 @@ class Runner:
                 "ok": final.get("ok") if final else None,
             }
         data["pairings"] = self._pending_pairings()
-        data["health"] = self._health_snapshot()
+        data["health"] = self._health_snapshot(health)
         return data
 
     def brief(self) -> dict:
         """一行状态：给"别处还有哪些目标在跑"用（页面上的那条提示）。
 
-        刻意**不是** `snapshot()`：快照会去探活模型与外接配方（走 HTTP），
-        而这一行只需要"在不在跑、在做什么"。页面每几秒轮一次 `/state`，
-        给每个在跑的 Runner 各探一次活，状态接口就会变成一串等待。
+        刻意**不是** `snapshot()`：这一行要的只是"在不在跑、在做什么"，而快照还要
+        读历史库与配对文件——`Runner.snapshot()` 默认还会**发一次 HTTP** 探活
+        （网页壳那边已经把探活挪到后台、给快照喂缓存，但直接用它时没有那个探针）。
+        页面每几秒轮一次 `/state`，给每个在跑的 Runner 各整一份纯属白干。
         """
         with self._lock:
             return {
@@ -314,8 +326,13 @@ class Runner:
                 "goal": self._goal,
             }
 
-    def _health_snapshot(self) -> dict:
-        """模型（以及 hub 可选附带的通道）通不通。给人看的。"""
+    def _health_snapshot(self, health: dict | None = None) -> dict:
+        """模型（以及 hub 可选附带的通道）通不通。给人看的。
+
+        给了 `health` 就原样用它（网页壳的后台探针给的那一份），否则同步探一次。
+        """
+        if health is not None:
+            return health
         return health_snapshot(self.extra_args, self._extra_health)
 
     def _pending_pairings(self) -> list[dict]:

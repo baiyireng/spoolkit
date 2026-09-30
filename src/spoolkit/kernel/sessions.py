@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 import sqlite3
 import time
@@ -30,9 +31,25 @@ from spoolkit.store.db import open_db
 META_NAME = "meta.json"
 TITLE_LIMIT = 40
 
+#: 会话名（人点名的那个）的长度上限。
+#:
+#: 自动 id 是 `250101-120000-abcd` 这种 20 个字符，48 是它的两倍多：长到人还认得出、
+#: 还能当目录名用，也不至于把左栏那一行撑爆。
+NAME_LIMIT = 48
+
+#: 会话名允许的形状：与 `safe()` 会**原样保留**的那一套一致（中英文、数字、
+#: `_`、`-`、`.`）。为什么严格校验而不是"交给 `safe()` 悄悄改掉"：
+#: `safe("a b")` 与 `safe("a_b")` 会落到**同一个目录**，两条活共用一个
+#: `meta.json`——那是静默的数据损坏，不是"名字被规整了"。
+_NAME_SHAPE = re.compile(r"^[\w.-]+$", re.UNICODE)
+
 
 class SessionError(RuntimeError):
     """会话名对不上、或者这里有别的问题让人没法继续。"""
+
+
+class SessionExists(SessionError):
+    """这个名字已经有会话了（新建时撞名）。"""
 
 
 @dataclass(frozen=True)
@@ -140,9 +157,69 @@ def list_sessions(root: Path | str, include_archived: bool = False) -> list[Sess
     return found
 
 
-def create_session(root: Path | str, title: str = "") -> str:
-    """新建一条会话：id 带时间戳（可排序）+ 两位随机（不撞车）。"""
-    session_id = time.strftime("%y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+def validate_session_name(name: str) -> str:
+    """人点名的会话名：过不了就抛 `SessionError`（说人话，不冒栈）。
+
+    规矩来自 `safe()`：它把认不出的字符换成 `_`、把首尾的 `.` / `_` 去掉。
+    **凡是会被它改写的名字这里一律不收**——会改写就等于两个不同的名字落到
+    同一个目录上，而"我以为建了一条新的、其实盖掉了旧那条"是最难查的一种。
+    """
+    raw = str(name)
+    clean = raw.strip()
+    if not clean:
+        raise SessionError("会话名不能是空的。")
+    if clean != raw:
+        raise SessionError("会话名两边不能有空白。")
+    if len(clean) > NAME_LIMIT:
+        raise SessionError(
+            f"会话名太长了：最多 {NAME_LIMIT} 个字符，现在 {len(clean)} 个。"
+        )
+    if not _NAME_SHAPE.match(clean) or safe(clean) != clean:
+        raise SessionError(
+            "会话名只能用中文、字母、数字、下划线、横线和点"
+            "（不能有斜杠、空格、冒号或别的符号）"
+            "——它同时也是 .agent/sessions/ 下的目录名。"
+        )
+    return clean
+
+
+def has_session(root: Path | str, name: str) -> bool:
+    """这个工作区里已经有叫这个名字的会话了没有。
+
+    **已归档的也算**：归档只是从默认列表里藏起来，那一条的目录与记忆都还在——
+    在它上面"新建"等于把它的 `meta.json` 覆盖掉。
+    """
+    raw = str(name).strip()
+    if not raw:
+        return False
+    if meta_path(root, raw).is_file():
+        return True
+    # 只在记忆库里有行、目录还没建的那种也算：`create_session` 会往同一行
+    # `record_session`，两条活于是共用一份记忆。
+    return any(item.id == raw for item in list_sessions(root, include_archived=True))
+
+
+def create_session(root: Path | str, title: str = "", session_id: str = "") -> str:
+    """新建一条会话：id 默认带时间戳（可排序）+ 两位随机（不撞车）。
+
+    网页壳的「＋ 新建会话」可以让人**点名**（`session_id`）：那时名字先过
+    `validate_session_name`（空、路径分隔符、超长一律报错），而且**撞名不许**
+    （抛 `SessionExists`）——`meta.json` 会被静默覆盖，而记忆库里那一行还在。
+    不点名时**逐字保留老行为**（自动 id），`spool session new` 走的就是那条路。
+
+    存储位置与命名与老路完全一样：`.agent/sessions/<safe(id)>/meta.json`
+    加记忆库的一行；两条路都只经由这里，不另写一套建法。
+    """
+    wanted = str(session_id or "")
+    if wanted:
+        wanted = validate_session_name(wanted)
+        if has_session(root, wanted):
+            raise SessionExists(
+                f"已经有叫 {wanted} 的会话了：换一个名字，或者直接切到那一条。"
+            )
+        session_id = wanted
+    else:
+        session_id = time.strftime("%y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
     now = time.time()
     write_meta(root, session_id, created_at=now, last_active=now, title=str(title or ""))
     conn = _db(root)

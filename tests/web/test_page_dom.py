@@ -154,3 +154,41 @@ def test_只按错误文本也能认出来(dom: dict) -> None:
 def test_页面上的错误文本先遮蔽密钥(dom: dict) -> None:
     """密钥、Bearer 串、KEY=VALUE 不许出现在页面上。"""
     assert dom["redact"] == "api_key=*** Bearer *** token=***"
+
+
+# --- ④ 探活挪到后台之后：横幅要说得出"什么时候探的" ---
+
+
+def test_探活横幅说得出什么时候探过(dom: dict) -> None:
+    """`/state` 给的是**最近一次**探测结果，所以"这是几秒前探的"必须在横幅上。
+
+    去掉 `probedAgo` 那一句，横幅就只剩"连不上"——一个几分钟前的结论看起来
+    跟刚刚测的一模一样，那正是"静默的陈旧值"。
+    """
+    line = dom["health_line"]
+    assert "连不上" in line
+    assert "3 秒前探过" in line, f"没说这是什么时候探的：{line}"
+    assert "spool service" in line, "说了不通却没给下一步"
+
+
+def test_还没探过不画成通了也不画成断了(dom: dict) -> None:
+    """`unknown`（后台探活刚起来）既不是通也不是断，页面上要照实说。"""
+    line = dom["health_line_unknown"]
+    assert "还没探过" in line
+    assert "连不上" not in line
+
+
+# --- ⑤ 新建会话：先调端点，再切目标 ---
+
+
+def test_点新建会话先建出来再切过去(dom: dict) -> None:
+    """点「＋ 新建会话」＝ `POST /session/new` → `POST /target`，而且顺序是这样。
+
+    改了顺序（或退回"只发 /target"）时：前者的服务端还没这条会话，后者压根
+    没建——页面上都会看到"请求被拒绝：没有叫 web-new 的会话"。
+    """
+    made = dom["new_session"]
+    assert made["calls"] == ["/session/new", "/target"], (
+        f"请求两连发不对：{made['calls']}"
+    )
+    assert "web-new" in made["selected"], "建完没有切过去（或没点亮那一行）"

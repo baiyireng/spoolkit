@@ -3,6 +3,10 @@
 不启 llama-server，也不认某台机器的地址。地址来自这次运行已经生效的
 `--provider` / `--base-url`（或用户配置）。页面每几秒打一次 `/state`，
 所以探活带几秒缓存，别每次都锤模型。
+
+**网页壳上探活不在请求路径里**（`web/probe.py`）：那里有一条后台线程按
+`CACHE_TTL` 同样的节拍探，`/state` 只读最近一次结果。这里的缓存于是成了
+第二道（进程内其它调用者：桥、`spool status`、终端那一头）。
 """
 
 from __future__ import annotations
@@ -18,16 +22,30 @@ from spoolkit.llm.llamacpp import DEFAULT_BASE_URL, proxy_for
 
 CACHE_TTL = 3.0
 
+#: 一次探活的超时。1 秒的依据：本机 llama-server 起没起是**连接层**的问题，
+#: 一秒内一定有答案（立刻连上 / 明确被拒 / 连不上）。等更久只是把这次探测拖长，
+#: 而它要么长在请求路径上（网页壳改后台之前：实测切换卡 3.4 秒），要么占着
+#: 后台线程——探活是"看一眼"，不是"等一等"。
+PROBE_TIMEOUT_SECONDS = 1.0
+
+#: 探活结果的分类（`_result` 里那个**只增**的 `kind`）。为什么值得有：
+#: "根本连不上"与"在、只是没在超时内回话"对人意味着不同的事，下一步也不同
+#: （前者去起服务，后者去看模型是不是在加载）。`ok` / `detail` 的口径一个字没动。
+KIND_CONNECT = "connect"
+KIND_SLOW = "slow"
+KIND_SERVER = "server"
+
 _CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def _result(*, ok: bool, target: str, detail: str) -> dict:
+def _result(*, ok: bool, target: str, detail: str, kind: str = "") -> dict:
     return {
         "ok": ok,
         "name": "model",
         "target": target,
         "detail": detail,
+        "kind": kind,
     }
 
 
@@ -48,7 +66,7 @@ def probe_model(
     *,
     provider: str = "",
     base_url: str = "",
-    timeout: float = 1.0,
+    timeout: float = PROBE_TIMEOUT_SECONDS,
     cached: bool = True,
 ) -> dict:
     """探一次模型。失败返回 ok=False，不抛。"""
@@ -84,19 +102,33 @@ def _probe_uncached(*, provider: str, target: str, timeout: float) -> dict:
             trust_env=False,
         ) as client:
             response = client.get("/props")
+    except httpx.ConnectTimeout as exc:
+        # 连都没连上（SYN 没人应）：与"连不上"同一类，不是"太慢"。
+        detail = str(exc).strip() or type(exc).__name__
+        return _result(ok=False, target=target, detail=detail, kind=KIND_CONNECT)
+    except httpx.TimeoutException as exc:
+        # 连上了、只是没在超时内回话（模型在加载 / 太慢）：这一种要说成"慢"，
+        # 因为人的下一步与"根本没有东西在听"不一样。
+        detail = str(exc).strip() or type(exc).__name__
+        return _result(ok=False, target=target, detail=detail, kind=KIND_SLOW)
     except Exception as exc:
         detail = str(exc).strip() or type(exc).__name__
-        return _result(ok=False, target=target, detail=detail)
+        return _result(ok=False, target=target, detail=detail, kind=KIND_CONNECT)
     if response.status_code == 200:
         return _result(ok=True, target=target, detail="llama-server /props 通")
     return _result(
         ok=False,
         target=target,
         detail=f"HTTP {response.status_code}",
+        kind=KIND_SERVER,
     )
 
 
-def probe_from_extra(extra: Sequence[str], *, timeout: float = 1.0) -> dict:
+def probe_from_extra(
+    extra: Sequence[str],
+    *,
+    timeout: float = PROBE_TIMEOUT_SECONDS,
+) -> dict:
     """按网页壳转发给子进程的那组参数探活。没写就退回用户配置。"""
     provider = flag_from_extra(extra, "provider")
     base_url = flag_from_extra(extra, "base-url")
@@ -124,7 +156,7 @@ def describe_change(old: dict | None, new: dict) -> str | None:
 def probe_spec(
     spec: str,
     *,
-    timeout: float = 1.0,
+    timeout: float = PROBE_TIMEOUT_SECONDS,
     cached: bool = True,
 ) -> tuple[bool, str, str]:
     """按配方上的探活地址打一次。http(s) GET，tcp 试连端口。失败不抛。"""

@@ -9,11 +9,20 @@ SSE 每写完一条都要 flush：不 flush 的话事件攒在缓冲里，
 机器级（不给 `--root`）时这个进程服务**整台机器**：它持有"当前目标"这个状态
 （`WebState`）和一张按 (工作区, 会话) 复用的 Runner 表（`web/registry.py`）。
 于是路由分成两类：打在**当前目标**上的（`/run`、`/confirm`），和改这个状态的
-（`POST /target`、`POST /session/delete`、`POST /session/restore`）。切换**不杀任务**
+（`POST /target`、`POST /session/delete`、`POST /session/restore`、
+`POST /session/new`）。切换**不杀任务**
 ——在跑的那条留在它自己的 Runner 里继续跑（设计 §3.4），切回去还能看到它的事件与历史。
+
+**探活不在请求路径上**（`web/probe.py`）：模型地址连不上时，一次探测要等到超时
+（实测 `/state` 3419ms、`/target` 3398ms），而那跟"切个工作区"一点关系都没有。
+所以探测由一条后台线程按固定节拍做，`/state` 只读**最近一次结果**，并把它
+"是什么时候探的"（`probed_at` / `age_s`）一起交出去。线程挂在
+`WebServer.server_close()` 上收（谁起的谁收，见 `WebServer` 的自述）。
 
 会话的"移除"是**归档**（可恢复，`WebState::remove_session` 里有自述），不是真删：
 `.agent/sessions/` 与 `memory.db` 里的记忆不该被网页上的一个按钮不可逆地销毁。
+"新建"走**同一个** `kernel_sessions.create_session`（`WebState::create_session`），
+不另写一套建法。
 
 `/events` 是长连接而目标可能在中途被换掉：服务端发现目标变了要**退订旧的、
 订阅新的、补一帧 state**，否则页面会一直停在旧工作区的事件流上。这是这块最
@@ -39,7 +48,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Sequence
 
-from spoolkit.health import describe_change, describe_service_change, probe_from_extra, probe_services
+from spoolkit.health import (
+    PROBE_TIMEOUT_SECONDS,
+    describe_change,
+    describe_service_change,
+)
 from spoolkit.kernel import pointers as kernel_pointers
 from spoolkit.kernel import sessions as kernel_sessions
 from spoolkit.kernel import workspaces as kernel_workspaces
@@ -47,6 +60,11 @@ from spoolkit.kernel.sessions import SessionError
 from spoolkit.kernel.target import Target, resolve_target
 from spoolkit.kernel.workspaces import WorkspaceError
 from spoolkit.web.page import HTML
+from spoolkit.web.probe import (
+    HEALTH_INTERVAL_SECONDS,
+    STATE_UNKNOWN,
+    HealthProbe,
+)
 from spoolkit.web.registry import RunnerRegistry
 from spoolkit.web.runner import Runner, health_snapshot
 
@@ -61,6 +79,13 @@ HEALTH_POLL_SECONDS = 5.0
 # 容易写错的地方（看起来切了，事件却还是别人的）。1 秒是"点完按钮基本感觉
 # 不到"与"别把 CPU 空转"之间的折中：这一圈只读一个整数和一个引用。
 TARGET_POLL_SECONDS = 1.0
+
+#: 终端那一头**还没拿到第一份探活结果**时的等待节拍。
+#:
+#: 为什么不是直接按 `HEALTH_POLL_SECONDS`（5 秒）等：后台探针通常几百毫秒就有
+#: 第一份结果（本机连不上时是它自己的超时，一秒），起手干等 5 秒会让"终端第一行"
+#: 看起来像没反应。拿到结果之后立刻回到 5 秒的节拍。
+FIRST_RESULT_POLL_SECONDS = 1.0
 
 # 机器级网页壳还没有当前目标时，`target.note` 要能告诉人下一步做什么。
 # 这句话会出现在 `/state` 的空态与启动提示里。**它必须与页面一致**：页面顶上那条
@@ -78,7 +103,13 @@ NO_TARGET_HINT = (
 #:
 #: 新端点必须加进这张表：判据按路径写死在这里一次，漏一个就等于把安全边界
 #: 漏在门外——而"远程只能看"这条边界是这一批唯一的硬承诺。
-WRITE_PATHS = ("/run", "/confirm", "/session/delete", "/session/restore")
+WRITE_PATHS = (
+    "/run",
+    "/confirm",
+    "/session/delete",
+    "/session/restore",
+    "/session/new",
+)
 
 #: 网页壳在 `clients.json` 里的键。与 `resolve_target(client=…)` 用的是同一套键，
 #: 所以"页面上选的那个"就是内核顺位里"上次选的那个"（设计 §3.3）。
@@ -126,12 +157,13 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
-def _empty_snapshot(extra_args: Sequence[str] = (), extra_health=None) -> dict:
+def _empty_snapshot(health: dict) -> dict:
     """还没有当前目标时的快照：字段一个不少，值全是空态。
 
     为什么要空态而不是少几个键：页面（以及外部驱动者）不该去猜"键缺了是因为
-    没这个功能、还是因为现在没有值"。`health` 仍要探——那是"这台机器连不连得上
-    模型"，与选了哪个工作区无关。
+    没这个功能、还是因为现在没有值"。`health` 仍要给——那是"这台机器连不连得上
+    模型"，与选了哪个工作区无关。它由调用方算好（网页壳上是**后台探针**的最近
+    一次结果，见 `web/probe.py`），所以这个函数自己不探。
     """
     return {
         "running": False,
@@ -147,7 +179,7 @@ def _empty_snapshot(extra_args: Sequence[str] = (), extra_health=None) -> dict:
         "done": False,
         "ok": None,
         "pairings": [],
-        "health": health_snapshot(extra_args, extra_health),
+        "health": health,
     }
 
 
@@ -188,6 +220,11 @@ class WebState:
         self._extra_health = extra_health
         self._lock = threading.Lock()
         self._version = 0
+        # 后台探针（`build_server` 起，`WebServer.server_close` 收）。
+        # 没有它时（`build_state(...).snapshot()` 这种直接调用）退回**同步**探一次：
+        # 那种壳没有 HTTP 请求路径，也就没有"一次请求卡三秒"这回事，而
+        # `Runner.snapshot()` 的既有口径（探活就在里面）一个字都不用动。
+        self._probe: HealthProbe | None = None
         # 还没绑端口时（`build_state` 单独用、测试直接 `snapshot()`）当作 loopback：
         # 那时它还没有"够得着它的人"这件事，而 `build_server` 一定会紧接着把它填上。
         self._host = "127.0.0.1"
@@ -231,16 +268,61 @@ class WebState:
             return None
         return self._registry.get(self._target.root, self._target.session)
 
+    # --- 探活（后台，请求路径永不等它）---
+
+    def start_probe(
+        self,
+        *,
+        interval: float = HEALTH_INTERVAL_SECONDS,
+        timeout: float = PROBE_TIMEOUT_SECONDS,
+    ) -> HealthProbe:
+        """起后台探针（幂等），返回它。
+
+        为什么由 `WebState` 持有而**由服务收尾**：老用法（`build_server(runner, …)`）
+        里那个 `WebState` 是 `build_server` 内部造的，调用方拿不到它，也就没人会
+        去 `close()`——线程会一直陪到进程退出。服务的生命周期才是这条线程该有的
+        边界，所以 `build_server` 拿到返回值之后把它挂到 `WebServer` 上
+        （`server_close()` 里停）。
+        """
+        with self._lock:
+            probe = self._probe
+            if probe is None:
+                probe = HealthProbe(
+                    self._extra_args,
+                    self._extra_health,
+                    interval=interval,
+                    timeout=timeout,
+                )
+                self._probe = probe
+        probe.start()  # 幂等：同一个 state 起两个服务（测试里就有）也只探一次
+        return probe
+
+    def health(self) -> dict:
+        """最近一次探活结果。**永不等探测**。
+
+        没有后台探针时（测试 / 嵌入直接调 `snapshot()`）退回同步探一次：
+        那里没有请求路径要保护，而"快照里带着模型红绿"这条既有口径更重要。
+        """
+        probe = self._probe
+        if probe is not None:
+            return probe.snapshot()
+        return health_snapshot(self._extra_args, self._extra_health)
+
     # --- 读 ---
 
     def snapshot(self) -> dict:
-        """给页面的完整状态：当前目标的快照 + 目标本身 + 有哪些可选 + 谁在跑。"""
+        """给页面的完整状态：当前目标的快照 + 目标本身 + 有哪些可选 + 谁在跑。
+
+        探活那一块由**后台探针**给（`health()`）：这里一次网络都不等，
+        所以切工作区 / 会话的响应时间是几十毫秒，与模型通不通无关。
+        """
         _version, runner = self.current()
         target = self.target()
+        health = self.health()
         data = (
-            runner.snapshot()
+            runner.snapshot(health=health)
             if runner is not None
-            else _empty_snapshot(self._extra_args, self._extra_health)
+            else _empty_snapshot(health)
         )
         data["target"] = self._target_payload(target)
         data["workspaces"] = _workspace_rows(target)
@@ -372,6 +454,51 @@ class WebState:
         self._remember(changed, explicit=bool(name or wanted))
         return 200, self.snapshot()
 
+    def create_session(self, name: str | None = None, *, title: str = "") -> tuple[int, dict]:
+        """新建一条会话（`POST /session/new`），返回（状态码, 响应体）。
+
+        走的是**既有那一条**建法（`kernel_sessions.create_session`）：存储位置
+        （`.agent/sessions/<safe(id)>/meta.json` + 记忆库一行）、默认 id 形状
+        （时间戳 + 两位随机）与 `spool session new` 完全一样。这里只决定
+        "谁的名字"：`name` 给了就是**人点名**（要过校验、撞名要报错），
+        不给就照既有约定自动生成。
+
+        `name` 与"没给"分得开是刻意的：`{"session": ""}` 是**给了一个空名字**
+        （400 说人话），而不是"你替我起一个"。
+
+        **不写指针**：建一条会话不等于"选了它"——口径与 `POST /target` 的空 body
+        一致（只有显式选择才落盘，见 `_remember`）。页面接着发的那次
+        `POST /target {"session": <新名字>}` 才是那次"选了它"。
+
+        钉住（`--root`）的壳在这里**照样能建**：它钉的是"看哪一条"，不是"什么
+        都不能改"（与 `/session/delete` 对非当前会话的态度一致）；建完切不过去
+        那件事由 `/target` 去说。
+        """
+        with self._lock:
+            target = self._target
+        if target is None:
+            return 409, {"error": "还没有选工作区：先在左边选一个，再新建会话。"}
+        wanted = None
+        if name is not None:
+            try:
+                wanted = kernel_sessions.validate_session_name(name)
+            except SessionError as exc:
+                # 名字非法就说人话（与 `/target` 同一条口径），绝不悄悄改成别的名字：
+                # 改掉之后页面上让人看到的名字与他敲的那个不一样，而目录已经建了。
+                return 400, {"error": str(exc)}
+        try:
+            made = kernel_sessions.create_session(
+                target.root, title=str(title or ""), session_id=wanted or ""
+            )
+        except kernel_sessions.SessionExists as exc:
+            return 409, {"error": str(exc)}
+        except SessionError as exc:
+            return 400, {"error": str(exc)}
+        except OSError as exc:
+            # 磁盘满 / 状态目录没权限：不冒栈，给人话。
+            return 500, {"error": f"会话没建起来（{target.root} 写不进去）：{exc}"}
+        return 200, {"ok": True, "session": made, "title": str(title or "")}
+
     def remove_session(self, session: str, *, restore: bool = False) -> tuple[int, dict]:
         """把一条会话从列表里摘掉（归档）；`restore=True` 就是把它放回来。
 
@@ -494,9 +621,16 @@ class WebState:
             print(f"网页壳指针没写进去（切换已经生效）：{exc}", file=sys.stderr)
 
     def close(self) -> None:
-        """收掉这张表里自己拉起的子进程。进程退出时调一次。"""
+        """收掉这张表里自己拉起的子进程 + 后台探活线程。进程退出时调一次。
+
+        探针两种情况都要收（它跟 Runner 的归属无关：都是**这个进程**起的），
+        而 Runner 表只在"表是自己的"时候收——老用法里那个 Runner 是调用方给的。
+        """
         with self._lock:
             fixed = self._fixed
+            probe = self._probe
+        if probe is not None:
+            probe.stop()
         if fixed is not None:
             # 老用法：Runner 是调用方给的，它的生命周期由调用方管（这里不动）。
             return
@@ -761,6 +895,18 @@ def _handler_for(state: WebState):
                 self._json(status, body)
                 return
 
+            if self.path == "/session/new":
+                payload = self._body()
+                # `session` 这个键**在不在这**是有意义的：给了空串是"名字非法"（400），
+                # 没给才是"你替我起一个"（照既有约定自动生成 id）。
+                raw = payload.get("session")
+                status, body = state.create_session(
+                    None if raw is None else str(raw),
+                    title=str(payload.get("title") or ""),
+                )
+                self._json(status, body)
+                return
+
             if self.path == "/run":
                 payload = self._body()
                 goal = str(payload.get("goal") or "").strip()
@@ -922,7 +1068,28 @@ def build_state(
     )
 
 
-def build_server(source: WebState | Runner, host: str, port: int) -> ThreadingHTTPServer:
+class WebServer(ThreadingHTTPServer):
+    """网页壳的 HTTP 服务：关掉它的时候，后台探活线程也要收掉。
+
+    为什么线程挂在这里而不是 `WebState`：老用法（`build_server(runner, …)`）里
+    那个 `WebState` 是 `build_server` 内部造的，调用方拿不到它，也就没人会去
+    `close()`——线程会一直陪到进程退出。**服务的生命周期才是这条线程该有的边界**，
+    而这条边界只有一个入口：`server_close()`（`serve()` 的 finally 与用例的
+    teardown 都走它）。
+    """
+
+    #: 这个服务用的后台探针（`build_server` 填）。没有探针也能关。
+    probe: HealthProbe | None = None
+
+    def server_close(self) -> None:
+        try:
+            if self.probe is not None:
+                self.probe.stop()
+        finally:
+            super().server_close()
+
+
+def build_server(source: WebState | Runner, host: str, port: int) -> WebServer:
     """构造服务。port 传 0 表示由系统分配。
 
     参数既可以是 `WebState`（机器级：一个 target 状态 + 一张表），也可以是
@@ -931,12 +1098,16 @@ def build_server(source: WebState | Runner, host: str, port: int) -> ThreadingHT
     只读判据在**绑好端口之后**用实际绑上的地址定（`server_address[0]`）：
     `localhost` 落到哪个协议栈由系统决定，`0.0.0.0` 是不是真全网可达也只有绑完
     才知道。判据不能放在 CLI 那一层——测试与嵌入代码直接调这里。
+
+    后台探活**在绑好端口之后**才起：绑不上（端口被占、地址不认）时不该留下一条
+    没人收的线程。它挂在这个服务上，`server_close()` 里收（见 `WebServer`）。
     """
     state = _as_state(source)
-    httpd = ThreadingHTTPServer((host, port), _handler_for(state))
+    httpd = WebServer((host, port), _handler_for(state))
     address = getattr(httpd, "server_address", None)
     bound = address[0] if isinstance(address, tuple) and address else host
     state.set_bound_host(str(bound))
+    httpd.probe = state.start_probe()
     return httpd
 
 
@@ -991,9 +1162,11 @@ def serve(
             file=sys.stderr,
         )
     stop = threading.Event()
+    # 终端那一行读的是**同一个后台探针**的结果（见 `_watch_health` 的自述）：
+    # 两个线程各探一次同一个地址只是白花力气，而且两边可能暂时不一致。
     watcher = threading.Thread(
         target=_watch_health,
-        args=(list(extra_args), extra_health, stop),
+        args=(getattr(httpd, "probe", None), stop),
         daemon=True,
         name="spool-health",
     )
@@ -1010,32 +1183,36 @@ def serve(
         state.close()
 
 
-def _watch_health(
-    extra_args: list[str],
-    extra_health: Callable[[], dict] | None,
-    stop: threading.Event,
-) -> None:
-    """通↔断时往终端打一行。页面横幅靠 /state，终端靠这一头。"""
+def _watch_health(probe: HealthProbe | None, stop: threading.Event) -> None:
+    """通↔断时往终端打一行。页面横幅靠 /state，终端靠这一头。
+
+    读的是**后台探针已经拿到的**结果（`probe.snapshot()`），不自己再探一遍：
+    探活是发 HTTP，两个线程各打一次同一个地址只是白花力气，而且两边的结论
+    可能暂时不一样（终端说通、页面说断——同一条壳上两种说法，最难查）。
+
+    `probe` 是 None 时（调用方自制的 `build_server`：测试与嵌入）这一头就闭嘴：
+    页面横幅仍然由 `/state` 给，那条路不依赖这里。
+    """
+    if probe is None:
+        return
     last_model: dict | None = None
     last_bridge: bool | None = None
     last_services: dict[str, bool] = {}
     while True:
-        try:
-            model = probe_from_extra(extra_args)
-        except Exception as exc:
-            model = {
-                "ok": False,
-                "target": "",
-                "detail": f"探活失败：{exc}",
-            }
-        line = describe_change(last_model, model)
-        if line:
-            print(line, file=sys.stderr)
-        last_model = model
-        try:
-            rows = probe_services()
-        except Exception:
-            rows = []
+        payload = probe.snapshot()
+        state_name = str(payload.get("state") or STATE_UNKNOWN)
+        if state_name == STATE_UNKNOWN:
+            # 还没探过：不报"不通"，那是假话（页面上那一档会说"还没探过"）。
+            pass
+        else:
+            model = payload.get("model")
+            if isinstance(model, dict):
+                line = describe_change(last_model, model)
+                if line:
+                    print(line, file=sys.stderr)
+                last_model = dict(model)
+        rows = payload.get("services")
+        rows = rows if isinstance(rows, list) else []
         for row in rows:
             name = str(row.get("name") or "")
             if not name:
@@ -1048,21 +1225,21 @@ def _watch_health(
             )
             if note:
                 print(note, file=sys.stderr)
-        if extra_health is not None:
-            try:
-                extra = extra_health() or {}
-            except Exception:
-                extra = {}
-            bridge = extra.get("bridge") if isinstance(extra, dict) else None
-            if isinstance(bridge, dict):
-                alive = bool(bridge.get("ok"))
-                if last_bridge is not None and alive != last_bridge:
-                    target = str(bridge.get("target") or "").strip()
-                    where = f"（{target}）" if target else ""
-                    print(
-                        ("通道在跑" if alive else "通道已退出") + where,
-                        file=sys.stderr,
-                    )
-                last_bridge = alive
-        if stop.wait(HEALTH_POLL_SECONDS):
+        bridge = payload.get("bridge")
+        if isinstance(bridge, dict):
+            alive = bool(bridge.get("ok"))
+            if last_bridge is not None and alive != last_bridge:
+                where = str(bridge.get("target") or "").strip()
+                place = f"（{where}）" if where else ""
+                print(("通道在跑" if alive else "通道已退出") + place, file=sys.stderr)
+            last_bridge = alive
+        # 还没拿到第一份结果时用**短**节拍等它（后台探针通常几百毫秒就有，
+        # 本机连不上时是它的超时）；有了结果再回到 `HEALTH_POLL_SECONDS`。
+        # 不这么分的话，"终端起手那一行"会晚最多 5 秒才出现。
+        delay = (
+            HEALTH_POLL_SECONDS
+            if state_name != STATE_UNKNOWN
+            else FIRST_RESULT_POLL_SECONDS
+        )
+        if stop.wait(delay):
             break

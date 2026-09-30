@@ -4,7 +4,8 @@
 打包时漏文件。代价是编辑时没有语法高亮，可以接受。
 
 这里刻意做得很薄——不持有状态、不做业务判断，只渲染事件、发请求
-（`/run`、`/confirm`、`/target`、`/session/delete|restore`，以及轮 `/state` 取横幅），
+（`/run`、`/confirm`、`/target`、`/session/delete|restore`、`/session/new`，
+以及轮 `/state` 取横幅），
 以及把快照里的待批准配对码、模型通断、当前目标、"已移除的会话"和"别处还有谁在跑"画出来。
 配对和探活都不进模型上下文，也不能点「应用/拒绝」来批准或重连——那两个按钮是落盘确认。
 前端出错只能靠人看出来，所以它必须小到一眼能看完。
@@ -21,8 +22,10 @@
   读屏可用）：可见的行点一下 = 改控件 + 派发 `change`（`target()`），而 `change`
   的归宿仍然只有 `switchTarget` 一处——"切目标 = `POST /target`"没有第二条路径。
   切换失败（409/400）时 `drawTarget` 会把面板拨回当前目标，页面上不会停在
-  一个假装选中的行上。**点下去先亮**（`chosen`）：回帧那一趟里服务端要探活模型，
-  模型不通时能有好几秒，而"点了没反应"最容易被当成壳坏了。
+  一个假装选中的行上。**点下去先亮**（`chosen`）：回帧是一趟服务端往返，而
+  "点了没反应"最容易被当成壳坏了。探活**不在**那一趟里（服务端挪到后台了，
+  见 `web/probe.py`），所以现在这一步是几十毫秒的事——但那不是因为"探活慢了"，
+  乐观选中本来就不该让高亮落后于点击。
 - **只在数据真变了才重绘**：左栏按 spec 逐行复用（`syncGroup` + 签名），
   两条下拉同样按签名跳过（`fillSelect`），历史只**追加**没画过的那一段
   （`drawn`）。同一帧状态重复到达（事件流补帧、运行状态变化、3 秒轮询）时
@@ -685,7 +688,8 @@ function failureCause(kind) {
 
 function failureNext(kind) {
   if (kind === 'connect') {
-    return '`spool service list` 看本机模型配方在不在跑；'
+    return '`spool service list` 看本机模型配方在不在跑'
+      + '（配方表里那条叫 llama 的话，`spool service start llama` 就能起它）；'
       + '`spool config` 看 provider 与 base_url 是从哪来的；把它起好再发一次';
   }
   if (kind === 'slow') {
@@ -1383,17 +1387,53 @@ function showPairings(items) {
   }
 }
 
+// 「这是什么时候探的」必须说得出：探活挪到后台之后，`/state` 给的是**最近一次**
+// 结果，可能是几秒前那一份。陈旧值可以接受，**静默的**陈旧值不行——不然一个
+// 几分钟前的结论看起来就像刚刚测的。用服务端算好的 `age_s`（两边的墙钟不保证
+// 同步，页面拿它换算成"3 秒前"就行），页面只负责说人话。
+function probedAgo(health) {
+  const info = health || {};
+  const age = info.age_s;
+  if (age === null || age === undefined) {
+    return info.probed_at ? '' : '（还没探过）';
+  }
+  const seconds = Math.max(0, Math.round(Number(age)));
+  if (seconds < 2) { return '（刚探过）'; }
+  if (seconds < 60) { return '（' + seconds + ' 秒前探过）'; }
+  return '（' + Math.round(seconds / 60) + ' 分钟前探过）';
+}
+
+// 探活不通那一行的开头。`slow`（连上了、只是没在超时内回话）与别的不通对人的
+// 下一步不一样（去看模型是不是在加载 vs 去把服务起起来），所以不合成一句
+// "连不上"——两句话都由 `failureCause` / `failureNext` 往下说。
+function modelDownLine(kind, where, ago) {
+  if (kind === 'slow') { return '本机模型没在超时内回话' + where + ago; }
+  return '本机模型连不上' + where + ago;
+}
+
 function showHealth(health) {
   const box = document.getElementById('health');
   const bits = [];
-  const model = (health && health.model) || {};
+  const info = health || {};
+  const model = info.model || {};
   if (model.ok === false) {
     // 横幅上也**说人话**：光摆一句 `timed out`，人只会以为壳坏了。
-    // 地址 + 可能原因 + 下一步，与对话流里那一块同一套说法（`failure*`）。
+    // 什么时候探的 + 可能原因 + 下一步，与对话流里那一块同一套说法（`failure*`），
+    // 但这里的"下一步"给的是**探活**该做的事：没人在等生成，所以不套用
+    // "把活拆小再发"（那是生成超时的下一步）。分类优先用服务端**只增**的 `kind`。
     const where = model.target ? '（' + model.target + '）' : '';
-    const kind = failureKind(model.detail) || 'connect';
-    bits.push('模型连不上' + where + '：可能原因：' + failureCause(kind)
-      + '；下一步：' + failureNext(kind));
+    const kind = model.kind || failureKind(model.detail) || 'connect';
+    const why = kind === 'slow'
+      ? '模型服务在、但没在超时内回话（在加载模型 / 太慢 / 卡住）'
+      : kind === 'server'
+        ? '服务在、但回话不是 200（参数不对 / 上下文超限 / 刚重启）'
+        : failureCause('connect');
+    bits.push(modelDownLine(kind, where, probedAgo(info))
+      + '：可能原因：' + why
+      + '；下一步：' + failureNext(kind === 'server' ? 'server' : 'connect'));
+  } else if (info.state === 'unknown') {
+    // 后台探活刚起来：说"还没探过"，**不画成"通了"**（那是静默的假话）。
+    bits.push('本机模型：还没探过（后台正在探，几秒后这里会自己更新）。');
   }
   const services = (health && health.services) || [];
   for (const item of services) {
@@ -1589,8 +1629,8 @@ async function post(url, payload) {
 // 切换当前目标：`POST /target`。成功后**立刻按返回体重绑**（它就是新的 /state），
 // 不等 SSE 补帧——补帧还会来，但页面不该有那一秒的旧内容。
 //
-// 点了就先亮选中态：这一趟里服务端会顺带探活模型，模型不通时能有好几秒，
-// 而"点了没反应"是最容易让人以为壳坏了的形状。
+// 点了就先亮选中态：回帧是一趟服务端往返，高亮不该落后于点击。探活**不在**那一趟里
+// （服务端挪到后台了），所以这一步现在是几十毫秒——见 `web/probe.py`。
 async function switchTarget(payload) {
   closeDrawer();
   chosen = wantedKey(payload);
@@ -1650,16 +1690,26 @@ async function act(url, payload, note) {
   add(note, 'dim');
 }
 
-// 「新建会话」：会话是**按工作区**存的，服务端没有"建会话"端点——会话在第一次
-// 真跑起来时才落进会话表（见 web/server.py::_session_rows 的自述）。所以这里
-// 只做一件事：把目标切到一个**还没跑过的新名字**上，页面上就是一条空会话。
-function newSession() {
+// 「新建会话」：会话**按工作区**存，而服务端有了一条真的建会话的路
+// （`POST /session/new` → `kernel_sessions.create_session`）。以前这里只做
+// "把目标切到一个还没跑过的新名字"：`/target` 不新建会话（`resolve_session`
+// 不认识就报错、且**绝不静默新建**），于是顶部那个「＋」点下去只有 400。
+//
+// 两步是刻意的：① 先让服务端**真把会话建出来**（重名 / 非法名在那里被拦下，
+// 说人话）；② 再走**同一条**切换路径（`switchTarget` → `POST /target`）切过去
+// ——"切目标"在这条壳上仍然只有一处。点完立刻亮：`chosen` 先点亮那一行，
+// 不等下一轮 `/state`（也不必等，`/target` 的响应体就是新的完整状态）。
+async function newSession() {
   if (readonly || (lastState.target || {}).pinned) { return; }
   const name = window.prompt('新会话的名字（字母 / 数字 / 横线）', 'web-' + Date.now());
   if (name === null) { return; }
   const clean = String(name).trim();
   if (!clean) { return; }
-  switchTarget({session: clean});
+  const made = await post('/session/new', {session: clean});
+  if (made === null) { return; }
+  // `await`：这一趟做完（回帧已经重绑到新会话）才算"新建完了"，调用方
+  // （与 `tests/web/page_dom.js` 那个假 DOM）据此判断页面有没有切过去。
+  await switchTarget({session: made.session});
 }
 
 async function say() {

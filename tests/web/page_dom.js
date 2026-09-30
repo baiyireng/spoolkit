@@ -370,8 +370,44 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
     });
     out.failure_blocks = ids.get('stream').querySelectorAll('.failure').length - before;
 
-    // 结果就是这一行 JSON（断言在 test_page_dom.py 里）：走 stdout，不用 console
-    // ——它是这个测试台的**输出通道**，不是页面里的调试日志（页面里一行都没有）。
-    process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+    // ②-2 探活横幅：模型断了，而且**说得出这是什么时候探的**（探活挪到后台之后，
+    // `/state` 给的是最近一次结果，可能是几秒前那一份——陈旧值可以接受，
+    // 静默的陈旧值不行）。
+    ctx.showHealth({
+      model: { ok: false, target: 'http://127.0.0.1:8080', detail: '拒绝连接', kind: 'connect' },
+      services: [], state: 'down', probed_at: 1700000000, age_s: 3,
+    });
+    const healthBox = ids.get('health');
+    out.health_line = healthBox.children.length ? healthBox.children[0].textContent : '';
+    // 还没探过：既不许画成"通了"，也不许画成"连不上"。
+    ctx.showHealth({
+      model: { ok: null, target: '', detail: '还没探过（后台探活刚起来）', kind: '' },
+      services: [], state: 'unknown', probed_at: null, age_s: null,
+    });
+    out.health_line_unknown = healthBox.children.length
+      ? healthBox.children[0].textContent : '';
+
+    // ①-6 点「＋ 新建会话」：**先让服务端建出来、再切过去**，两个请求都要发对
+    // （以前这里只发一次 /target，而服务端不新建会话——那个按钮点下去只有 400）。
+    const posts = [];
+    const SROWS_NEW = [{ id: 'web-new', title: '', archived: false, last_active: 1, current: true }];
+    ctx.prompt = () => 'web-new';
+    ctx.__fetchImpl = (url) => {
+      posts.push(url);
+      if (url === '/session/new') {
+        return Promise.resolve({ ok: true, status: 200,
+          json: async () => ({ ok: true, session: 'web-new', title: '' }) });
+      }
+      return Promise.resolve({ ok: true, status: 200,
+        json: async () => frame(ROOT_B, 'web-new', WROWS, SROWS_NEW, history(0, '')) });
+    };
+    ids.get('new-session').onclick().then(() => {
+      out.new_session = { calls: posts, selected: highlighted() };
+      ctx.__fetchImpl = null;
+
+      // 结果就是这一行 JSON（断言在 test_page_dom.py 里）：走 stdout，不用 console
+      // ——它是这个测试台的**输出通道**，不是页面里的调试日志（页面里一行都没有）。
+      process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+    });
   });
 });

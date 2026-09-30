@@ -117,6 +117,30 @@ def test_页面也报外接配方断开() -> None:
     assert "连不上" in HTML
 
 
+def test_探活横幅说得出什么时候探的与还没探过() -> None:
+    """探活挪到后台之后（`web/probe.py`），`/state` 给的是**最近一次**结果。
+
+    所以横幅必须说得出"几秒前探过"（陈旧值可以接受，**静默的**陈旧值不行），
+    而"还没探过"既不是通也不是断——三条分支缺一个就红。行为数字（那句话真的
+    被画出来）在 `test_page_dom.py` 里。
+    """
+    body = _body("showHealth")
+    assert "probedAgo(info)" in body, "说了不通却不说这是什么时候探的"
+    assert "model.kind || failureKind(model.detail)" in body, (
+        "没用服务端只增的 kind：慢与不通就分不开了"
+    )
+    assert "state === 'unknown'" in body, "还没探过那一档没有分支"
+    assert "本机模型：还没探过" in body
+
+    ago = _body("probedAgo")
+    assert "age_s" in ago
+    assert "秒前探过" in ago and "分钟前探过" in ago
+
+    down = _body("modelDownLine")
+    assert "没在超时内回话" in down, "慢与不通被合成了一句"
+    assert "模型连不上" in down
+
+
 def test_页面按快照显示待批准的配对码() -> None:
     """给人看的一行，不进模型上下文。不能复用「应用/拒绝」——那是落盘确认。"""
     assert "pairings" in HTML
@@ -316,13 +340,23 @@ def test_左栏标出哪个目标在跑() -> None:
 
 
 def test_新建会话的入口在顶部() -> None:
-    """顶部一个"新建会话"入口：会话服务端没有"建会话"端点（会话在第一次真跑起来
-    时才落进会话表），所以这里只做"把目标切到一个还没跑过的新名字"。"""
+    """顶部一个「＋ 新建会话」：先让服务端**真把会话建出来**（`POST /session/new`
+    → 既有的 `kernel_sessions.create_session`），再切过去。
+
+    这条断言是**跟着行为改的**：以前这里只做"把目标切到一个还没跑过的新名字"，
+    而 `/target` 不新建会话（`resolve_session` 不认识就报错、且绝不静默新建）
+    ——于是那个「＋」点下去只有 400。端到端那几条在 `test_session_new.py` 里，
+    这里只管"接线的顺序对"：**先调端点、再切目标**。
+    """
     assert 'id="new-session"' in HTML
     assert "新建会话" in HTML
 
     body = _body("newSession")
-    assert "switchTarget({session: clean})" in body
+    assert "post('/session/new'" in body, "没有真的建会话：又回到「只换个名字」"
+    assert "switchTarget({session: made.session})" in body, "建完没有切过去"
+    assert body.find("post('/session/new'") < body.find("switchTarget("), (
+        "顺序反了：切目标时那条会话还没建出来（服务端会 400）"
+    )
     assert "readonly" in body, "只读壳里不许摆能点的入口"
     assert "pinned" in body, "--root 钉住时只有一个目标，建不了新的"
     assert "newBtn.onclick = newSession" in _script()

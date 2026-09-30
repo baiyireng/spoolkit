@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -45,6 +46,24 @@ def _post(url: str, payload: dict) -> tuple[int, str]:
         return exc.code, exc.read().decode("utf-8")
 
 
+def _state_when(url: str, ready, timeout: float = 10.0) -> dict:
+    """等到 `/state` 满足条件再返回它。
+
+    探活改成**后台**之后（`web/probe.py`），`/state` 不再等探测：服务刚起来的
+    那一帧可能就是 `health.state == "unknown"`（还没探过）。这条用例要知道的是
+    "假模型算通"，所以先等第一份结果落地——这也正是页面真实的样子（它每 3 秒
+    轮一次，探到了横幅就自己变绿）。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        status, body = _get(url + "/state")
+        assert status == 200, body
+        payload = json.loads(body)
+        if ready(payload) or time.monotonic() >= deadline:
+            return payload
+        time.sleep(0.05)
+
+
 def test_首页返回HTML(server: str) -> None:
     status, body = _get(server + "/")
     assert status == 200
@@ -52,11 +71,10 @@ def test_首页返回HTML(server: str) -> None:
 
 
 def test_状态接口返回快照(server: str) -> None:
-    status, body = _get(server + "/state")
-    assert status == 200
-    payload = json.loads(body)
+    payload = _state_when(server, lambda item: item["health"]["state"] != "unknown")
     assert payload["running"] is False
     assert payload["pairings"] == []
+    assert payload["health"]["state"] != "unknown", "后台探活一直没给出结果"
     assert payload["health"]["model"]["ok"] is True
     assert "假" in payload["health"]["model"]["detail"]
     assert payload["health"]["services"] == []
