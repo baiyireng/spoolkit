@@ -9,6 +9,7 @@
 少一个引号、`\\n` 写成真换行）在那里会红。
 """
 
+import re
 import shutil
 import subprocess
 
@@ -202,7 +203,12 @@ def test_内联脚本能过node语法检查(tmp_path) -> None:
 
 
 def test_左栏是两段式的会话列表() -> None:
-    """ChatGPT 那套：左边一条会话栏，按工作区分段，段里是它的会话。"""
+    """ChatGPT 那套：左边一条会话栏，按工作区分段，段里是它的会话。
+
+    行的**更新方式**在这一批改了：以前每一帧都 `replaceChildren()` 把两段整段
+    推倒重画（那是"切换很卡"的一半），现在按 spec 同步（`syncGroup`），
+    签名没变就一个节点都不动。行为数字钉在 `test_page_dom.py` 里。
+    """
     assert 'id="sidebar"' in HTML
     assert 'id="workspaces"' in HTML
     assert 'id="sessions"' in HTML
@@ -211,11 +217,29 @@ def test_左栏是两段式的会话列表() -> None:
     # 两段各自的名字，以及"每一段都要有列表"这件事
     assert "工作区" in body
     assert "会话" in body
-    assert "workspaceList.appendChild" in body
-    assert "sessionList.appendChild" in body
+    assert "syncGroup(workspaceList" in body
+    assert "syncGroup(sessionList" in body
+    assert "sidebarSig" in body, "没有「同键跳过」：同一帧重复到达会整段重画"
     # 当前目标要能一眼看出来（高亮）
     assert "classList.add('on')" in _body("row")
-    assert "sessionList.appendChild(line)" in body
+    assert "markChosen()" in body, "行的复用之后要重新点亮选中态"
+
+
+def test_列表按行复用而不是整段重画() -> None:
+    """一行先描述成 spec（文字 / 在不在跑 / 那个小按钮），只有 sig 变了才建节点。
+
+    证伪法：把 `syncGroup` 换回 `replaceChildren()`，`test_page_dom.py` 里
+    那三条"重复帧 / 补帧 / 补历史"立刻变红。
+    """
+    body = _body("syncGroup")
+    assert "have._sig === spec.sig" in body, "没有比对签名，等于每次都重建"
+    assert "box.replaceChild(node, have)" in body
+    assert "box.appendChild(node)" in body
+
+    spec = _body("rowSpec")
+    assert "JSON.stringify([" in spec
+    # 「亮不亮」不进签名：切一行的高亮只改类，不该把节点重建一遍。
+    assert "Boolean(on)" not in spec
 
 
 def test_左栏的行点下去就是切目标() -> None:
@@ -232,6 +256,10 @@ def test_左栏的行点下去就是切目标() -> None:
     assert "wsBox" in dispatch
     assert "sessBox" in dispatch
     assert "dispatchEvent" in dispatch
+    # 两条都要派发：原先只派发会话那条，于是**点工作区那一列什么都没发生**
+    # （ws 那条 change 监听永远收不到事件，"点了没反应"就是这么来的）。
+    assert "wsBox.dispatchEvent" in dispatch
+    assert "sessBox.dispatchEvent" in dispatch
     # 目标名不一定已经是控件里的一项（当前会话没跑过就不在会话表里）：
     # 不先把那项补出来，赋 value 会被浏览器丢掉，点一行就变成"不改会话"。
     assert "pick(" in dispatch
@@ -242,13 +270,39 @@ def test_左栏的行点下去就是切目标() -> None:
     assert "sessBox.addEventListener('change'" in script
 
 
+def test_点一行立刻亮起来不等回帧() -> None:
+    """回帧那一趟里服务端会顺带探活模型，模型不通时要好几秒。
+
+    所以点了就先亮（`chosen` 是乐观选中），回帧到了由 `applyState` 交棒给
+    服务端确认的目标；切换被拒时拨回去。
+    """
+    body = _body("switchTarget")
+    assert "chosen = wantedKey(payload)" in body
+    assert "markChosen()" in body
+    # 失败要拨回当前目标（与"选择栏拨回去"同一件事，只是这次是行的高亮）。
+    assert "drawTarget(lastState)" in body
+
+    apply_body = _body("applyState")
+    assert "chosen = {root: '', session: ''}" in apply_body, "回帧之后要交棒"
+    assert "markChosen()" in apply_body
+
+    want = _body("wantedKey")
+    assert "payload.workspace" in want
+    assert "payload.session" in want
+
+
+def test_切换完成后服务端补的那一帧不再重建侧栏() -> None:
+    """同一帧重复到达要**一个节点都不重建**（行为数字在 `test_page_dom.py`）。"""
+    assert "if (sig === sidebarSig) { return; }" in _body("renderSidebar")
+    assert "if (box.dataset.fill === sign)" in _body("fillSelect")
+
+
 def test_左栏标出哪个目标在跑() -> None:
     """切走不杀任务（设计 §3.4）：正在跑的目标必须标出来。
 
     判据只有 `state.running_targets` 一处（`running` 那个布尔值只讲当前目标）。
     """
     body = _body("renderSidebar")
-    assert "markRunning(" in body
     assert "runningRows(" in body
 
     live = _body("runningRows")
@@ -256,6 +310,8 @@ def test_左栏标出哪个目标在跑() -> None:
     assert "one.root" in live
     assert "one.session" in live
 
+    # 点亮的那个小圆点是行的一部分（跟着行一起复用 / 重建），不是外挂上去的。
+    assert "markRunning(line, Boolean(running))" in _body("row")
     assert "RUN_MARK" in _script()
 
 
@@ -298,8 +354,6 @@ def test_只读时左栏的行与新建入口都点不动() -> None:
 
 
 # --- 中间对话流：气泡方向 ---
-
-
 def test_用户与助手的气泡方向是分开的() -> None:
     """用户右对齐、助手左对齐（宽屏留白更像文档流）。"""
     # 类名是 CSS 的挂点：改了它们，方向就没了
@@ -323,11 +377,23 @@ def test_用户与助手的气泡方向是分开的() -> None:
     assert "item.role === 'user' ? 'user' : 'assistant'" in history
 
 
-def test_历史也按气泡方向画() -> None:
+def test_历史也只追加不重画() -> None:
+    """同一个目标上，快照里的往来会变长：只补没画过的那一段。
+
+    改之前是"画过就不再画"（`historyDrawn` 一个布尔值），于是**多出来的那几条
+    永远不出现**——数据变了却不重绘，与"数据没变却重绘"正好是一对反的错。
+    """
     body = _body("drawHistory")
     assert "makeBubble(" in body
     assert "fillRich(" in body
-    assert "historyDrawn" in body, "历史画两遍会把对话流撑爆"
+    assert "for (let index = drawn; index < items.length; index += 1)" in body, (
+        "不是从「已经画到哪儿」接着画：那是全量重画"
+    )
+    assert "drawn = items.length" in body
+    assert "drawn > items.length" in body, "列表变短时要能重来一遍"
+
+    reset = _body("resetView")
+    assert "drawn = 0" in reset, "换了目标要重新开始画"
 
 
 def test_代码块等宽且能一键复制() -> None:
@@ -337,13 +403,215 @@ def test_代码块等宽且能一键复制() -> None:
 
     body = _body("fillRich")
     assert "text.split('```')" in body, "没有把代码围栏认出来"
-    assert "codeEl.textContent = payload" in body, "代码没有按文本写进去"
-    assert "copyText(" in body
-    assert "copy" in body
+
+    block = _body("codeBlock")
+    assert "codeEl.textContent = payload" in block, "代码没有按文本写进去"
+    assert "copyText(" in block
+    assert "copy" in block
 
     script = _script()
     assert "navigator.clipboard" in script
     assert "复制" in script
+
+
+# --- ③ 代码块与正文分得开 ---
+
+
+def test_围栏是代码而其余是正文() -> None:
+    """`split('```')` 出来的**奇数块**才是代码（围栏一定成对）。
+
+    改之前每一块都被当代码块画（连正文也是）：整条消息看上去全是等宽的——
+    "代码与对话没区分开"的根就在这里。行为数字在 `test_page_dom.py`。
+    """
+    body = _body("fillRich")
+    assert "index % 2 === 1" in body, "没有按奇偶把代码和正文分开"
+    assert "bubble.appendChild(codeBlock(parts[index]))" in body
+    assert "appendProse(bubble, parts[index])" in body
+
+    prose = _body("appendProse")
+    assert "index % 2 === 1" in prose, "行内代码没有按 ` 切出来"
+    assert "inline.className = 'inline-code'" in prose
+    assert "document.createTextNode(piece)" in prose, "正文要按文本节点写进去"
+
+
+def test_代码块有明显的块样式且不撑破气泡() -> None:
+    """视觉判据只能钉在 CSS 上（真长什么样得人眼看，见交付说明）。"""
+    style = HTML[HTML.find("<style>") : HTML.find("</style>")]
+    # 底色 / 边框 / 圆角 / 内边距：四样都在，才叫"一块代码"
+    assert ".code {" in style
+    assert "background:var(--code-bg)" in style
+    assert "border:1px solid var(--code-line)" in style
+    assert "border-radius:10px" in style
+    assert "padding:11px 13px" in style
+    # 自己滚，不撑破气泡
+    assert "overflow:auto" in style
+    assert "max-height:360px" in style
+    # 气泡与消息必须是 min-width:0，否则 flex 子项不肯收缩，代码会把气泡撑爆
+    assert "min-width:0" in style
+    # 语言标签可以让位、复制键位置固定
+    assert ".code-lang" in style and "text-overflow:ellipsis" in style
+    assert "flex:0 0 auto" in style
+    # 行内代码与正文要能区分
+    assert ".inline-code" in style
+    assert "background:var(--inline-bg)" in style
+    assert ".prose" in style
+    # 语言标签与"代码"兜底两种文案都在
+    script = _script()
+    assert "'代码'" in script or '"代码"' in script
+
+
+def test_主题变量表两档都给代码与滚动条的色() -> None:
+    style = HTML[HTML.find("<style>") : HTML.find("</style>")]
+    dark = style[: style.find("@media (prefers-color-scheme: light)")]
+    light = style[style.find("@media (prefers-color-scheme: light)") :]
+    for name in ("--code-bg", "--code-line", "--code-bar", "--inline-bg",
+                 "--inline-line", "--scroll-thumb", "--scroll-thumb-hover"):
+        assert (name + ":") in dark, f"深色那一档缺 {name}"
+        assert (name + ":") in light, f"浅色那一档缺 {name}"
+
+
+# --- ④ 滚动条 ---
+
+
+def test_滚动条按平台美化而不是藏掉滚动能力() -> None:
+    """两套写法都要给：WebKit 认 `::-webkit-scrollbar`，Firefox 认标准属性。
+
+    "隐藏"这一条要小心：`display:none` 真的会让鼠标用户没有抓手。这里做的是
+    美化（细、跟主题、悬停才亮），可滚性一个字都没动。
+    """
+    style = HTML[HTML.find("<style>") : HTML.find("</style>")]
+    assert "::-webkit-scrollbar {" in style
+    assert "::-webkit-scrollbar-thumb" in style
+    assert "::-webkit-scrollbar-track" in style
+    assert "scrollbar-width:thin" in style
+    assert "scrollbar-color:var(--scroll-thumb) transparent" in style
+    # 不许把滚动条藏掉：藏掉之后列表与代码块仍然要能滚。
+    assert "::-webkit-scrollbar { display:none" not in style
+    assert "::-webkit-scrollbar{display:none" not in style
+    assert "::-webkit-scrollbar-thumb { display:none" not in style
+    # 两个滚动区自己也要能滚（美化不许把它一起改掉）
+    assert "#stream {" in style and "overflow-y:auto" in style
+    assert "#panel {" in style and "overflow-y:auto" in style
+    # 能滚的还有代码块（第一层是美化，不是"藏了就不管了"）
+    assert "overflow:auto" in style
+
+
+# --- ② 连不上模型时说人话 ---
+
+
+def test_失败在对话流里说人话而不是一行原始异常() -> None:
+    """`final` 失败与 `error` 事件都走 `showFailure`（不再直接 `add` 原始文本）。
+
+    行为数字（地址 / 可能原因 / 下一步）在 `test_page_dom.py`。
+    """
+    body = _body("onEvent")
+    assert "showFailure('失败：', data.text, data.error)" in body, "失败还是一行原始异常"
+    assert "showFailure('错误：', data.message, data.error)" in body, "错误事件没有走这条"
+
+    # 认不出来时仍按**原来的画法**：那个词还是原来的词（失败 / 错误）。
+    assert "add(head + redact(text), 'bad')" in _body("showFailure")
+
+    explain = _body("explainFailure")
+    assert "失败环节" in explain
+    assert "模型地址" in explain
+    assert "可能原因" in explain
+    assert "下一步" in explain
+    # 下一步必须是**真的存在**的命令（这一批的硬要求）：`spool service list`
+    # 看本机模型配方、`spool config` 看 provider/base_url 从哪来。
+    assert "spool service list" in _script()
+    assert "spool config" in _script()
+
+
+def test_下一步里指的命令真的存在(capsys) -> None:
+    """比"文本里有这几个字"强一档：指路要指**真的**（命令改名/删掉时这条会红）。
+
+    页面里出现的每个 `spool <子命令>` 都要能在 CLI 里找到——写一句
+    `spool status` 之类不存在的命令，等于把人指进死路。
+    """
+    from spoolkit.cli import app as cli_app
+
+    used = set(re.findall(r"spool ([a-z][a-z0-9-]*)", _script()))
+    assert used, "脚本里一个 spool 命令都没提到"
+
+    with pytest.raises(SystemExit):
+        cli_app.main(["--help"])
+    text = capsys.readouterr().out
+    match = re.search(r"\{([a-z0-9,-]+)\}", text)
+    assert match, "没从 CLI 的帮助里抓到子命令清单（帮助的格式变了？）"
+    known = set(match.group(1).split(","))
+
+    assert used <= known, f"指了一个不存在的命令：{sorted(used - known)}"
+
+
+def test_结构化线索只增不改() -> None:
+    """页面优先用服务端**只增**的那条字段（`error: {stage, url, kind}`），
+    没有它时按错误文本自己认——两条路都要在。"""
+    body = _body("explainFailure")
+    assert "info.kind || failureKind(text)" in body
+    assert "info.url" in _body("modelAddress")
+
+    script = _script()
+    assert "data.error" in script
+    assert "stage" in script
+
+
+def test_页面上的错误文本先遮蔽密钥() -> None:
+    """密钥、Bearer 串、KEY=VALUE 不许出现在页面上。"""
+    body = _body("redact")
+    assert "sk-" in body
+    assert "Bearer" in body
+    assert "token" in body and "secret" in body and "password" in body
+    assert "***" in body
+    # 画失败那块也要过一遍遮蔽（原始信息那一行最容易带出地址与参数）。
+    assert "redact(usefulLine(text))" in _body("explainFailure")
+    assert "redact(" in _body("showHealth")
+
+
+# --- ① 删除会话 ---
+
+
+def test_会话行上有移除入口而且要两次点击() -> None:
+    """一点就删太容易误伤：第一下只把这一行变成确认态（`armed`），第二下才发请求。"""
+    actions = _script()
+    assert "'/session/delete'" in actions
+    assert "'/session/restore'" in actions
+    assert "requestRemove" in actions and "requestRestore" in actions
+
+    remove = _body("requestRemove")
+    assert "if (armed !== value)" in remove, "没有二次确认：点一下就删了"
+    assert "markArmed()" in remove
+    assert "act('/session/delete'" in remove
+
+    armed = _body("markArmed")
+    assert "'确认移除'" in armed
+    assert "'移除'" in armed
+    assert "classList.toggle('armed', ready)" in armed
+
+    # 按钮是行里的一个 button，点它不许当成"切到这一条"
+    button = _body("rowAction")
+    assert "event.stopPropagation()" in button
+    assert "button.dataset.value = value" in button
+
+
+def test_已移除的会话在页面上能放回来() -> None:
+    """"可恢复"在界面上必须够得着，否则不叫可恢复。"""
+    body = _body("renderSidebar")
+    assert "sremoved" in body
+    assert "已移除（" in body
+    assert "'恢复'" in body
+
+    target = _body("drawTarget")
+    assert "state.sessions_removed" in target
+
+
+def test_只读时移除入口不摆出来() -> None:
+    body = _body("renderSidebar")
+    assert "const removable = !locked && !readonly;" in body
+    assert "readonly ? null : actSpec('恢复'" in body
+    remove = _body("requestRemove")
+    assert "if (readonly) { return; }" in remove
+    restore = _body("requestRestore")
+    assert "if (readonly) { return; }" in restore
 
 
 # --- 滚动：跟到底，但不抢 ---

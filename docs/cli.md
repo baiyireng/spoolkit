@@ -5,7 +5,7 @@
 `--root` 缺省找工作区的顺位：显式给了 → 往上找 `.agent/` → 客户端指向 → 全局登记表 `%APPDATA%\spoolkit\workspaces.json` → 当前目录。**机器级入口**（`serve` / `hub` / `web` / `bridge` / `qq` / `mcp` 不给 `--root`）**不看当前目录**，它们服务整台机器。
 `--session` 留空 = 用客户端指向里那条，没有就回到老默认名：`run` / `plan` / `serve` / `hub` / `web` → `cli`，`chat` → `chat`，`bridge` / `qq` → `bridge`，`mcp` → `mcp`。
 
-`spool` 进对话（不是工作区就先问一句要不要初始化，非交互时打帮助）；`spool --version` → `spool 0.0.1 (spoolkit)`；`spool --help` 是总入口。子命令：`init` `ws` `run` `plan` `policy` `revert` `bench` `session` `serve` `hub` `web` `qq` `diagnose` `limits` `config` `env` `chat` `mcp` `mcp-servers` `bridge` `approve` `extra` `service`。
+`spool` 进对话（不是工作区就先问一句要不要初始化，非交互时打帮助）；`spool --version` → `spool 0.0.1 (spoolkit)`；`spool --help` 是总入口。子命令：`init` `ws` `run` `plan` `policy` `revert` `bench` `session` `serve` `hub` `web` `qq` `diagnose` `limits` `config` `env` `chat` `mcp` `mcp-servers` `bridge` `approve` `extra` `service` `status` `help`。
 
 ## spool ws
 
@@ -212,6 +212,34 @@ health = "tcp:127.0.0.1:1080"
 ```
 
 `command` 可空：空就只探测、不替你启动。`health` 认 `http(s)://…`（GET）和 `tcp:host:port`；停掉只杀 `spool service start` 写下 pid 的孩子。`spool config --set` 不会抹掉 `[[service]]` / `[[mcp]]`。
+
+## spool status
+
+一眼看清这台机器上的 spoolkit 服务：一行一个服务，给**状态 / 地址或说明 / 怎么起 / 怎么停**。**只打本机地址**（不联网），每个探测点短超时，探不通给一句人话＋非零退出码，不冒回溯。
+
+| 行 | 探什么 |
+|---|---|
+| `provider` | 生效的模型供应商（命令行 > 环境变量 > 用户配置）；没配过或生效值是 `fake` 都算关键，并给出该敲的那一条 |
+| `model` | 本机模型（`base_url`，默认 `http://127.0.0.1:8080`）打 `/props`：**没起 / 起来了但慢**（`503` 或端口通而 HTTP 不应答）/ 正常 |
+| `web:<端口>` | 网页壳（默认探 `8765`，别的端口用 `--web-port`）：读 `GET /state`，报**监听端口、是不是只读（绑了非回环地址）、当前目标**；端口上有别的东西也会说出来 |
+| `bridge:<通道>` | 用户配置 `[channel.*]` ＋ 放行记录里的通道：凭据**从哪个文件 / 哪个环境变量来**（只印来源，不印值）；桥是前台进程，"在不在跑"说不出就说不出 |
+| `mcp:<名字>` | 外挂 MCP 登记了哪些；`--probe` 才真连一次（会拉起它们的子进程，超时另算） |
+| `workspace` | 登记了几个工作区、网页壳与命令行的指针各指向谁 |
+| `config` / `env:user` / `env:workspace` | `config.toml`、用户级 `.env`、当前工作区 `.env` 的**路径与存在性**（只印键数，不印值） |
+| `service:<配方>` | 用户配置 `[[service]]` 里的每条配方（与 `spool service` 同一套探活） |
+
+| 参数 | 说明 |
+|---|---|
+| `--json` | 给机器读：`ok` / `critical_down` / `rows[]{name,label,state,critical,target,detail,start,stop}`；`state` 取 `up` / `slow` / `down` / `unknown` / `none` |
+| `--timeout 秒` | 每个探测点的超时（默认 `0.5`：探的都是回环地址，正常监听时毫秒级就有回音）|
+| `--web-port 端口` | 除 `8765` 外还要看哪个端口上的网页壳（可重复）|
+| `--probe` / `--mcp-timeout 秒` | 真连一次外挂 MCP（默认只列登记了哪些）/ 连它的超时（默认 `5`：要起子进程）|
+
+**关键项**（表里带 ★，没起 → 退出码 `1`）只有三处：模型供应商没配过或生效值是 `fake`；生效 `provider` 是 `llamacpp` 时的本机模型；`[[service]]` 里写了 `command` 的配方（你声明了要拉起它）。表里其余各行只报不判（网页壳、通道桥按需起，外挂 MCP 与密钥落点不影响退出码）。退出码：`0` 关键都在、`1` 有关键没起、`2` 用法错或配置读不出来。
+
+## spool help
+
+`spool help [子命令]` 等价于 `spool --help` / `spool <子命令> --help`（退出码 `0`）；认不出的子命令还是 argparse 那套报错与退出码 `2`。它不新造帮助系统：实现就是一次带 `--help` 的重新解析，所以两处文本逐字相同。
 
 ## spool policy
 

@@ -9,8 +9,11 @@ SSE 每写完一条都要 flush：不 flush 的话事件攒在缓冲里，
 机器级（不给 `--root`）时这个进程服务**整台机器**：它持有"当前目标"这个状态
 （`WebState`）和一张按 (工作区, 会话) 复用的 Runner 表（`web/registry.py`）。
 于是路由分成两类：打在**当前目标**上的（`/run`、`/confirm`），和改这个状态的
-（`POST /target`）。切换**不杀任务**——在跑的那条留在它自己的 Runner 里继续跑
-（设计 §3.4），切回去还能看到它的事件与历史。
+（`POST /target`、`POST /session/delete`、`POST /session/restore`）。切换**不杀任务**
+——在跑的那条留在它自己的 Runner 里继续跑（设计 §3.4），切回去还能看到它的事件与历史。
+
+会话的"移除"是**归档**（可恢复，`WebState::remove_session` 里有自述），不是真删：
+`.agent/sessions/` 与 `memory.db` 里的记忆不该被网页上的一个按钮不可逆地销毁。
 
 `/events` 是长连接而目标可能在中途被换掉：服务端发现目标变了要**退订旧的、
 订阅新的、补一帧 state**，否则页面会一直停在旧工作区的事件流上。这是这块最
@@ -71,8 +74,14 @@ NO_TARGET_HINT = (
     "或用 `--root` 起服务把它钉住。"
 )
 
-# 网页壳在 `clients.json` 里的键。与 `resolve_target(client=…)` 用的是同一套键，
-# 所以"页面上选的那个"就是内核顺位里"上次选的那个"（设计 §3.3）。
+#: 会**驱动**这台机器的端点。非回环绑定一律 403（设计 §3.7）。
+#:
+#: 新端点必须加进这张表：判据按路径写死在这里一次，漏一个就等于把安全边界
+#: 漏在门外——而"远程只能看"这条边界是这一批唯一的硬承诺。
+WRITE_PATHS = ("/run", "/confirm", "/session/delete", "/session/restore")
+
+#: 网页壳在 `clients.json` 里的键。与 `resolve_target(client=…)` 用的是同一套键，
+#: 所以"页面上选的那个"就是内核顺位里"上次选的那个"（设计 §3.3）。
 POINTER_CLIENT = "web"
 
 # `_stream` 里那个"还没订阅过"的哨兵：没有它，第一圈会以为"目标没变"而不订阅。
@@ -236,6 +245,10 @@ class WebState:
         data["target"] = self._target_payload(target)
         data["workspaces"] = _workspace_rows(target)
         data["sessions"] = _session_rows(target)
+        # 已移除（归档）的那几条**另开一个字段**：`sessions` 的口径一个字没动
+        # （它仍然只列没归档的那些），而页面要能把删掉的放回来——"可恢复"如果
+        # 在界面上够不着，那就不叫可恢复。
+        data["sessions_removed"] = _removed_rows(target)
         # 只读要**说在状态里**，不能只体现在 403 上：页面得在点按钮之前就知道
         # "这里只能看"（点一下被拒是最后一秒才告诉人）。`host` 一起给，页面那句
         # 提示才说得出"绑在哪个地址上"。
@@ -359,6 +372,97 @@ class WebState:
         self._remember(changed, explicit=bool(name or wanted))
         return 200, self.snapshot()
 
+    def remove_session(self, session: str, *, restore: bool = False) -> tuple[int, dict]:
+        """把一条会话从列表里摘掉（归档）；`restore=True` 就是把它放回来。
+
+        为什么是**归档**而不是真删：仓库里既有的就是 `archive_session`——标签写进
+        `.agent/sessions/<id>/meta.json`，计划 / 进度 / 检查点 / 记忆一个字节都不动，
+        随时能放回来（页面上的"已移除"那一段就是出口）。真删要动
+        `.agent/sessions/` 与 `memory.db` 里的记忆，那是这台机器的底账，不该由
+        网页上的一个按钮不可逆地销毁；`spool session` 这条既有命令也只到归档为止。
+
+        正在跑的那一条**不许**移除：任务留在它自己的 Runner 里继续（切走不杀任务，
+        设计 §3.4），把它的记录从列表里摘掉只会让人以为任务没了。
+
+        移掉的正好是当前会话时：把目标挪到还在的下一条上（没有就退回启动时的默认
+        会话名）。不挪的话指针会指着一条列表里没有的会话——"我在一条已移除的会话里"
+        正是"列表与指针不一致"的样子。
+        """
+        with self._lock:
+            target = self._target
+            pinned = self._pinned
+        if target is None:
+            return 409, {"error": "还没有选工作区：先在左边选一个，再来管会话。"}
+        raw = str(session or "").strip()
+        if not raw:
+            return 400, {"error": "缺少 session：要移除哪一条？"}
+        try:
+            picked = kernel_sessions.resolve_session(target.root, raw)
+        except SessionError as exc:
+            # 名字对不上就说人话（与 `POST /target` 同一条口径），绝不静默新建。
+            return 400, {"error": str(exc)}
+        if restore:
+            kernel_sessions.archive_session(target.root, picked, archived=False)
+            return 200, self.snapshot()
+        running = any(
+            row["root"] == str(target.root) and row["session"] == picked
+            for row in self._registry.running_targets()
+        )
+        if running:
+            return 409, {
+                "error": f"会话 {picked} 正在跑，等它结束再移除"
+                "（这个壳没有停止运行的接口）。"
+            }
+        if pinned and picked == target.session:
+            return 409, {
+                "error": "这条壳是用 --root 起的，钉的就是这一个目标："
+                "移除当前会话就没有可看的会话了。"
+                "先去终端换一条（`spool session use <id>`），或去掉 --root 重启。"
+            }
+        kernel_sessions.archive_session(target.root, picked)
+        if picked == target.session:
+            rest = kernel_sessions.list_sessions(target.root)
+            self._retarget_session(
+                target.root, self._fallback_session(rest, picked)
+            )
+        return 200, self.snapshot()
+
+    def _fallback_session(self, rest: list, removed: str) -> str:
+        """移掉**当前**会话之后退到哪一条。
+
+        顺序：① 还在的下一条（最近活跃在前）；② 这条壳的默认会话名；③ `cli`
+        （各入口一直以来的默认名）。一路跳过**刚被移除的那一个**——留在一个已移除
+        的名字上就是"列表与指针不一致"。
+
+        三条路都是它自己时（只有"把默认名本身移掉"才会出现）只能原地不动：那种
+        名字仍然可用，下次真跑起来它会重新落进会话表，页面上它也一直在「已移除」
+        那一段里，点「恢复」就回来。
+        """
+        for name in [item.id for item in rest] + [self._default_session, "cli"]:
+            if name and name != removed:
+                return name
+        return removed
+
+    def _retarget_session(self, root: Path, name: str) -> None:
+        """只换会话名、不动工作区（移除当前会话之后的退路）。
+
+        不复用 `switch()`：那条路会把名字交给 `resolve_session` 解析，而退路里的
+        默认名（如 `cli`）**可能还没有任何会话记录**——在"为了不指向已移除的会话"
+        而换名字这条路上，解析失败等于把状态卡在坏的地方。
+        """
+        with self._lock:
+            prev = self._target
+            self._target = Target(
+                root=root,
+                session=name,
+                workspace_source=(
+                    prev.workspace_source if prev is not None else "explicit"
+                ),
+                session_source="default",
+            )
+            self._version += 1
+        self._remember(self._target, explicit=True)
+
     def _remember(self, target: Target, *, explicit: bool) -> None:
         """把这次显式选择写进网页壳指针（`clients.json` 里 `client="web"` 那条）。
 
@@ -437,6 +541,26 @@ def _session_rows(target: Target | None) -> list[dict]:
             "current": item.id == target.session,
         }
         for item in items
+    ]
+
+
+def _removed_rows(target: Target | None) -> list[dict]:
+    """这个工作区里**已移除**（归档）的会话：id + 标题。
+
+    页面拿它摆一段"已移除（N）— 点「恢复」放回来"。单独一个字段而不是把
+    `sessions` 改成"连归档的一起给"：后者是本批明令不动的既有语义
+    （会话列表一直只列没归档的）。
+    """
+    if target is None:
+        return []
+    try:
+        items = kernel_sessions.list_sessions(target.root, include_archived=True)
+    except Exception:  # noqa: BLE001 - 会话表读坏了不该把状态接口弄挂
+        return []
+    return [
+        {"id": item.id, "title": item.title}
+        for item in items
+        if item.archived
     ]
 
 
@@ -607,12 +731,14 @@ def _handler_for(state: WebState):
                 self._json(status, body)
                 return
 
-            # 驱动这一台机器的两个端点：非回环绑定一律 403（设计 §3.7）。
+            # 驱动这一台机器的端点：非回环绑定一律 403（设计 §3.7）。
             #
             # 为什么判在**这里**、而且排在最前面：安全边界不能"看 payload 再决定"。
             # 排在后头的话，一个远程请求会因为"缺少 goal"拿到 400——那说明它已经
             # 进到业务分支里了，而"远程不许驱动"这句话就不再是这条壳的性质。
-            if self.path in ("/run", "/confirm") and state.readonly():
+            # 会话的移除 / 恢复也是"驱动"（它们改这台机器的持久状态），
+            # 所以走**同一张** `WRITE_PATHS` 表，不另开一条判据。
+            if self.path in WRITE_PATHS and state.readonly():
                 # 请求体先读掉再回话：不读的话这条连接上会留下残字节（keep-alive 时
                 # 被当成下一个请求），close 时还会触发 RST——见 `_drain_body`。
                 self._drain_body()
@@ -624,6 +750,15 @@ def _handler_for(state: WebState):
                         "readonly": True,
                     },
                 )
+                return
+
+            if self.path in ("/session/delete", "/session/restore"):
+                payload = self._body()
+                status, body = state.remove_session(
+                    str(payload.get("session") or ""),
+                    restore=self.path == "/session/restore",
+                )
+                self._json(status, body)
                 return
 
             if self.path == "/run":

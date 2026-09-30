@@ -167,6 +167,7 @@
 
 | 想知道 | 用什么 |
 |---|---|
+| 这台机器上服务现在什么状态 | `spool status`（一行一个服务：状态、地址、**怎么起 / 怎么停**；`--json` 给脚本）|
 | 这一步在干什么 | `spool run --events`（JSON 行事件）、或 `spool hub` / `spool serve` 的网页 |
 | 以前干过什么 | `spool session`；`--history N` 在开跑时显示 |
 | 现在的标定值 / 默认配置 | `spool limits` / `spool config`（都印值 + 来源）|

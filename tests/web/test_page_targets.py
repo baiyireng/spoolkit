@@ -106,7 +106,7 @@ def test_state帧会重画目标与历史() -> None:
 
     reset = _body("resetView")
     assert "stream.replaceChildren()" in reset, "换了目标还留着上一个目标的输出"
-    assert "historyDrawn = false" in reset, "不给新目标重画历史的门"
+    assert "drawn = 0" in reset, "不给新目标重画历史的门"
 
 
 # --- 三种状态各有分支 ---

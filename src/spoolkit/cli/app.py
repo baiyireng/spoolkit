@@ -15,6 +15,7 @@ from pathlib import Path
 from spoolkit import __version__
 from spoolkit import onboarding
 from spoolkit import settings
+from spoolkit import status as status_report
 from spoolkit import workspace
 from spoolkit.bench import DEFAULT_BENCH_ROOT
 from spoolkit.cli.commands.bench import bench
@@ -36,6 +37,8 @@ from spoolkit.cli.commands.bridge import approve_entry, bridge_command
 from spoolkit.cli.commands.init import init_command
 from spoolkit.cli.commands.extra import extra_command
 from spoolkit.cli.commands.service import service_command
+from spoolkit.cli.commands.status import status_command
+from spoolkit.cli.commands.help import help_command
 from spoolkit.cli.commands.mcp import mcp_command
 from spoolkit.cli.commands.mcp_servers import mcp_servers_command
 from spoolkit.cli.options import (
@@ -891,6 +894,78 @@ def _add_service_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=service_command)
 
 
+def _add_status_command(sub: argparse._SubParsersAction) -> None:
+    """一眼看清这台机器上的 spoolkit 服务，以及怎么起 / 怎么停。
+
+    为什么值得一条顶层命令：用户报的是"**缺乏全局命令能够观察/管理服务状态**"
+    ——模型在哪、网页壳起没起、通道凭据认到没有、密钥落在哪，原先散在
+    `spool service` / `spool bridge --check` / `spool env` 三个地方，而且没有
+    一条命令回答"现在到底有没有东西在跑"。这里给一张表，最后一列是怎么起停。
+
+    **只打本机地址、绝不联网**；探活超时短（默认 0.5 秒，探的是回环地址），
+    失败不冒栈，退出码：0 = 关键都在，1 = 有关键没起，2 = 用法错 / 配置读不出来。
+    """
+    parser = sub.add_parser(
+        "status",
+        help="一眼看清本机服务（模型 / 网页壳 / 通道 / MCP / 工作区 / 密钥落点）与怎么起停",
+        description=(
+            "把这台机器上 spoolkit 相关的东西摆成一张表：每行是服务、状态、地址或说明，"
+            "以及**怎么起 / 怎么停**。只打本机地址（127.0.0.1），不联网；"
+            "每条探测点都是短超时，失败给一句人话 + 非零退出码。"
+            "关键项（没起 → 退出码 1）：模型供应商没配 / 生效值是 fake、"
+            "生效 provider 是 llamacpp 时的本机模型、用户配置 [[service]] 里写了 command 的配方。"
+        ),
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="以 JSON 输出（字段名稳定，给脚本用）"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=status_report.DEFAULT_TIMEOUT,
+        help=(
+            "每个探测点的超时秒数（默认 0.5：探的都是回环地址，"
+            "正常监听时毫秒级就有回音；等模型加载完可以给大一点）"
+        ),
+    )
+    parser.add_argument(
+        "--web-port",
+        action="append",
+        type=int,
+        default=[],
+        metavar="端口",
+        help="除默认 8765 外，还要看哪个端口上的网页壳（可重复）",
+    )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="真连一次外挂 MCP（默认只列出登记了哪些；真连会拉起它们的子进程）",
+    )
+    parser.add_argument(
+        "--mcp-timeout",
+        type=float,
+        default=status_report.DEFAULT_MCP_TIMEOUT,
+        help="`--probe` 连外挂 MCP 的超时秒数（默认 5：要起子进程，0.5 秒不够）",
+    )
+    parser.set_defaults(func=status_command)
+
+
+def _add_help_command(sub: argparse._SubParsersAction) -> None:
+    """`spool help [子命令]`：等价于 `spool --help` / `spool <子命令> --help`。
+
+    用户敲过 `spool help`，当时得到的是一句 `invalid choice: 'help'`。这条命令
+    只是把它转发成一次带 `--help` 的重新解析（见 `commands/help.py`），
+    帮助文本与 `spool <子命令> --help` 逐字相同。
+    """
+    parser = sub.add_parser(
+        "help", help="看帮助（= `spool --help`）：spool help [子命令]"
+    )
+    parser.add_argument(
+        "topic", nargs="?", default="", metavar="子命令", help="留空看总帮助"
+    )
+    parser.set_defaults(func=help_command)
+
+
 def _add_init_command(sub: argparse._SubParsersAction) -> None:
     """把一个目录做成工作区（幂等）。"""
     parser = sub.add_parser(
@@ -1009,6 +1084,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_approve_command(sub)
     _add_extra_command(sub)
     _add_service_command(sub)
+    _add_status_command(sub)
+    _add_help_command(sub)
 
     args = parser.parse_args(argv)
     if args.command is None:

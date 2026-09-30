@@ -3,9 +3,9 @@
 做成 Python 字符串而不是外置文件：跑起来只有一个东西要分发，也避免
 打包时漏文件。代价是编辑时没有语法高亮，可以接受。
 
-这里刻意做得很薄——不持有状态、不做业务判断，只渲染事件、发四个请求
-（`/run`、`/confirm`、`/target`，以及轮 `/state` 取横幅），
-以及把快照里的待批准配对码、模型通断、当前目标和"别处还有谁在跑"画出来。
+这里刻意做得很薄——不持有状态、不做业务判断，只渲染事件、发请求
+（`/run`、`/confirm`、`/target`、`/session/delete|restore`，以及轮 `/state` 取横幅），
+以及把快照里的待批准配对码、模型通断、当前目标、"已移除的会话"和"别处还有谁在跑"画出来。
 配对和探活都不进模型上下文，也不能点「应用/拒绝」来批准或重连——那两个按钮是落盘确认。
 前端出错只能靠人看出来，所以它必须小到一眼能看完。
 
@@ -21,10 +21,24 @@
   读屏可用）：可见的行点一下 = 改控件 + 派发 `change`（`target()`），而 `change`
   的归宿仍然只有 `switchTarget` 一处——"切目标 = `POST /target`"没有第二条路径。
   切换失败（409/400）时 `drawTarget` 会把面板拨回当前目标，页面上不会停在
-  一个假装选中的行上。
+  一个假装选中的行上。**点下去先亮**（`chosen`）：回帧那一趟里服务端要探活模型，
+  模型不通时能有好几秒，而"点了没反应"最容易被当成壳坏了。
+- **只在数据真变了才重绘**：左栏按 spec 逐行复用（`syncGroup` + 签名），
+  两条下拉同样按签名跳过（`fillSelect`），历史只**追加**没画过的那一段
+  （`drawn`）。同一帧状态重复到达（事件流补帧、运行状态变化、3 秒轮询）时
+  一个节点都不新建——这条有行为用例（`tests/web/page_dom.js`）钉着。
 - **运行中把发送降级成禁用**：服务端只有 `/run` 与 `/confirm`，没有停止端点
   （`Runner.stop()` 没有对应接口）。所以这里**不摆一个点了就骗人的停止键**，
   而是在横幅上说明"等服务端收尾再发下一条"——本轮不做停止，也不新开端点。
+- **会话的「移除」是两次点击**：第一下只把那一行变成确认态，第二下才发请求；
+  服务端把它按**归档**处理（数据不动、可恢复），已移除的那几条在左栏单独一段里
+  点「恢复」就回来。
+- **失败要说人话**：`final` 失败与 `error` 事件都走 `showFailure`——把
+  "连模型那一步失败了"翻译成「哪一步 / 哪个地址 / 可能为什么 / 下一步敲什么」，
+  而不是甩一行原始异常。线索优先用服务端**只增**的 `error: {stage, url, kind}`，
+  没有就按错误文本自己认；页面上的错误文本一律先过 `redact` 遮蔽密钥。
+- **代码与正文分开画**：围栏（```）才是代码块（有底色、边框、内边距、自己滚，
+  复制键固定在右上角），行内 `` ` `` 是带底色的等宽小片，其余是正文。
 - **流式输出默认跟到底，人往上翻就不抢**：`stick` 在**改动 DOM 之前**读，
   翻上去读到一半不会被新事件弹回底部；那时右下角浮出「回到最新」。
 - **"正在思考"由既有的 `wait` / `start` / `final` 驱动**，不新造协议：
@@ -32,6 +46,9 @@
 
 主题：默认深色，跟随 `prefers-color-scheme`；颜色全在 `:root` 的那张变量表里，
 外加一条浅色的 `@media (prefers-color-scheme: light)` 覆盖，改一处就整体换掉。
+滚动条按平台各给一套（WebKit 的 `::-webkit-scrollbar` 与标准的
+`scrollbar-width` / `scrollbar-color`），只做美化不做隐藏——`display:none`
+会让鼠标用户没有抓手。
 """
 
 HTML = """<!DOCTYPE html>
@@ -57,7 +74,13 @@ HTML = """<!DOCTYPE html>
     --accent-soft:#1e3a5f;
     --bubble-user:#2f2f2f;
     --bubble-assistant:#0d0d0d;
-    --code-bg:#000;
+    --code-bg:#0b0b0b;
+    --code-line:#3a3a3a;
+    --code-bar:#1c1c1c;
+    --inline-bg:#2b2b2b;
+    --inline-line:#3d3d3d;
+    --scroll-thumb:#4a4a4a;
+    --scroll-thumb-hover:#6a6a6a;
     --ok:#6fb36f;
     --bad:#e07777;
     --warn-bg:#2a2410;
@@ -93,6 +116,12 @@ HTML = """<!DOCTYPE html>
       --bubble-user:#f0f0f0;
       --bubble-assistant:#fff;
       --code-bg:#f6f8fa;
+      --code-line:#d8dee4;
+      --code-bar:#eef1f4;
+      --inline-bg:#eef1f4;
+      --inline-line:#d8dee4;
+      --scroll-thumb:#c9cdd3;
+      --scroll-thumb-hover:#a8aeb6;
       --ok:#2f7a3f;
       --bad:#b42318;
       --warn-bg:#fff6d6;
@@ -113,6 +142,21 @@ HTML = """<!DOCTYPE html>
     }
   }
   * { box-sizing:border-box; }
+  /* ══ 滚动条：细、跟随主题，深色浅色各一档 ══
+     两套写法都要给：WebKit（Chrome / Edge / Safari）认 `::-webkit-scrollbar`，
+     Firefox 认标准的 `scrollbar-width` / `scrollbar-color`。**只做美化不做隐藏**：
+     thumb 平时低调、悬停才亮，"看不见"不等于"不能滚"——真的 `display:none`
+     会让鼠标用户没有任何抓手（触屏与键盘还能滚，但那是另一个故事）。 */
+  * { scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb {
+    background:var(--scroll-thumb); border-radius:8px;
+    border:2px solid transparent; background-clip:content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background:var(--scroll-thumb-hover);
+    border:2px solid transparent; background-clip:content-box; }
+  ::-webkit-scrollbar-corner { background:transparent; }
   html, body { height:100%; }
   body {
     margin:0; background:var(--bg); color:var(--text);
@@ -189,7 +233,20 @@ HTML = """<!DOCTYPE html>
   .empty-line { color:var(--text-faint); font-size:12.5px; padding:2px 8px 8px; }
   #sessions .grp-name { font-weight:400; padding-left:24px; font-size:13.5px; }
   .li { display:flex; align-items:center; gap:8px; }
+  .li .nm { flex:1 1 auto; }
   .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* 行上那个小按钮（移除 / 恢复）。一直看得见，不藏在 hover 里——触屏没有 hover。
+     第一次点只是**变成确认态**，第二次点才真的发请求（一点就删太容易误伤）。 */
+  .row-act { flex:0 0 auto; padding:1px 7px; border-radius:7px; cursor:pointer;
+             border:1px solid var(--line); background:transparent;
+             color:var(--text-faint); font-size:11.5px; }
+  .row-act:hover { color:var(--text); border-color:var(--text-dim); }
+  .row-act.armed { background:var(--danger-bg); color:var(--danger-text);
+                   border-color:var(--danger-line); }
+  .row-act.back { color:var(--accent); border-color:var(--accent-soft); }
+  /* 「已移除」那一行：只是摆在那里等「恢复」，点它是没有用的。 */
+  .li.gone { opacity:.6; cursor:default; }
+  .grp-sub { padding:6px 8px 2px; color:var(--text-faint); font-size:11.5px; }
   .dot { width:7px; height:7px; flex:0 0 7px; border-radius:50%;
          background:var(--ok); animation:pulse 1.6s ease-in-out infinite; }
   .lock { opacity:.5; }
@@ -203,11 +260,19 @@ HTML = """<!DOCTYPE html>
   #stream .col { max-width:760px; margin:0 auto;
                  display:flex; flex-direction:column; gap:12px; }
   /* 消息成块：用户在右、助手在左（宽屏留白更像文档流） */
-  .msg { display:flex; flex-direction:column; }
+  .msg { display:flex; flex-direction:column; min-width:0; }
   .msg.user { align-self:flex-end; max-width:84%; align-items:flex-end; }
   .msg.assistant { align-self:flex-start; max-width:100%; }
   .bubble { padding:9px 14px; border-radius:14px; white-space:pre-wrap;
-            overflow-wrap:anywhere; word-break:break-word; }
+            overflow-wrap:anywhere; word-break:break-word; min-width:0;
+            max-width:100%; }
+  /* 普通正文与代码必须看得出是两种东西：正文是一段话（保留换行），
+     行内代码是带底色的等宽小片——一眼就能分开。 */
+  .prose { white-space:pre-wrap; }
+  .prose + .prose { margin-top:9px; }
+  .inline-code { font:0.92em/1.5 var(--mono); background:var(--inline-bg);
+                 border:1px solid var(--inline-line); border-radius:5px;
+                 padding:1px 5px; overflow-wrap:anywhere; word-break:break-word; }
   .msg.user .bubble { background:var(--bubble-user); border-bottom-right-radius:4px; }
   .msg.assistant .bubble { background:var(--bubble-assistant);
                            border:1px solid var(--line-soft);
@@ -217,20 +282,32 @@ HTML = """<!DOCTYPE html>
               white-space:pre-wrap; overflow-wrap:anywhere; }
   .sys-line.bad { color:var(--bad); }
   .sys-line.ok { color:var(--ok); }
+  /* 连不上模型这类失败：一行原始异常谁也读不出下一步。做成一块带左边框的说明。 */
+  .sys-line.failure { margin-top:2px; padding:8px 12px; border-left:3px solid var(--danger-line);
+                      background:var(--danger-bg); color:var(--danger-text);
+                      border-radius:0 8px 8px 0; }
+  .sys-line.failure .fail-head { font-weight:600; }
+  .sys-line.failure .fail-line { margin-top:2px; }
+  .sys-line.failure .fail-raw { margin-top:6px; color:var(--text-dim);
+                                font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
 
-  /* 代码块：等宽 + 一键复制 */
-  .code { margin:10px 0 0; border:1px solid var(--line); border-radius:10px;
-          overflow:hidden; background:var(--code-bg); }
-  .code-bar { display:flex; align-items:center; justify-content:space-between;
-              gap:8px; padding:4px 8px 4px 12px; background:var(--panel-2);
-              color:var(--text-dim); font:12px/1.6 var(--mono);
-              border-bottom:1px solid var(--line); }
-  .copy-btn { padding:3px 10px; border-radius:7px; border:1px solid var(--line);
-              background:transparent; color:var(--text-dim); cursor:pointer;
-              font:12px/1.6 var(--sans); }
-  .copy-btn:hover { color:var(--text); }
-  .code pre { margin:0; padding:10px 12px; overflow-x:auto;
-              font:13px/1.55 var(--mono); color:var(--text); }
+  /* 代码块：**明显**的一块——底色、边框、圆角、内边距；自己横向/纵向滚，
+     不撑破气泡（`.bubble` 与 `.msg` 上的 min-width:0 是这条能成立的前提）。 */
+  .code { margin:10px 0 0; border:1px solid var(--code-line); border-radius:10px;
+          overflow:hidden; background:var(--code-bg); max-width:100%; }
+  .code-bar { display:flex; align-items:center; gap:8px; padding:5px 8px 5px 12px;
+              background:var(--code-bar); color:var(--text-dim);
+              font:12px/1.6 var(--mono); border-bottom:1px solid var(--code-line); }
+  /* 语言标签可以让位（长语言名不许把复制键挤走），复制键位置固定在最右。 */
+  .code-lang { flex:1 1 auto; min-width:0; overflow:hidden;
+               text-overflow:ellipsis; white-space:nowrap; }
+  .copy-btn { flex:0 0 auto; padding:3px 10px; border-radius:7px;
+              border:1px solid var(--line); background:transparent;
+              color:var(--text-dim); cursor:pointer; font:12px/1.6 var(--sans); }
+  .copy-btn:hover { color:var(--text); border-color:var(--text-dim); }
+  .code pre { margin:0; padding:11px 13px; max-height:360px; overflow:auto;
+              font:13px/1.55 var(--mono); color:var(--text);
+              scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
   .msg.user .code { border-color:var(--line); }
 
   /* 历史分隔：给人看的，不进模型上下文 */
@@ -406,11 +483,20 @@ let running = false, decided = false;
 let readonly = false;
 let session = 'cli';
 let pendings = [];
-let historyDrawn = false;
+// 当前这一屏已经画了几条历史（只往后补，已经画好的不重建）。
+let drawn = 0;
 let busy = false;
 // 页面上当前绑定的目标（"工作区|会话"）。它变了就说明这一屏整体属于上一个目标，
 // 得清掉重绑——只更新横幅是不够的。
 let bound = '';
+// 左栏上一次画出来的内容签名。**只有它变了才重绘**：同一帧状态重复到达
+// （事件流补帧、运行状态变化、3 秒轮询）时，一个节点都不该新建。
+let sidebarSig = '';
+// 人刚点下去、服务端还没回话的那一行（乐观选中）。点了就先亮它，
+// 不等回帧——回帧那一趟里带着探活，模型不通时要好几秒。
+let chosen = {root: '', session: ''};
+// 值了"确认移除"的那一行（二次确认的第一下）。
+let armed = '';
 // 最近一帧状态：切换失败时用它把选择栏拨回当前目标，别停在选中态骗人。
 let lastState = {};
 // 模型是不是正在生成。"正在思考"与发送键的可用性都由它推。
@@ -466,38 +552,76 @@ function makeSystem(text, cls) {
   return wrap;
 }
 
-// 助手的话里可能有代码块（``` 围起来）。用 textContent 而不是 innerHTML：
+// 助手的话里有三样东西要分开画：**正文**、**围栏代码块**（``` 围起来）、
+// **行内代码**（` 围起来）。全都用 textContent 装配而不是拼 innerHTML：
 // 模型输出是不可信输入，拼标签等于把页面交给它。
+//
+// 分成"奇数块 = 代码"是 `split('```')` 的性质：围栏一定成对，割出来就是
+// [正文, 代码, 正文, 代码, …]。以前每一块都被当成代码块画（连正文也是），
+// 于是整条消息看上去全是等宽的代码——这正是"代码与对话分不开"的根。
 function fillRich(bubble, content) {
   const text = String(content === null || content === undefined ? '' : content);
-  for (const block of text.split('```')) {
-    const raw = block.replace(/^\\r?\\n/, '').replace(/\\r?\\n$/, '');
-    if (raw === '') { continue; }
-    const lines = raw.split('\\n');
-    const first = lines[0].trim();
-    const fenced = lines.length !== 1 && first !== '' && first.indexOf(' ') === -1;
-    const code = document.createElement('div');
-    code.className = 'code';
-    const bar = document.createElement('div');
-    bar.className = 'code-bar';
-    const label = document.createElement('span');
-    label.textContent = fenced ? first : '代码';
-    const copy = document.createElement('button');
-    copy.type = 'button';
-    copy.className = 'copy-btn';
-    copy.textContent = '复制';
-    const payload = fenced ? lines.slice(1).join('\\n') : raw;
-    copy.onclick = function () { copyText(payload, copy); };
-    bar.appendChild(label);
-    bar.appendChild(copy);
-    const pre = document.createElement('pre');
-    const codeEl = document.createElement('code');
-    codeEl.textContent = payload;
-    pre.appendChild(codeEl);
-    code.appendChild(bar);
-    code.appendChild(pre);
-    bubble.appendChild(code);
+  const parts = text.split('```');
+  for (let index = 0; index < parts.length; index += 1) {
+    if (index % 2 === 1) {
+      bubble.appendChild(codeBlock(parts[index]));
+      continue;
+    }
+    appendProse(bubble, parts[index]);
   }
+}
+
+// 正文：按 ` 再切成"普通字"与"行内代码"，一句一段（换行保留）。
+function appendProse(bubble, raw) {
+  const text = raw.replace(/^\\r?\\n/, '').replace(/\\r?\\n$/, '');
+  if (text === '') { return; }
+  const para = document.createElement('div');
+  para.className = 'prose';
+  const bits = text.split('`');
+  for (let index = 0; index < bits.length; index += 1) {
+    const piece = bits[index];
+    if (piece === '') { continue; }
+    if (index % 2 === 1) {
+      const inline = document.createElement('code');
+      inline.className = 'inline-code';
+      inline.textContent = piece;
+      para.appendChild(inline);
+      continue;
+    }
+    para.appendChild(document.createTextNode(piece));
+  }
+  if (para.childNodes.length) { bubble.appendChild(para); }
+}
+
+// 围栏代码块：自己滚（横向 + 纵向），复制键固定在右上角，语言标签可选。
+function codeBlock(raw) {
+  const body = raw.replace(/^\\r?\\n/, '').replace(/\\r?\\n$/, '');
+  const lines = body.split('\\n');
+  const first = lines.length > 1 ? lines[0].trim() : '';
+  // 第一行是个"一个词"（没空格、不太长）就当语言名：```python / ```powershell。
+  const fenced = first !== '' && first.indexOf(' ') === -1 && first.length <= 24;
+  const payload = fenced ? lines.slice(1).join('\\n') : body;
+  const code = document.createElement('div');
+  code.className = 'code';
+  const bar = document.createElement('div');
+  bar.className = 'code-bar';
+  const label = document.createElement('span');
+  label.className = 'code-lang';
+  label.textContent = fenced ? first : '代码';
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'copy-btn';
+  copy.textContent = '复制';
+  copy.onclick = function () { copyText(payload, copy); };
+  bar.appendChild(label);
+  bar.appendChild(copy);
+  const pre = document.createElement('pre');
+  const codeEl = document.createElement('code');
+  codeEl.textContent = payload;
+  pre.appendChild(codeEl);
+  code.appendChild(bar);
+  code.appendChild(pre);
+  return code;
 }
 
 // 复制走 navigator.clipboard；失败就选中那段代码让人自己按 Ctrl+C——
@@ -514,21 +638,163 @@ function copyText(text, button) {
   done(false);
 }
 
-function drawHistory(messages) {
-  if (historyDrawn || !messages || !messages.length) { return; }
+/* ── 失败要说人话（尤其"连不上模型"这一种） ──
+   一行原始异常（`LlamaCppError: …`、`ConnectTimeout`、一截回溯）谁也读不出
+   下一步该干什么。这里只做**展示层**：把错误文本分类成人能读的四件事——
+   哪一步失败、地址是哪个、可能为什么、下一步敲什么命令。
+
+   线索从哪来：① 服务端在 final 事件上**只增**的那一条结构化字段
+   `error: {stage, url, kind}`（别的一概没动）；② 没有它时按错误文本里的词
+   自己认（老服务端、别的失败路径）。地址还能退回 `/state` 的探活结果。
+
+   页面上的东西一律先过 `redact`：密钥、Bearer 串、KEY=VALUE 不许出现在页面上。 */
+const FAIL_KINDS = [
+  {kind: 'connect', marks: ['无法连接 llama-server', 'ConnectError', 'ConnectTimeout',
+    'Connection refused', '连接被拒绝', '连接失败']},
+  {kind: 'slow', marks: ['秒内没返回', 'ReadTimeout', 'Read timed out', 'timed out',
+    'timeout', '超时']},
+  {kind: 'server', marks: ['服务返回', 'tokenize 返回', 'LlamaCppError', 'HTTP 5']},
+];
+
+// 页面上的兜底遮蔽：密钥那几类串一律换成 ***（不碰别的字，原文照旧可读）。
+function redact(text) {
+  return String(text === null || text === undefined ? '' : text)
+    .replace(/(sk-[A-Za-z0-9_-]{4})[A-Za-z0-9_-]+/g, '$1***')
+    .replace(/(Bearer\\s+)[A-Za-z0-9._~+/-]{4,}/gi, '$1***')
+    .replace(/((?:api[-_]?key|token|secret|password|passwd|authorization)\\s*[=:]\\s*)\\S+/gi,
+      '$1***');
+}
+
+// 这条错误是"哪一步"坏了。认不出来就是空串（不当成模型故障，别乱指路）。
+function failureKind(text) {
+  const line = String(text || '');
+  for (const item of FAIL_KINDS) {
+    for (const mark of item.marks) {
+      if (line.indexOf(mark) >= 0) { return item.kind; }
+    }
+  }
+  return '';
+}
+
+function failureCause(kind) {
+  if (kind === 'connect') { return '模型服务没起 / 端口不对 / 代理挡了'; }
+  if (kind === 'slow') { return '这次要生成的内容太长 / 模型太慢 / 服务卡住'; }
+  if (kind === 'server') { return '服务端参数不对 / 上下文超限 / 进程刚重启'; }
+  return '';
+}
+
+function failureNext(kind) {
+  if (kind === 'connect') {
+    return '`spool service list` 看本机模型配方在不在跑；'
+      + '`spool config` 看 provider 与 base_url 是从哪来的；把它起好再发一次';
+  }
+  if (kind === 'slow') {
+    return '把活拆小再发；`spool service list` 看模型进程还在不在';
+  }
+  if (kind === 'server') {
+    return '看下面那行原始信息；`spool service list` 看服务状态';
+  }
+  return '';
+}
+
+// 模型地址：以这一次运行的配置为准（服务端探活接口给的），没有就说"配置里那个"。
+function modelAddress(extra) {
+  const info = extra || {};
+  if (info.url) { return String(info.url); }
+  const model = ((lastState || {}).health || {}).model || {};
+  return String(model.target || '');
+}
+
+// 从一堆行里挑出**最有信息量**的那一行：报错那行通常带 Error / 连接 / 超时这些词。
+function usefulLine(text) {
+  const lines = String(text || '').split('\\n')
+    .map(function (one) { return one.trim(); })
+    .filter(function (one) { return one !== ''; });
+  if (!lines.length) { return ''; }
+  for (const one of lines) {
+    if (/Error|错误|连不上|连接|超时|timed out|拒绝|返回/.test(one)) { return one; }
+  }
+  return lines[lines.length - 1];
+}
+
+// 认出来就返回 {head, lines, raw}；认不出来返回 null（调用方走原来的画法）。
+function explainFailure(text, extra) {
+  const info = extra || {};
+  const kind = info.kind || failureKind(text);
+  if (kind === '') { return null; }
+  const where = modelAddress(info);
+  const stage = kind === 'connect' ? '连接模型'
+    : kind === 'slow' ? '等模型生成' : '模型服务回话';
+  const lines = [
+    '模型地址：' + (where === '' ? '（按配置里的地址）' : where),
+    '可能原因：' + failureCause(kind),
+    '下一步：' + failureNext(kind),
+  ];
+  const raw = redact(usefulLine(text)).slice(0, 300);
+  return {
+    head: '失败环节：' + stage + '（这一步没过去，后面的活一件都没做）',
+    lines: lines,
+    raw: raw,
+  };
+}
+
+// 对话流里的那一块。认不出来的错误仍按**原来的画法**画（不假装懂）：
+// `head` 就是原来那个词——`final` 是「失败：」、`error` 事件是「错误：」。
+function showFailure(head, text, extra) {
+  const parts = explainFailure(text, extra);
+  if (parts === null) { add(head + redact(text), 'bad'); return; }
   const stick = atBottom();
-  historyDrawn = true;
-  const sep = document.createElement('div');
-  sep.className = 'history-sep';
-  sep.textContent = '之前的往来（给人看的，不进模型上下文）';
-  appendNode(sep);
-  for (const item of messages) {
+  const wrap = makeMsg('system');
+  const box = document.createElement('div');
+  box.className = 'sys-line failure';
+  const title = document.createElement('div');
+  title.className = 'fail-head';
+  title.textContent = parts.head;
+  box.appendChild(title);
+  for (const item of parts.lines) {
+    const line = document.createElement('div');
+    line.className = 'fail-line';
+    line.textContent = item;
+    box.appendChild(line);
+  }
+  if (parts.raw) {
+    const raw = document.createElement('div');
+    raw.className = 'fail-raw';
+    raw.textContent = '原始信息：' + parts.raw;
+    box.appendChild(raw);
+  }
+  wrap.appendChild(box);
+  if (stick) { scrollDown(); }
+  updateToBottom();
+}
+
+// 历史**增量追加**：同一个目标上，/state 的快照可能比上一帧多出几条
+// （一次运行跑完之后库里的往来就长了）。以前是"画过就不再画"，于是多出来的
+// 那几条永远不出现；现在只补**还没画过**的那一段，已经画好的一条都不重建。
+function drawHistory(messages) {
+  const items = messages || [];
+  if (drawn > items.length) {
+    // 列表变短了（换了库、清过历史）：只能重来一遍。
+    stream.replaceChildren();
+    drawn = 0;
+  }
+  if (!items.length || drawn === items.length) { return; }
+  const stick = atBottom();
+  if (drawn === 0) {
+    const sep = document.createElement('div');
+    sep.className = 'history-sep';
+    sep.textContent = '之前的往来（给人看的，不进模型上下文）';
+    appendNode(sep);
+  }
+  for (let index = drawn; index < items.length; index += 1) {
+    const item = items[index];
     const bubble = makeBubble(
       item.role === 'user' ? 'user' : 'assistant',
       ''
     );
     fillRich(bubble, item.content);
   }
+  drawn = items.length;
   if (stick) { scrollDown(); }
 }
 
@@ -573,6 +839,11 @@ function add(text, cls) {
    「我在哪个工作区」必须一眼看得出：批次一踩过绑错工作区、把 __init__.py 写空的坑，
    而机器级壳服务的是整台机器（设计 §3.3）。 */
 function fillSelect(box, rows, value) {
+  // 备选与当前值都没变就别动它：`replaceChildren` 一次就是几十个节点，
+  // 而每一帧状态都会走到这里（同一帧重复到达时纯属白干）。
+  const sign = JSON.stringify([rows, value]);
+  if (box.dataset.fill === sign) { box.value = value; return; }
+  box.dataset.fill = sign;
   box.replaceChildren();
   for (const row of rows) {
     const item = document.createElement('option');
@@ -606,13 +877,42 @@ function pick(box, value) {
 function target(workspace, name) {
   if (workspace !== '') { pick(wsBox, workspace); }
   if (name !== '') { pick(sessBox, name); }
+  // 两条都派发。**原先只派发会话那一条**，于是点工作区那一列什么都不会发生
+  // （ws 那条 change 监听永远收不到事件），而页面看起来"点了没反应"。
+  // 两条监听各自有一道"值没变就不发请求"的守卫，所以多派发一次不会多发一次请求。
+  wsBox.dispatchEvent(new Event('change'));
   sessBox.dispatchEvent(new Event('change'));
 }
 
+// ── 左栏的"行复用" ──
+// 每一行先描述成一份 spec（文字 / 高亮 / 在不在跑 / 那个小按钮），
+// **只有 sig 变了才建节点**：同一帧状态重复到达时，一个节点都不新建、也不替换。
+function lineSpec(sig, make) { return {sig: sig, make: make}; }
+
+function actSpec(label, kind, value, onClick) {
+  return lineSpec(JSON.stringify(['act', label, kind, value]), function () {
+    return rowAction(label, kind, value, onClick);
+  });
+}
+
+function rowSpec(label, title, on, onClick, key, kind, act, running) {
+  // 签名里**不含**"亮不亮"：切一行的高亮只改类，不重建节点（`markChosen` 收尾）。
+  return lineSpec(
+    JSON.stringify(['row', label, title, key || '', kind || '', running ? 1 : 0,
+      act ? act.sig : '']),
+    function () { return row(label, title, on, onClick, key, kind, act, running); }
+  );
+}
+
 // 左栏的一行。点它就是切目标（经 `target()` 落到原生控件上）。
-function row(label, title, on, onClick) {
+// `key`/`kind` 是给"乐观选中"用的：点下去立刻按它们把这一行点亮，不等回帧。
+function row(label, title, on, onClick, key, kind, act, running) {
   const line = document.createElement('div');
   line.className = 'li grp-name';
+  line.dataset.key = key || '';
+  line.dataset.kind = kind || '';
+  // 「已移除」那一行不是可点的目标：它只是摆在那里等「恢复」。
+  if (kind === 'gone') { line.classList.add('gone'); }
   if (on) { line.classList.add('on'); }
   const mark = document.createElement('span');
   mark.className = 'caret';
@@ -628,8 +928,58 @@ function row(label, title, on, onClick) {
     src.textContent = title;
     line.appendChild(src);
   }
+  markRunning(line, Boolean(running));
+  if (act) { line.appendChild(act.make()); }
   line.onclick = onClick;
   return line;
+}
+
+// 行上那个小按钮（移除 / 恢复）。点第一下只是**变成确认态**，第二下才发请求：
+// 一点就删太容易误伤（这一行和"切到这条会话"只差几个像素）。
+function rowAction(label, kind, value, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'row-act' + (kind === 'restore' ? ' back' : '');
+  button.dataset.act = kind;
+  button.dataset.value = value;
+  button.textContent = label;
+  button.onclick = function (event) {
+    event.stopPropagation();   // 别把"点按钮"当成"切到这一条"
+    onClick();
+  };
+  return button;
+}
+
+// 确认态（`armed`）就地改文字与类，不重建行——重建会把整段列表推倒重来。
+function markArmed() {
+  for (const button of document.querySelectorAll('.row-act')) {
+    if (button.dataset.act !== 'remove') { continue; }
+    const ready = button.dataset.value === armed;
+    button.textContent = ready ? '确认移除' : '移除';
+    button.classList.toggle('armed', ready);
+  }
+}
+
+// 一段列表（段名 + 若干行）按 spec 同步：同 sig 的那一行原样留着。
+function syncGroup(box, specs) {
+  for (let index = 0; index < specs.length; index += 1) {
+    const spec = specs[index];
+    const have = box.children[index];
+    if (have && have._sig === spec.sig) { continue; }
+    const node = spec.make();
+    node._sig = spec.sig;
+    if (have) { box.replaceChild(node, have); } else { box.appendChild(node); }
+  }
+  while (box.children.length > specs.length) { box.removeChild(box.lastChild); }
+}
+
+function headSpec(text) {
+  return lineSpec('head|' + text, function () {
+    const head = document.createElement('div');
+    head.className = 'grp-name dim';
+    head.textContent = text;
+    return head;
+  });
 }
 
 // 「正在跑」的标记。`state.running_targets` 是**唯一**能说出这件事的地方
@@ -651,57 +1001,123 @@ function markRunning(line, on) {
   line.appendChild(dot);
 }
 
-function renderSidebar(wrows, srows, key, locked) {
+// 页面上"选中的那一行"：优先人刚点的那个（乐观），否则是服务端确认的目标。
+function selectedKeys() {
+  if (chosen.root || chosen.session) { return chosen; }
+  const t = lastState.target || {};
+  return {root: t.root || '', session: t.session || ''};
+}
+
+// 只改类的"点亮/熄灭"，不碰结构：点一行的那一下必须**立刻**看得见选中态
+// （回帧要等服务端，模型不通时那一趟能有好几秒，人只会以为壳卡死了）。
+function markChosen() {
+  const want = selectedKeys();
+  for (const box of [workspaceList, sessionList]) {
+    for (const line of box.children) {
+      if (!line.dataset || !line.dataset.kind) { continue; }
+      const kind = line.dataset.kind;
+      // 「已移除」那几行不是目标（点了也没用），不参与点亮。
+      const mine = kind === 'ws'
+        ? line.dataset.key === want.root
+        : (kind === 'sess' && line.dataset.key === want.session);
+      line.classList.toggle('on', mine);
+      const caret = line.querySelector('.caret');
+      if (caret) { caret.textContent = mine ? '▸' : '·'; }
+    }
+  }
+}
+
+function renderSidebar(wrows, srows, sremoved, key, locked) {
   const live = runningRows(lastState);
   const here = (lastState.target || {}).root || '';
-  workspaceList.replaceChildren();
-  sessionList.replaceChildren();
-  const head = document.createElement('div');
-  head.className = 'grp-name dim';
-  head.textContent = '工作区';
-  workspaceList.appendChild(head);
+  // 同键跳过：这一份签名没变就**一个节点都不动**。签名里带上"谁在跑"与当前目标，
+  // 所以该重画的时候（数据真变了）一定会重画。
+  const sig = JSON.stringify([wrows, srows, sremoved, key, locked, here, session, live]);
+  if (sig === sidebarSig) { return; }
+  sidebarSig = sig;
+
+  const wsSpecs = [headSpec('工作区')];
   for (const one of wrows) {
     if (one.value === '') { continue; }
-    const line = row(
+    const on = (one.value + '|' + session) === key;
+    wsSpecs.push(rowSpec(
       one.name + ((one.ready === false) ? '（没 init）' : ''),
       '',
-      (one.value + '|' + session) === key,
+      on,
       (function (value) {
         return function () { target(value, ''); };
-      })(one.value)
-    );
-    markRunning(line, Boolean(live[one.value + '|' + session]));
-    workspaceList.appendChild(line);
+      })(one.value),
+      one.value,
+      'ws',
+      null,
+      Boolean(live[one.value + '|' + session])
+    ));
   }
-  if (!workspaceList.querySelector('.li')) {
-    const none = document.createElement('div');
-    none.className = 'empty-line';
-    none.textContent = '（登记表是空的：先在工作区目录里敲 spool init）';
-    workspaceList.appendChild(none);
+  if (wsSpecs.length === 1) {
+    wsSpecs.push(lineSpec('empty-line', function () {
+      const none = document.createElement('div');
+      none.className = 'empty-line';
+      none.textContent = '（登记表是空的：先在工作区目录里敲 spool init）';
+      return none;
+    }));
   }
+  syncGroup(workspaceList, wsSpecs);
   // 钉住（--root）时两段列表都只读：`LOCK` 走 CSS 的 pointer-events，
   // 行本身还是画出来（人要看得到"这里有哪几条"），只是点不动。
   workspaceList.classList.toggle(LOCK, locked);
-  sessionList.classList.toggle(LOCK, locked);
-  const shead = document.createElement('div');
-  shead.className = 'grp-name dim';
-  shead.textContent = '会话';
-  sessionList.appendChild(shead);
+
+  const sessSpecs = [headSpec('会话')];
   for (const one of srows) {
     if (one.value === '') { continue; }
-    const line = row(
+    const on = one.value === session;
+    const removable = !locked && !readonly;
+    sessSpecs.push(rowSpec(
       one.text,
       '',
-      one.value === session,
+      on,
       (function (value) {
         return function () { target('', value); };
-      })(one.value)
-    );
-    // 「正在跑」的键是 (工作区, 会话)：别的会话在跑也要标出来
-    // （切走不杀任务，见设计 §3.4）。
-    markRunning(line, Boolean(live[keyFor(here, one.value)]));
-    sessionList.appendChild(line);
+      })(one.value),
+      one.value,
+      'sess',
+      removable
+        ? actSpec('移除', 'remove', one.value, (function (value) {
+            return function () { requestRemove(value); };
+          })(one.value))
+        : null,
+      // 「正在跑」的键是 (工作区, 会话)：别的会话在跑也要标出来
+      // （切走不杀任务，见设计 §3.4）。
+      Boolean(live[keyFor(here, one.value)])
+    ));
   }
+  if (sremoved.length) {
+    sessSpecs.push(lineSpec('sub|' + sremoved.map(function (row) { return row.id; }).join(','),
+      function () {
+        const sub = document.createElement('div');
+        sub.className = 'grp-sub';
+        sub.textContent = '已移除（' + sremoved.length + '）— 点「恢复」放回来';
+        return sub;
+      }));
+    for (const one of sremoved) {
+      sessSpecs.push(rowSpec(
+        one.id + (one.title ? '  —  ' + one.title : ''),
+        '',
+        false,
+        null,
+        one.id,
+        'gone',
+        readonly ? null : actSpec('恢复', 'restore', one.id, (function (value) {
+          return function () { requestRestore(value); };
+        })(one.id)),
+        false
+      ));
+    }
+  }
+  syncGroup(sessionList, sessSpecs);
+  sessionList.classList.toggle(LOCK, locked);
+  markArmed();
+  // 收尾点亮选中态：复用的那几行（签名没变、节点没重建）也要跟着高亮走。
+  markChosen();
 }
 
 function drawTarget(state) {
@@ -762,6 +1178,10 @@ function drawTarget(state) {
     }),
     sessions.map(function (s) {
       return {value: s.id, text: s.title || s.id};
+    }),
+    // 已移除（归档）的那几条单独一段：删了还能放回来，才算"移除"而不是"毁掉"。
+    (state.sessions_removed || []).map(function (s) {
+      return {id: s.id, title: s.title || ''};
     }),
     key,
     locked
@@ -825,10 +1245,11 @@ function showElsewhere(state) {
   }
 }
 
-// 重绑这一屏：目标换了，旧的输出、待确认面板、历史标记都属于**上一个**目标。
+// 重绑这一屏：目标换了，旧的输出、待确认面板、历史进度都属于**上一个**目标。
 function resetView() {
   stream.replaceChildren();
-  historyDrawn = false;
+  drawn = 0;
+  armed = '';
   clearPending();
   actions.style.display = 'none';
   updateToBottom();
@@ -911,6 +1332,13 @@ function applyState(state) {
   // 目标先画：它变了就**整屏重绑**（服务端在目标变了时会补一帧 state，
   // 那一帧也要走这条重绑，不能只更新横幅）。
   if (drawTarget(state)) { resetView(); }
+  // 高亮跟着服务端确认的目标走（乐观那一下到这里就交棒了）。**只有当它兑现了**
+  // （回帧就是它）或压根没有时才清：人手快、连点了两行时，第一行的回帧不该
+  // 把第二行刚点亮的选择抹掉。
+  const settled = (chosen.root === '' && chosen.session === '')
+    || keyFor(chosen.root, chosen.session) === keyFor(target.root, target.session);
+  if (settled) { chosen = {root: '', session: ''}; }
+  markChosen();
   const usage = state.usage || {};
   setMeta(usage.steps);
   setRunning(running);
@@ -960,15 +1388,19 @@ function showHealth(health) {
   const bits = [];
   const model = (health && health.model) || {};
   if (model.ok === false) {
+    // 横幅上也**说人话**：光摆一句 `timed out`，人只会以为壳坏了。
+    // 地址 + 可能原因 + 下一步，与对话流里那一块同一套说法（`failure*`）。
     const where = model.target ? '（' + model.target + '）' : '';
-    bits.push('模型连不上' + where + '：' + (model.detail || '连不上'));
+    const kind = failureKind(model.detail) || 'connect';
+    bits.push('模型连不上' + where + '：可能原因：' + failureCause(kind)
+      + '；下一步：' + failureNext(kind));
   }
   const services = (health && health.services) || [];
   for (const item of services) {
     if (item.ok === false) {
       const where = item.target ? '（' + item.target + '）' : '';
       bits.push((item.name || '外接服务') + '连不上' + where
-        + '：' + (item.detail || '连不上'));
+        + '：' + redact(item.detail || '连不上'));
     }
   }
   const bridge = (health && health.bridge) || {};
@@ -1111,15 +1543,20 @@ function onEvent(event) {
   if (data.type === 'final') {
     setThinking(false);
     setRunning(false);
-    add(data.ok ? '完成：' + data.text : '失败：' + data.text,
-        data.ok ? 'ok' : 'bad');
+    // 失败的结局**不走**"一行原始异常"：那正是"模型连不上"时人看到的东西，
+    // 而它没说清下一步。认得出是模型那一步坏的就画成人话（showFailure）。
+    if (data.ok) {
+      add('完成：' + data.text, 'ok');
+    } else {
+      showFailure('失败：', data.text, data.error);
+    }
     actions.style.display = 'none';
     clearPending();
     return;
   }
   if (data.type === 'error') {
     setThinking(false);
-    add('错误：' + data.message, 'bad');
+    showFailure('错误：', data.message, data.error);
   }
 }
 
@@ -1151,15 +1588,66 @@ async function post(url, payload) {
 
 // 切换当前目标：`POST /target`。成功后**立刻按返回体重绑**（它就是新的 /state），
 // 不等 SSE 补帧——补帧还会来，但页面不该有那一秒的旧内容。
+//
+// 点了就先亮选中态：这一趟里服务端会顺带探活模型，模型不通时能有好几秒，
+// 而"点了没反应"是最容易让人以为壳坏了的形状。
 async function switchTarget(payload) {
   closeDrawer();
+  chosen = wantedKey(payload);
+  markChosen();
   const next = await post('/target', payload);
   if (next === null) {
-    // 没切成（409/400）：把选择栏拨回当前目标，别停在选中态骗人。
+    // 没切成（409/400）：把选中态拨回当前目标，别停在选中态骗人。
+    chosen = {root: '', session: ''};
     drawTarget(lastState);
+    markChosen();
     return;
   }
   applyState(next);
+}
+
+// 这一次点的是谁（用在乐观选中上）。工作区那一列给的是**根路径**（下拉的值就是它）。
+function wantedKey(payload) {
+  const t = lastState.target || {};
+  if (payload.workspace) { return {root: payload.workspace, session: payload.session || session}; }
+  if (payload.session) { return {root: t.root || '', session: payload.session}; }
+  return {root: '', session: ''};
+}
+
+// 「移除」这一段会话：**两次点击**才算数（第一次只是把这一行变成确认态）。
+// 服务端把它按归档处理（数据不动、可恢复），正在跑的那一条会被拒。
+function requestRemove(value) {
+  if (readonly) { return; }
+  if (armed !== value) {
+    armed = value;
+    markArmed();
+    return;
+  }
+  armed = '';
+  markArmed();
+  act('/session/delete', {session: value}, '已移除会话 ' + value + '（归档：数据没动）');
+}
+
+// 「恢复」：把归档过的那一条放回列表（同一个端点，另一个方向）。
+function requestRestore(value) {
+  if (readonly) { return; }
+  act('/session/restore', {session: value}, '已恢复会话 ' + value);
+}
+
+// 会话这一类动作的公共落地：成功就按返回体重绑（它就是新的 /state）。
+async function act(url, payload, note) {
+  const next = await post(url, payload);
+  if (next === null) {
+    // 被拒（409 正在跑 / 只读 403 / 400 查无此会话）：把确认态收回去，
+    // 理由已经由 post() 摆进对话区了。
+    armed = '';
+    drawTarget(lastState);
+    markArmed();
+    return;
+  }
+  armed = '';
+  applyState(next);
+  add(note, 'dim');
 }
 
 // 「新建会话」：会话是**按工作区**存的，服务端没有"建会话"端点——会话在第一次

@@ -82,6 +82,41 @@ def health_snapshot(
     return payload
 
 
+#: `NOISE_LINES` 里那几行怎么归到"模型那一步坏了"的哪一类。
+#:
+#: 只用来**分类**（页面据此说人话），不做任何业务判断——循环该不该继续、
+#: 要不要重试，都由内核自己的代码决定，跟这里的词一个关系都没有。
+MODEL_FAILURE_MARKS = (
+    ("connect", ("无法连接 llama-server", "ConnectError", "ConnectTimeout",
+                 "Connection refused")),
+    ("slow", ("秒内没返回", "ReadTimeout", "Read timed out")),
+    ("server", ("服务返回", "tokenize 返回")),
+)
+
+
+def model_failure(extra_args: Sequence[str], noise: Sequence[str]) -> dict | None:
+    """认出"连模型那一步失败了"，给出**结构化**的一条线索；认不出来给 None。
+
+    为什么值得单独一条并返回字典：子进程是带着一段回溯死的，`final.text` 里只有
+    "进程退出，退出码 1：<几行回溯>"——页面照原样显示出来就是一行原始异常，
+    而人需要的是「哪一步 / 哪个地址 / 可能为什么 / 下一步敲什么」。
+    这里**只增**：`final` 的既有字段与文字一个字都没动，只是多了一个 `error` 键
+    （`{stage, url, kind}`），展示层（`page.py` 的 `explainFailure`）拿它说人话。
+
+    `url` 就是这次运行生效的 `--base-url`（没有就给空串，页面退回探活给的地址）。
+    地址里可能带查询串，页面显示前还会过一遍遮蔽（`redact`）。
+    """
+    text = "\n".join(str(line) for line in noise)
+    for kind, marks in MODEL_FAILURE_MARKS:
+        if any(mark in text for mark in marks):
+            return {
+                "stage": "model",
+                "kind": kind,
+                "url": health_mod.flag_from_extra(list(extra_args), "base-url"),
+            }
+    return None
+
+
 class Runner:
     """管理一次 agent 子进程的运行。"""
 
@@ -378,7 +413,12 @@ class Runner:
                 # 补的这条要同时进快照，而且要和 finished 一起写：分两步写的话
                 # 中间有个瞬间是「已完成、却没有结局」，那一刻恰好连上来的页面
                 # 什么都显示不出来——既像跑完了又像没跑，比报错还难查。
-                fallback = Event(FINAL, {"ok": False, "text": self._death_note(code)})
+                data = {"ok": False, "text": self._death_note(code)}
+                clue = model_failure(self.extra_args, self._noise)
+                if clue is not None:
+                    # 只**增**一个键：既有字段与文字都没动。
+                    data["error"] = clue
+                fallback = Event(FINAL, data)
                 self._final = dict(fallback.data)
         if fallback is not None:
             self._broadcast(fallback)
