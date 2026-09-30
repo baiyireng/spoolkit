@@ -4,7 +4,7 @@
 打包时漏文件。代价是编辑时没有语法高亮，可以接受。
 
 这里刻意做得很薄——不持有状态、不做业务判断，只渲染事件、发请求
-（`/run`、`/confirm`、`/target`、`/session/delete|restore`、`/session/new`，
+（`/run`、`/run/stop`、`/confirm`、`/target`、`/session/delete|restore`、`/session/new`，
 以及轮 `/state` 补通知），
 以及把待批准的配对码、模型通断、"别处还有谁在跑"和当前目标画出来。
 配对和探活都不进模型上下文，也不能点「应用/拒绝」来批准或重连——那两个按钮是落盘确认。
@@ -30,9 +30,19 @@
   两条下拉同样按签名跳过（`fillSelect`），历史只**追加**没画过的那一段
   （`drawn`）。同一帧状态重复到达（事件流补帧、运行状态变化、3 秒轮询）时
   一个节点都不新建——这条有行为用例（`tests/web/page_dom.js`）钉着。
-- **运行中把发送降级成禁用**：服务端只有 `/run` 与 `/confirm`，没有停止端点
-  （`Runner.stop()` 没有对应接口）。所以这里**不摆一个点了就骗人的停止键**，
-  而是在状态区里说明"等服务端收尾再发下一条"——本轮不做停止，也不新开端点。
+- **运行中那一枚键变成「停止」**：服务端有 `POST /run/stop`（复用 `Runner.stop()` 的
+  温和停止语义：先 terminate 请它自己收尾、到点才 kill），所以这里**不再**摆一个
+  点了就骗人的灰键。点了立刻进"正在停止…"（禁用一下防连点），真正回到"发送"由
+  `final` 事件或下一拍 `/state`（`running` 落回假）说了算——那一拍是兜底：`final`
+  因为断线漏掉时，那一枚键不会永远卡在"正在停止…"。手动停止**不当失败画**：
+  `/state` 的 `stopped`（只增字段）说得出这一轮是被停掉的。
+- **回复长在同一张消息卡片里，思考过程可折叠、事后还能回看**：一轮开始时先摆一张
+  助手卡片（占位"正在思考"），`final` 一到就地换成真正的回复；`/state` 稍后把同一条
+  从记忆库里再送一次时**认领**同一张卡片（不新建节点、不重复一条）。步骤 / 工具调用 /
+  失败详情进这张卡片上的「思考过程」，**默认收起**（收起时一个节点都不建）。
+  刷新页面、切走再切回之后，页面按 `/state` 里每条消息带着的 `trace`（服务端**只增**
+  的字段，数据来自事件流与记忆库，没有第二份数据库）重新画出来；失败那一轮还会把
+  "哪一步 / 哪个地址 / 可能原因 / 下一步敲什么"直接画在卡片里。
 - **会话的「移除」是两次点击**：第一下只把那一行变成确认态，第二下才发请求；
   服务端把它按**归档**处理（数据不动、可恢复），已移除的那几条在左栏单独一段里
   点「恢复」就回来。
@@ -44,13 +54,17 @@
   几秒后自己消失，**错误那一档不会**——人没看到就没了，比不提示更糟。
   同一个 key 的同一份内容只**更新**不重建（轮询每 3 秒一拍，重建就是每 3 秒抖一次），
   人手动关掉之后同一份内容不再弹回来（内容真变了才回）。
-- **顶部没有常驻提示**：只读（非回环）、`--root` 钉住、模型探活、待配对、"别处还有一条
-  在跑"以前都挤在页面顶部那条横幅带里——它一出现就把对话流往下推，而"没事"的时候
-  白占一行。现在这些**模式与状态**收进输入条下面那一**行**（`.st`，本来写着
-  Enter 发送 的就是那一行）：常态下只剩一枚小圆点，异常 / 只读 / 钉住 / 待配对 /
-  别处在跑时才多出一枚可点开的徽标，点开是详情（状态 / 地址 / `probed_at` 与 `age_s`
-  / 可能原因 / 下一步敲哪条**真存在**的命令）。**异常仍然看得见**：那时徽标是红的
-  并且带字（"模型不通"），不是一枚沉默的绿点——静默的陈旧值比报错更糟。
+- **常驻提示在右上角，而且不在文档流里**：只读（非回环）、`--root` 钉住、模型探活、
+  待配对、"别处还有一条在跑"**先**挤在页面顶部那条横幅带里（一出现就把对话流往下推），
+  **上一轮**搬进输入条下面那一行——可那一行**在文档流里**：徽标一多就换行、`#composer`
+  变高、`#stream`（`flex:1`）就被压矮。这一轮把它们收到右上角一个 `position:fixed`
+  的列里（`#corner`，与通知上下相邻，谁也盖不住谁）：最大宽度 `min(420px, 92vw)`、
+  高度自适应，出现 / 展开 / 收起**都不改对话区高度、不挪滚动位置**（证据在
+  `tests/web/page_dom.js` 的 `no_squeeze`，而且那条模型先被反证过它量得出"挤"）。
+  常态下只剩一枚小圆点，异常 / 只读 / 钉住 / 待配对 / 别处在跑时才多出一枚可点开的
+  徽标，点开是详情（状态 / 地址 / `probed_at` 与 `age_s` / 可能原因 / 下一步敲哪条
+  **真存在**的命令）。**异常仍然看得见**：那时徽标是红的并且带字（"模型不通"），
+  不是一枚沉默的绿点——静默的陈旧值比报错更糟。
 - **自己说的话不加符号前缀**：发出去的那一条前面原来挂着一个黑色三角形符号，
   它什么也没说明（气泡底色 + 右对齐已经说清"这是我说的"），所以它没了，也没换成
   别的符号。这一个字符现在整份文件里一次都不出现。
@@ -211,14 +225,6 @@ HTML = """<!DOCTYPE html>
         它跟对话流叠在一起时（宽屏上右侧那一列会压到居中的卡片），底下的按钮照样点得动。
         可堆叠（竖着排，不叠在一起）、每条一个关闭键；`info` 自己会走，
         **`error` / `warn` 不会**——错误在人看到之前消失，比不提示更糟。 */
-  .toasts { display:none; position:fixed; z-index:30; top:56px; right:14px;
-            width:min(360px, calc(100vw - 28px)); max-height:70vh;
-            overflow-y:auto; flex-direction:column; gap:8px; pointer-events:none; }
-  .toasts.show { display:flex; }
-  /* 入场只动 `opacity` 与一点位移：`position:fixed` 的元素上做 transform 不会建
-     包含块问题，而 `prefers-reduced-motion` 那一档把它整个关掉（见文件末尾）。 */
-  @keyframes toast-in { from { opacity:0; transform:translateY(-4px); }
-                        to { opacity:1; transform:none; } }
   .toast-all { display:none; align-self:flex-end; padding:4px 12px;
                border-radius:999px; border:1px solid var(--line);
                background:var(--panel-2); color:var(--text-dim);
@@ -250,7 +256,7 @@ HTML = """<!DOCTYPE html>
                 color:var(--warn-text); }
   .toast.error { border-color:var(--danger-line); background:var(--danger-bg);
                  color:var(--danger-text); }
-  /* `ask` 那一档（待批准）现在**没有调用方**：配对码收进了输入条那一行的状态区
+  /* `ask` 那一档（待批准）现在**没有调用方**：配对码收进了右上角状态区
      （那里必须看得见码，气泡会被划走）。配色留着，因为气泡这个组件仍是四档的。 */
   .toast.ask { border-color:var(--pair-line); background:var(--pair-bg);
                color:var(--pair-text); }
@@ -258,6 +264,41 @@ HTML = """<!DOCTYPE html>
   .toast.warn .toast-line, .toast.warn .toast-close,
   .toast.error .toast-line, .toast.error .toast-close,
   .toast.ask .toast-line, .toast.ask .toast-close { color:inherit; opacity:.82; }
+
+  /* 入场只动 `opacity` 与一点位移：`position:fixed` 的元素上做 transform 不会建
+     包含块问题，而 `prefers-reduced-motion` 那一档把它整个关掉（见文件末尾）。 */
+  @keyframes toast-in { from { opacity:0; transform:translateY(-4px); }
+                        to { opacity:1; transform:none; } }
+  /* ══ 右上角那一列：**常驻提示**与**通知**，两样都脱离文档流 ══
+     它们曾经各自占着地方：常驻状态（探活 / 只读 / 钉住 / 待配对 / 别处在跑）先是顶部
+     一条横幅带，上一轮搬进了输入条下面那一行（`.st`）——可那一行**在文档流里**：
+     徽标一多就换行，`#composer` 跟着变高，`#stream`（`flex:1`）就被压矮，
+     而"提示一出现就把对话区挤下去"正是用户这次报的第一条。
+
+     所以这一轮把常驻提示也**收到右上角**，与通知共用一条 `position:fixed` 的列：
+     出现 / 展开 / 收起都**不改对话区的高度、不挪滚动位置**（证据在
+     `tests/web/page_dom.js` 的 `no_squeeze`：对话区可用高度前后一样，而且那个
+     模型先被反证过它量得出"挤"）。两样都在同一列里靠右堆叠，也就不存在"通知盖住
+     徽标"这种事（徽标是不该被划走的状态，通知是不该被盖住的提醒）。
+
+     尺寸的依据（不是随手写的数）：
+     - `width:min(420px, 92vw)`：420px 是"一条状态说明 + 一条 `spool service list`
+       这类命令"在 12.5px 等宽下不折行的量级；92vw 是窄屏那一档的护栏——留 8vw
+       给边距，右锚 14px，视口窄到 175px 才开始贴边，**不越界**（同一件事在
+       860px 以下那条媒体查询里再收一次）。
+     - `height:auto`（一个字都不写死）：内容多少就多高，徽标换行也不会溢出——
+       整列的宽度是定值，高度随内容走。
+     - 容器 `pointer-events:none`，只有徽标、详情面板、气泡自己吃点击：它压在
+       对话流上时，底下的卡片与按钮照样点得动。 */
+  #corner { position:fixed; z-index:30; top:52px; right:14px;
+            width:min(420px, 92vw); height:auto;
+            display:flex; flex-direction:column; align-items:flex-end;
+            gap:8px; pointer-events:none; }
+  #hints { position:relative; width:100%; height:auto; display:flex;
+           flex-wrap:wrap; justify-content:flex-end; gap:6px; }
+  #toasts { display:none; width:100%; max-height:60vh; overflow-y:auto;
+            flex-direction:column; gap:8px; }
+  #toasts.show { display:flex; }
 
   /* ── 顶条：抽屉开关 + 当前目标（"我在哪儿"必须一眼看得出） ── */
   #top {
@@ -365,6 +406,33 @@ HTML = """<!DOCTYPE html>
   .sys-line.failure .fail-raw { margin-top:6px; color:var(--text-dim);
                                 font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
 
+  /* ── 消息卡片上的「思考过程」：**默认收起**，收起时一个节点都不建 ──
+     它回答的是"这一轮它到底干了什么、卡在哪一步"（排错用），而这份内容平时不该占版面：
+     所以正文块 `trace-body` 是**点开才建**的，收起状态下页面上只有那一行小标题。
+     刷新 / 切走再切回之后，这一块由服务端只增的 `messages[i].trace` 重新画出来
+     （`makeTrace` + `fillTrace`），所以"看过就没了"这件事不会再有。 */
+  .msg .trace { margin:0 0 6px; }
+  .trace-head { display:block; max-width:100%; padding:3px 9px; cursor:pointer;
+                border:1px solid var(--line); border-radius:999px;
+                background:transparent; color:var(--text-dim);
+                font-size:12px; text-align:left; overflow:hidden;
+                text-overflow:ellipsis; white-space:nowrap; }
+  .trace-head:hover, .trace-head[aria-expanded="true"] { color:var(--text);
+                border-color:var(--text-dim); }
+  .trace-body { margin:6px 0 0; padding:8px 12px; border-left:3px solid var(--line);
+                border-radius:0 8px 8px 0; background:var(--panel-2);
+                color:var(--text-dim); font-size:12.5px; }
+  .trace-line { margin-top:2px; overflow-wrap:anywhere; }
+  .trace-line:first-child { margin-top:0; }
+  .trace-line.bad { color:var(--danger-text); }
+  .trace-line.ok { color:var(--ok); }
+  .trace-detail { margin-top:2px; color:var(--text-faint);
+                  font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
+  /* 失败 / 停止那一轮：气泡让位给那一块说明（`.sys-line.failure` 自己有底色边框），
+     所以这一档把气泡自己的底色与内边距去掉，免得两层框套在一起。 */
+  .bubble.failed { padding:0; background:transparent; border:0; }
+  .bubble.stopped { color:var(--text-dim); font-size:13px; }
+
   /* 代码块：**明显**的一块——底色、边框、圆角、内边距；自己横向/纵向滚，
      不撑破气泡（`.bubble` 与 `.msg` 上的 min-width:0 是这条能成立的前提）。 */
   .code { margin:10px 0 0; border:1px solid var(--code-line); border-radius:10px;
@@ -464,23 +532,22 @@ HTML = """<!DOCTYPE html>
   #send svg { width:18px; height:18px; }
   #send:disabled { background:var(--line); color:var(--text-faint); cursor:default; }
 
-  /* ══ 状态区：输入条下面那一**行**（`.st`） ══
-     "这一页现在是什么模式 / 探活通不通 / 有没有人在等批准"全在这里，顶部因此干净。
+  /* ══ 状态区：右上角那一列里的常驻提示（`.st-item` 徽标 + `#st-panel` 详情） ══
+     "这一页现在是什么模式 / 探活通不通 / 有没有人在等批准"全在这里，而它**不在文档流里**
+     （挂在 `#corner` 那个 `position:fixed` 的列下）：对话区的高度与滚动位置都不受它影响。
      三种信息各就各位：① 探活常态只剩一枚小圆点（**不是**"显示一句一切正常"）；
      ② 只读（非回环）与 `--root` 钉住才摆出一枚锁徽标——它回答"为什么点不动"；
      ③ 待配对 / 别处还有一条在跑收进同一行，详情里仍然是完整的码与命令。
-     徽标都在**同一行**里，而且这一行本来就在（原来是 Enter 发送 那句）：
-     状态怎么变，对话流都不会被推下去。点徽标（或那枚圆点）展开详情；再点、
-     点别处、按 Esc 收起。 */
+     点徽标（或那枚圆点）展开详情；再点、点别处、按 Esc 收起。 */
   .st { display:flex; align-items:center; gap:6px; max-width:800px;
         margin:8px auto 0; font-size:11.5px; color:var(--text-faint); }
   .st-hint { margin-left:auto; padding-left:10px; color:var(--text-faint);
              white-space:nowrap; }
   .st-item { display:inline-flex; align-items:center; gap:6px; max-width:44vw;
              min-width:0; flex:0 1 auto; padding:2px 9px; border-radius:999px;
-             border:1px solid transparent; background:transparent;
+             border:1px solid var(--line-soft); background:var(--panel-2);
              color:var(--text-faint); cursor:pointer; font-size:11.5px;
-             line-height:1.7; }
+             line-height:1.7; pointer-events:auto; }
   .st-item > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .st-item:hover, .st-item[aria-expanded="true"] { color:var(--text);
              border-color:var(--line); }
@@ -495,12 +562,14 @@ HTML = """<!DOCTYPE html>
   .st-item.ro { color:var(--ro-text); border-color:var(--ro-line); }
   .st-item.ask { color:var(--pair-text); border-color:var(--pair-line); }
   .st-item svg { width:12px; height:12px; flex:0 0 12px; }
-  /* 详情面板：浮在输入条上方（绝对定位，**不占文档流**）。 */
-  .st-panel { position:absolute; z-index:25; left:18px; right:18px; bottom:100%;
-              max-width:760px; margin:0 auto 8px; max-height:56vh; overflow-y:auto;
+  /* 详情面板：以 `#hints` 为锚**绝对定位**，从徽标下面朝下展开（**不占文档流**）。
+     高度自适应内容、超过 56vh 才自己滚：面板再长也不会把右上角那一列撑出屏。 */
+  .st-panel { position:absolute; z-index:2; top:calc(100% + 6px); right:0;
+              left:auto; width:100%; max-height:56vh; overflow-y:auto;
               padding:12px 14px; border-radius:14px; border:1px solid var(--line);
               background:var(--panel); color:var(--text); font-size:12.5px;
-              box-shadow:0 10px 30px rgba(0,0,0,.4); }
+              box-shadow:0 10px 30px rgba(0,0,0,.4); pointer-events:auto;
+              animation:toast-in .14s ease-out; }
   .st-sec + .st-sec { margin-top:10px; padding-top:10px;
                       border-top:1px solid var(--line-soft); }
   .st-sec-head { font-weight:600; }
@@ -523,27 +592,45 @@ HTML = """<!DOCTYPE html>
     #stream { padding:14px 12px 20px; }
     .msg.user { max-width:92%; }
     #composer { padding:8px 10px calc(10px + env(safe-area-inset-bottom)); }
-    /* 手机宽度：气泡不越界——左右都压住、占满宽度，但它**仍然 fixed**
-       （这里刻意一个 `position` 都不写：写上去就等于把它拉回文档流）。
-       高低再收一档，免得整列通知把对话流里那张卡片盖住。 */
-    .toasts { top:52px; left:10px; right:10px; width:auto; max-height:45vh; }
+    /* 手机宽度：提示与通知那一列不越界——左右都压住（`left`/`right` 同时写），
+       宽度交给 `auto` 去算，但它**仍然 fixed**（这里刻意一个 `position` 都不写：
+       写上去就等于把它拉回文档流，"挤下去"那个毛病就回来了）。
+       高低再收一档，免得整列把对话流里那张卡片盖住。 */
+    #corner { top:52px; left:10px; right:10px; width:auto; }
+    #toasts { max-height:45vh; }
+    #hints { gap:4px; }
+    #hints .st-item { max-width:38vw; padding:2px 7px; }
     .st { gap:4px; }
-    .st-item { max-width:38vw; padding:2px 7px; }
     .st-hint { display:none; }
-    .st-panel { left:10px; right:10px; max-height:50vh; }
+    .st-panel { max-height:50vh; }
     #thinking { right:12px; bottom:96px; }
     #toBottom { right:12px; bottom:56px; }
   }
   @media (prefers-reduced-motion: reduce) {
     #stream { scroll-behavior:auto; }
     .dot, .thinking-dots i { animation:none; }
-    /* 通知的入场也关掉：不动画不等于不出现（它只是直接在那里）。 */
+    /* 通知与状态详情的入场也关掉：不动画不等于不出现（它只是直接在那里）。 */
     .toast { animation:none; }
+    .st-panel { animation:none; }
   }
 </style>
 </head>
 <body>
-<div id="toasts"><button id="toast-all" type="button" class="toast-all">全部关闭</button></div>
+<!-- 右上角那一列：常驻提示（徽标 + 详情浮层）与通知。两者都在**文档流之外**
+     （`#corner` 是 `position:fixed`），所以它们的出现 / 展开 / 收起都不会改对话区的
+     高度、也不挪滚动位置。常驻提示在最上面（它是不该被划走的状态），通知在它下面
+     （通知是不该被盖住的提醒）。 -->
+<div id="corner">
+  <div id="hints">
+    <button id="st-health" type="button" class="st-item ok" aria-expanded="false"></button>
+    <button id="st-mode" type="button" class="st-item ro hidden" aria-expanded="false"></button>
+    <button id="st-target" type="button" class="st-item warn hidden" aria-expanded="false"></button>
+    <button id="st-pair" type="button" class="st-item ask hidden" aria-expanded="false"></button>
+    <button id="st-elsewhere" type="button" class="st-item warn hidden" aria-expanded="false"></button>
+    <div id="st-panel" class="st-panel hidden" role="region" aria-label="状态详情"></div>
+  </div>
+  <div id="toasts"><button id="toast-all" type="button" class="toast-all">全部关闭</button></div>
+</div>
 <div id="top">
   <button id="menu" title="会话列表" aria-label="会话列表"></button>
   <span id="where" class="empty">连接中…</span>
@@ -574,18 +661,13 @@ HTML = """<!DOCTYPE html>
         <textarea id="goal" rows="1" placeholder="给 agent 发消息…"></textarea>
         <button id="send" title="发送"></button>
       </div>
-      <!-- 状态区：常态下只剩一枚圆点，所以这里刻意**只有一个空壳**——里面的
-           圆点 / 标签 / 锁图标由脚本建（`badgeParts`，脚本一加载就建）。
-           按钮上的 `aria-expanded` 说的是"详情面板开着没有"。 -->
+      <!-- 输入条下面那一行：**只剩"Enter 发送"这句静态提示**。
+           常驻状态（探活 / 只读 / 钉住 / 待配对 / 别处在跑）已经搬到右上角那一列
+           （`#hints`）：那一行在文档流里，徽标一多就换行、把对话区压矮，而"提示一出现
+           就挤对话区"正是用户这次报的第一条。 -->
       <div class="st">
-        <button id="st-health" type="button" class="st-item ok" aria-expanded="false"></button>
-        <button id="st-mode" type="button" class="st-item ro hidden" aria-expanded="false"></button>
-        <button id="st-target" type="button" class="st-item warn hidden" aria-expanded="false"></button>
-        <button id="st-pair" type="button" class="st-item ask hidden" aria-expanded="false"></button>
-        <button id="st-elsewhere" type="button" class="st-item warn hidden" aria-expanded="false"></button>
         <span class="st-hint">Enter 发送 · Shift+Enter 换行</span>
       </div>
-      <div id="st-panel" class="st-panel hidden" role="region" aria-label="状态详情"></div>
     </div>
   </div>
 </div>
@@ -598,6 +680,8 @@ HTML = """<!DOCTYPE html>
 const ICON = {
   menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"></path><path d="M4 12h16"></path><path d="M4 17h16"></path></svg>',
   send: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 12l15-7-6 7 6 7z"></path></svg>',
+  // 运行中那一枚键变成「停止」：一个方块（与"发送"的箭头一眼分得开）。
+  stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg>',
   down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"></path><path d="M6 13l6 6 6-6"></path></svg>',
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg>',
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>',
@@ -611,7 +695,8 @@ const goalBox = document.getElementById('goal');
 const whereBox = document.getElementById('where');
 const toastsBox = document.getElementById('toasts');
 const toastAllBtn = document.getElementById('toast-all');
-// 状态区那一行（输入条下面）：常态下只剩一枚小圆点，所以徽标里的东西都得现建。
+// 状态区那几枚徽标（在右上角 `#hints` 里，脱离文档流）：常态下只剩一枚小圆点，
+// 所以徽标里的东西都得现建。
 const stHealth = document.getElementById('st-health');
 const stMode = document.getElementById('st-mode');
 const stTarget = document.getElementById('st-target');
@@ -629,6 +714,12 @@ const thinkingBox = document.getElementById('thinking');
 const toBottomBtn = document.getElementById('toBottom');
 const scrim = document.getElementById('scrim');
 let running = false, decided = false;
+// 停止请求发出去了、还没看到它真的停下来（按钮上写着"正在停止…"）。
+// 由 `final` 事件或下一拍 `/state`（`running` 落回假）清掉，所以它不会一直挂着。
+let stopping = false;
+// 这一轮是不是被用户手动停掉的：拿到 `final` 时据此说"已停止"，
+// 而不是把一次主动停止画成一次红彤彤的失败。
+let stoppedRun = false;
 // 这条壳绑在非回环地址上时，服务端只放行"看"：/run 与 /confirm 一律 403，
 // 页面必须在**点之前**说出来（点一下被拒是最后一秒才告诉人）。
 let readonly = false;
@@ -1284,16 +1375,10 @@ function explainFailure(text, extra) {
   };
 }
 
-// 失败要说人话，而且**要弹出来**：失败是通知，不该只在对话流里躺着等人自己往下翻。
-// 对话流里那一块仍然留着——那是这一趟干过什么的记录。
-// 认不出来的错误仍按**原来的画法**画（不假装懂）：
-// `head` 就是原来那个词——`final` 是「失败：」、`error` 事件是「错误：」。
-function showFailure(head, text, extra) {
-  const parts = explainFailure(text, extra);
-  notifyFailure(head, text, parts);
-  if (parts === null) { add(head + redact(text), 'bad'); return; }
-  const stick = atBottom();
-  const wrap = makeMsg('system');
+// 认出来的失败画成一块带左边框的说明（`.sys-line.failure`）：哪一步 / 哪个地址 /
+// 可能原因 / 下一步敲什么。`showFailure`（对话流里那块）与消息卡片里那一块共用它，
+// 免得同一个失败在两处有两套说法。
+function failureBox(parts) {
   const box = document.createElement('div');
   box.className = 'sys-line failure';
   const title = document.createElement('div');
@@ -1312,20 +1397,354 @@ function showFailure(head, text, extra) {
     raw.textContent = '原始信息：' + parts.raw;
     box.appendChild(raw);
   }
-  wrap.appendChild(box);
+  return box;
+}
+
+// 失败要说人话，而且**要弹出来**：失败是通知，不该只在对话流里躺着等人自己往下翻。
+// 对话流里那一块仍然留着——那是这一趟干过什么的记录。
+// 认不出来的错误仍按**原来的画法**画（不假装懂）：
+// `head` 就是原来那个词——`final` 是「失败：」、`error` 事件是「错误：」。
+function showFailure(head, text, extra) {
+  const parts = explainFailure(text, extra);
+  notifyFailure(head, text, parts);
+  if (parts === null) { add(head + redact(text), 'bad'); return; }
+  const stick = atBottom();
+  const wrap = makeMsg('system');
+  wrap.appendChild(failureBox(parts));
   if (stick) { scrollDown(); }
   updateToBottom();
+}
+
+// 失败画进消息卡片（这一轮的回复那张）而不是另起一行系统消息：同一件事在一屏上
+// 出现两遍，人会以为是两次失败。气泡让位给这块说明（`.bubble.failed` 去掉了自己的
+// 底色与内边距），**占位"正在思考"一个字符都不留**。
+function failIntoBubble(bubble, head, text, extra) {
+  const parts = explainFailure(text, extra);
+  bubble.className = 'bubble failed';
+  bubble.textContent = '';
+  if (parts === null) {
+    const line = document.createElement('div');
+    line.className = 'sys-line bad';
+    line.textContent = head + redact(text);
+    bubble.appendChild(line);
+    return;
+  }
+  bubble.appendChild(failureBox(parts));
+}
+
+/* ══ 消息卡片上的「思考过程」：默认收起、收起时一个节点都不建、事后能再展开 ══
+   数据有两个来源，各管一段：
+
+   - **正在跑的那一轮**由事件现攒（`liveTraceLine`），所以它边跑边可看——不必等跑完；
+   - **跑完之后**（刷新页面、切走再切回）一律以服务端那份为准（`messages[i].trace`，
+     见 `web/runner.py::attach_traces`）。所以"看过就没了"这件事不会再有。
+
+   两边文字刻意写得一样（步骤 / 工具成功失败 / 等待心跳的措辞与服务端 `trace_line`
+   一致），免得同一轮在跑完前后看到两种写法。 */
+
+// 一个可折叠的轨迹块。收起时**只有标题那一行**（正文块是空的，`hidden`），
+// 点开才把行建出来：这是"默认收起、不占版面"在 DOM 层的判据。
+function makeTrace() {
+  const box = document.createElement('div');
+  box.className = 'trace';
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'trace-head';
+  head.setAttribute('aria-expanded', 'false');
+  const body = document.createElement('div');
+  body.className = 'trace-body hidden';
+  head.onclick = function () { toggleTrace(box); };
+  box.appendChild(head);
+  box.appendChild(body);
+  box._head = head;
+  box._body = body;
+  box._lines = [];
+  drawTraceHead(box);
+  return box;
+}
+
+function traceOpen(box) { return !box._body.classList.contains('hidden'); }
+
+function toggleTrace(box) {
+  const open = !traceOpen(box);
+  box._body.classList.toggle('hidden', !open);
+  box._head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) { drawTraceBody(box); }
+}
+
+// 标题那一行：几行 + **有没有失败**。一行都没有时也要说得出"这里现在是空的"，
+// 而失败必须一眼看得见（藏在收起块里的失败等于没提示）。
+function drawTraceHead(box) {
+  const lines = box._lines || [];
+  let text = '思考过程 · ' + lines.length + ' 行';
+  for (const one of lines) {
+    if (one.ok === false) { text += ' · 有失败'; break; }
+  }
+  box._head.textContent = text;
+  box._head.title = text + '（点开看这一轮的步骤、工具调用与失败原因）';
+}
+
+// 正文：**只追加没画过的那几行**（增量追加，重复到达不会叠）。收起时不建节点。
+function drawTraceBody(box) {
+  const lines = box._lines || [];
+  if (box._body.children.length > lines.length) { box._body.replaceChildren(); }
+  for (let index = box._body.children.length; index < lines.length; index += 1) {
+    box._body.appendChild(traceLineNode(lines[index]));
+  }
+}
+
+function traceLineText(line) {
+  const kind = String(line.type || '');
+  const text = String(line.text || '');
+  if (kind === 'final') { return (line.ok ? '完成：' : '失败：') + text; }
+  if (kind === 'error') { return '错误：' + text; }
+  return text;
+}
+
+function traceLineNode(line) {
+  const node = document.createElement('div');
+  const bad = line.ok === false || line.type === 'error';
+  node.className = 'trace-line'
+    + (bad ? ' bad' : (line.type === 'final' ? ' ok' : ''));
+  // 上屏一律先遮蔽密钥（与服务端那份同一口径）。
+  node.textContent = redact(traceLineText(line));
+  if (line.detail) {
+    const detail = document.createElement('div');
+    detail.className = 'trace-detail';
+    detail.textContent = redact(String(line.detail));
+    node.appendChild(detail);
+  }
+  return node;
+}
+
+// 把一份轨迹填进那个块（历史消息与"认领快照"时用）。
+function fillTrace(box, lines) {
+  box._lines = (lines || []).map(function (one) { return one; });
+  drawTraceHead(box);
+  if (traceOpen(box)) { drawTraceBody(box); }
+}
+
+// 一份轨迹里"失败的那一轮"：`final` / `error` 那行（带着服务端只增的结构化线索）。
+// 刷新之后靠它把失败原因与下一步重新画成那一块说明。
+function failedTraceLine(lines) {
+  for (const one of lines || []) {
+    if (one.ok === false && (one.type === 'final' || one.type === 'error')) { return one; }
+  }
+  return null;
+}
+
+// 事件 → 轨迹行（措辞与服务端 `runner.trace_line` 一致）。
+function liveTraceLine(data) {
+  const kind = String(data.type || '');
+  if (kind === 'step') { return {type: 'step', text: '第 ' + data.n + ' 步'}; }
+  if (kind === 'tool') {
+    const ok = Boolean(data.ok);
+    const line = {
+      type: 'tool', ok: ok,
+      text: String(data.name || '工具') + ' → ' + (ok ? '成功' : '失败'),
+    };
+    // 失败那行**必须带原因**：只写"read_file → 失败"等于把排错要的那一句丢掉。
+    if (!ok && data.detail) { line.detail = String(data.detail); }
+    return line;
+  }
+  if (kind === 'note') {
+    return {type: 'note', ok: Boolean(data.ok), text: String(data.text || '')};
+  }
+  if (kind === 'wait') {
+    let text = WAIT_PREFIX + ' ' + data.elapsed + 's';
+    if (data.limit) { text += ' / 上限 ' + data.limit + 's'; }
+    return {type: 'wait', text: text};
+  }
+  if (kind === 'await') {
+    return {
+      type: 'await',
+      text: data.command ? '等你确认：要执行 ' + data.command
+        : '等你确认：' + (data.count || 1) + ' 处改动',
+    };
+  }
+  if (kind === 'confirm') {
+    return {
+      type: 'confirm', ok: Boolean(data.applied),
+      text: (data.applied ? '已应用 ' : '已拒绝 ') + (data.count || 0) + ' 处改动'
+        + (data.auto ? '（自动）' : ''),
+    };
+  }
+  if (kind === 'error') {
+    return {type: 'error', ok: false, text: String(data.message || '')};
+  }
+  return null;
+}
+
+/* ══ 这一轮的助手卡片：占位 → 真正的回复 ══
+   `start` 一到就摆出占位（"正在思考"），回复到达时**替换同一张卡片**里的内容
+   （不是另起一张），所以页面上不会留下陈旧的占位、也不会同一条回复出现两遍。
+   思考过程挂在这张卡片上，随事件增量追加。 */
+let live = null;
+// 快照里那条回复对应的卡片（已经用事件画过回复、库里的那条刚到）：按正文认领。
+let pendingReplies = [];
+// 刚发出去、`/state` 还没送回来的那条用户消息（乐观画过的那条，不许画第二遍）。
+let pendingUser = '';
+// 最近画进对话流的那条快照消息：兜底判重要用（"这句回复已经在了，不再说第二遍"）。
+let lastDrawn = null;
+
+function ensureLive() {
+  if (live !== null && !live.done) { return live; }
+  const wrap = makeMsg('assistant');
+  const trace = makeTrace();
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble pending';
+  bubble.textContent = '正在思考…';
+  wrap.appendChild(trace);
+  wrap.appendChild(bubble);
+  // `turnGoal` 是"这张卡片属于哪一轮"：刷新 / 补帧时靠它认出"还是同一轮"，
+  // 不会又摆一张占位卡片出来。
+  live = {wrap: wrap, trace: trace, bubble: bubble, done: false, turnGoal: ''};
+  return live;
+}
+
+function addTraceLine(line) {
+  if (line === null || line === undefined) { return; }
+  const stick = atBottom();
+  const card = ensureLive();
+  card.trace._lines.push(line);
+  drawTraceHead(card.trace);
+  if (traceOpen(card.trace)) { drawTraceBody(card.trace); }
+  if (stick) { scrollDown(); }
+  updateToBottom();
+}
+
+// 卡片里的气泡换成**真正的回复**。先清空再填：重复到达（事件与快照各来一次）
+// 不会叠字，也不会留下那句占位。
+function fillReply(card, text) {
+  card.bubble.className = 'bubble';
+  card.bubble.textContent = '';
+  fillRich(card.bubble, text || '（没有产出）');
+}
+
+// 结局到达：把同一张卡片更新成结局（占位必须被替换掉）。返回有没有卡片可更新。
+function finishLive(ok, text, extra, stopped) {
+  const card = live;
+  if (card === null) { return false; }
+  const stick = atBottom();
+  card.done = true;
+  if (ok) {
+    // 成功：库里那条会写 `result.final or "（没有产出）"`，这里用同一个归一化，
+    // 后面认领时才对得上。
+    fillReply(card, text);
+    pendingReplies.push({card: card, text: String(text || '（没有产出）')});
+    if (pendingReplies.length > 4) { pendingReplies.shift(); }
+  } else if (stopped) {
+    // 手动停止**不是失败**：低调说一句，别给它套一个红色的失败块。
+    card.bubble.className = 'bubble stopped';
+    card.bubble.textContent = redact(text) || '已停止这一轮（已产出的内容保留）';
+  } else {
+    notifyFailure('失败：', text, explainFailure(text, extra));
+    failIntoBubble(card.bubble, '失败：', text, extra);
+  }
+  if (stick) { scrollDown(); }
+  updateToBottom();
+  return true;
+}
+
+// 快照里那条助手消息对应哪张卡片：已经用事件画过回复、库里那条刚到的
+// （`pendingReplies`，按正文认领）。认领不到就返回 null，调用方照老样子新画一张
+// （更早的轮次、别的会话的历史都走这条路）。
+function liveCardFor(item) {
+  for (let index = 0; index < pendingReplies.length; index += 1) {
+    if (pendingReplies[index].text === item.content) {
+      const hit = pendingReplies[index].card;
+      pendingReplies.splice(index, 1);
+      return hit;
+    }
+  }
+  return null;
+}
+
+// 快照里这一条"已经画过了"吗？是就认领回来（补上服务端那份轨迹），**不新建节点**。
+// 乐观画过的那条用户消息、这一轮已经渲染成卡片的回复，都属于这一类：
+// 这是"不许留下陈旧占位、也不许重复一条"的关键一步。
+function adoptMessage(item, isLast) {
+  if (item.role === 'user') {
+    if (pendingUser !== '' && item.content === pendingUser) { pendingUser = ''; return true; }
+    return false;
+  }
+  // 只有**这一帧最后一条**才可能是"这一轮刚写好的回复"：更早的那些属于上一轮，
+  // 把它们塞进正在跑的卡片里就张冠李戴了（它们的归宿是按正文去 pendingReplies 里认领）。
+  let card = null;
+  if (isLast && live !== null) { card = live; }
+  if (card === null) { card = liveCardFor(item); }
+  if (card === null) { return false; }
+  if (item.trace && item.trace.length) { fillTrace(card.trace, item.trace); }
+  if (!card.done) { card.done = true; }
+  fillReply(card, item.content);
+  return true;
+}
+
+// 画一条快照里的往来。助手那一条如果有轨迹，就多一个**默认收起**的「思考过程」；
+// "失败的那一轮"的失败原因与下一步也在这里重新画出来（刷新之后还看得见）。
+function historyCard(item) {
+  const mine = item.role === 'user';
+  const wrap = makeMsg(mine ? 'user' : 'assistant');
+  wrap.classList.add('history');
+  const lines = item.trace || [];
+  if (!mine && lines.length) {
+    const trace = makeTrace();
+    wrap.appendChild(trace);
+    fillTrace(trace, lines);
+  }
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  wrap.appendChild(bubble);
+  const failed = mine ? null : failedTraceLine(lines);
+  if (failed) {
+    failIntoBubble(bubble, '失败：', failed.text, failed.error || null);
+  } else {
+    fillRich(bubble, item.content);
+  }
+  return wrap;
+}
+
+// 刷新 / 切回之后，这一轮可能还在跑：把服务端那份轨迹接回来接着画。
+// 三条护栏：
+// ① **还是同一轮**（`turnGoal` 对得上）就只接轨迹，绝不另摆一张占位卡片；
+// ② 库里那条回复**已经画出来了**（这一帧最后一条是助手那条）也不再摆占位，
+//    否则一屏上会出现两张一模一样的回复卡片；
+// ③ 服务端那份更长才换——本地刚攒下的行不能被一拍轮询吞掉。
+function restoreLive(state) {
+  const info = state.trace || {};
+  if (!info.open) { return; }
+  const goal = String(info.goal || state.goal || '');
+  const lines = info.lines || [];
+  if (live !== null && live.turnGoal === goal) {
+    if (lines.length >= live.trace._lines.length) { fillTrace(live.trace, lines); }
+    return;
+  }
+  const items = state.messages || [];
+  const last = items.length ? items[items.length - 1] : null;
+  if (last !== null && last.role !== 'user') { return; }
+  const card = ensureLive();
+  card.turnGoal = goal;
+  if (lines.length >= card.trace._lines.length) { fillTrace(card.trace, lines); }
 }
 
 // 历史**增量追加**：同一个目标上，/state 的快照可能比上一帧多出几条
 // （一次运行跑完之后库里的往来就长了）。以前是"画过就不再画"，于是多出来的
 // 那几条永远不出现；现在只补**还没画过**的那一段，已经画好的一条都不重建。
+//
+// 这一批多了一道**认领**（`adoptMessage`）：这一轮已经实时画过的那些
+// （乐观发出去的用户消息、已经渲染成卡片的回复）在快照里再出现时，
+// 只把服务端那份轨迹补上去，**不新建节点**——否则同一句话会在页面上出现两遍。
 function drawHistory(messages) {
   const items = messages || [];
   if (drawn > items.length) {
-    // 列表变短了（换了库、清过历史）：只能重来一遍。
+    // 列表变短了（换了库、清过历史）：只能重来一遍。这一屏的实时状态也跟着作废，
+    // 否则卡片引用会指向已经不在页面上的节点。
     stream.replaceChildren();
     drawn = 0;
+    live = null;
+    pendingReplies = [];
+    pendingUser = '';
+    lastDrawn = null;
   }
   if (!items.length || drawn === items.length) { return; }
   const stick = atBottom();
@@ -1338,12 +1757,9 @@ function drawHistory(messages) {
   }
   for (let index = drawn; index < items.length; index += 1) {
     const item = items[index];
-    const bubble = makeBubble(
-      item.role === 'user' ? 'user' : 'assistant',
-      '',
-      'history'
-    );
-    fillRich(bubble, item.content);
+    lastDrawn = item;
+    if (adoptMessage(item, index === items.length - 1)) { continue; }
+    historyCard(item);
   }
   drawn = items.length;
   if (stick) { scrollDown(); }
@@ -1760,9 +2176,13 @@ function drawTarget(state) {
       + '（表是空的就先在工作区目录里敲 spool init）。');
   }
   if (busy) {
-    // 后端没有停止接口（只有 /run 与 /confirm），所以发送键在运行中只能禁用。
-    // 不解释的话，那个灰掉的圆钮就是"坏了"。
-    notes.push('这条正在跑：等服务端收尾再发下一条（这个壳没有停止运行接口）。');
+    // 运行中那一枚键变成「停止」（`syncSend`）：这里只说清"点了会发生什么"，
+    // 因为"停止"这两个字本身回答不了"已产出的东西会不会没了"。
+    notes.push('这条正在跑：点输入条右边那枚「停止」可以中断它'
+      + '（温和停止，已经产出的内容保留）。');
+  }
+  if (!busy && (lastState || {}).stopped) {
+    notes.push('上一轮是**手动停止**的（已产出的内容保留）；接着发下一条就行。');
   }
   targetNotes = notes;
   // 状态区收尾重画：目标（空态）、模式（钉住）、运行中那几句都在这一下里对齐。
@@ -1804,6 +2224,11 @@ function resetView() {
   cardApply = null;
   cardReject = null;
   cardSig = '';
+  // 这一轮的实时卡片、待认领的回复、乐观画过的那条用户消息同样属于上一个目标。
+  live = null;
+  pendingReplies = [];
+  pendingUser = '';
+  lastDrawn = null;
   decided = false;
   pendings = [];
   updateToBottom();
@@ -1969,18 +2394,60 @@ function setRunning(value) {
   const was = busy;
   running = value;
   busy = value;
+  // 跑完了（或 `/state` 说它已经不在跑）：停止请求这一档也该落回去了，
+  // 否则按钮会一直写着"正在停止…"。
+  if (!busy) { stopping = false; }
   goalBox.readOnly = value || readonly;
   syncSend();
   setThinking(value && thinking);
-  // 运行中那句提示在状态区的详情里（见 drawTarget）：这一格变了就要重画一次，
+  // 运行中那句提示在状态详情里（见 drawTarget）：这一格变了就要重画一次，
   // 否则它会停在上一帧——"跑完了还写着正在跑"比不写还坏。
   if (was !== busy && lastState && lastState.target) { drawTarget(lastState); }
 }
 
-// 发送键的两态：运行中 / 只读就是禁用（后端没有停止接口，见 drawTarget 里的说明）。
+// 那一枚圆键的三态：空闲=发送（箭头），运行中=**停止**（方块，可点），
+// 停止请求已发出=正在停止…（禁用一下，免得连点发两次）。只读壳里它一律禁用。
+//
+// 为什么不是"运行中禁用 + 说明"：服务端现在有停止入口了（`POST /run/stop`，
+// 复用 `Runner.stop()` 的温和停止语义），再摆一个灰键就是骗人。
 function syncSend() {
-  sendBtn.disabled = busy || readonly;
-  sendBtn.title = busy ? '运行中：服务端还没给出停止接口' : '发送';
+  const mode = busy ? (stopping ? 'stopping' : 'stop') : 'send';
+  sendBtn.disabled = stopping || readonly;
+  sendBtn.dataset.mode = mode;
+  sendBtn.title = readonly ? '只能看：这条壳绑在非回环地址上，写请求会被拒'
+    : busy ? (stopping ? '正在停止…' : '停止这一轮（已产出的内容保留）')
+    : '发送';
+  // 按钮里只有一个图标：读屏得有个名字（只给 title 是不够稳的）。
+  sendBtn.setAttribute('aria-label', sendBtn.title);
+  const icon = mode === 'send' ? ICON.send : ICON.stop;
+  // 图标只在**换了那一个**的时候重写：`innerHTML` 每次都写会让按钮闪一下。
+  if (sendBtn._icon !== icon) { sendBtn.innerHTML = icon; sendBtn._icon = icon; }
+}
+
+// 点那一枚键：空闲时是发送，运行中就是**停止**。
+// 返回值就是那一条 POST 的 promise：调用方（与假 DOM 那一层）要能 `await` 到
+// "请求真的发出去了、回话真的到了"，而不是只看按钮上那一瞬间的样子。
+function onSendClick() {
+  if (busy) { return requestStop(); }
+  return say();
+}
+
+// 手动中断这一轮：`POST /run/stop` → 服务端温和地收掉子进程（已产出的内容保留）。
+// 点了立刻有反馈（按钮进"正在停止…"），真正回到可发送由 `final` 事件或下一拍
+// `/state`（`running` 落回假）说了算——所以这里**不等**它，也不假装已经停了。
+async function requestStop() {
+  if (readonly || stopping) { return; }
+  stopping = true;
+  syncSend();
+  const body = await post('/run/stop', {});
+  if (body === null) {
+    // 被拒（409 没有在跑 / 403 只读）：理由已经由 post() 摆进对话区与通知里了。
+    stopping = false;
+    syncSend();
+    return;
+  }
+  stoppedRun = true;
+  add('已请求停止这一轮：服务端在收尾，已经产出的内容保留。', 'dim');
 }
 
 // 「正在思考」：由既有的 wait / start / final 驱动，不新造协议。
@@ -2011,10 +2478,18 @@ function keyFor(root, name) {
 
 function applyState(state) {
   lastState = state;
-  // 只读与"在不在跑"必须在 drawTarget **之前**定下来：状态区那两枚徽标
-  // （只读 / 运行中）与发送键的两态都按它们算，晚一步就会画成上一帧的样子。
+  // 只读与"在不在跑"必须在 drawTarget **之前**定下来：右上角那两枚徽标
+  // （只读 / 运行中）与那一枚键的两态都按它们算，晚一步就会画成上一帧的样子。
   showReadonly(state);
   running = Boolean(state.running);
+  if (!running) {
+    // 服务端说它已经不在跑了：停止请求那一档要落回去（否则那一枚键会一直写着
+    // "正在停止…"并且禁用着——看起来就像壳卡住了）。而"这一轮是被停掉的"这个
+    // 标记只留到结局被画出来为止：服务端说**不是**停的（`stopped` 假），说明是
+    // 正常收场，标记必须清掉，不然下一轮的普通失败会被画成"已停止"。
+    stopping = false;
+    if (!state.stopped) { stoppedRun = false; }
+  }
   busy = running;
   // 会话名要先定：左栏那一列的高亮按它算（晚一步就会高亮**上一条**会话）。
   const target = state.target || {};
@@ -2041,7 +2516,10 @@ function applyState(state) {
   if (state.awaiting && asking.command) { showCommandAsk(asking); }
   // `awaiting` 缺了 / 是空 = 服务端说"没有待确认内容"：卡片收掉（缺字段按没有处理）。
   if (state.awaiting) { showActions(); } else { clearPending(); }
+  // 历史先画：`adoptMessage` 要用到"这一帧最后一条是不是助手那条"来决定
+  // 哪张卡片该被认领。**认领之后再补实时卡片**，它的节点才会落在对话流最后。
   drawHistory(state.messages);
+  restoreLive(state);
   showPairings(state.pairings);
   showHealth(state.health);
   showElsewhere(state);
@@ -2159,12 +2637,30 @@ function showHealth(health) {
 // 短轮询 /state。这几样都**不一定伴随事件**：配对码是另一个进程在批，
 // 而「别处还有一条在跑」说的是别的目标上的任务——它在当前目标的事件流上
 // 一个字都不会出现，只轮不推的话状态区永远不会亮。
+//
+// 这一拍还兜一件事：**"正在停止…"不许卡住**。停止的结局靠 `final` 事件推过来，
+// 而那一条正好可能因为断线漏掉（`/events` 断过、或者人点了停止就切走了）。
+// 所以这一拍发现服务端说"不在跑"时，把那一枚键放回"发送"。
 async function refreshStatus() {
   try {
     const response = await fetch('/state');
     if (!response.ok) { return; }
     const state = await response.json();
     showReadonly(state);
+    // 只把"在不在跑 / 停没停"这两个标量并进最近一帧：**不 applyState**——
+    // 那一趟会把列表、对话流、卡片全重画一遍，而这一拍只该碰状态区
+    // （`test_page_dom.py::test_三秒轮询只碰状态区` 钉着这件事）。
+    if (lastState && typeof lastState === 'object') {
+      lastState.running = Boolean(state.running);
+      lastState.stopped = Boolean(state.stopped);
+    }
+    if (!state.running) {
+      // 这一轮已经结束了（而 `final` 事件可能因为断线漏掉）：那一枚键放回"发送"，
+      // 顺便把"这一轮是停的"那个标记清掉——服务端说不是停的就该清，否则下一轮的
+      // 一次普通失败会被当成"已停止"画出来。
+      if (!state.stopped) { stoppedRun = false; }
+      if (busy) { setRunning(false); }
+    }
     showPairings(state.pairings);
     showHealth(state.health);
     showElsewhere(state);
@@ -2243,33 +2739,24 @@ function onEvent(event) {
     setRunning(true);
     setThinking(true);
     clearPending();
+    // 这一轮的助手卡片**立刻**摆出来（占位"正在思考"）：回复到达时它会被替换成
+    // 真正的回复——同一张卡片、同一个位置，不是另起一张。
+    const stick = atBottom();
+    ensureLive().turnGoal = String(data.goal || '');
+    if (stick) { scrollDown(); }
+    updateToBottom();
     return;
   }
-  if (data.type === 'step') {
-    add('── 第 ' + data.n + ' 步', 'dim');
-    return;
-  }
-  if (data.type === 'tool') {
-    // 工具回来就说明模型那一口气过去了，思考指示先灭；下一拍 wait 会再亮。
-    setThinking(false);
-    add('  ' + data.name + ' → ' + (data.ok ? '成功' : '失败'),
-        data.ok ? 'ok' : 'bad');
-    return;
-  }
-  // 系统说给用户听的一句话（比如数字核对的结果）。工具那行只有「成功/失败」，
-  // 而这类事件的理由才是全部内容——不显示出来，页面上就只剩一个没有理由的红字。
-  if (data.type === 'note') {
-    add(data.text, data.ok ? 'dim' : 'bad');
-    return;
-  }
-  // 模型等待心跳（既有协议，见 docs/superpowers/specs/2026-09-21-*）。
-  // 这一行**只是"还在生成"**，不占探活那条通知：红色的"连不上"说的是模型。
-  // 同时把「正在思考」点亮——同一件事的两种画法，不新造事件。
-  if (data.type === 'wait') {
-    setThinking(true);
-    var text = WAIT_PREFIX + ' ' + data.elapsed + 's';
-    if (data.limit) { text += ' / 上限 ' + data.limit + 's'; }
-    add(text, 'dim');
+  // 步骤 / 工具 / 系统说的一句话 / 等待心跳：全部进这张卡片的「思考过程」
+  // （默认收起，点开可看）。以前它们是对话流里一行行常驻的细字——那一屏既是
+  // "挤"，又让"刷新之后就再也回看不了"变成必然。
+  if (data.type === 'step' || data.type === 'tool'
+      || data.type === 'note' || data.type === 'wait') {
+    // 工具回来就说明模型那一口气过去了，思考指示先灭；下一拍 wait 会再亮
+    // ——同一件事的两种画法，不新造协议。
+    if (data.type === 'tool') { setThinking(false); }
+    if (data.type === 'wait') { setThinking(true); }
+    addTraceLine(liveTraceLine(data));
     return;
   }
   if (data.type === 'diff') {
@@ -2279,6 +2766,7 @@ function onEvent(event) {
   }
   if (data.type === 'await') {
     setThinking(false);
+    addTraceLine(liveTraceLine(data));
     if (data.command) { showCommandAsk(data); }
     showActions();
     return;
@@ -2289,6 +2777,7 @@ function onEvent(event) {
     if (data.auto) {
       add('自动应用 ' + data.count + ' 处改动（策略 auto 且范围内）', 'dim');
     }
+    addTraceLine(liveTraceLine(data));
     clearPending();
     return;
   }
@@ -2300,22 +2789,38 @@ function onEvent(event) {
     return;
   }
   if (data.type === 'final') {
+    const stopped = stoppedRun;
     setThinking(false);
     setRunning(false);
-    // 失败的结局**不走**"一行原始异常"：那正是"模型连不上"时人看到的东西，
-    // 而它没说清下一步。认得出是模型那一步坏的就画成人话（showFailure）。
-    if (data.ok) {
-      add('完成：' + data.text, 'ok');
-    } else {
-      showFailure('失败：', data.text, data.error);
+    stoppedRun = false;
+    // 有卡片就把**同一张卡片**更新成结局（占位被替换掉、回复不重复）；
+    // 没有卡片（事件先于 start 到、老页面）才退回"另起一行"的老画法。
+    if (!finishLive(Boolean(data.ok), data.text, data.error, stopped)) {
+      if (data.ok) {
+        // 库里那条如果已经是这句回复（同一轮），就不再重复说一遍。
+        if (!replyAlreadyVisible(data.text)) { add('完成：' + data.text, 'ok'); }
+      } else if (stopped) {
+        add('已停止：' + data.text, 'dim');
+      } else {
+        showFailure('失败：', data.text, data.error);
+      }
     }
     clearPending();
     return;
   }
   if (data.type === 'error') {
     setThinking(false);
+    // 中途的一条错误：进轨迹（事后回看得到），同时照旧弹出来 + 在对话流里留一块
+    // ——失败必须看得见，收敛到"思考过程"里就等于藏起来了。
+    addTraceLine(liveTraceLine(data));
     showFailure('错误：', data.message, data.error);
   }
+}
+
+// 这句回复是不是已经画在页面上了（快照比事件先到的情况）。
+function replyAlreadyVisible(text) {
+  if (lastDrawn === null || lastDrawn.role === 'user') { return false; }
+  return lastDrawn.content === String(text || '（没有产出）');
 }
 
 // 事件流只连**一次**。切换目标**不重连**：服务端发现目标变了会退订旧的、
@@ -2446,6 +2951,9 @@ async function say() {
   // 这一行原来在 goal 前面拼了一个黑色三角形符号——它什么也没多说，
   // 所以没了，也没有换成别的符号。
   add(goal, 'me');
+  // 这一条已经画出来了；等 `/state` 把它送回来时（子进程开工第一件事就是写库）
+  // 要认出来是同一句，不许画第二遍。
+  pendingUser = goal;
   await post('/run', {goal});
 }
 
@@ -2467,8 +2975,9 @@ function openDrawer() { document.body.classList.add('drawer'); scrim.classList.a
 function closeDrawer() { document.body.classList.remove('drawer'); scrim.classList.remove('show'); }
 
 document.getElementById('menu').innerHTML = ICON.menu;
-sendBtn.innerHTML = ICON.send;
 toBottomBtn.innerHTML = ICON.down;
+// 发送 / 停止那一枚键的图标**不在这里写**：它有三档（发送 / 停止 / 正在停止…），
+// 唯一决定它长什么样的地方是 `syncSend()`（文件末尾的 `syncSend()` 会先画一遍）。
 
 // 两条原生控件是"切目标"的唯一入口（左栏的行经 `target()` 落到它们身上）。
 // 守卫盯着**当前目标**：派发 change 不会把同一个目标再切一次，也不会在
@@ -2484,7 +2993,7 @@ sessBox.addEventListener('change', function () {
   }
 });
 newBtn.onclick = newSession;
-sendBtn.onclick = say;
+sendBtn.onclick = onSendClick;
 goalBox.oninput = autoGrow;
 goalBox.onkeydown = onKeydown;
 stream.onscroll = updateToBottom;
@@ -2498,15 +3007,15 @@ document.getElementById('menu').onclick = function () {
 scrim.onclick = closeDrawer;
 toastAllBtn.onclick = closeAllToasts;
 
-// 状态区：五枚徽标都是同一个开关——点开 / 收起详情面板。
-// 都在输入条那一行里，所以"点外面"就是点到 `#composer` 之外（用 `closest` 判）。
+// 状态区：五枚徽标都是同一个开关——点开 / 收起详情面板（它们都在右上角那一列里）。
+// 都在一个盒子里，所以"点外面"就是点到 `#corner` 之外（用 `closest` 判）。
 for (const badge of [stHealth, stMode, stTarget, stPair, stElsewhere]) {
   badge.onclick = function () { setStatusOpen(!statusOpen); };
 }
 document.onclick = function (event) {
   if (!statusOpen) { return; }
   const node = event && event.target;
-  const inside = node && node.closest && node.closest('#composer');
+  const inside = node && node.closest && node.closest('#corner');
   if (!inside) { setStatusOpen(false); }
 };
 // Esc 也收起：焦点不一定在输入框里（点过徽标之后焦点就在按钮上），

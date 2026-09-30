@@ -15,23 +15,41 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Sequence
 
 from spoolkit import health as health_mod
 from spoolkit.bridge.pairing import Pairings
-from spoolkit.memory.transcript import recent_messages
+from spoolkit.memory.transcript import ASSISTANT, recent_messages
 from spoolkit.web.protocol import (
     AWAIT,
     CONFIRM,
     DIFF,
+    ERROR,
     FINAL,
+    NOTE,
+    STEP,
+    TOOL,
     USAGE,
+    WAIT,
     Event,
     parse_line,
 )
 
 NOISE_LINES = 3
+
+# 一轮的"思考轨迹"留多少行、留几轮。
+#
+# 为什么要有上限：这份轨迹随每一帧 `/state` 发给页面（页面每 3 秒轮一次），
+# 而一轮里 `wait` 心跳与工具调用可以上百条。40 行 ≈ 40 步的量级，足够看清
+# "它卡在哪一步、哪次调用失败了"，又不会把轮询变成搬数据。
+#
+# 为什么留 4 轮而不是 1 轮：用户的原话是"刷新页面、切走再切回，仍能回看那一轮
+# 的思考"——一次坐下来说不定跑了好几轮，只有最近那一轮等于"上一轮的错再也查不到"。
+# 4 轮 × 40 行 × 一行几百字节，最坏也就几十 KB，本地单机够用。
+TRACE_LINES = 40
+TRACE_TURNS = 4
 
 # 事件留痕的条数上限。外部驱动者（MCP 那条路）不能订阅 SSE，只能按序号轮询，
 # 所以事件必须留一段。留全量不行：长任务的事件是几千条，内存里攒着没意义。
@@ -123,6 +141,108 @@ def model_failure(extra_args: Sequence[str], noise: Sequence[str]) -> dict | Non
     return None
 
 
+def trace_line(event: Event) -> dict | None:
+    """把一条事件翻成"给人回看的思考轨迹"里的一行；不值得记的给 None。
+
+    为什么要这样一份东西：子进程的思考过程（第几步 / 调了什么工具 / 为什么失败）
+    原先只以**瞬时**的界面行存在——页面刷新、切走再切回，那一轮的排错线索就没了。
+    轨迹由**已经有的事件**推出来（不新造协议、不新造存储），封存进 Runner，
+    随 `/state` 只增地交出去，页面据此画一个默认收起的「思考过程」。
+
+    `diff` 单独给 None：那份正文可能有几百行，而且它已经作为待确认卡片有了自己的
+    位置（`diffs` 字段一个字没动），塞进轨迹只会把它淹掉。`start` 也不是一步。
+    """
+    kind = event.type
+    data = event.data
+    if kind == STEP:
+        return {"type": STEP, "text": f"第 {data.get('n', '?')} 步"}
+    if kind == TOOL:
+        name = str(data.get("name") or "工具")
+        ok = bool(data.get("ok"))
+        line = {"type": TOOL, "ok": ok, "text": f"{name} → {'成功' if ok else '失败'}"}
+        detail = str(data.get("detail") or "").strip()
+        # 成功那行只报状态，失败那行**必须带原因**：排错要的就是这一句。
+        if detail and not ok:
+            line["detail"] = detail
+        return line
+    if kind == NOTE:
+        return {
+            "type": NOTE,
+            "ok": bool(data.get("ok", True)),
+            "text": str(data.get("text") or ""),
+        }
+    if kind == WAIT:
+        text = f"模型生成中，已等待 {data.get('elapsed', 0)}s"
+        if data.get("limit"):
+            text += f" / 上限 {data['limit']}s"
+        return {"type": WAIT, "text": text}
+    if kind == AWAIT:
+        command = str(data.get("command") or "").strip()
+        if command:
+            return {"type": AWAIT, "text": f"等你确认：要执行 {command}"}
+        return {"type": AWAIT, "text": f"等你确认：{data.get('count', 1)} 处改动"}
+    if kind == CONFIRM:
+        applied = bool(data.get("applied"))
+        where = "（自动）" if data.get("auto") else ""
+        return {
+            "type": CONFIRM,
+            "ok": applied,
+            "text": f"{'已应用' if applied else '已拒绝'} {data.get('count', 0)} 处改动{where}",
+        }
+    if kind == ERROR:
+        return {"type": ERROR, "ok": False, "text": str(data.get("message") or "")}
+    if kind == FINAL:
+        ok = bool(data.get("ok"))
+        line = {"type": FINAL, "ok": ok, "text": str(data.get("text") or "")}
+        clue = data.get("error")
+        if isinstance(clue, dict):
+            # **只增**地带走服务端那条结构化线索（`{stage, url, kind}`），
+            # 页面才能把"哪一步/哪个地址/下一步敲什么"重新说一遍。
+            line["error"] = {
+                key: clue.get(key) for key in ("stage", "kind", "url") if clue.get(key)
+            }
+        if not ok and not line["text"]:
+            line["text"] = "这一轮没有产出"
+        return line
+    return None
+
+
+def attach_traces(messages: list[dict], turns: Sequence[dict]) -> None:
+    """把每一轮的轨迹挂回**它那条回复**上（给每条消息**只增**一个 `trace` 键）。
+
+    为什么按时间窗口认领而不是按正文比对：同一句话可能被跑两遍
+    （"（没有产出）"这种正文更是每条都一样），按正文匹配会把轨迹挂错轮。
+    一轮的窗口 `[started_at, ended_at]` 里落下的消息就是这一轮写的：子进程
+    开工时写用户那条、收尾时写助手那条（见 `cli/commands/run.py`）。
+
+    一轮**只挂一条**：有助手回复就挂它（回复卡片才是"排错要看的那张"），
+    没有（进程被停掉 / 崩了，助手那条根本没写）就挂这一轮最后那条消息——
+    宁可挂在用户那条上，也不能让这一轮的线索没有落脚点。
+
+    挂不上的那些消息照旧有 `trace: []`：键一个不少，值就是"这一轮没有轨迹"
+    （页面因此不必去猜"键缺了是因为没这个功能、还是因为没有值"）。
+    """
+    for item in messages:
+        item["trace"] = []
+    for turn in turns:
+        start = float(turn.get("started_at") or 0.0)
+        end = float(turn.get("ended_at") or 0.0)
+        mine = []
+        for item in messages:
+            at = item.get("created_at")
+            if at is None:
+                continue
+            if start <= float(at) <= end:
+                mine.append(item)
+        if not mine:
+            continue
+        holder = next(
+            (item for item in reversed(mine) if item.get("role") == ASSISTANT),
+            mine[-1],
+        )
+        holder["trace"] = [dict(line) for line in turn.get("lines") or []]
+
+
 class Runner:
     """管理一次 agent 子进程的运行。"""
 
@@ -161,6 +281,16 @@ class Runner:
         # 因为"上次看到第几条"是驱动者唯一能说的话。
         self._log: list[dict] = []
         self._log_seq = 0
+        # 这一轮的思考轨迹（`trace_line` 推出来的行），以及封存下来的前几轮。
+        # 页面刷新 / 切走再切回时，排错要看的正是这两样（见 `attach_traces`）。
+        self._trace: list[dict] = []
+        self._turns: list[dict] = []
+        self._turn_started = 0.0
+        self._turn_open = False
+        # 这一轮是不是被用户手动停掉的（`stop()` 里置位，`start()` 清位）。
+        # `/state` 只增地带出去：页面据此说"已停止"，而不是把一次主动停止
+        # 画成一次神秘失败。
+        self._stopped = False
 
     # --- 命令 ---
 
@@ -206,6 +336,12 @@ class Runner:
             self._diffs = []
             self._log = []
             self._log_seq = 0
+            # 新的一轮：轨迹重新开始攒，上一轮已经由 `_seal_turn_locked` 封存
+            # （刷新 / 切回时还能回看它），停止标记也要清掉——那是上一轮的事。
+            self._trace = []
+            self._turn_started = time.time()
+            self._turn_open = True
+            self._stopped = False
             self._process = subprocess.Popen(
                 self.command(goal),
                 cwd=str(self.project_root),
@@ -228,10 +364,21 @@ class Runner:
 
         照 `cli/commands/hub.py::stop_children` 的做法：先 terminate（让它自己
         收尾），到点还不退就 kill。别人的进程这里一概不碰。
+
+        语义是**温和停止**：给它机会把手上这一步收尾（`terminate` 是"请求退出"，
+        不是 kill -9），已经写进库里的往来、已经发出来的事件**一条都不删**——
+        停止只让这一轮到此为止，不做任何回滚。
+
+        `_stopped` 只在"真的在跑"时置位：空闲时调它必须仍是空操作，否则
+        `/state` 会替上一轮背一个它没干过的锅（`/run/stop` 那条路在调用前
+        已经用 `running` 判过，这里再判一次是给嵌入代码留的护栏）。
         """
         with self._lock:
             process = self._process
-        if process is None or process.poll() is not None:
+            alive = process is not None and process.poll() is None
+            if alive:
+                self._stopped = True
+        if process is None or not alive:
             return
         process.terminate()
         try:
@@ -290,6 +437,11 @@ class Runner:
         """
         with self._lock:
             final = dict(self._final) if self._final else None
+            messages = self._transcript()
+            # **只增**：每条消息多一个 `trace`（这一轮的思考轨迹，默认空表）。
+            # 刷新 / 切走再切回时，页面靠它把「思考过程」重新画出来——那一轮停在
+            # 哪一步、哪次调用为什么失败，是排错唯一要看的东西。
+            attach_traces(messages, self._turns)
             data = {
                 "running": self.running,
                 "finished": self._finished,
@@ -300,11 +452,20 @@ class Runner:
                 "final": final,
                 "diffs": [dict(item) for item in self._diffs],
                 "session": self.session,
-                "messages": self._transcript(),
+                "messages": messages,
                 # 顶层别名：外部驱动者（MCP 客户端等）不读源码时靠直觉就能判断
                 # 「做完了没」「成功没」。finished/final 仍然保留，不破坏老接口。
                 "done": self._finished,
                 "ok": final.get("ok") if final else None,
+                # **只增**：这一轮（正在跑或刚跑完）的轨迹 + 是不是被手动停掉的。
+                # `open` 为真 = 还在跑：页面刷新之后据此把实时卡片（连同已经攒下的
+                # 轨迹行）接着画出来，而不是等它跑完才看得见。
+                "trace": {
+                    "open": self.running,
+                    "goal": self._goal,
+                    "lines": [dict(item) for item in self._trace],
+                },
+                "stopped": self._stopped,
             }
         data["pairings"] = self._pending_pairings()
         data["health"] = self._health_snapshot(health)
@@ -366,6 +527,10 @@ class Runner:
                     "role": row["role"],
                     "content": row["content"],
                     "meta": row["meta"] or "",
+                    # **只增**：写这条消息的墙钟。它给 `attach_traces` 用来认领
+                    # "这条消息属于哪一轮"（按时间窗口，不按正文比对——同一句话
+                    # 可能被跑两遍），页面上不显示它。
+                    "created_at": float(row["created_at"]),
                 }
                 for row in rows
             ]
@@ -385,6 +550,12 @@ class Runner:
             self._log_seq += 1
             self._log.append({"seq": self._log_seq, **event.data, "type": event.type})
             del self._log[:-EVENT_LOG]
+            line = trace_line(event)
+            if line is not None:
+                # 轨迹与事件留痕是两件事：留痕**有上限地留一段**给轮询的驱动者，
+                # 轨迹是给人回看的（只留 `TRACE_LINES` 行，但会随轮次封存）。
+                self._trace.append(line)
+                del self._trace[:-TRACE_LINES]
             if event.type == AWAIT:
                 self._awaiting = int(event.data.get("count", 1))
                 self._await_detail = dict(event.data)
@@ -400,6 +571,28 @@ class Runner:
                 self._awaiting = 0
                 self._await_detail = {}
                 self._diffs = []
+                self._seal_turn_locked()
+
+    def _seal_turn_locked(self) -> None:
+        """把这一轮的轨迹封存下来（刷新 / 切走再切回时还要能回看）。持锁调用。
+
+        幂等：`final` 事件之后子进程还会退出，`_pump` 也要收尾一次——不封两次，
+        否则同一个窗口里会出现两条一模一样的轮次，`attach_traces` 认领时就分不清。
+        """
+        if not self._turn_open:
+            return
+        self._turn_open = False
+        self._turns.append(
+            {
+                "goal": self._goal,
+                "final": (self._final or {}).get("text", ""),
+                "ok": (self._final or {}).get("ok"),
+                "started_at": self._turn_started,
+                "ended_at": time.time(),
+                "lines": [dict(item) for item in self._trace],
+            }
+        )
+        del self._turns[:-TRACE_TURNS]
 
     def events(self, since: int = 0) -> list[dict]:
         """序号大于 since 的事件。外部驱动者按 last_seq 往下拉。"""
@@ -437,6 +630,10 @@ class Runner:
                     data["error"] = clue
                 fallback = Event(FINAL, data)
                 self._final = dict(fallback.data)
+            # 子进程收场就是这一轮的终点：即使它没发 `final`（崩了 / 被停掉），
+            # 轨迹也要就地封存——**失败的那一轮正是最需要事后回看的那一轮**。
+            # 时间窗口的右端取"进程真的走掉"这一刻：助手那条消息是在这之前写的。
+            self._seal_turn_locked()
         if fallback is not None:
             self._broadcast(fallback)
 
@@ -449,7 +646,15 @@ class Runner:
             del self._noise[:-NOISE_LINES]
 
     def _death_note(self, code: int | None) -> str:
-        """给一句能查下去的失败原因。调用方必须已持有锁。"""
+        """给一句能查下去的失败原因。调用方必须已持有锁。
+
+        被用户手动停掉时**要说得出是停的**：这条补的结局会进快照、也会推到页面上，
+        写成"进程退出，退出码 1"会让一次主动停止看起来像一次神秘崩溃（然后人去翻
+        根本不存在的日志）。退出码照旧给出来，只是把原因说在最前面。
+        """
         reason = "；".join(self._noise[-NOISE_LINES:])
+        if self._stopped:
+            head = f"你手动停止了这一轮（进程退出码 {code}）；已产出的内容保留"
+            return f"{head}：{reason}" if reason else head
         head = f"进程退出，退出码 {code}"
         return f"{head}：{reason}" if reason else head

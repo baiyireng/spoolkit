@@ -105,6 +105,168 @@ def test_三秒轮询只碰状态区(dom: dict) -> None:
     assert dom["poll"]["created"] == 0
 
 
+# --- ① 常驻提示：收敛到右上角，**不许挤对话区** ---
+
+
+def test_常驻提示出现展开收起都不挤对话区(dom: dict) -> None:
+    """用户报的第一条：常驻提示"占满屏幕顶端、压缩会话窗口"。
+
+    假 DOM 不排版，所以这里先把"挤"量化成一条**粗模型**（`page_dom.js` 里的 `room()`）：
+    对话区可用高度 = `#thread` 的高 - `#composer` 的高，而 `#composer` 的高按它里面
+    在文档流里的**元素**数估（一个节点一行、一行 24px）。判据：四枚徽标全亮 / 详情面板
+    展开 / 又回到安静，这个数**一个像素都不许动**，`scrollTop` 与 `scrollHeight`、
+    对话流的节点数也一样。
+
+    这条证据本身**可证伪**在两处：
+    ① 徽标真的出现了（4 → 1）而面板真的建了节点（反证"什么都没发生"）；
+    ② 把五枚徽标搬回输入条那一行——也就是这一轮改掉的那个设计——可用高度当场掉
+       288px（`moved_back`），搬回去又原样回来（`restored`）。所以"不变"不是因为
+       模型量不出东西。
+    """
+    squeeze = dom["no_squeeze"]
+    quiet = squeeze["quiet"]
+    assert quiet["composer_nodes"] == 0, f"输入条那一行里本来就有节点：{quiet}"
+    assert quiet["room"] == 528, f"没量到可用高度：{quiet}"
+    for name in ("busy", "opened", "clean"):
+        assert squeeze[name]["room"] == quiet["room"], (
+            f"{name} 那一下对话区可用高度变了：{squeeze[name]} vs {quiet}"
+        )
+        assert squeeze[name]["composer_nodes"] == quiet["composer_nodes"], (
+            f"{name} 那一下往输入条那一行里塞了节点"
+        )
+        assert squeeze[name]["scrollTop"] == quiet["scrollTop"], f"{name} 挪了滚动位置"
+        assert squeeze[name]["scrollHeight"] == quiet["scrollHeight"], f"{name} 改了内容高度"
+        assert squeeze[name]["stream_nodes"] == quiet["stream_nodes"], (
+            f"{name} 那一下动了对话流的节点"
+        )
+    # ① 反证：提示真的出现了，而且详情展开是真的建了节点。
+    assert squeeze["busy_badges"] == ["st-health", "st-mode", "st-pair", "st-elsewhere"], (
+        f"那几枚徽标没亮起来：{squeeze['busy_badges']}"
+    )
+    assert squeeze["clean_badges"] == ["st-health"], "收起来之后常态那枚圆点也不见了"
+    assert squeeze["panel_nodes"] > 0, "详情面板是空的"
+    # ② 反证：搬回输入条那一行就挤，搬回去就不挤——模型量得出"挤"。
+    assert squeeze["moved_back"]["room"] < quiet["room"], (
+        f"模型量不出挤：这条用例等于没测：{squeeze['moved_back']}"
+    )
+    assert squeeze["moved_back"]["composer_nodes"] > 0
+    assert squeeze["restored"]["room"] == quiet["room"], "搬回去没有复原"
+    assert squeeze["restored"]["composer_nodes"] == 0
+
+
+# --- ② AI 回复后消息卡自动更新；思考过程可折叠、事后还能回看 ---
+
+
+def test_回复到达时占位被真正的回复替换(dom: dict) -> None:
+    """用户报的第二条：AI 回复之后卡片不会自动更新（要刷新才看得见）。
+
+    判据是一条**时间线**：`start` 摆出占位「正在思考」→ 边跑边攒轨迹（收起，正文
+    一个节点都不建）→ 一键展开看得到那三行 → `final` 到达时**同一张卡片**里的占位
+    被换成真正的回复。整条时间线里 `.bubble` 只该有一个：不许留下占位、也不许
+    另起一张。
+    """
+    placeholder = dom["reply_placeholder"]
+    assert placeholder["pending"] is True, "start 之后没有摆出占位卡片"
+    assert placeholder["bubble_text"] == "正在思考…", f"占位不是那句话：{placeholder}"
+    assert placeholder["bubbles"] == 1
+    assert placeholder["trace_nodes"] == 0, "轨迹默认就该是收起的（不占版面）"
+    assert placeholder["trace_aria"] == "false"
+
+    collapsed = dom["reply_collapsed"]
+    assert collapsed["trace_head"] == "思考过程 · 3 行 · 有失败", (
+        f"轨迹标题没有说清几行、有没有失败：{collapsed['trace_head']}"
+    )
+    assert collapsed["trace_nodes"] == 0, "收起状态下正文节点不该存在"
+    # 对话流里正好两个气泡：我说的那条 + 这张卡片上的占位（多出来的就是重复画）。
+    assert dom["reply_collapsed_bubbles"] == 2, "边跑边攒轨迹时又多出了气泡"
+
+    opened = dom["reply_open"]
+    assert opened["trace_aria"] == "true", "点开之后 aria-expanded 没跟上"
+    assert opened["trace_nodes"] == 4, f"展开之后行数不对：{opened['trace_nodes']}"
+    assert "第 1 步" in opened["trace_text"]
+    assert "read_file → 失败" in opened["trace_text"], "工具那一行没有说清成功还是失败"
+    assert "文件不存在" in opened["trace_text"], "失败那行没有带上原因（排错要的就是它）"
+    assert "已等待 12s" in opened["trace_text"], "等待心跳没进轨迹"
+
+    done = dom["reply_done"]
+    assert done["bubble_text"] == "改好了：加了校验", f"回复没有替换掉占位：{done}"
+    assert done["pending"] is False, "气泡上还挂着「占位」那个类"
+    assert done["bubbles"] == 1, "回复另起了一张卡片（占位那张还在）"
+
+
+def test_库里那条回复到达时不新建节点也不重复(dom: dict) -> None:
+    """`/state` 每 3 秒一拍、跑完还会补一帧：同一句回复会被送**两次**
+    （`final` 事件一次、记忆库里那条一次）。第二次必须**认领**同一张卡片，
+    不能又画一个气泡出来、也不能把正文叠两遍。
+    """
+    persisted = dom["reply_persisted"]
+    # 两条：我说的那条 + 它答的那条；而**认领之后总数还是 2**（没有新建节点）。
+    assert dom["reply_done_bubbles"] == 2, "回复替换占位时多出了气泡"
+    assert persisted["stream_bubbles"] == 2, (
+        f"对话流里应该正好两条（我说的 + 它答的）：{persisted['texts']}"
+    )
+    assert persisted["texts"] == ["改一下登录页", "改好了：加了校验"], (
+        f"顺序或内容不对（重复画 / 少画）：{persisted['texts']}"
+    )
+    assert persisted["bubbles"] == 1, "同一张卡片里被填了两遍"
+    assert persisted["bubble_text"] == "改好了：加了校验", "正文叠了一遍"
+    assert persisted["has_placeholder"] is False, "页面上还留着「正在思考」那句占位"
+
+
+def test_刷新之后思考过程与失败原因依然回看得见(dom: dict) -> None:
+    """这一批最硬的那条要求：**刷新页面 / 切走再切回，仍能回看那一轮的思考与失败原因**。
+
+    假 DOM 里的"刷新"就是 `resetView()`（对话流清空、这一轮的实时状态全部作废），
+    然后只喂一帧 `/state`——那一帧里的助手消息带着服务端只增的 `trace`。
+    判据：卡片上有一个**默认收起**的「思考过程」；点开后步骤、工具调用、失败那行
+    （带原因）都在；而这一轮的失败原因与**下一步**（`spool service list` 这类真命令）
+    直接画在卡片里——不必点开也看得见。
+    """
+    fresh = dom["refresh_trace"]
+    assert fresh["has_placeholder"] is False, "刷新之后还挂着占位"
+    assert fresh["trace_head"] == "思考过程 · 3 行 · 有失败", fresh["trace_head"]
+    assert fresh["trace_nodes"] == 0, "默认该是收起的"
+    assert "失败环节：连接模型" in fresh["card_text"], "失败原因没有重新画出来"
+    assert "下一步：" in fresh["card_text"], "没有下一步"
+    assert "spool service list" in fresh["card_text"], "下一步要写**实际存在**的命令"
+    assert "可能原因：" in fresh["card_text"]
+
+    opened = dom["refresh_trace_open"]
+    assert opened["trace_aria"] == "true"
+    assert "第 1 步" in opened["trace_text"], "步骤没有回放出来"
+    assert "read_file → 失败" in opened["trace_text"], "工具调用没有回放出来"
+    assert "文件不存在" in opened["trace_text"], "失败原因没有回放出来"
+    assert "失败：没做成：文件不存在" in opened["trace_text"], "结局那行没有回放出来"
+
+
+# --- ⑤ 运行中那一枚键是「停止」 ---
+
+
+def test_运行中发送键变停止点了就调那个端点(dom: dict) -> None:
+    """用户报的第三条：无法手动中断任务。
+
+    判据：运行中那一枚键是"停止"（可点，不是禁用），说明里写清"已产出的内容保留"；
+    点它发的就是 `POST /run/stop`，而且**立刻**进"正在停止…"；
+    `/state` 说它已经不在跑之后，那一枚键回到"发送"。
+    """
+    button = dom["stop_button"]
+    assert button["mode"] == "stop", f"运行中那一枚键不是停止：{button}"
+    assert button["disabled"] is False, "运行中那一枚键是禁用的：点不动等于没有停止入口"
+    assert "停止" in button["title"] and "保留" in button["title"], button["title"]
+
+    clicked = dom["stop_clicked"]
+    assert clicked["calls"] == ["/run/stop"], f"没有调那个端点：{clicked['calls']}"
+    assert clicked["mode"] == "stopping", "点了没有立刻反馈"
+    assert clicked["disabled"] is True, "正在停止时还能再点（会重复发请求）"
+    assert "正在停止" in clicked["title"], clicked["title"]
+    assert clicked["last_line"] is True, "点了之后对话区里没有一句回执"
+
+    settled = dom["stop_settled"]
+    assert settled["mode"] == "send", f"停下来之后那一枚键没回到发送：{settled}"
+    assert settled["disabled"] is False
+    assert settled["title"] == "发送"
+
+
 # --- ③ 代码块与正文分开 ---
 
 

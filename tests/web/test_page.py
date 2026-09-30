@@ -457,7 +457,10 @@ def test_用户与助手的气泡方向是分开的() -> None:
     # 助手的话可以带代码块
     assert "fillRich" in add
     history = _body("drawHistory")
-    assert "item.role === 'user' ? 'user' : 'assistant'" in history
+    assert "historyCard(" in history, "历史没有走「按往来画一张卡片」那条路"
+    card = _body("historyCard")
+    assert "item.role === 'user'" in card
+    assert "makeMsg(mine ? 'user' : 'assistant')" in card
 
 
 def test_历史也只追加不重画() -> None:
@@ -467,13 +470,18 @@ def test_历史也只追加不重画() -> None:
     永远不出现**——数据变了却不重绘，与"数据没变却重绘"正好是一对反的错。
     """
     body = _body("drawHistory")
-    assert "makeBubble(" in body
-    assert "fillRich(" in body
+    assert "historyCard(" in body
     assert "for (let index = drawn; index < items.length; index += 1)" in body, (
         "不是从「已经画到哪儿」接着画：那是全量重画"
     )
     assert "drawn = items.length" in body
     assert "drawn > items.length" in body, "列表变短时要能重来一遍"
+    # 这一批多了一道**认领**：这一轮已经实时画过的那些不新建节点（否则同一句话
+    # 会出现两遍）。行为数字在 `test_page_dom.py` 的 `reply_card` 那一组。
+    assert "adoptMessage(" in body, "快照里那条已经画过的消息没有认领回来"
+
+    card = _body("historyCard")
+    assert "fillRich(" in card
 
     reset = _body("resetView")
     assert "drawn = 0" in reset, "换了目标要重新开始画"
@@ -663,16 +671,24 @@ def _rule(selector: str) -> str:
 
 def test_通知是右上角的浮动气泡而不是横幅() -> None:
     """失败与提示以前挤在同一条横幅带里：一条早就没意义的旧提示会把新错误挤下去，
-    而它自己不会走。现在通知走 `#toasts`——固定在右上角的一列。
+    而它自己不会走。现在通知走 `#toasts`——右上角那一列浮层的下半截。
+
+    那一列（`#corner`）是**整块 fixed**：常驻提示在上、通知在下，两样都脱离文档流，
+    所以"通知把对话流挤下去"与"通知盖住状态徽标"这两件事同时不存在。
     """
     assert 'id="toasts"' in HTML
-    box = _rule(".toasts")
-    assert "position:fixed" in box, "通知没有浮起来"
-    assert "top:" in box and "bottom:" not in box, "通知锚在底部会压住输入条"
-    assert "flex-direction:column" in box, "通知没有排成一列（会互相盖住）"
-    assert "gap:8px" in box, "两条通知之间没有间隙"
-    # 单个气泡自己不许绝对定位：那是"叠在一起"的写法。
+    assert 'id="corner"' in HTML
+    corner = _rule("#corner")
+    assert "position:fixed" in corner, "右上角那一列没有浮起来"
+    assert "top:" in corner and "bottom:" not in corner, "锚在底部会压住输入条"
+    # 常驻提示在前、通知在后：同一列里靠右堆叠，谁也不会盖住谁。
+    assert "flex-direction:column" in corner, "那一列不是竖着排的"
+    assert "gap:8px" in corner, "两块之间没有间隙"
+    toasts = _rule("#toasts")
+    assert "flex-direction:column" in toasts, "通知没有排成一列（会互相盖住）"
+    # 单个气泡自己不许绝对定位或固定定位：那是"叠在一起"的写法。
     assert "position:absolute" not in _rule(".toast")
+    assert "position:fixed" not in _rule(".toast")
     # 横幅带上只剩"这是哪一种壳 / 有没有目标"这类模式说明。
     for gone in ('id="health"', 'id="pairing"', 'id="elsewhere"'):
         assert gone not in HTML, f"{gone} 还留在横幅带上"
@@ -721,37 +737,49 @@ def _ancestors(element_id: str) -> list:
     raise AssertionError(f"静态 HTML 里没有 id={element_id!r} 的元素")
 
 
-def test_通知容器是body的直接子节点且不在滚动容器里() -> None:
-    """气泡一出现就把页面往下挤，是因为它长在**文档流**里。现在不是了：
+def test_提示与通知那一列在body下且不在滚动容器里() -> None:
+    """浮层一出现就把页面往下挤，是因为它长在**文档流**里。现在不是了：
 
-    ① 容器 `position:fixed`（脱离文档流），而且 `pointer-events:none`
-       ——它跟内容重叠时，底下的按钮照样点得动；
+    ① 那一列 `position:fixed`（脱离文档流），而且 `pointer-events:none`
+       ——它跟内容重叠时，底下的按钮照样点得动（徽标 / 面板 / 气泡自己吃点击）；
     ② 它的父节点就是 `body`，不在 `#stream` / `#thread` / `#body` 任何一个里面，
        也就是**不在滚动容器里**：滚对话流不会把它带走，它也不占对话流的位置。
+       常驻提示（`#hints`）与通知（`#toasts`）都在这一列下，两样都受益。
 
-    证伪法：把 `#toasts` 那个 div 挪进 `#stream` 里（或把 `position:fixed` 删掉），
-    这里立刻红——而"弹一条通知不动对话流"的行为断言在 `test_page_dom.py` 里。
+    证伪法：把 `#corner` 那个 div 挪进 `#stream` 里（或把 `position:fixed` 删掉），
+    这里立刻红——而"提示 / 通知不动对话流"的行为断言在 `test_page_dom.py` 里。
     """
-    assert 'id="toasts"' in HTML
-    box = _rule(".toasts")
-    assert "position:fixed" in box, "通知没有脱离文档流"
-    assert "pointer-events:none" in box, "通知容器会挡住底下那层内容的点击"
+    assert 'id="corner"' in HTML
+    corner = _rule("#corner")
+    assert "position:fixed" in corner, "右上角那一列没有脱离文档流"
+    assert "pointer-events:none" in corner, "那一列会挡住底下那层内容的点击"
 
-    assert _ancestors("toasts") == ["html", "body"], (
-        f"通知不是挂在 body 下：{_ancestors('toasts')}"
+    assert _ancestors("corner") == ["html", "body"], (
+        f"那一列不是挂在 body 下：{_ancestors('corner')}"
+    )
+    assert _ancestors("hints") == ["html", "body", "div#corner"], (
+        f"常驻提示不在那一列里：{_ancestors('hints')}"
+    )
+    assert _ancestors("toasts") == ["html", "body", "div#corner"], (
+        f"通知不在那一列里：{_ancestors('toasts')}"
     )
     # 反证：对话流确实深深嵌在滚动容器里（不然上一条会因为"页面啥都没有"而假绿）。
     assert _ancestors("stream") == ["html", "body", "div#body", "div#thread"], (
         f"对话流的层次变了？{_ancestors('stream')}"
     )
+    # 而"输入条那一行"仍然在文档流里（它是这一页唯一还带状态文字的地方），
+    # 这正好是"挤不挤"的反证面：徽标要是还在那儿，就会跟着它一起占高度。
+    assert _ancestors("composer") == ["html", "body", "div#body", "div#thread"], (
+        f"输入条的层次变了？{_ancestors('composer')}"
+    )
 
 
 def test_顶部没有横幅带也没有常驻提示() -> None:
-    """一切正常时，顶部**不出现任何常驻提示**（不是"显示一句一切正常"，而是不占位）。
+    """顶部那条**在文档流里**的横幅没有了（不是"显示一句一切正常"，而是不占位）。
 
-    以前顶部那条横幅装着：只读（非回环）、`--root` 钉住、没有目标、模型探活。
-    它一出现就把对话流往下推。现在这些全收进输入条那一行（`.st`）与它的详情里，
-    顶部只剩"我在哪儿"（`#top` 里的目标）。
+    以前那条横幅装着：只读（非回环）、`--root` 钉住、没有目标、模型探活。
+    它一出现就把对话流往下推。现在这些收进**右上角那一列浮层**（`#corner` 里的
+    `#hints` + 详情），顶部只剩"我在哪儿"（`#top` 里的目标）。
     """
     style = HTML[HTML.find("<style>") : HTML.find("</style>")]
     assert "class=\"banner\"" not in HTML, "横幅那个挂点还在页面上"
@@ -767,11 +795,44 @@ def test_顶部没有横幅带也没有常驻提示() -> None:
     assert 'id="where"' in top and 'id="menu"' in top
 
 
+def test_常驻提示在右上角浮层里而不是占着输入条那一行() -> None:
+    """用户报的第一条：常驻提示"占满屏幕顶端、压缩会话窗口"。
+
+    它在文档流里的任何一个位置都会挤对话区（上一轮搬进输入条下面那一行也还是挤：
+    徽标一多就换行，`#composer` 变高、`#stream` 变矮）。所以这一轮两件事一起做：
+
+    ① 五枚徽标 + 详情面板全搬进 `#hints`（在 `#corner` 那个 `position:fixed` 的列里）；
+    ② 输入条那一行**只剩一句静态提示**（Enter 发送），再没有会随状态长出来的东西。
+    """
+    # 五枚徽标都在 `#hints` 里（静态结构），而不在输入条那一行里。
+    hints = HTML[HTML.find('<div id="hints">') : HTML.find('<div id="toasts">')]
+    for badge in ("st-health", "st-mode", "st-target", "st-pair", "st-elsewhere",
+                  "st-panel"):
+        assert f'id="{badge}"' in hints, f"{badge} 不在右上角那一列里"
+    strip = HTML[HTML.find('<div class="st">') :][:400]
+    assert "Enter 发送" in strip, "输入条那一行连原来那句提示都没了"
+    assert 'id="st-' not in strip, "输入条那一行里还留着会随状态长出来的徽标"
+    assert strip.count("<button") == 0, "输入条那一行里还有按钮"
+
+    # 尺寸是**参数化**的：最大宽度写在那一列上，高度自适应（`height:auto`）。
+    corner = _rule("#corner")
+    assert "width:min(420px, 92vw)" in corner, f"最大宽度没有参数化：{corner}"
+    assert "height:auto" in corner, f"高度被写死了：{corner}"
+    hints_rule = _rule("#hints")
+    assert "flex-wrap:wrap" in hints_rule, "徽标多了不换行，会横向溢出"
+    assert "height" not in hints_rule or "auto" in hints_rule, "提示那一行高度被写死了"
+    # 详情面板以 `#hints` 为锚（它得是定位祖先），高度自适应、超长才自己滚。
+    assert "position:relative" in hints_rule, "详情面板没有可锚定的祖先"
+    panel = _rule(".st-panel")
+    assert "position:absolute" in panel, "详情面板长在文档流里"
+    assert "max-height:56vh" in panel and "overflow-y:auto" in panel
+
+
 def test_状态区常态只剩一枚圆点() -> None:
     """探活收进一枚小圆点：正常时 `label` 是空的——**不画**"一切正常"那句。
 
-    判据在两条分支上：常态给空标签，异常给短标签；而徽标始终在输入条那一行里
-    （`.st`），不新增占位。
+    判据在两条分支上：常态给空标签，异常给短标签；而徽标在右上角那一列里
+    （`#hints`），不是输入条那一行——那一行现在只有一句静态提示。
     """
     assert 'id="st-health"' in HTML
     body = _body("showHealth")
@@ -783,11 +844,7 @@ def test_状态区常态只剩一枚圆点() -> None:
     assert "healthLabel.classList.toggle('hidden', healthView.label === '')" in status, (
         "常态那枚圆点旁边还挂着空标签"
     )
-    # 徽标都在同一行里，而那一行本来就在（Enter 发送 那句）：状态变化不新增占位。
-    strip = HTML[HTML.find('<div class="st">') : HTML.find('<div id="st-panel"')]
-    assert "Enter 发送" in strip, "状态区不是原来那一行小字"
-    assert strip.count("<div") == 1, "状态区里又多了一层会占位的块"
-    # 那一行与"Enter 发送"是同一个 flex 行（`.st-hint` 靠 margin-left:auto 靠右）。
+    # 那一行与"Enter 发送"仍是同一个 flex 行（`.st-hint` 靠 margin-left:auto 靠右）。
     assert "margin-left:auto" in _rule(".st-hint")
 
 
@@ -808,19 +865,22 @@ def test_状态详情保留四项而且异常仍然看得见() -> None:
     body = _body("showHealth")
     assert "cls: 'bad'" in body
     assert "redact(" in body
-    # 详情面板是浮层：绝对定位，展开/收起都不占文档流。
+    # 详情面板是浮层：绝对定位（锚在右上角那一列里），展开/收起都不占文档流。
     assert "position:absolute" in _rule(".st-panel"), "详情面板长在文档流里"
 
 
 def test_状态详情能收起而且点外面也行() -> None:
     """展开之后得能收起来，而且**焦点不在输入框里时也收得掉**（点过徽标之后焦点
-    就在按钮上）：所以除了输入框那条 Esc，还挂着"点 `#composer` 之外"与 document 上
-    的 Esc。"""
+    就在按钮上）：所以除了输入框那条 Esc，还挂着"点那一列之外"与 document 上的 Esc。
+
+    常驻提示搬到右上角之后，"外面"的判据也跟着改了：以前是 `#composer`（徽标在
+    输入条那一行里），现在是 `#corner`——不然点一下对话流就会被当成"点在外面"。
+    """
     script = _script()
     assert "if (event.key === 'Escape') { setStatusOpen(false); return; }" in _body("onKeydown")
     assert "document.onkeydown" in script and "Escape" in script
     outside = script[script.find("document.onclick = function") :][:400]
-    assert "closest('#composer')" in outside, "点外面收不掉"
+    assert "closest('#corner')" in outside, "点外面收不掉"
     assert "setStatusOpen(false)" in outside
 
 
@@ -853,23 +913,32 @@ def test_只读与钉住的模式信息仍然可发现() -> None:
     assert "var(--danger-line)" in _rule(".st-item.bad")
 
 
-def test_窄屏通知仍占满宽度但仍然是fixed() -> None:
-    """860px 以下左栏收成抽屉；通知整块跟着收进来，**但一个 `position` 都不许写**
-    ——写上去就等于把它从浮层拉回文档流，"挤下去"那个毛病就回来了。"""
-    mobile = HTML[HTML.find("@media (max-width:860px)") :][:1400]
-    assert ".toasts {" in mobile
+def test_窄屏时提示与通知那一列不越界而且仍然是fixed() -> None:
+    """860px 以下左栏收成抽屉；右上角那一列跟着收进来，**但一个 `position` 都不许写**
+    ——写上去就等于把它从浮层拉回文档流，"挤下去"那个毛病就回来了。
+
+    "不越界"的判据是**左右都压住**（`left` 与 `right` 同时给、宽度交给 `auto` 算）：
+    只锚右边的话，宽度大于视口时左边缘会跑到屏幕外。
+    """
+    mobile = HTML[HTML.find("@media (max-width:860px)") :][:1600]
+    assert "#corner {" in mobile
     assert "left:10px" in mobile and "right:10px" in mobile
     assert "width:auto" in mobile
-    rule = mobile[mobile.find(".toasts {") : mobile.find("}", mobile.find(".toasts {")) + 1]
+    rule = mobile[mobile.find("#corner {") : mobile.find("}", mobile.find("#corner {")) + 1]
     assert "position" not in rule, f"窄屏那条规则里写了定位：{rule}"
+    # 底座那条规则里的最大宽度是**参数化**的（`min(420px, 92vw)`）：窄屏还有第二道
+    # 护栏（上面那对 left/right），两道加起来才不会越界。
+    assert "width:min(420px, 92vw)" in _rule("#corner")
 
 
-def test_减少动效时通知不动画() -> None:
+def test_减少动效时提示与通知都不动画() -> None:
     """`prefers-reduced-motion` 下不动画（不动画 ≠ 不出现：它只是直接在那里）。"""
     block = HTML[HTML.find("@media (prefers-reduced-motion: reduce)") :]
     block = block[: block.find("</style>")]
     assert ".toast { animation:none; }" in block, f"减少动效那一档没有关掉入场动画：{block}"
+    assert ".st-panel { animation:none; }" in block, "状态详情那一档还在动画"
     assert "animation:toast-in" in _rule(".toast"), "入场动画的钥匙丢了"
+    assert "animation:toast-in" in _rule(".st-panel"), "详情面板的入场动画钥匙丢了"
 
 
 def test_自己说的话不带符号前缀() -> None:
@@ -948,10 +1017,11 @@ def test_历史不加那句给用户看的说明() -> None:
     assert "history-sep" in history, "历史与这一趟之间的界线没了"
     # 分隔线只是**一条线**：里面一个字都不写（`::before`/`::after` 画的线）。
     assert "textContent" not in history, "分隔线上还写着字"
-    # 历史消息照旧画出来，只是多一个类。
-    assert "makeBubble(" in history
-    assert "'history'" in history, "历史没有可辨认的类（略淡那一档）"
-    assert "fillRich(bubble, item.content)" in history, "历史正文没画出来"
+    # 历史消息照旧画出来，只是多一个类（`historyCard` 是这一批新抽出来的那个落点）。
+    card = _body("historyCard")
+    assert "makeMsg(" in card
+    assert "'history'" in card, "历史没有可辨认的类（略淡那一档）"
+    assert "fillRich(bubble, item.content)" in card, "历史正文没画出来"
     assert ".msg.history" in HTML, "没有略淡那一条样式"
 
 
@@ -1071,25 +1141,60 @@ def test_Enter发送与ShiftEnter换行() -> None:
 def test_发送键走同一个run() -> None:
     say = _body("say")
     assert "post('/run', {goal})" in say
-    assert "sendBtn.onclick = say" in _script(), "发送按钮没绑上"
+    click = _body("onSendClick")
+    assert "say()" in click, "空闲时那一枚键不是发送"
+    assert "sendBtn.onclick = onSendClick" in _script(), "发送按钮没绑上"
     # 只读壳里不许发：非回环按钮点了只会 403
     assert "if (readonly) { return; }" in say
 
 
-def test_运行中发送键禁用并说明原因() -> None:
-    """后端没有停止接口（只有 /run 与 /confirm）：不摆一个点了就骗人的停止键，
-    而是把发送降级成"跑完再发"，并把原因写出来。
+def test_运行中发送键变成停止而不是禁用() -> None:
+    """用户报的第三条：运行中**无法手动中断**。服务端现在有 `POST /run/stop` 了
+    （复用 `Runner.stop()` 的温和停止语义），所以那一枚键运行中变成「停止」——
+    不再是"禁用 + 一句说明"（那正是原来那个灰键，点了什么也不会发生）。
 
-    证伪法：让 syncSend 不再看 busy（运行中仍然可点），这条就红。
+    证伪法：把 `syncSend` 里的 `mode` 改回只有发送一档（或让 `disabled` 又看 `busy`），
+    这条立刻红。
     """
     send = _body("syncSend")
-    assert "sendBtn.disabled = busy" in send
+    assert "const mode = busy ? (stopping ? 'stopping' : 'stop') : 'send';" in send
+    assert "sendBtn.disabled = stopping || readonly;" in send, (
+        "运行中那一枚键又被禁用了：点不动就等于没有停止入口"
+    )
+    assert "sendBtn.dataset.mode = mode" in send, "没有任何地方说得出它现在是哪一档"
+    assert "'停止这一轮（已产出的内容保留）'" in send, "运行中那枚键的说明里没写清会丢什么"
+    assert "ICON.stop" in send and "stop: '<svg" in _script(), "停止那一档没有自己的图标"
 
-    target = _body("drawTarget")
-    assert "没有停止" in target, "禁用了却不说明原因，那个灰按钮看起来就是坏了"
+    # 点它：运行中走停止，空闲才走发送；返回值是那一条 POST 的 promise
+    # （要能 `await` 到"请求真的发出去了"，而不是只看按钮那一瞬间）。
+    click = _body("onSendClick")
+    assert "if (busy) { return requestStop(); }" in click
+    assert "return say();" in click
+    assert "sendBtn.onclick = onSendClick" in _script()
 
+    # 停止走的是新端点，而且**立刻有反馈**（按钮进"正在停止…"）、失败要拨回去。
+    stop = _body("requestStop")
+    assert "post('/run/stop', {})" in stop
+    assert "stopping = true;" in stop and "syncSend()" in stop, "点了没有立刻反馈"
+    assert "stopping = false;" in stop, "被拒（409/403）之后那一枚键卡在停止态"
+    assert "if (readonly || stopping) { return; }" in stop, "没有防连点"
+
+    # 跑完（或 `/state` 说不在跑）要把那一档落回去，否则会永远写着"正在停止…"。
+    run = _body("setRunning")
+    assert "if (!busy) { stopping = false; }" in run
+    poll = _body("refreshStatus")
+    assert "if (!state.running) {" in poll and "if (busy) { setRunning(false); }" in poll, (
+        "`final` 事件漏掉时那一枚键会卡在「正在停止…」"
+    )
+    # 服务端说这一轮**不是**被停掉的（`stopped` 假）= 正常收场：那个标记也得清，
+    # 否则下一轮的一次普通失败会被画成"已停止"。
+    assert "if (!state.stopped) { stoppedRun = false; }" in _body("applyState")
     final_at = _script().find("data.type === 'final'")
-    assert "setRunning(false)" in _script()[final_at : final_at + 160], "跑完没有把发送放回可用"
+    assert "setRunning(false)" in _script()[final_at : final_at + 200], "跑完没有把那一档放回去"
+
+    # 运行中那句说明改成"点停止就能中断"（不再说"这个壳没有停止接口"）。
+    target = _body("drawTarget")
+    assert "停止" in target and "手动停止" in target
 
 
 # --- 主题与响应式 ---
@@ -1124,7 +1229,8 @@ def test_只读时发送键不出现也不可点() -> None:
     """只读壳里没有可点的东西：点一下被 403 拒，只会让人以为壳坏了。
 
     判据两点：① 发送的处理函数第一句就是只读早退；② 只读状态由**服务端**的
-    `state.readonly` 定，而且它一到位就把发送键关掉。
+    `state.readonly` 定，而且它一到位就把那一枚键关掉（停止请求也一样：
+    `/run/stop` 与 `/run` 走同一张 `WRITE_PATHS` 表，远程一律 403）。
     """
     say = _body("say")
     assert "if (readonly) { return; }" in say
@@ -1135,9 +1241,11 @@ def test_只读时发送键不出现也不可点() -> None:
 
     send = _body("syncSend")
     assert "readonly" in send
+    # 只读与"正在停止"落在同一个禁用条件上（运行中那一档是**可点**的停止键）。
+    assert "sendBtn.disabled = stopping || readonly" in send
 
-    # 运行中不许发，只读同样不许发：两种都要落在同一个禁用条件上
-    assert "busy || readonly" in send
+    stop = _body("requestStop")
+    assert "if (readonly || stopping) { return; }" in stop, "只读壳里还发得出停止请求"
 
 
 def test_只读时审批按钮也不摆出来() -> None:

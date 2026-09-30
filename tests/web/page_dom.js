@@ -906,4 +906,226 @@ async function extras() {
     calls: ctx.fetchCalls.slice(-1),
     last_user: mine.length ? mine[mine.length - 1].textContent : 'missing',
   };
+
+  await extras2();
 }
+
+/* ── ① 常驻提示挪到右上角之后**不许挤对话区** / ② 回复卡片 / ⑤ 停止 ──
+   单独一段、放在最后：上面那些计数是既有用例的判据，别让这一段的节点搅进去。 */
+
+function lastCard() {
+  const wraps = ids.get('stream').querySelectorAll('.msg');
+  return wraps.length ? wraps[wraps.length - 1] : null;
+}
+
+// 一张助手卡片当前长什么样：气泡里有几个、是不是还挂着占位、轨迹那一块收着没有。
+function cardInfo(card) {
+  const trace = card ? card.querySelector('.trace') : null;
+  const head = trace ? trace.querySelector('.trace-head') : null;
+  const body = trace ? trace.querySelector('.trace-body') : null;
+  const bubble = card ? card.querySelector('.bubble') : null;
+  return {
+    bubbles: card ? card.querySelectorAll('.bubble').length : 0,
+    bubble_text: bubble ? bubble.textContent : '',
+    pending: bubble ? String(bubble._cls).indexOf('pending') >= 0 : false,
+    trace_head: head ? head.textContent : '',
+    trace_aria: head ? head.getAttribute('aria-expanded') : '',
+    trace_nodes: body ? allNodes(body).length : 0,
+    trace_text: body ? body.textContent : '',
+    card_text: card ? card.textContent : '',
+  };
+}
+
+function bubbleTexts() {
+  return ids.get('stream').querySelectorAll('.bubble').map((node) => node.textContent);
+}
+
+function streamText() { return ids.get('stream').textContent; }
+
+function event(type, payload) {
+  return { data: JSON.stringify(Object.assign({type: type}, payload || {})) };
+}
+
+async function extras2() {
+  // ══ ① 常驻提示：从"一枚圆点都没有"到"五枚徽标全亮 + 详情展开"，对话区不许动 ══
+  // 假 DOM 不排版，所以这里用一条**粗模型**把"挤"量化，而且模型自己先被反证过：
+  //   对话区可用高度 = #thread 的高 - #composer 的高
+  //   #composer 的高 = 72 + （它里面在文档流里的节点数 × 24）
+  // 那 24px 是"一行小字"的量级——徽标换行、面板展开都会让那一行多一行。
+  // 判据：常驻提示亮起 / 详情展开 / 全部收起，这个数**一个像素都不许动**；
+  // 而 `hints_nodes` 同时在变（说明提示真的出现了，不是"什么都没发生"），
+  // 再把徽标搬回输入条那一行——可用高度立刻掉 120px（模型量得出"挤"）。
+  const threadBox = ids.get('thread');
+  const composerBox = ids.get('composer');
+  const streamBox = ids.get('stream');
+  threadBox.clientHeight = 600;
+  streamBox.clientHeight = 520;
+  streamBox.scrollHeight = 900;
+  streamBox.scrollTop = 220;
+  const room = () => {
+    // 节点数只算**元素**（文本节点不额外占行）：一行文字本身不会让那一行变高。
+    const nodes = allNodes(composerBox).filter((node) => node.tagName !== 'TEXT').length;
+    const composerH = 72 + nodes * 24;
+    return {
+      composer_nodes: nodes,
+      composer_h: composerH,
+      thread_h: threadBox.clientHeight,
+      room: threadBox.clientHeight - composerH,
+      stream_children: streamBox.children.length,
+      stream_nodes: allNodes(streamBox).length,
+      scrollTop: streamBox.scrollTop,
+      scrollHeight: streamBox.scrollHeight,
+    };
+  };
+  const UP = { model: { ok: true, target: '', detail: '假模型' }, services: [],
+    state: 'up', probed_at: 1700000000, age_s: 1 };
+  const DOWN = { model: { ok: false, target: 'http://127.0.0.1:8080',
+    detail: '拒绝连接', kind: 'connect' }, services: [], state: 'down',
+    probed_at: 1700000000, age_s: 3 };
+  // **同一个目标**（ROOT_A）、同样空的历史，只改"常驻提示那几样"：
+  // 安静 → 四枚徽标全亮 → 详情展开 → 又回到安静。目标一变就会整屏重绑，
+  // 那会把对话流的节点数搅进来，而这一条要量的正是"提示自己占不占地方"。
+  const hintFrame = (extra) => frame(ROOT_A, 'a1', WROWS, SROWS_A, [],
+    Object.assign({ readonly: false, host: '127.0.0.1', pairings: [],
+      running_targets: [], health: UP }, extra));
+  ctx.setStatusOpen(false);
+  ctx.applyState(hintFrame({}));
+  const quiet = room();
+  ctx.applyState(hintFrame({
+    readonly: true,
+    host: '0.0.0.0',
+    pairings: [{ code: '482913', user: 'u-1' }],
+    running_targets: [
+      { root: 'D:/ws-c', session: 'c1', name: 'ws-c', goal: '另一条在跑',
+        current: false, awaiting: true },
+    ],
+    health: DOWN,
+  }));
+  const busy = room();
+  const busyBadges = visibleBadges();
+  ctx.setStatusOpen(true);
+  const opened = room();
+  const panelNodes = allNodes(ids.get('st-panel')).length;
+  ctx.setStatusOpen(false);
+  ctx.applyState(hintFrame({}));
+  const clean = room();
+  const cleanBadges = visibleBadges();
+  out.no_squeeze = {
+    quiet: quiet, busy: busy, opened: opened, clean: clean,
+    panel_nodes: panelNodes,
+    busy_badges: busyBadges,
+    clean_badges: cleanBadges,
+  };
+  // 反证：把五枚徽标搬回**输入条那一行**（也就是这一轮改掉的那个设计），
+  // 可用高度立刻掉 5 × 24 = 120px，滚动位置与对话流节点数倒是没动——
+  // 说明"挤"正是从那一行的高度来的，而模型量得出它。
+  const moved = [];
+  for (const id of ['st-health', 'st-mode', 'st-target', 'st-pair', 'st-elsewhere']) {
+    const node = ids.get(id);
+    if (node.parentNode) { node.parentNode.removeChild(node); }
+    composerBox.appendChild(node);
+    moved.push(id);
+  }
+  out.no_squeeze.moved_back = room();
+  for (const id of moved) {
+    const node = ids.get(id);
+    if (node.parentNode) { node.parentNode.removeChild(node); }
+    ids.get('hints').appendChild(node);
+  }
+  out.no_squeeze.restored = room();
+
+  // ══ ② 回复卡片：占位 → 真正的回复；思考过程收起可展开、库里那条不重复画 ══
+  // `resetView` 就是"刷新了一次"在假 DOM 里的样子：对话流清空、这一轮的实时状态作废。
+  ctx.resetView();
+  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, '')));
+  const goalInput2 = ids.get('goal');
+  goalInput2.value = '改一下登录页';
+  ctx.__fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  await ctx.say();
+  ctx.__fetchImpl = null;
+  out.reply_user_bubbles = streamBubbles();
+  ctx.onEvent(event('start', { goal: '改一下登录页' }));
+  out.reply_placeholder = cardInfo(lastCard());
+  // 边跑边攒：步骤 / 一次失败的工具调用 / 等待心跳，都进「思考过程」。
+  ctx.onEvent(event('step', { n: 1 }));
+  ctx.onEvent(event('tool', { name: 'read_file', ok: false, detail: '文件不存在：src/a.py' }));
+  ctx.onEvent(event('wait', { elapsed: 12, limit: 491 }));
+  out.reply_collapsed = cardInfo(lastCard());
+  out.reply_collapsed_bubbles = streamBubbles();
+  // 一键展开：三行都要在，失败那行还要带原因。
+  // 展开键可能压根没建出来（那就是这条用例要抓的坏）：**不在假 DOM 里抛异常**，
+  // 照常放行，让下面的断言去红（抛异常会把整组变成 error 而不是 failed）。
+  const replyHead = lastCard() ? lastCard().querySelector('.trace-head') : null;
+  if (replyHead) { replyHead.onclick(); }
+  out.reply_open = cardInfo(lastCard());
+  ctx.onEvent(event('final', { ok: true, text: '改好了：加了校验' }));
+  out.reply_done = cardInfo(lastCard());
+  out.reply_done_bubbles = streamBubbles();
+  // 库里那条回复到了（快照）：**认领**同一张卡片——不新建节点、也不重复一遍。
+  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, [
+    { role: 'user', content: '改一下登录页', meta: '', created_at: 10 },
+    { role: 'assistant', content: '改好了：加了校验', meta: '1 步，完成', created_at: 11,
+      trace: [
+        { type: 'step', text: '第 1 步' },
+        { type: 'tool', ok: false, text: 'read_file → 失败', detail: '文件不存在：src/a.py' },
+        { type: 'final', ok: true, text: '改好了：加了校验' },
+      ] },
+  ]));
+  out.reply_persisted = {
+    ...cardInfo(lastCard()),
+    stream_bubbles: streamBubbles(),
+    texts: bubbleTexts(),
+    has_placeholder: streamText().indexOf('正在思考') >= 0,
+  };
+
+  // 刷新页面 / 切走再切回之后：只喂一帧 `/state`（历史里那条消息带着 trace），
+  // **思考过程必须重新画得出来**——这是"排错"那条硬要求。
+  ctx.resetView();
+  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, [
+    { role: 'user', content: '看一下 src/a.py', meta: '', created_at: 20 },
+    { role: 'assistant', content: '没做成：文件不存在', meta: '1 步，未完成', created_at: 21,
+      trace: [
+        { type: 'step', text: '第 1 步' },
+        { type: 'tool', ok: false, text: 'read_file → 失败', detail: '文件不存在：src/a.py' },
+        { type: 'final', ok: false, text: '没做成：文件不存在',
+          error: { stage: 'model', kind: 'connect', url: 'http://127.0.0.1:9' } },
+      ] },
+  ]));
+  out.refresh_trace = {
+    ...cardInfo(lastCard()),
+    stream_bubbles: streamBubbles(),
+    has_placeholder: streamText().indexOf('正在思考') >= 0,
+  };
+  // 刷新之后一键展开（展开键没建出来时不抛异常，让断言去红）。
+  const freshHead = lastCard() ? lastCard().querySelector('.trace-head') : null;
+  if (freshHead) { freshHead.onclick(); }
+  out.refresh_trace_open = cardInfo(lastCard());
+
+  // ══ ⑤ 运行中那一枚键是「停止」：点了立刻有反馈，`/state` 说停下来了就回到发送 ══
+  ctx.resetView();
+  ctx.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(0, ''), { running: true }));
+  const sendNode = ids.get('send');
+  out.stop_button = {
+    mode: sendNode.dataset.mode, disabled: sendNode.disabled, title: sendNode.title,
+  };
+  const stopPosts = [];
+  ctx.__fetchImpl = (url) => {
+    stopPosts.push(url);
+    return Promise.resolve({ ok: true, status: 200,
+      json: async () => ({ ok: true, stopped: true }) });
+  };
+  await sendNode.onclick();
+  ctx.__fetchImpl = null;
+  out.stop_clicked = {
+    calls: stopPosts,
+    mode: sendNode.dataset.mode, disabled: sendNode.disabled, title: sendNode.title,
+    last_line: (streamText().split('\n').pop() || '').indexOf('已请求停止') >= 0,
+  };
+  ctx.__nextBody = frame(ROOT_A, 'a1', WROWS, SROWS_A, history(0, ''),
+    { running: false, stopped: true });
+  await ctx.refreshStatus();
+  out.stop_settled = {
+    mode: sendNode.dataset.mode, disabled: sendNode.disabled, title: sendNode.title,
+  };
+}
+

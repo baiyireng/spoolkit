@@ -8,10 +8,15 @@ SSE 每写完一条都要 flush：不 flush 的话事件攒在缓冲里，
 
 机器级（不给 `--root`）时这个进程服务**整台机器**：它持有"当前目标"这个状态
 （`WebState`）和一张按 (工作区, 会话) 复用的 Runner 表（`web/registry.py`）。
-于是路由分成两类：打在**当前目标**上的（`/run`、`/confirm`），和改这个状态的
+于是路由分成两类：打在**当前目标**上的（`/run`、`/run/stop`、`/confirm`），和改这个状态的
 （`POST /target`、`POST /session/delete`、`POST /session/restore`、
 `POST /session/new`）。切换**不杀任务**
 ——在跑的那条留在它自己的 Runner 里继续跑（设计 §3.4），切回去还能看到它的事件与历史。
+
+`POST /run/stop` 是**温和停止**：复用 `Runner.stop()`（先 terminate 请它自己收尾、
+到点才 kill），已经写进记忆库的往来与已经发出来的事件一条都不删；`/state` 里
+`stopped` 与 `running`（只增的键）合起来说得出"这一轮是被停掉的"。空闲时停 → 409 说人话；
+它和 `/run` 一样进 `WRITE_PATHS`，非回环绑定一律 403。
 
 **探活不在请求路径上**（`web/probe.py`）：模型地址连不上时，一次探测要等到超时
 （实测 `/state` 3419ms、`/target` 3398ms），而那跟"切个工作区"一点关系都没有。
@@ -105,6 +110,7 @@ NO_TARGET_HINT = (
 #: 漏在门外——而"远程只能看"这条边界是这一批唯一的硬承诺。
 WRITE_PATHS = (
     "/run",
+    "/run/stop",
     "/confirm",
     "/session/delete",
     "/session/restore",
@@ -180,6 +186,10 @@ def _empty_snapshot(health: dict) -> dict:
         "ok": None,
         "pairings": [],
         "health": health,
+        # 空态也**字段一个不少**（`Runner.snapshot()` 那份里新加的只增字段）：
+        # 页面不该去猜"键缺了是因为没这个功能、还是因为现在没有值"。
+        "trace": {"open": False, "goal": "", "lines": []},
+        "stopped": False,
     }
 
 
@@ -927,6 +937,33 @@ def _handler_for(state: WebState):
                     self._json(409, {"error": "已有运行在进行，等它结束再发"})
                     return
                 self._json(202, {"ok": True})
+                return
+
+            if self.path == "/run/stop":
+                # 温和停止这一轮：复用 `Runner.stop()`（terminate → 等它自己收尾 →
+                # 到点才 kill），**不另写一套 kill**——停止语义只能有一处。
+                #
+                # 请求体照读不误（哪怕这里用不到）：不读的话这条 keep-alive 连接上
+                # 会留下残字节，被当成下一个请求的行（见 `_drain_body` 的自述）。
+                self._body()
+                _version, runner = state.current()
+                if runner is None:
+                    self._json(
+                        409,
+                        {
+                            "error": "还没有选工作区：没有在跑的任务，也就没有可停的。"
+                            "先在页面顶上的选择栏里选一个（或 POST /target）。"
+                        },
+                    )
+                    return
+                if not runner.running:
+                    # 空闲时说人话：点一下"停止"却什么都没发生时，人会以为壳坏了。
+                    self._json(409, {"error": "现在没有在跑的任务，不用停。"})
+                    return
+                runner.stop()
+                # 200 而不是 202：这一句回话的时候进程已经收掉了（`stop()` 会等它），
+                # 所以"停了没有"有确定答案，不必让调用方再猜。
+                self._json(200, {"ok": True, "stopped": True})
                 return
 
             if self.path == "/confirm":
