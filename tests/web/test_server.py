@@ -52,7 +52,7 @@ def _state_when(url: str, ready, timeout: float = 10.0) -> dict:
     探活改成**后台**之后（`web/probe.py`），`/state` 不再等探测：服务刚起来的
     那一帧可能就是 `health.state == "unknown"`（还没探过）。这条用例要知道的是
     "假模型算通"，所以先等第一份结果落地——这也正是页面真实的样子（它每 3 秒
-    轮一次，探到了横幅就自己变绿）。
+    轮一次，探到了那枚圆点就变绿）。
     """
     deadline = time.monotonic() + timeout
     while True:

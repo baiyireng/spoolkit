@@ -209,7 +209,7 @@ def test_running_targets只报在跑的(tmp_path: Path) -> None:
 def test_running_targets不探活(tmp_path: Path, monkeypatch) -> None:
     """`running_targets()` 只许走 `Runner.brief()`，不能碰 `Runner.snapshot()`。
 
-    页面每几秒轮一次 `/state`（`web/page.py` 的 `refreshBanners`），而快照会去探活
+    页面每几秒轮一次 `/state`（`web/page.py` 的 `refreshStatus`），而快照会去探活
     模型与外接配方（**走 HTTP**）。给每个在跑的目标各探一次，状态接口就变成一串等待；
     这不是风格问题，是"页面会不会卡住"的问题。
     """

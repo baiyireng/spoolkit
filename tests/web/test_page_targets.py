@@ -95,7 +95,7 @@ def test_切换不重连事件流() -> None:
 
 
 def test_state帧会重画目标与历史() -> None:
-    """切换后服务端补的那一帧 `state` 也要**整屏重绑**，不能只更新横幅。"""
+    """切换后服务端补的那一帧 `state` 也要**整屏重绑**，不能只更新状态区。"""
     body = _body("onEvent")
 
     assert "applyState(data)" in body
@@ -113,13 +113,18 @@ def test_state帧会重画目标与历史() -> None:
 
 
 def test_空态引导人选工作区() -> None:
-    assert 'id="target-note"' in HTML
+    """顶部那条常驻横幅没了：空态引导改由输入条那行的「未选工作区」徽标承载
+    （点开是同一句话）。判据一个字都没丢，只是不再占顶部的位置。"""
+    assert 'id="st-target"' in HTML
+    assert 'id="target-note"' not in HTML, "顶部那条常驻横幅还在"
 
     body = _body("drawTarget")
 
     assert "if (!t.root)" in body
     assert "还没有选工作区" in body
     assert "t.note" in body, "空态那句话以服务端为准，页面只兜底"
+    assert "targetMissing = !t.root" in body, "空态那枚徽标没有画出来"
+    assert "drawStatus()" in body, "空态那句话没有落到状态区"
 
 
 def test_pinned时选择栏禁用并说明原因() -> None:
@@ -142,7 +147,7 @@ def test_别处还有一条在跑() -> None:
     assert "short(row.goal, 60)" in body, "目标要截断，一条长 goal 会把这一行撑爆"
 
     # 别的目标上的任务，在本目标的事件流上**一个字都不会出现**：只能轮 /state
-    assert "showElsewhere(state)" in _body("refreshBanners")
+    assert "showElsewhere(state)" in _body("refreshStatus")
 
 
 def test_请求被拒时把error说给人看() -> None:

@@ -213,7 +213,7 @@ def test_状态里探活那块只增字段(start_server, tmp_path: Path) -> None
 
     health = _state(url)["health"]
 
-    # 既有字段：一个不少、口径不变（页面横幅读的就是它们）。
+    # 既有字段：一个不少、口径不变（页面状态区读的就是它们）。
     for key in ("model", "services"):
         assert key in health, f"health.{key} 不见了（既有字段不许动）"
     for key in ("ok", "name", "target", "detail"):
@@ -265,7 +265,7 @@ def test_状态里的顶层字段一个不少(start_server, tmp_path: Path) -> N
 def test_还没探过与探过不通分得开(start_server, tmp_path: Path, monkeypatch) -> None:
     """`unknown` 不许长得像 `down`：还没探过时 `model.ok` 是 `None`（不是 `False`）。
 
-    `False` 会让页面立刻挂一条"连不上"的红横幅——那是假话；`True` 更假。
+    `False` 会让状态区那枚徽标立刻变红并写着"模型不通"——那是假话；`True` 更假。
     """
     from spoolkit import health as health_mod
 

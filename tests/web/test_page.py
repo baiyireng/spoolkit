@@ -118,34 +118,39 @@ def test_页面能按快照重建待确认面板() -> None:
 def test_页面按快照显示模型断开() -> None:
     """配对是待批准；模型不通是另一条，不能复用「应用/拒绝」。
 
-    这一条现在是右上角的**浮动通知**（`.toast`），不是横幅带里的一行。
+    它现在是输入条那一行的**状态徽标**（+ 点开的详情），不是顶部横幅、也不是气泡：
+    常态下只剩一枚小圆点，不通才变色并**带字**——一枚沉默的绿点会把"连不上"藏起来。
     """
     assert "showHealth" in HTML
-    assert 'id="toasts"' in HTML
+    assert 'id="st-health"' in HTML
     assert "模型连不上" in HTML
     assert "state.health" in HTML
-    # 探活那条通知要说四件事，四句复用 `explainFailure`（不另写一套）。
+    # 三个短标签都在：不通 / 回话慢 / 还没探过。
     body = _body("showHealth")
+    assert "模型不通" in body
+    assert "模型回话慢" in body
+    assert "还没探过" in body
+    # 详情那几句复用 `explainFailure` / `modelDownLine`（不另写一套说法）。
     assert "explainFailure(" in body, "探活那条没有复用失败那套说法"
     assert "modelDownLine(" in body
-    assert "showToast(" in body
 
 
 def test_页面也报外接配方断开() -> None:
-    """llama / 隧道是本机配方，不通时走同一条通知，不另开按钮。"""
+    """llama / 隧道是本机配方，不通时进同一个状态详情，不另开一枚徽标。"""
     assert "services" in HTML
     assert "连不上" in HTML
     body = _body("showHealth")
     assert "item.ok === false" in body
-    assert "showToast(" in body
+    assert "外接服务不通" in body
+    assert "healthView.lines" in body
 
 
-def test_探活那条通知说得出什么时候探的与还没探过() -> None:
+def test_探活详情说得出什么时候探的与还没探过() -> None:
     """探活挪到后台之后（`web/probe.py`），`/state` 给的是**最近一次**结果。
 
-    所以那条通知必须说得出"几秒前探过"（陈旧值可以接受，**静默的**陈旧值不行），
-    而"还没探过"既不是通也不是断——三条分支缺一个就红。行为数字（那句话真的
-    被画出来）在 `test_page_dom.py` 里。
+    所以详情必须说得出"3 秒前探过"（陈旧值可以接受，**静默的**陈旧值不行），
+    而"还没探过"既不是通也不是断——三条分支缺一个就红。行为数字（那些文字真的
+    被画进了详情）在 `test_page_dom.py` 里。
     """
     body = _body("showHealth")
     assert "probedAgo(info)" in body, "说了不通却不说这是什么时候探的"
@@ -158,23 +163,40 @@ def test_探活那条通知说得出什么时候探的与还没探过() -> None:
     ago = _body("probedAgo")
     assert "age_s" in ago
     assert "秒前探过" in ago and "分钟前探过" in ago
+    # 有结果却没时间戳时**不许**说"还没探过"：那句话会和"状态：正常"打架。
+    assert "没说是什么时候探的" in ago
 
     down = _body("modelDownLine")
     assert "没在超时内回话" in down, "慢与不通被合成了一句"
     assert "模型连不上" in down
 
+    # 详情里"这是什么时候探的"用的是服务端给的 `probed_at`（那一秒的墙钟）。
+    stamp = _body("probedStamp")
+    assert "probed_at" in stamp and "toLocaleString()" in stamp
+
 
 def test_页面按快照显示待批准的配对码() -> None:
-    """给人看的一条通知。不能复用「应用/拒绝」——那是落盘确认。"""
+    """给人看的一条状态。不能复用「应用/拒绝」——那是落盘确认。
+
+    配对码收进输入条那一行的徽标，而且**只有一条时把码直接写在徽标上**：
+    人得把它抄进终端，藏进详情就等于没提示。
+    """
     assert "pairings" in HTML
     assert "showPairings" in HTML
     assert "spool approve" in HTML
-    assert 'id="toasts"' in HTML
+    assert 'id="st-pair"' in HTML
     assert "/state" in HTML
-    # 配对码要人做决定（去终端敲一条命令），所以是**只能手动关**的那一档。
     body = _body("showPairings")
-    assert "kind: 'ask'" in body
-    assert "pruneToasts('pairing'" in body, "批准完了那一条不会自己收掉"
+    assert "drawStatus()" in body, "配对变了没重画状态区"
+    section = _body("pairSections")
+    assert "spool approve ' + item.code" in section
+    assert "配对码：" in section, "详情里没把码写全"
+    assert "点「应用」不会批准配对（那是落盘确认）。" in section, (
+        "没说清那两个按钮不批配对"
+    )
+    assert "'配对码 ' + pairingRows[0].code" in _body("drawStatus"), (
+        "只有一条配对时码没有直接写在徽标上"
+    )
 
 
 def test_脚本里没有能把脚本提前收掉的序列() -> None:
@@ -430,7 +452,7 @@ def test_用户与助手的气泡方向是分开的() -> None:
     assert "indexOf('me')" in add
     assert "indexOf('say')" in add
     say = _body("say")
-    assert "add('▶ ' + goal, 'me')" in say, "用户消息没有走用户那一支"
+    assert "add(goal, 'me')" in say, "用户消息没有走用户那一支"
 
     # 助手的话可以带代码块
     assert "fillRich" in add
@@ -656,12 +678,207 @@ def test_通知是右上角的浮动气泡而不是横幅() -> None:
         assert gone not in HTML, f"{gone} 还留在横幅带上"
 
 
-def test_手机宽度下通知不越界() -> None:
-    """左栏在 860px 以下收成抽屉；通知整块也要跟着收进来，不许顶出屏幕。"""
-    mobile = HTML[HTML.find("@media (max-width:860px)") :][:1200]
+# --- ① 通知**不许把页面挤下去**：脱离文档流、不在滚动容器里 ---
+
+# 这些标签没有结束标签；手写标签栈要把它们跳过去，否则栈会一路歪掉。
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+              "link", "meta", "param", "source", "track", "wbr"}
+
+
+def _static_html() -> str:
+    """静态那一半（`<script>` 之前）。脚本里全是 JS 字符串里的 `<`，
+    拿它一起扫标签栈会被内联 SVG 搅乱——而通知在不在滚动容器里，只看静态这一半。"""
+    return HTML[: HTML.find("<script>")]
+
+
+def _ancestors(element_id: str) -> list:
+    """`id="…"` 那个元素在静态 HTML 里的祖先标签（从外到内，不含它自己）。
+
+    元素用 `标签名#id` 表示（没有 id 就是标签名）。手写标签栈而不是引解析器：
+    这一页是单文件、结构就那几种标签，够用；而"通知的父节点是不是 `body`、
+    它在不在滚动容器里"**只有**这一层能量——假 DOM 不解析静态树（它按 id 造空壳）。
+    """
+    static = _static_html()
+    # 重复的 id 一律是 bug（页面里没有一件东西该出现两次），而它会让下面这个
+    # "取第一个匹配"的扫描失去意义：先把这件事证伪掉。
+    assert static.count(f'id="{element_id}"') == 1, (
+        f'id="{element_id}" 在静态 HTML 里出现了 '
+        f"{static.count(f'id=\"{element_id}\"')} 次"
+    )
+    stack = []
+    for match in re.finditer(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)([^>]*)>", static):
+        closing, name, rest = match.group(1), match.group(2).lower(), match.group(3)
+        if closing:
+            while stack and stack.pop()[0] != name:
+                pass
+            continue
+        if name in _VOID_TAGS or rest.rstrip().endswith("/"):
+            continue
+        if f'id="{element_id}"' in rest:
+            return [label for _, label in stack]
+        found = re.search(r'id="([^"]+)"', rest)
+        stack.append((name, name + ("#" + found.group(1) if found else "")))
+    raise AssertionError(f"静态 HTML 里没有 id={element_id!r} 的元素")
+
+
+def test_通知容器是body的直接子节点且不在滚动容器里() -> None:
+    """气泡一出现就把页面往下挤，是因为它长在**文档流**里。现在不是了：
+
+    ① 容器 `position:fixed`（脱离文档流），而且 `pointer-events:none`
+       ——它跟内容重叠时，底下的按钮照样点得动；
+    ② 它的父节点就是 `body`，不在 `#stream` / `#thread` / `#body` 任何一个里面，
+       也就是**不在滚动容器里**：滚对话流不会把它带走，它也不占对话流的位置。
+
+    证伪法：把 `#toasts` 那个 div 挪进 `#stream` 里（或把 `position:fixed` 删掉），
+    这里立刻红——而"弹一条通知不动对话流"的行为断言在 `test_page_dom.py` 里。
+    """
+    assert 'id="toasts"' in HTML
+    box = _rule(".toasts")
+    assert "position:fixed" in box, "通知没有脱离文档流"
+    assert "pointer-events:none" in box, "通知容器会挡住底下那层内容的点击"
+
+    assert _ancestors("toasts") == ["html", "body"], (
+        f"通知不是挂在 body 下：{_ancestors('toasts')}"
+    )
+    # 反证：对话流确实深深嵌在滚动容器里（不然上一条会因为"页面啥都没有"而假绿）。
+    assert _ancestors("stream") == ["html", "body", "div#body", "div#thread"], (
+        f"对话流的层次变了？{_ancestors('stream')}"
+    )
+
+
+def test_顶部没有横幅带也没有常驻提示() -> None:
+    """一切正常时，顶部**不出现任何常驻提示**（不是"显示一句一切正常"，而是不占位）。
+
+    以前顶部那条横幅装着：只读（非回环）、`--root` 钉住、没有目标、模型探活。
+    它一出现就把对话流往下推。现在这些全收进输入条那一行（`.st`）与它的详情里，
+    顶部只剩"我在哪儿"（`#top` 里的目标）。
+    """
+    style = HTML[HTML.find("<style>") : HTML.find("</style>")]
+    assert "class=\"banner\"" not in HTML, "横幅那个挂点还在页面上"
+    assert ".banner {" not in style, "横幅的样式还在"
+    for gone in ('id="readonly"', 'id="target-note"', 'id="health"',
+                 'id="pairing"', 'id="elsewhere"'):
+        assert gone not in HTML, f"{gone} 还常驻在页面上"
+    # `#top` 里只有三样：它自己、抽屉开关、当前目标（多一个都算"顶部有提示"）。
+    top = HTML[HTML.find('<div id="top">') : HTML.find('<div id="scrim">')]
+    assert re.findall(r'id="([^"]+)"', top) == ["top", "menu", "where"], (
+        f"顶部多出了东西：{top}"
+    )
+    assert 'id="where"' in top and 'id="menu"' in top
+
+
+def test_状态区常态只剩一枚圆点() -> None:
+    """探活收进一枚小圆点：正常时 `label` 是空的——**不画**"一切正常"那句。
+
+    判据在两条分支上：常态给空标签，异常给短标签；而徽标始终在输入条那一行里
+    （`.st`），不新增占位。
+    """
+    assert 'id="st-health"' in HTML
+    body = _body("showHealth")
+    assert "label: ''" in body, "常态还在徽标上写一句话"
+    assert "label: kind === 'slow' ? '模型回话慢' : '模型不通'" in body, (
+        "异常没有带字：一枚沉默的绿点会把「连不上」藏起来"
+    )
+    status = _body("drawStatus")
+    assert "healthLabel.classList.toggle('hidden', healthView.label === '')" in status, (
+        "常态那枚圆点旁边还挂着空标签"
+    )
+    # 徽标都在同一行里，而那一行本来就在（Enter 发送 那句）：状态变化不新增占位。
+    strip = HTML[HTML.find('<div class="st">') : HTML.find('<div id="st-panel"')]
+    assert "Enter 发送" in strip, "状态区不是原来那一行小字"
+    assert strip.count("<div") == 1, "状态区里又多了一层会占位的块"
+    # 那一行与"Enter 发送"是同一个 flex 行（`.st-hint` 靠 margin-left:auto 靠右）。
+    assert "margin-left:auto" in _rule(".st-hint")
+
+
+def test_状态详情保留四项而且异常仍然看得见() -> None:
+    """详情里要有：状态 / 地址 / 探活时间（`probed_at` + `age_s`）/ 可能原因 / 下一步。
+
+    "下一步"必须是一条**真存在**的命令（既有的 `failureNext` 给的是 `spool service
+    list` / `spool config` 这类），不能是"请联系管理员"。
+    """
+    lines = _body("healthLines")
+    assert "'状态：'" in lines
+    assert "'地址：'" in lines
+    assert "'探活时间：'" in lines
+    assert "probedStamp(info)" in lines
+    assert "healthView.lines" in lines, "可能原因 / 下一步那几行没有接进详情"
+
+    # 异常那一档带着原始信息（先遮蔽密钥），而它是"bad"（红的）。
+    body = _body("showHealth")
+    assert "cls: 'bad'" in body
+    assert "redact(" in body
+    # 详情面板是浮层：绝对定位，展开/收起都不占文档流。
+    assert "position:absolute" in _rule(".st-panel"), "详情面板长在文档流里"
+
+
+def test_状态详情能收起而且点外面也行() -> None:
+    """展开之后得能收起来，而且**焦点不在输入框里时也收得掉**（点过徽标之后焦点
+    就在按钮上）：所以除了输入框那条 Esc，还挂着"点 `#composer` 之外"与 document 上
+    的 Esc。"""
+    script = _script()
+    assert "if (event.key === 'Escape') { setStatusOpen(false); return; }" in _body("onKeydown")
+    assert "document.onkeydown" in script and "Escape" in script
+    outside = script[script.find("document.onclick = function") :][:400]
+    assert "closest('#composer')" in outside, "点外面收不掉"
+    assert "setStatusOpen(false)" in outside
+
+
+def test_只读与钉住的模式信息仍然可发现() -> None:
+    """"这一页现在是什么模式"回答的是"为什么点不动"，所以它**不许消失**。
+
+    只是从顶部横幅挪到了输入条那行的锁徽标：悬停看得见标题、点开是全文。
+    """
+    assert 'id="st-mode"' in HTML
+    view = _body("showReadonly")
+    assert "state.readonly" in view
+    assert "readonly = Boolean(state.readonly)" in view
+    assert "readOnlyNote = readonly" in view, "只读那句解释没有落到状态区"
+    assert "非回环地址上" in view and "只能看，不能驱动" in view, (
+        "只读那句解释被删短了：为什么、能看什么、想驱动怎么办三件事都得在"
+    )
+    assert "--host" in view
+    assert "drawStatus()" in view
+
+    target = _body("drawTarget")
+    assert "pinnedNote = locked" in target, "--root 钉住的解释没有落到状态区"
+    assert "--root" in target
+    assert "drawStatus()" in target
+
+    # 徽标上的短标签由这两件事拼出来（同时成立时说全）。
+    badge = _body("modeBadgeText")
+    assert "'只读'" in badge and "'已钉住'" in badge
+    # 配色：只读是紫的、异常是红的、待配对是黄的（"低调"不等于"看不见"）。
+    assert "var(--ro-line)" in _rule(".st-item.ro")
+    assert "var(--danger-line)" in _rule(".st-item.bad")
+
+
+def test_窄屏通知仍占满宽度但仍然是fixed() -> None:
+    """860px 以下左栏收成抽屉；通知整块跟着收进来，**但一个 `position` 都不许写**
+    ——写上去就等于把它从浮层拉回文档流，"挤下去"那个毛病就回来了。"""
+    mobile = HTML[HTML.find("@media (max-width:860px)") :][:1400]
     assert ".toasts {" in mobile
     assert "left:10px" in mobile and "right:10px" in mobile
     assert "width:auto" in mobile
+    rule = mobile[mobile.find(".toasts {") : mobile.find("}", mobile.find(".toasts {")) + 1]
+    assert "position" not in rule, f"窄屏那条规则里写了定位：{rule}"
+
+
+def test_减少动效时通知不动画() -> None:
+    """`prefers-reduced-motion` 下不动画（不动画 ≠ 不出现：它只是直接在那里）。"""
+    block = HTML[HTML.find("@media (prefers-reduced-motion: reduce)") :]
+    block = block[: block.find("</style>")]
+    assert ".toast { animation:none; }" in block, f"减少动效那一档没有关掉入场动画：{block}"
+    assert "animation:toast-in" in _rule(".toast"), "入场动画的钥匙丢了"
+
+
+def test_自己说的话不带符号前缀() -> None:
+    """发出去的那一条原来是 `符号 + 空格 + 原话`。那个符号现在整份文件里一次都不出现，
+    也没换来一个更花哨的：气泡底色 + 右对齐本来就说得清"这是我发的"。"""
+    assert "\u25b6" not in HTML, "那个三角形前缀又回来了"
+    say = _body("say")
+    assert "add(goal, 'me')" in say, "发出去的那一条前面又被拼了东西"
+    assert "add('" not in say, f"say() 里又手拼了前缀：{say}"
 
 
 def test_每条通知都能关掉两条以上给全部关闭() -> None:

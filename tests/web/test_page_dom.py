@@ -100,8 +100,8 @@ def test_消息变长了只追加新消息而不是全量重画(dom: dict) -> No
     assert dom["history_grew"]["sidebar"] == 0, "补历史却把侧栏重建了"
 
 
-def test_三秒轮询只碰横幅(dom: dict) -> None:
-    """`/state` 轮询只喂横幅（配对码 / 探活 / 别处还有谁在跑），不重画列表。"""
+def test_三秒轮询只碰状态区(dom: dict) -> None:
+    """`/state` 轮询只喂状态区（探活 / 模式 / 配对 / 别处还有谁在跑），不重画列表。"""
     assert dom["poll"]["created"] == 0
 
 
@@ -159,47 +159,14 @@ def test_页面上的错误文本先遮蔽密钥(dom: dict) -> None:
     assert dom["redact"] == "api_key=*** Bearer *** token=***"
 
 
-# --- ④ 探活挪到后台之后：通知要说得出"什么时候探的" ---
+# --- ④ 探活搬进状态区（旧的"探活通知"那一组换成了上面那几条） ---
 
 
-def test_探活通知说得出什么时候探过(dom: dict) -> None:
-    """`/state` 给的是**最近一次**探测结果，所以"这是几秒前探的"必须在通知里。
-
-    去掉 `probedAgo` 那一句，人只会看到一个几分钟前的结论被当成刚刚测的
-    ——那正是"静默的陈旧值"。
-    """
-    toast = dom["health_toast"]
-    line = toast["text"]
-    assert "连不上" in line
-    assert "3 秒前探过" in line, f"没说这是什么时候探的：{line}"
-    assert "spool service" in line, "说了不通却没给下一步"
-    # 它是右上角那条**可关的浮动通知**（不是横幅）：一条通知一个关闭键。
-    assert toast["kind"] == "toast error", f"探活那条不是浮动气泡：{toast['kind']}"
-    assert toast["close_buttons"] == len(toast["keys"]), "有通知却没有关闭键"
-    # 关闭键里只有一个图标：读屏得有个名字。
-    assert toast["close_labels"] == ["关掉这条通知"] * len(toast["keys"])
-    assert toast["stack_shown"] is True
-
-
-def test_同一份探活通知再来一拍不重建节点(dom: dict) -> None:
+def test_同一份探活再来一拍不重建节点(dom: dict) -> None:
     """`/state` 是 3 秒一拍：同一份内容重复到达时一个节点都不该新建。"""
     assert dom["health_repeat"]["created"] == 0, (
-        f"同一份探活通知被重建了：{dom['health_repeat']}"
+        f"同一份探活把节点重建了：{dom['health_repeat']}"
     )
-
-
-def test_模型通了那条通知自己收掉(dom: dict) -> None:
-    """状态类的通知（"模型连不上"）不是错误：条件没了就收掉，不用人去关。"""
-    assert not any(key.startswith("health|model") for key in dom["health_cleared"]["keys"]), (
-        f"模型通了那条通知还挂着：{dom['health_cleared']}"
-    )
-
-
-def test_还没探过不画成通了也不画成断了(dom: dict) -> None:
-    """`unknown`（后台探活刚起来）既不是通也不是断，页面上要照实说。"""
-    line = dom["health_line_unknown"]
-    assert "还没探过" in line
-    assert "连不上" not in line
 
 
 # --- ① 通知：可关的浮动气泡，两类分得清 ---
@@ -263,6 +230,181 @@ def test_人关掉的那一份不再自己弹回来(dom: dict) -> None:
     assert dismiss["after_close"] == 0
     assert dismiss["same_again"] == 0, "人关掉的那一条被下一拍又弹回来了"
     assert dismiss["changed"] == 1, "内容变了却不回来"
+
+
+# --- ④ 探活搬进状态区：常态只剩一枚圆点，异常变色带字，点开有详情 ---
+
+
+def test_探活正常时只剩一枚圆点(dom: dict) -> None:
+    """常态下**不画任何提示**（不是"显示一句一切正常"）：徽标上只有圆点与空标签，
+    而且探活**一条气泡都不产生**（它不再是通知）。
+
+    证伪法：把 `healthView` 常态的 `label` 改回一句"模型正常"，或让 `showHealth`
+    再走 `showToast`，这条立刻红。
+    """
+    ok = dom["health_ok"]
+    assert ok["label"] == "", f"常态下还写着一句话：{ok}"
+    assert "ok" in ok["cls"] and "bad" not in ok["cls"], f"常态不是低调那档：{ok['cls']}"
+    assert ok["visible"] == ["st-health"], f"常态下多出了别的徽标：{ok['visible']}"
+    assert ok["parts"] == 2, "常态那枚徽标就只有圆点 + 空标签两块"
+    assert ok["keys"] == [], f"探活还弹气泡：{ok['keys']}"
+    assert "模型探活" in ok["title"], "那枚圆点悬停/读屏说不出它是什么"
+
+
+def test_探活异常时变色带字而不是一枚沉默的绿点(dom: dict) -> None:
+    """"异常必须仍然看得见"：不通时徽标是红的并且**带字**，不是一枚沉默的绿点；
+    "还没探过"是黄的（既不是通也不是断）。
+
+    证伪法：把 `showHealth` 里的 `label` 去掉（只留变色），这条红。
+    """
+    down = dom["health_down"]
+    assert down["label"] == "模型不通", f"异常没有带字：{down}"
+    assert "bad" in down["cls"], f"异常没有变色：{down}"
+    assert down["visible"] == ["st-health"], "异常时冒出了别的徽标"
+    # 变色那一下不该重建节点（`/state` 是 3 秒一拍，重建就是每 3 秒抖一次）。
+    assert down["cost"]["created"] == 0, f"改个颜色重建了节点：{down['cost']}"
+    assert down["panel_open"] is False, "详情默认就是开着的"
+    assert dom["health_repeat"]["created"] == 0, "同一份探活被重建了"
+
+    unknown = dom["health_unknown"]
+    assert unknown["label"] == "还没探过" and "warn" in unknown["cls"]
+    assert "连不上" not in dom["health_line_unknown"], "还没探过被画成了连不上"
+
+    # 模型又通了：回到常态，而且没有留下任何气泡。
+    back = dom["health_back"]
+    assert back["label"] == "" and back["keys"] == [], f"通了之后还留着东西：{back}"
+
+
+def test_探活详情保留状态地址探活时间与下一步(dom: dict) -> None:
+    """详情里要有：状态 / 地址 / 探活时间（`probed_at` + `age_s`）/ 可能原因 / 下一步。
+
+    "3 秒前探过"必须在——探活挪到后台之后 `/state` 给的是最近一次结果，
+    **静默的**陈旧值比报错更糟。
+    """
+    panel = dom["health_panel"]
+    assert panel["open"] is True
+    text = panel["text"]
+    assert "状态：连不上" in text, f"详情里没有状态：{text}"
+    assert "地址：http://127.0.0.1:8080" in text, f"详情里没有地址：{text}"
+    assert "探活时间：" in text and "3 秒前探过" in text, f"没说这是什么时候探的：{text}"
+    assert "可能原因：" in text, f"详情里没有可能原因：{text}"
+    assert "下一步：" in text and "spool service list" in text, f"没有下一步的命令：{text}"
+    assert "拒绝连接" in text, "原始信息被藏掉了"
+    # 展开详情**不动对话流**：那些新节点全在面板下（面板是绝对定位的浮层）。
+    assert panel["panel_nodes"] > 0, "详情面板是空的"
+    assert panel["panel_root"] == "st-panel", "详情节点挂到别人家去了"
+    assert panel["stream_nodes"] == panel["stream_nodes_before"], "展开详情把对话流重画了"
+    assert panel["stream_children"] == panel["stream_children_before"]
+
+
+def test_状态详情能收起来(dom: dict) -> None:
+    """收起之后面板不在页面上，而且按钮上的 `aria-expanded` 跟着走
+    （读屏要问得出来"现在开着没有"）。"""
+    assert dom["health_panel"]["aria"] == "true"
+    closed = dom["health_panel_closed"]
+    assert closed["open"] is False
+    assert closed["aria"] == "false"
+    assert dom["status_clean"]["panel"] is False, "默认就该是收起的"
+
+
+def test_点外面或按Esc都能收起详情(dom: dict) -> None:
+    """焦点不一定在输入框里：收起详情不能只挂在 `goalBox.onkeydown` 那条上。
+
+    证伪法：把 `document.onkeydown` / `document.onclick` 那两处删掉，这条红。
+    """
+    assert dom["status_esc"]["open"] is False, "Esc 收不掉（焦点在徽标上时就是这样）"
+    assert dom["status_outside"]["open"] is False, "点 composer 之外收不掉"
+    assert dom["status_inside"]["open"] is True, "点徽标自己那一下把面板关了"
+
+
+def test_常态下状态区只看得见一枚圆点(dom: dict) -> None:
+    """只读 / 钉住 / 待配对 / 别处在跑**都不是常态**：它们没有的时候，那一行里
+    只剩探活那枚小圆点——"顶部干净"在输入条这一行的样子。"""
+    assert dom["status_clean"]["visible"] == ["st-health"], (
+        f"常态下多出了徽标：{dom['status_clean']['visible']}"
+    )
+    assert dom["health_ok"]["visible"] == ["st-health"]
+
+
+def test_只读与钉住收进模式徽标并说得出为什么点不动(dom: dict) -> None:
+    """只读（非回环）与 `--root` 钉住回答的是"为什么点不动"，所以**不许变得不可发现**：
+    徽标悬停就有标题、点开是全文。"""
+    ro = dom["status_readonly"]
+    assert ro["mode"] == "只读"
+    assert "st-mode" in ro["visible"]
+    assert "非回环" in ro["title"] and "只能看" in ro["title"], f"悬停说不出原因：{ro['title']}"
+    panel = dom["status_readonly_panel"]["text"]
+    assert "写请求会被服务端拒" in panel and "--host" in panel, panel
+
+    pinned = dom["status_pinned"]
+    assert pinned["mode"] == "已钉住"
+    assert "--root" in dom["status_pinned_panel"]["text"]
+
+    # 常态（可写、没钉住）时这枚徽标根本不摆出来。
+    assert "st-mode" not in dom["status_clean"]["visible"]
+
+
+def test_待配对与别处在跑收进状态区但都不丢(dom: dict) -> None:
+    """配对码与"别处还有一条在跑"都收进同一行了，但**都不许变得不可发现**：
+    配对码直接写在徽标上（人要去终端敲它），别处那条点开看是哪几条。"""
+    pair = dom["status_pair"]
+    assert pair["pair"] == "配对码 482913", f"配对码没有直接写在徽标上：{pair}"
+    assert "st-pair" in pair["visible"]
+    text = dom["status_pair_panel"]["text"]
+    assert "spool approve 482913" in text and "来自：u-1" in text, text
+    assert "点「应用」不会批准配对" in text, "没说清那两个按钮不批配对"
+
+    elsewhere = dom["status_elsewhere"]
+    assert elsewhere["label"] == "别处 1 条在跑"
+    assert "st-elsewhere" in elsewhere["visible"]
+    et = dom["status_elsewhere_panel"]["text"]
+    assert "别处还有一条在跑：ws-c" in et and "它在等你确认" in et, et
+
+    # 都收掉之后那一行又只剩圆点。
+    assert dom["status_clean"]["visible"] == ["st-health"]
+
+
+def test_没有目标时那枚徽标仍然指得动路(dom: dict) -> None:
+    """空态引导从顶部横幅搬到了「未选工作区」徽标 + 详情：那句话一个字都没少。"""
+    empty = dom["status_no_target"]
+    assert empty["label"] == "未选工作区"
+    assert "st-target" in empty["visible"]
+    assert "还没有选工作区" in dom["status_no_target_panel"]["text"]
+
+
+# --- ① 通知**不许把页面挤下去** ---
+
+
+def test_弹一条通知不动对话流也不动滚动位置(dom: dict) -> None:
+    """假 DOM 不排版，但"被挤下去"在 DOM 层就是两件事：往对话流里塞了节点、
+    或者动了主滚动容器的滚动位置 / 内容高度。弹一条通知前后这两样都得一模一样。
+
+    证伪法：把 `showToast` 里那个 `toastsBox.appendChild(node)` 改成
+    `appendNode(node)`（挂进对话流），`stream_children` / `stream_nodes` 立刻变，
+    这条红。
+    """
+    push = dom["toast_no_push"]
+    assert push["before"]["stream_nodes"] > 0, "这条用例没量到对话流里的东西（测了个寂寞）"
+    assert push["before"]["scrollTop"] == 120, "没量到真的滚动位置"
+    assert push["after"] == push["before"], f"弹一条通知把页面动了：{push}"
+    assert push["after_close"] == push["before"], f"关掉那条通知又动了一次：{push}"
+    # 反证：气泡确实建出来了，而且它挂在 `#toasts` 下——**不在对话流里**。
+    assert push["parent_id"] == "toasts", f"气泡挂到别处去了：{push}"
+    assert push["in_stream"] == "toasts", "通知被挂进对话流了"
+    assert push["container_root"] == "toasts"
+
+
+# --- ③ 自己说的话不带符号前缀 ---
+
+
+def test_自己说的话不带符号前缀(dom: dict) -> None:
+    """发出去的那一条就是原话：气泡底色 + 右对齐已经说清"这是我发的"。
+
+    证伪法：把 `say()` 改回 `add('▶ ' + goal, 'me')`，这条红。
+    """
+    said = dom["say_text"]
+    assert said["calls"] == ["/run"], f"没有真的走 /run：{said['calls']}"
+    assert said["last_user"] == "改一下登录页", f"气泡里多了别的东西：{said['last_user']!r}"
 
 
 # --- ② 待确认：对话流里的卡片；没有待确认内容时它不存在 ---

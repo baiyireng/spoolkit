@@ -341,6 +341,22 @@ function closeButtons() { return ids.get('toasts').querySelectorAll('.toast-clos
 function closeLabels() { return closeButtons().map((node) => node.getAttribute('aria-label')); }
 function toastsShown() { return ids.get('toasts').classList.contains('show'); }
 function allButtonShown() { return ids.get('toast-all').classList.contains('show'); }
+
+/* ── 状态区（输入条那一行）与详情面板：读它长什么样的几个函数 ── */
+
+function stNode(id) { return ids.get(id); }
+// 徽标是不是"看得见"：假 DOM 不算样式，判据是那个类名在不在（真页面里它是 display:none）。
+function stShown(id) { return !ids.get(id).classList.contains('hidden'); }
+function stLabel(id) {
+  const node = ids.get(id).querySelector('.st-label');
+  return node ? node.textContent : '';
+}
+function visibleBadges() {
+  return ['st-health', 'st-mode', 'st-target', 'st-pair', 'st-elsewhere']
+    .filter((id) => stShown(id));
+}
+function panelOpen() { return !ids.get('st-panel').classList.contains('hidden'); }
+function panelText() { return ids.get('st-panel').textContent; }
 // 每个 diff 的头一行（"哪个文件 + 加了几行减了几行"）。
 function diffHeads() {
   return ids.get('stream').querySelectorAll('.diff').map(
@@ -394,10 +410,10 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
   out.history_grew = since(beforeGrow);
   out.history_added = streamBubbles() - bubbles;
 
-  // ①-5 3 秒轮询（refreshBanners）：横幅之外不该有重建。
+  // ①-5 3 秒轮询（refreshStatus）：状态区之外不该有重建。
   ctx.__nextBody = FRAME_B;
   const beforePoll = snap();
-  ctx.refreshBanners().then(() => {
+  ctx.refreshStatus().then(() => {
     out.poll = since(beforePoll);
 
     // ③ 代码块与正文分开：一段"正文 + 围栏代码 + 正文 + 行内代码"
@@ -443,43 +459,76 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
     });
     out.failure_blocks = ids.get('stream').querySelectorAll('.failure').length - before;
 
-    // ②-2 探活那条通知：模型断了，而且**说得出这是什么时候探的**（探活挪到后台之后，
-    // `/state` 给的是最近一次结果，可能是几秒前那一份——陈旧值可以接受，
-    // 静默的陈旧值不行）。它现在是右上角的一个气泡：可关、而且**不许自己消失**。
-    const beforeHealth = snap();
+    // ②-2 探活：**常态只剩一枚小圆点**（不是画一句"一切正常"）；不通 / 回话慢 /
+    // 还没探过 才变色并**带字**；点开是详情（状态 / 地址 / 探活时间 / 可能原因 / 下一步）。
+    // 探活挪到后台之后 `/state` 给的是最近一次结果，所以详情里必须说得出"3 秒前探过"。
+    const HEALTH_UP = {
+      model: { ok: true, target: '', detail: '假模型' }, services: [],
+      state: 'up', probed_at: 1700000000, age_s: 1,
+    };
     const DOWN = {
       model: { ok: false, target: 'http://127.0.0.1:8080', detail: '拒绝连接', kind: 'connect' },
       services: [], state: 'down', probed_at: 1700000000, age_s: 3,
     };
-    ctx.showHealth(DOWN);
-    const downToast = toastWith('health|model');
-    out.health_toast = {
+    ctx.closeAllToasts();   // 先清干净：要能说"探活**一条气泡都不产生**"
+    ctx.showHealth(HEALTH_UP);
+    out.health_ok = {
+      label: stLabel('st-health'),
+      cls: stNode('st-health')._cls,
+      parts: stNode('st-health').children.length,
+      visible: visibleBadges(),
+      title: stNode('st-health').title,
       keys: toastKeys(),
-      text: toastBody(downToast),
-      kind: downToast ? downToast._cls : '',
-      close_buttons: closeButtons().length,
-      close_labels: closeLabels(),
-      stack_shown: toastsShown(),
-      all_shown: allButtonShown(),
-      cost: since(beforeHealth),
+    };
+    const beforeDown = snap();
+    ctx.showHealth(DOWN);
+    out.health_down = {
+      label: stLabel('st-health'),
+      cls: stNode('st-health')._cls,
+      visible: visibleBadges(),
+      panel_open: panelOpen(),
+      cost: since(beforeDown),
     };
     // 同一份内容再来一拍（3 秒轮询就是这么送的）：一个节点都不该新建。
     const beforeHealthRepeat = snap();
     ctx.showHealth(DOWN);
     out.health_repeat = since(beforeHealthRepeat);
-    // 模型又通了：这一条**自己收掉**（状态没了，不用人去关）。
-    ctx.showHealth({
-      model: { ok: true, target: '', detail: '假模型' }, services: [],
-      state: 'up', probed_at: 1, age_s: 1,
-    });
-    out.health_cleared = { keys: toastKeys(), shown: toastsShown() };
+    // 点开那枚徽标：四件事都要在（地址 / 探活时间 / 可能原因 / 下一步敲什么）。
+    const beforePanel = snap();
+    const streamKidsBefore = ids.get('stream').children.length;
+    const streamNodesBefore = allNodes(ids.get('stream')).length;
+    ctx.setStatusOpen(true);
+    out.health_panel = {
+      open: panelOpen(),
+      text: panelText(),
+      aria: stNode('st-health').getAttribute('aria-expanded'),
+      stream_children: ids.get('stream').children.length,
+      stream_children_before: streamKidsBefore,
+      stream_nodes: allNodes(ids.get('stream')).length,
+      stream_nodes_before: streamNodesBefore,
+      panel_nodes: allNodes(ids.get('st-panel')).length,
+      panel_root: (function () {
+        const kid = ids.get('st-panel').firstChild;
+        return kid ? kid._rootId() : '';
+      })(),
+      cost: since(beforePanel),
+    };
+    ctx.setStatusOpen(false);
+    out.health_panel_closed = {open: panelOpen(), aria: stNode('st-health').getAttribute('aria-expanded')};
+    // 模型又通了：圆点回到常态——一条通知都不该留（探活不再是气泡）。
+    ctx.showHealth(HEALTH_UP);
+    out.health_back = {
+      label: stLabel('st-health'), cls: stNode('st-health')._cls,
+      keys: toastKeys(), visible: visibleBadges(),
+    };
     // 还没探过：既不许画成"通了"，也不许画成"连不上"。
     ctx.showHealth({
       model: { ok: null, target: '', detail: '还没探过（后台探活刚起来）', kind: '' },
       services: [], state: 'unknown', probed_at: null, age_s: null,
     });
-    out.health_line_unknown = toastText('health|unknown');
-    ctx.showHealth({ model: { ok: true, target: '', detail: '假模型' }, services: [], state: 'up', probed_at: 1, age_s: 1 });
+    out.health_unknown = {label: stLabel('st-health'), cls: stNode('st-health')._cls};
+    out.health_line_unknown = stLabel('st-health');
+    ctx.showHealth(HEALTH_UP);
 
     // ①-6 点「＋ 新建会话」：**先让服务端建出来、再切过去**，两个请求都要发对
     // （以前这里只发一次 /target，而服务端不新建会话——那个按钮点下去只有 400）。
@@ -552,13 +601,11 @@ async function extras() {
   if (errorClose) { errorClose.onclick(); }
 
   // ①-9 多条同时出现：同一个栈里各占一行（`#toasts` 那一列），两条以上才有「全部关闭」。
-  const elsewhere = (goal) => ({
-    running_targets: [
-      { root: 'D:/ws-b', session: 'a1', name: 'ws-b', goal: goal, current: false, awaiting: false },
-      { root: 'D:/ws-c', session: 'c1', name: 'ws-c', goal: '另一条在跑', current: false, awaiting: true },
-    ],
-  });
-  ctx.showElsewhere(elsewhere('改前端那一版'));
+  // 气泡现在只管"刚刚发生了什么"（失败 / 做成了的回执）；"这一页什么状态"走状态区，
+  // 所以这里直接摆两条失败通知。
+  const failSpec = (key, title) => ({key: key, kind: 'error', title: title, lines: ['一行']});
+  ctx.showToast(failSpec('failure|甲', '失败甲'));
+  ctx.showToast(failSpec('failure|乙', '失败乙'));
   const stackNodes = toastNodes();
   out.stack = {
     keys: toastKeys(),
@@ -568,7 +615,9 @@ async function extras() {
     shown: toastsShown(),
   };
   // 关掉一条：另一条留着；只剩一条时「全部关闭」收起来。
-  const first = stackNodes[0].querySelector('.toast-close');
+  // （`stackNodes` 可能是空的：那说明"通知挂在 `#toasts` 下"这条前提已经坏了——
+  // 让上面那几条断言去红，这里不要在假 DOM 里抛异常，否则整组会变成 error 而不是 failed。）
+  const first = stackNodes.length ? stackNodes[0].querySelector('.toast-close') : null;
   if (first) { first.onclick(); }
   out.stack.after_one = { keys: toastKeys(), all_shown: allButtonShown(), shown: toastsShown() };
   // 「全部关闭」：一条不剩，整块也收起来。
@@ -576,13 +625,13 @@ async function extras() {
   out.stack.after_all = { keys: toastKeys(), shown: toastsShown() };
 
   // ①-10 人关掉的那一份内容不再自己弹回来；内容真变了才回。
-  ctx.showElsewhere(elsewhere('改前端那一版'));
+  ctx.showToast(failSpec('failure|丙', '失败丙'));
   const dismissedKey = toastKeys()[0];
   ctx.dismissToast(dismissedKey);
   out.dismiss = { after_close: toastKeys().length };
-  ctx.showElsewhere(elsewhere('改前端那一版'));
+  ctx.showToast(failSpec('failure|丙', '失败丙'));
   out.dismiss.same_again = toastKeys().length;
-  ctx.showElsewhere(elsewhere('换了个活'));
+  ctx.showToast(failSpec('failure|丙', '失败丙（换了内容）'));
   out.dismiss.changed = toastKeys().length;
   ctx.closeAllToasts();
 
@@ -740,5 +789,121 @@ async function extras() {
     bubbles: streamBubbles(),
     marked: ids.get('stream').querySelectorAll('.history').length,
     texts: ids.get('stream').querySelectorAll('.bubble').map((node) => node.textContent),
+  };
+
+  // ①-11 通知**不许把页面挤下去**：弹一条前后，对话流的子节点数与主滚动容器的
+  // 滚动位置、以及输入条那一块的直接子节点数，都得一模一样；而且气泡本身
+  // **不在对话流里**（它挂在 `#toasts` 下，那是 `body` 的直接子节点）。
+  // 假 DOM 不排版，所以能量的是"有没有往流里塞节点、有没有动 scrollTop /
+  // scrollHeight"——真浏览器里"被挤下去"正是这两件事的结果。
+  const streamBox = ids.get('stream');
+  streamBox.scrollHeight = 800;
+  streamBox.clientHeight = 200;
+  streamBox.scrollTop = 120;
+  const readStream = () => ({
+    stream_children: streamBox.children.length,
+    stream_nodes: allNodes(streamBox).length,
+    scrollTop: streamBox.scrollTop,
+    scrollHeight: streamBox.scrollHeight,
+  });
+  const beforePush = readStream();
+  const pushed = ctx.showToast({key: 'failure|挤', kind: 'error', title: '失败：挤一下', lines: ['一行']});
+  out.toast_no_push = {
+    before: beforePush,
+    after: readStream(),
+    toast_root: pushed ? pushed._rootId() : 'missing',
+    container_root: ids.get('toasts')._rootId(),
+    in_stream: pushed ? inStream(pushed) : 'missing',
+    parent_id: pushed && pushed.parentNode ? pushed.parentNode._id : '',
+  };
+  ctx.closeAllToasts();
+  out.toast_no_push.after_close = readStream();
+
+  // ②-11 状态区：常态下**只看得见一枚圆点**；只读 / 钉住 / 待配对 / 别处在跑
+  // 才各多出一枚徽标。徽标只是同一行里的东西，所以展开详情也不动对话流与输入条结构。
+  ctx.showReadonly({ readonly: true, host: '0.0.0.0' });
+  out.status_readonly = {
+    visible: visibleBadges(), mode: stLabel('st-mode'),
+    title: stNode('st-mode').title,
+  };
+  const beforeStatusPanel = snap();
+  ctx.setStatusOpen(true);
+  out.status_readonly_panel = { open: panelOpen(), text: panelText(), cost: since(beforeStatusPanel) };
+  ctx.setStatusOpen(false);
+  ctx.showReadonly({ readonly: false, host: '127.0.0.1' });
+  ctx.showPairings([{ code: '482913', user: 'u-1' }]);
+  out.status_pair = { visible: visibleBadges(), pair: stLabel('st-pair') };
+  ctx.setStatusOpen(true);
+  out.status_pair_panel = { text: panelText() };
+  ctx.setStatusOpen(false);
+  ctx.showPairings([]);
+  ctx.showElsewhere({ running_targets: [
+    { root: 'D:/ws-c', session: 'c1', name: 'ws-c', goal: '另一条在跑', current: false, awaiting: true },
+  ] });
+  out.status_elsewhere = { visible: visibleBadges(), label: stLabel('st-elsewhere') };
+  ctx.setStatusOpen(true);
+  out.status_elsewhere_panel = { text: panelText() };
+  ctx.setStatusOpen(false);
+  ctx.showElsewhere({ running_targets: [] });
+  out.status_clean = { visible: visibleBadges(), label: stLabel('st-health'), panel: panelOpen() };
+
+  // `--root` 钉住：模式徽标说"已钉住"，详情里那段解释还在（回答"为什么点不动"）。
+  ctx.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(4, 'h'), {
+    target: { root: ROOT_A, session: 'a1', pinned: true, workspace_source: 'explicit',
+      session_source: 'explicit', note: '' },
+  }));
+  out.status_pinned = { visible: visibleBadges(), mode: stLabel('st-mode') };
+  ctx.setStatusOpen(true);
+  out.status_pinned_panel = { text: panelText() };
+  ctx.setStatusOpen(false);
+  // 空态（还没有目标）：那一枚"未选工作区"徽标 + 怎么选的说明。
+  ctx.applyState(frame('', 'a1', WROWS, SROWS_A, history(0, ''), {
+    target: { root: '', session: 'a1', pinned: false, workspace_source: 'none',
+      session_source: 'default', note: '还没有选工作区：在左边的「工作区」里选一个。' },
+  }));
+  out.status_no_target = { visible: visibleBadges(), label: stLabel('st-target') };
+  ctx.setStatusOpen(true);
+  out.status_no_target_panel = { text: panelText() };
+  ctx.setStatusOpen(false);
+  ctx.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(4, 'h')));
+
+  // ②-12 收起详情有三条路：Esc（焦点不在输入框里也算）、点 `#composer` 之外、
+  // 再点一次徽标。前两条挂在 `document` 上——假 DOM 里 `document` 是普通对象，
+  // 直接把它那两个处理函数叫一遍就行（这正是"处理函数写了却没绑上"的证伪点）。
+  // 没绑上时**不许**让假 DOM 抛异常（那会把整组变成 error）：照常放行，
+  // 让下面那几条断言去红。
+  const pressEsc = () => {
+    if (typeof ctx.document.onkeydown === 'function') {
+      ctx.document.onkeydown({ key: 'Escape' });
+    }
+  };
+  const clickAt = (inside) => {
+    if (typeof ctx.document.onclick === 'function') {
+      ctx.document.onclick({ target: { closest: () => (inside ? {} : null) } });
+    }
+  };
+  ctx.setStatusOpen(true);
+  pressEsc();
+  out.status_esc = { open: panelOpen(), bound: typeof ctx.document.onkeydown === 'function' };
+  ctx.setStatusOpen(true);
+  clickAt(false);
+  out.status_outside = { open: panelOpen(), bound: typeof ctx.document.onclick === 'function' };
+  ctx.setStatusOpen(true);
+  clickAt(true);
+  out.status_inside = { open: panelOpen() };
+  ctx.setStatusOpen(false);
+
+  // ③-2 自己说的话不加符号前缀：发一条之后，气泡里就是原话（一个字符都不多）。
+  const goalInput = ids.get('goal');
+  goalInput.value = '改一下登录页';
+  ctx.__fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  await ctx.say();
+  ctx.__fetchImpl = null;
+  const bubbles = ids.get('stream').querySelectorAll('.bubble');
+  const mine = bubbles.filter((node) => String(node.parentNode && node.parentNode._cls || '')
+    .indexOf('user') >= 0);
+  out.say_text = {
+    calls: ctx.fetchCalls.slice(-1),
+    last_user: mine.length ? mine[mine.length - 1].textContent : 'missing',
   };
 }

@@ -296,7 +296,7 @@ def test_非回环时看的那部分照常(start_server, tmp_path: Path) -> None
     status, page = _get(url + "/")
     assert status == 200
     assert "<html" in page.lower()
-    assert 'id="readonly"' in page, "页面上得有那条只读横幅"
+    assert 'id="st-mode"' in page, "页面上得有那枚只读锁徽标（输入条那一行）"
 
     payload = _state(url)
     assert payload["readonly"] is True

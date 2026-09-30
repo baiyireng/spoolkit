@@ -32,15 +32,28 @@
   一个节点都不新建——这条有行为用例（`tests/web/page_dom.js`）钉着。
 - **运行中把发送降级成禁用**：服务端只有 `/run` 与 `/confirm`，没有停止端点
   （`Runner.stop()` 没有对应接口）。所以这里**不摆一个点了就骗人的停止键**，
-  而是在横幅上说明"等服务端收尾再发下一条"——本轮不做停止，也不新开端点。
+  而是在状态区里说明"等服务端收尾再发下一条"——本轮不做停止，也不新开端点。
 - **会话的「移除」是两次点击**：第一下只把那一行变成确认态，第二下才发请求；
   服务端把它按**归档**处理（数据不动、可恢复），已移除的那几条在左栏单独一段里
   点「恢复」就回来。
 - **通知是右上角的浮动气泡，不是横幅**：失败与提示以前挤在同一条横幅带里，现在各走
-  各自的层（`#toasts`）。每条一个关闭键，两条以上时多一个「全部关闭」；`info` 那一档
-  几秒后自己消失，**错误与要人决策的两档不会**——人没看到就没了，比不提示更糟。
+  各自的层（`#toasts`）。气泡是 `position:fixed`、父节点就是 `body`，而且容器不吃点击
+  （`pointer-events:none`，只有气泡自己吃）——**出现与消失都不占文档流**：页面高度、
+  主滚动容器的滚动位置、对话流的节点数，一个都不动；它跟内容叠在一起时，底下的
+  卡片与按钮照样点得动。每条一个关闭键，两条以上时多一个「全部关闭」；`info` 那一档
+  几秒后自己消失，**错误那一档不会**——人没看到就没了，比不提示更糟。
   同一个 key 的同一份内容只**更新**不重建（轮询每 3 秒一拍，重建就是每 3 秒抖一次），
   人手动关掉之后同一份内容不再弹回来（内容真变了才回）。
+- **顶部没有常驻提示**：只读（非回环）、`--root` 钉住、模型探活、待配对、"别处还有一条
+  在跑"以前都挤在页面顶部那条横幅带里——它一出现就把对话流往下推，而"没事"的时候
+  白占一行。现在这些**模式与状态**收进输入条下面那一**行**（`.st`，本来写着
+  Enter 发送 的就是那一行）：常态下只剩一枚小圆点，异常 / 只读 / 钉住 / 待配对 /
+  别处在跑时才多出一枚可点开的徽标，点开是详情（状态 / 地址 / `probed_at` 与 `age_s`
+  / 可能原因 / 下一步敲哪条**真存在**的命令）。**异常仍然看得见**：那时徽标是红的
+  并且带字（"模型不通"），不是一枚沉默的绿点——静默的陈旧值比报错更糟。
+- **自己说的话不加符号前缀**：发出去的那一条前面原来挂着一个黑色三角形符号，
+  它什么也没说明（气泡底色 + 右对齐已经说清"这是我说的"），所以它没了，也没换成
+  别的符号。这一个字符现在整份文件里一次都不出现。
 - **待确认是对话流里的一张卡片，不是常驻横幅**：有待确认内容时才建节点（`.ask-card`，
   与 ChatGPT 的工具调用卡片同一挂：谁的 / 哪个文件或哪条命令 / diff 摘要 / 两个按钮），
   没有的时候**这块 UI 在页面上不存在**——没有 DOM 占位、也没有可聚焦的空按钮。
@@ -184,35 +197,40 @@ HTML = """<!DOCTYPE html>
   .ok { color:var(--ok); }
   .bad { color:var(--bad); }
 
-  /* ── 横幅区：只放"这是哪一种壳 / 现在有没有目标"这类**模式与目标说明** ──
-     失败与提示**不在这里**：它们走右上角的浮动气泡（见下面的 `.toasts`），
-     因为一条已经没意义的旧提示不该把新错误挤下去，而它自己又不会走。 */
-  .banner { display:none; padding:7px 14px; font-size:13px;
-            border-bottom:1px solid var(--line-soft); }
-  #readonly { background:var(--ro-bg); color:var(--ro-text);
-              border-bottom-color:var(--ro-line); }
-  #target-note { background:var(--info-bg); color:var(--info-text);
-                 border-bottom-color:var(--info-line); }
+  /* ══ 顶部**没有**横幅带 ══
+     以前这里是一条常驻的横幅（只读 / 钉住 / 没有目标 / 探活）：它一出现就把对话流
+     往下推，而"一切正常"的时候又白占一行。现在这些**模式与状态**全收进输入条下面
+     那一行小字（见下面的 `.st`），顶部只剩"我在哪儿"（`#top` 里的目标）。
+     判据有两条：没有任何元素还挂着那个横幅类名；`#readonly` / `#target-note` /
+     `#health` / `#pairing` / `#elsewhere` 这几个挂点一个都不在页面上。 */
   .hidden { display:none !important; }
 
-  /* ── 通知：右上角的浮动气泡。可堆叠（竖着排，不叠在一起）、每条一个关闭键；
-        `info` 自己会走，**`error` / `warn` / `ask` 不会**——错误在人看到之前消失，
-        比不提示更糟。固定在右上：**不遮输入条，也不遮对话流里那张待确认卡片**。 */
+  /* ── 通知：右上角的浮动气泡。**脱离文档流**（`position:fixed`，`z-index` 高于内容）：
+        出现与消失都不改页面高度、不挪滚动位置——"弹一条通知把对话流推下去"就是这么坏的。
+        容器**不吃点击**（`pointer-events:none`），只有气泡与「全部关闭」自己吃（`auto`）：
+        它跟对话流叠在一起时（宽屏上右侧那一列会压到居中的卡片），底下的按钮照样点得动。
+        可堆叠（竖着排，不叠在一起）、每条一个关闭键；`info` 自己会走，
+        **`error` / `warn` 不会**——错误在人看到之前消失，比不提示更糟。 */
   .toasts { display:none; position:fixed; z-index:30; top:56px; right:14px;
             width:min(360px, calc(100vw - 28px)); max-height:70vh;
-            overflow-y:auto; flex-direction:column; gap:8px; }
+            overflow-y:auto; flex-direction:column; gap:8px; pointer-events:none; }
   .toasts.show { display:flex; }
+  /* 入场只动 `opacity` 与一点位移：`position:fixed` 的元素上做 transform 不会建
+     包含块问题，而 `prefers-reduced-motion` 那一档把它整个关掉（见文件末尾）。 */
+  @keyframes toast-in { from { opacity:0; transform:translateY(-4px); }
+                        to { opacity:1; transform:none; } }
   .toast-all { display:none; align-self:flex-end; padding:4px 12px;
                border-radius:999px; border:1px solid var(--line);
                background:var(--panel-2); color:var(--text-dim);
-               cursor:pointer; font-size:12px; }
+               cursor:pointer; font-size:12px; pointer-events:auto; }
   .toast-all.show { display:inline-flex; }
   .toast-all:hover { color:var(--text); border-color:var(--text-dim); }
   .toast { display:flex; align-items:flex-start; gap:8px;
            border:1px solid var(--line); border-radius:12px;
            padding:9px 10px 9px 12px; background:var(--panel-2);
            color:var(--text); font-size:13px; overflow-wrap:anywhere;
-           box-shadow:0 8px 26px rgba(0,0,0,.34); }
+           box-shadow:0 8px 26px rgba(0,0,0,.34); pointer-events:auto;
+           animation:toast-in .14s ease-out; }
   .toast-body { flex:1 1 auto; min-width:0; }
   .toast-title { font-weight:600; }
   .toast-line { margin-top:3px; color:var(--text-dim); }
@@ -232,6 +250,8 @@ HTML = """<!DOCTYPE html>
                 color:var(--warn-text); }
   .toast.error { border-color:var(--danger-line); background:var(--danger-bg);
                  color:var(--danger-text); }
+  /* `ask` 那一档（待批准）现在**没有调用方**：配对码收进了输入条那一行的状态区
+     （那里必须看得见码，气泡会被划走）。配色留着，因为气泡这个组件仍是四档的。 */
   .toast.ask { border-color:var(--pair-line); background:var(--pair-bg);
                color:var(--pair-text); }
   .toast.info .toast-line, .toast.info .toast-close,
@@ -429,7 +449,9 @@ HTML = """<!DOCTYPE html>
   #toBottom.show { display:flex; }
   #toBottom svg { width:18px; height:18px; }
 
-  #composer { padding:10px 18px 14px; }
+  /* `position:relative`：状态详情面板（`.st-panel`）以它为锚，绝对定位浮在输入条上方
+     ——**不占文档流**，展开/收起也不推内容。 */
+  #composer { position:relative; padding:10px 18px 14px; }
   .box { display:flex; align-items:flex-end; gap:8px; max-width:800px;
          margin:0 auto; padding:8px 8px 8px 16px; border-radius:22px;
          border:1px solid var(--line); background:var(--panel-2); }
@@ -441,8 +463,51 @@ HTML = """<!DOCTYPE html>
           display:flex; align-items:center; justify-content:center; }
   #send svg { width:18px; height:18px; }
   #send:disabled { background:var(--line); color:var(--text-faint); cursor:default; }
-  .hint { max-width:760px; margin:8px auto 0; color:var(--text-faint);
-          font-size:11.5px; text-align:right; }
+
+  /* ══ 状态区：输入条下面那一**行**（`.st`） ══
+     "这一页现在是什么模式 / 探活通不通 / 有没有人在等批准"全在这里，顶部因此干净。
+     三种信息各就各位：① 探活常态只剩一枚小圆点（**不是**"显示一句一切正常"）；
+     ② 只读（非回环）与 `--root` 钉住才摆出一枚锁徽标——它回答"为什么点不动"；
+     ③ 待配对 / 别处还有一条在跑收进同一行，详情里仍然是完整的码与命令。
+     徽标都在**同一行**里，而且这一行本来就在（原来是 Enter 发送 那句）：
+     状态怎么变，对话流都不会被推下去。点徽标（或那枚圆点）展开详情；再点、
+     点别处、按 Esc 收起。 */
+  .st { display:flex; align-items:center; gap:6px; max-width:800px;
+        margin:8px auto 0; font-size:11.5px; color:var(--text-faint); }
+  .st-hint { margin-left:auto; padding-left:10px; color:var(--text-faint);
+             white-space:nowrap; }
+  .st-item { display:inline-flex; align-items:center; gap:6px; max-width:44vw;
+             min-width:0; flex:0 1 auto; padding:2px 9px; border-radius:999px;
+             border:1px solid transparent; background:transparent;
+             color:var(--text-faint); cursor:pointer; font-size:11.5px;
+             line-height:1.7; }
+  .st-item > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .st-item:hover, .st-item[aria-expanded="true"] { color:var(--text);
+             border-color:var(--line); }
+  /* 常态那枚圆点：绿色、低调，但不沉默——鼠标停上去（`title`）与读屏（`aria-label`）
+     都念得出"模型探活：正常"。 */
+  .st-dot { width:8px; height:8px; flex:0 0 8px; border-radius:50%;
+            background:var(--ok); }
+  .st-item.warn { color:var(--warn-text); border-color:var(--warn-line); }
+  .st-item.warn .st-dot { background:var(--warn-text); }
+  .st-item.bad { color:var(--danger-text); border-color:var(--danger-line); }
+  .st-item.bad .st-dot { background:var(--bad); }
+  .st-item.ro { color:var(--ro-text); border-color:var(--ro-line); }
+  .st-item.ask { color:var(--pair-text); border-color:var(--pair-line); }
+  .st-item svg { width:12px; height:12px; flex:0 0 12px; }
+  /* 详情面板：浮在输入条上方（绝对定位，**不占文档流**）。 */
+  .st-panel { position:absolute; z-index:25; left:18px; right:18px; bottom:100%;
+              max-width:760px; margin:0 auto 8px; max-height:56vh; overflow-y:auto;
+              padding:12px 14px; border-radius:14px; border:1px solid var(--line);
+              background:var(--panel); color:var(--text); font-size:12.5px;
+              box-shadow:0 10px 30px rgba(0,0,0,.4); }
+  .st-sec + .st-sec { margin-top:10px; padding-top:10px;
+                      border-top:1px solid var(--line-soft); }
+  .st-sec-head { font-weight:600; }
+  .st-line { margin-top:3px; color:var(--text-dim); overflow-wrap:anywhere; }
+  .st-line.bad { color:var(--danger-text); }
+  .st-raw { margin-top:6px; color:var(--text-faint);
+            font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
   #conn { position:fixed; left:50%; transform:translateX(-50%); bottom:10px;
           color:var(--danger-text); background:var(--danger-bg);
           border:1px solid var(--danger-line); border-radius:999px;
@@ -458,21 +523,26 @@ HTML = """<!DOCTYPE html>
     #stream { padding:14px 12px 20px; }
     .msg.user { max-width:92%; }
     #composer { padding:8px 10px calc(10px + env(safe-area-inset-bottom)); }
-    /* 手机宽度：气泡不越界——左边也压住，别让它顶出屏幕；高低再收一档，
-       免得整列通知把对话流里那张卡片盖住。 */
+    /* 手机宽度：气泡不越界——左右都压住、占满宽度，但它**仍然 fixed**
+       （这里刻意一个 `position` 都不写：写上去就等于把它拉回文档流）。
+       高低再收一档，免得整列通知把对话流里那张卡片盖住。 */
     .toasts { top:52px; left:10px; right:10px; width:auto; max-height:45vh; }
+    .st { gap:4px; }
+    .st-item { max-width:38vw; padding:2px 7px; }
+    .st-hint { display:none; }
+    .st-panel { left:10px; right:10px; max-height:50vh; }
     #thinking { right:12px; bottom:96px; }
     #toBottom { right:12px; bottom:56px; }
   }
   @media (prefers-reduced-motion: reduce) {
     #stream { scroll-behavior:auto; }
     .dot, .thinking-dots i { animation:none; }
+    /* 通知的入场也关掉：不动画不等于不出现（它只是直接在那里）。 */
+    .toast { animation:none; }
   }
 </style>
 </head>
 <body>
-<div id="readonly" class="banner"></div>
-<div id="target-note" class="banner"></div>
 <div id="toasts"><button id="toast-all" type="button" class="toast-all">全部关闭</button></div>
 <div id="top">
   <button id="menu" title="会话列表" aria-label="会话列表"></button>
@@ -504,7 +574,18 @@ HTML = """<!DOCTYPE html>
         <textarea id="goal" rows="1" placeholder="给 agent 发消息…"></textarea>
         <button id="send" title="发送"></button>
       </div>
-      <div class="hint">Enter 发送 · Shift+Enter 换行</div>
+      <!-- 状态区：常态下只剩一枚圆点，所以这里刻意**只有一个空壳**——里面的
+           圆点 / 标签 / 锁图标由脚本建（`badgeParts`，脚本一加载就建）。
+           按钮上的 `aria-expanded` 说的是"详情面板开着没有"。 -->
+      <div class="st">
+        <button id="st-health" type="button" class="st-item ok" aria-expanded="false"></button>
+        <button id="st-mode" type="button" class="st-item ro hidden" aria-expanded="false"></button>
+        <button id="st-target" type="button" class="st-item warn hidden" aria-expanded="false"></button>
+        <button id="st-pair" type="button" class="st-item ask hidden" aria-expanded="false"></button>
+        <button id="st-elsewhere" type="button" class="st-item warn hidden" aria-expanded="false"></button>
+        <span class="st-hint">Enter 发送 · Shift+Enter 换行</span>
+      </div>
+      <div id="st-panel" class="st-panel hidden" role="region" aria-label="状态详情"></div>
     </div>
   </div>
 </div>
@@ -519,6 +600,7 @@ const ICON = {
   send: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 12l15-7-6 7 6 7z"></path></svg>',
   down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"></path><path d="M6 13l6 6 6-6"></path></svg>',
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>',
 };
 
 const stream = document.getElementById('stream');
@@ -527,9 +609,15 @@ const conn = document.getElementById('conn');
 const sendBtn = document.getElementById('send');
 const goalBox = document.getElementById('goal');
 const whereBox = document.getElementById('where');
-const noteBox = document.getElementById('target-note');
 const toastsBox = document.getElementById('toasts');
 const toastAllBtn = document.getElementById('toast-all');
+// 状态区那一行（输入条下面）：常态下只剩一枚小圆点，所以徽标里的东西都得现建。
+const stHealth = document.getElementById('st-health');
+const stMode = document.getElementById('st-mode');
+const stTarget = document.getElementById('st-target');
+const stPair = document.getElementById('st-pair');
+const stElsewhere = document.getElementById('st-elsewhere');
+const stPanel = document.getElementById('st-panel');
 // 两条原生选择器：HTML 里它们是给左栏两段兜底的可访问控件，值也由 drawTarget
 // 一起填（fillSelect）——切换只走这一条路径（行点击最终也落到 switchTarget 上）。
 const wsBox = document.getElementById('ws');
@@ -550,7 +638,7 @@ let pendings = [];
 let drawn = 0;
 let busy = false;
 // 页面上当前绑定的目标（"工作区|会话"）。它变了就说明这一屏整体属于上一个目标，
-// 得清掉重绑——只更新横幅是不够的。
+// 得清掉重绑——只更新顶部那行目标是远远不够的。
 let bound = '';
 // 左栏上一次画出来的内容签名。**只有它变了才重绘**：同一帧状态重复到达
 // （事件流补帧、运行状态变化、3 秒轮询）时，一个节点都不该新建。
@@ -576,6 +664,25 @@ let cardReject = null;
 // 卡片上那一份待确认内容的签名：同一份内容只更新不重建（补帧会一遍遍送同一份）。
 let cardSig = '';
 
+/* ── 状态区的数据（画它的是 `drawStatus`，就在下面） ──
+   这些全是**最近一帧**的样子：`/state` 一拍更新一次，没有事件也会走轮询。
+   `healthView` 的三段（`cls` / `label` / `lines`）是"探活那枚徽标怎么长"的唯一出处：
+   `label` 为空就是常态——只剩一枚小圆点，**不是**画一句"一切正常"。 */
+let healthView = {cls: 'warn', label: '探活中', lines: [], raw: ''};
+let healthInfo = {};
+let pairingRows = [];
+let elsewhereRows = [];
+// 只读（非回环）/ `--root` 钉住：两句长解释分别由 `showReadonly` 与 `drawTarget` 落进来，
+// 徽标上的短标签由它们拼（"只读 · 已钉住"）。
+let readOnlyNote = '';
+let pinnedNote = '';
+let pinned = false;
+// 顶部那行只剩"我在哪儿"之后，空态引导与"运行中"这类说明搬进了详情面板。
+let targetNotes = [];
+let targetMissing = false;
+// 详情面板开着没有。默认关（页面一上来不该顶着一块东西）。
+let statusOpen = false;
+
 // 等待时那一行里**不许**出现探活那条通知的名字：红色的"连不上"说的是模型，
 // 不是"还在生成"（两者混在一起，人会以为模型挂了）。
 const WAIT_PREFIX = '模型生成中，已等待';
@@ -583,7 +690,7 @@ const WAIT_PREFIX = '模型生成中，已等待';
 const RUN_MARK = '正在跑';
 // 钉住（--root）时两段列表都只读。用类而不是 disabled：这里是 div 行，不是控件。
 const LOCK = 'lock';
-// 只有 `info` 那一档的提示自己会走（几秒）；错误与要人决策的那些**永远不自动消失**
+// 只有 `info` 那一档的提示自己会走（几秒）；错误那些**永远不自动消失**
 // ——在人看到之前消失，比不提示更糟。
 const AUTO_CLOSE_MS = 5000;
 
@@ -596,7 +703,9 @@ const AUTO_CLOSE_MS = 5000;
    ② 同一个 key 的同一份内容只**更新**不重建——`/state` 是 3 秒一拍，
       重建就是每 3 秒抖一次；人手动关掉的那一份内容不再自己弹回来
       （内容真变了才回：错误换了、那条提示消失了又回来）；
-   ③ 位置固定在右上：不遮输入条，也不遮对话流里那张待确认卡片。 */
+   ③ 它**脱离文档流**：`position:fixed` 在右上（CSS），节点挂在 `#toasts` 上——
+      那个容器是 `body` 的直接子节点，不在 `#stream` / `#thread` 里。所以弹一条通知
+      既不新增对话流的节点，也不改主滚动容器的滚动位置（"把页面挤下去"就是这么坏的）。 */
 const toastNodes = {};
 const toastSigs = {};
 const toastOrder = [];
@@ -647,10 +756,10 @@ function fillToastLines(box, lines) {
   while (box.children.length > lines.length) { box.removeChild(box.lastChild); }
 }
 
-// 建 / 更新一条通知。`spec`：{key, source, kind, title, lines, raw}
-//   kind: 'info'（自己消失）/ 'warn' / 'error' / 'ask'（后三档只能手动关）
-//   source: 给 `pruneToasts` 用——这一拍没再出现的那几条（模型又通了、
-//           别处那条跑完了）要自己收掉。
+// 建 / 更新一条通知。`spec`：{key, kind, title, lines, raw}
+//   kind: 'info'（自己消失）/ 'warn' / 'error'（后两档只能手动关）
+// 气泡只讲"刚刚发生了什么"（失败、做成了的回执）。"这一页现在什么状态"
+// （探活 / 模式 / 配对 / 别处在跑）走状态区，所以这里没有"这一拍没出现就收掉"的活。
 function showToast(spec) {
   const key = String(spec.key);
   const lines = spec.lines || [];
@@ -695,7 +804,6 @@ function showToast(spec) {
     toastOrder.push(key);
     toastsBox.appendChild(node);
   }
-  node._source = spec.source || '';
   if (node._kind !== spec.kind) {
     node._kind = spec.kind;
     node.className = 'toast ' + spec.kind;
@@ -706,7 +814,7 @@ function showToast(spec) {
   node._parts.raw.style.display = spec.raw ? 'block' : 'none';
   toastSigs[key] = sig;
   if (node._timer) { clearTimeout(node._timer); node._timer = 0; }
-  // 只有 `info` 自己消失。错误、警告、要人决策的一律留到人点关闭为止。
+  // 只有 `info` 自己消失。错误那一档一律留到人点关闭为止。
   if (spec.kind === 'info') {
     node._timer = setTimeout(function () { closeToast(key); }, AUTO_CLOSE_MS);
   }
@@ -714,18 +822,9 @@ function showToast(spec) {
   return node;
 }
 
-// 这一拍没再出现的那几条（同一个来源的）：收掉。
-function pruneToasts(source, keep) {
-  for (const key of toastOrder.slice()) {
-    const node = toastNodes[key];
-    if (!node || node._source !== source) { continue; }
-    if (!keep[key]) { closeToast(key); }
-  }
-}
-
 // 一次性提示：操作做成了这类回执，自己会走，不必人去关。
 function notifyInfo(title, lines) {
-  return showToast({key: 'info|' + title, source: 'info', kind: 'info',
+  return showToast({key: 'info|' + title, kind: 'info',
     title: title, lines: lines || []});
 }
 
@@ -735,10 +834,224 @@ function notifyFailure(head, text, parts) {
   const title = parts === null ? head + redact(text) : parts.head;
   return showToast({
     key: 'failure|' + head + '|' + redact(usefulLine(text)).slice(0, 120),
-    source: 'failure', kind: 'error', title: title,
+    kind: 'error', title: title,
     lines: parts === null ? [] : parts.lines,
     raw: parts === null ? '' : parts.raw,
   });
+}
+
+/* ══ 状态区：输入条下面那一行 ══
+   这一页"现在什么状态"只有这一个落点，所以顶部可以是干净的：
+   ① **探活**：常态只剩一枚小圆点（`healthView.label` 为空）；不通 / 回话慢 / 还没探过
+      才变色并写出几个字。异常**带字**是刻意的——一枚沉默的绿点会把"模型连不上"
+      藏起来，那正是"静默的陈旧值比报错更糟"那条教训。
+   ② **模式**：只读（非回环）与 `--root` 钉住才摆出一枚锁徽标；它回答"为什么点不动"。
+   ③ **待配对 / 别处还有一条在跑**：收进同一行；配对码直接写在徽标上（一次点击就能看到，
+      不会被划走），详情里仍然有完整的那条 `spool approve <码>` 命令。
+   徽标与"Enter 发送"那句共用**同一行**（`.st`，本来就在），所以状态怎么变都不新增占位。
+   点徽标展开 `#st-panel`（绝对定位，浮在输入条上方，同样不占文档流）；再点、点别处、
+   按 Esc 都收起。 */
+
+// 每个徽标里的东西（圆点 / 锁图标 / 标签）现建：HTML 里只摆了空按钮。
+// 为什么不用 `querySelector` 去取静态 HTML 里写好的那几个 span——假 DOM（测试台）
+// 只按 id 造空壳，不解析静态子节点；靠它取就会在测试里拿到 null。
+function badgeParts(box, withDot, withLock) {
+  if (withDot) {
+    const dot = document.createElement('span');
+    dot.className = 'st-dot';
+    box.appendChild(dot);
+  }
+  if (withLock) {
+    const icon = document.createElement('span');
+    icon.className = 'st-icon';
+    icon.innerHTML = ICON.lock;
+    box.appendChild(icon);
+  }
+  const label = document.createElement('span');
+  label.className = 'st-label';
+  box.appendChild(label);
+  return label;
+}
+
+const healthLabel = badgeParts(stHealth, true, false);
+const modeLabel = badgeParts(stMode, false, true);
+const targetLabelBox = badgeParts(stTarget, false, false);
+const pairLabel = badgeParts(stPair, false, false);
+const elsewhereLabel = badgeParts(stElsewhere, false, false);
+
+// 徽标上的短标签：只读 / 钉住同时成立时说全（"--root 起的只读壳"是可能的）。
+function modeBadgeText() {
+  const parts = [];
+  if (readonly) { parts.push('只读'); }
+  if (pinned) { parts.push('已钉住'); }
+  return parts.join(' · ');
+}
+
+// 探活那一节：**状态 / 地址 / 探活时间 / 可能原因 / 下一步**（下一步是真存在的命令）。
+// "什么时候探的"由 `probedStamp` 给：探活挪到后台之后 `/state` 给的是最近一次结果，
+// 陈旧值可以接受，**静默的**陈旧值不行。
+function healthStateText(info, model) {
+  if (model.ok === false) {
+    const kind = model.kind || failureKind(model.detail);
+    if (kind === 'slow') { return '回话慢（连上了，但没在超时内回话）'; }
+    return '连不上';
+  }
+  if (info.state === 'unknown' || model.ok === null || model.ok === undefined) {
+    return '还没探过（后台正在探，几秒后自己更新）';
+  }
+  return '正常';
+}
+
+function healthLines() {
+  const info = healthInfo || {};
+  const model = info.model || {};
+  const rows = [{text: '状态：' + healthStateText(info, model),
+    cls: healthView.cls === 'bad' ? 'bad' : ''}];
+  // 地址：优先用这一次探活报的地址，其次配置里那个。
+  rows.push({text: '地址：' + (model.target || info.url || '（按配置里的地址）')});
+  rows.push({text: '探活时间：' + probedStamp(info)});
+  for (const one of healthView.lines) { rows.push({text: one}); }
+  return rows;
+}
+
+// 模式那一节：这一页现在能不能驱动、目标为什么切不动——"为什么点不动"的答案。
+function modeLines() {
+  const rows = [{text: '驱动：' + (readonly
+    ? '不可以（这一页只读，写请求会被服务端拒）'
+    : '可以（本机回环）')}];
+  if (readOnlyNote) { rows.push({text: readOnlyNote}); }
+  if (pinnedNote) { rows.push({text: pinnedNote}); }
+  if (!readOnlyNote && !pinnedNote) {
+    rows.push({text: '目标没有钉住：左栏里点一行就切过去。'});
+  }
+  return rows;
+}
+
+// 目标那一节：我在哪儿 + 空态怎么选 + 现在是不是正在跑（发送键为什么是灰的）。
+function targetLines() {
+  const t = (lastState || {}).target || {};
+  const rows = [{text: t.root
+    ? '目标：' + t.root + ' · 会话 ' + (t.session || '')
+    : '目标：还没有选'}];
+  rows.push({text: '运行：' + (busy ? '正在跑一条' : '空闲')});
+  for (const one of targetNotes) { rows.push({text: one}); }
+  return rows;
+}
+
+// 配对那一节：码必须**看得见**（人要去终端敲它），所以整条命令都写出来。
+function pairSections() {
+  const sections = [];
+  for (const item of pairingRows) {
+    sections.push({
+      title: '待批准的通道配对请求（来自手机 / 聊天通道）',
+      lines: [
+        {text: '配对码：' + item.code},
+        {text: '在本机终端敲：spool approve ' + item.code},
+        {text: '来自：' + (item.user || '未知')},
+        {text: '点「应用」不会批准配对（那是落盘确认）。'},
+      ],
+    });
+  }
+  return sections;
+}
+
+// 别处那几条：标题就是"别处还有一条在跑：<工作区>"（`showElsewhere` 里拼好的）。
+function elsewhereSections() {
+  return elsewhereRows.map(function (one) {
+    return {title: one.title, lines: one.lines.map(function (text) {
+      return {text: text};
+    })};
+  });
+}
+
+function statusSection(title, lines, raw) {
+  const box = document.createElement('div');
+  box.className = 'st-sec';
+  const head = document.createElement('div');
+  head.className = 'st-sec-head';
+  head.textContent = title;
+  box.appendChild(head);
+  for (const one of (lines || [])) {
+    const line = document.createElement('div');
+    line.className = 'st-line' + (one.cls ? ' ' + one.cls : '');
+    line.textContent = one.text;
+    box.appendChild(line);
+  }
+  if (raw) {
+    const node = document.createElement('div');
+    node.className = 'st-raw';
+    node.textContent = '原始信息：' + raw;
+    box.appendChild(node);
+  }
+  return box;
+}
+
+// 面板内容 = 探活 + 模式 + 目标 + 别处 + 配对。关着的时候一个节点都不建。
+function renderStatusPanel() {
+  if (!statusOpen) { return; }
+  const nodes = [
+    statusSection('模型探活', healthLines(), healthView.raw),
+    statusSection('这一页的运行模式', modeLines(), ''),
+    statusSection('当前目标', targetLines(), ''),
+  ];
+  for (const one of elsewhereSections()) {
+    nodes.push(statusSection(one.title, one.lines, ''));
+  }
+  for (const one of pairSections()) {
+    nodes.push(statusSection(one.title, one.lines, ''));
+  }
+  stPanel.replaceChildren(...nodes);
+}
+
+function setStatusOpen(open) {
+  statusOpen = Boolean(open);
+  stPanel.classList.toggle('hidden', !statusOpen);
+  for (const badge of [stHealth, stMode, stTarget, stPair, stElsewhere]) {
+    badge.setAttribute('aria-expanded', statusOpen ? 'true' : 'false');
+  }
+  if (statusOpen) { renderStatusPanel(); }
+}
+
+// 徽标 + 面板一次画出来。状态每次都从**最近一帧**重算，所以"跑完了还写着正在跑"
+// 这类陈旧话不会留在上面；节点只在面板开着时才重建（关着就只改类与文字）。
+function drawStatus() {
+  const bad = healthView.cls === 'bad' || healthView.cls === 'warn';
+  stHealth.className = 'st-item ' + (bad ? healthView.cls : 'ok');
+  healthLabel.classList.toggle('hidden', healthView.label === '');
+  healthLabel.textContent = healthView.label;
+  stHealth.title = '模型探活：' + (healthView.label || '正常') + '（点开看详情）';
+  stHealth.setAttribute('aria-label', stHealth.title);
+
+  const mode = modeBadgeText();
+  stMode.classList.toggle('hidden', mode === '');
+  modeLabel.textContent = mode;
+  const modeWhy = [readOnlyNote, pinnedNote].filter(Boolean).join(' ');
+  stMode.title = mode === '' ? '这一页的运行模式' : (mode + '：' + modeWhy);
+  stMode.setAttribute('aria-label', stMode.title);
+
+  stTarget.classList.toggle('hidden', !targetMissing);
+  targetLabelBox.textContent = targetMissing ? '未选工作区' : '';
+  stTarget.title = targetMissing
+    ? '还没有选工作区（点开看怎么选）' : '当前目标';
+  stTarget.setAttribute('aria-label', stTarget.title);
+
+  stPair.classList.toggle('hidden', pairingRows.length === 0);
+  // 只有一条时**把码写在徽标上**：配对码人要去终端敲，藏进详情就等于没提示。
+  pairLabel.textContent = pairingRows.length === 1
+    ? ('配对码 ' + pairingRows[0].code)
+    : (pairingRows.length ? ('待配对 ' + pairingRows.length) : '');
+  stPair.title = pairingRows.length
+    ? '有通道配对请求等你在本机终端批准（点开看码与命令）' : '通道配对';
+  stPair.setAttribute('aria-label', stPair.title);
+
+  stElsewhere.classList.toggle('hidden', elsewhereRows.length === 0);
+  elsewhereLabel.textContent = elsewhereRows.length
+    ? ('别处 ' + elsewhereRows.length + ' 条在跑') : '';
+  stElsewhere.title = elsewhereRows.length
+    ? '别的目标上还有任务在跑（点开看是哪几条）' : '别处的任务';
+  stElsewhere.setAttribute('aria-label', stElsewhere.title);
+
+  renderStatusPanel();
 }
 
 function buildColumn() {
@@ -1429,11 +1742,16 @@ function drawTarget(state) {
   newBtn.classList.toggle(LOCK, dead);
   newBtn.disabled = dead;
 
+  // `--root` 钉住与"还没有目标"以前是顶部横幅上的两句常驻提示（一出现就把对话流
+  // 往下推）。现在它们落在状态区：`--root` 是锁徽标上的"已钉住" + 详情里的一段解释，
+  // 空态引导是"未选工作区"那枚徽标 + 详情。判据一个字都没丢，占位没了。
+  pinned = locked;
+  pinnedNote = locked
+    ? '这条壳是用 --root 起的：只有这一个目标，切不了。'
+      + '去掉 --root 重启就是机器级。'
+    : '';
+  targetMissing = !t.root;
   const notes = [];
-  if (locked) {
-    notes.push('这条壳是用 --root 起的：只有这一个目标，切不了。'
-      + '去掉 --root 重启就是机器级。');
-  }
   if (!t.root) {
     // 空态要**引导人选**，不是摆一堆空白：候选清单就在左边那条工作区段里。
     // 但那张表也可能是**空的**（一个工作区都没登记过）——那时说"在左边选一个"
@@ -1446,13 +1764,9 @@ function drawTarget(state) {
     // 不解释的话，那个灰掉的圆钮就是"坏了"。
     notes.push('这条正在跑：等服务端收尾再发下一条（这个壳没有停止运行接口）。');
   }
-  if (notes.length) {
-    noteBox.style.display = 'block';
-    noteBox.textContent = notes.join(' ');
-  } else {
-    noteBox.style.display = 'none';
-    noteBox.replaceChildren();
-  }
+  targetNotes = notes;
+  // 状态区收尾重画：目标（空态）、模式（钉住）、运行中那几句都在这一下里对齐。
+  drawStatus();
   return changed;
 }
 
@@ -1464,25 +1778,18 @@ function short(text, limit) {
 // 「别处还有一条在跑」：切走不杀任务（设计 §3.4），页面就必须**说得出**这件事，
 // 不能让它看起来只有一条。这一条不走事件流——别的目标上起来的任务，在本目标的
 // 事件流上什么都没有，只能按 `/state` 的 `running_targets` 轮出来。
-// 它是"看一眼就该知道"的提示（`warn`，要人自己关）：轮询每 3 秒会送同一份，
-// 内容没变就只更新那一个节点。
+// 它是"看一眼就该知道"的状态，不是"刚刚发生了什么"的事件：所以收进状态区那一行
+// 的一枚徽标（点开是哪几条），而不是一条要人自己关、又一直挂着的气泡。
 function showElsewhere(state) {
-  const keep = {};
   const others = (state.running_targets || []).filter(function (row) {
     return !row.current;
   });
-  for (const row of others) {
-    const key = 'elsewhere|' + (row.root || '') + '|' + (row.session || '');
-    keep[key] = true;
+  elsewhereRows = others.map(function (row) {
     const lines = ['会话 ' + row.session + ' — ' + short(row.goal, 60)];
     if (row.awaiting) { lines.push('它在等你确认'); }
-    showToast({
-      key: key, source: 'elsewhere', kind: 'warn',
-      title: '别处还有一条在跑：' + (row.name || row.root),
-      lines: lines,
-    });
-  }
-  pruneToasts('elsewhere', keep);
+    return {title: '别处还有一条在跑：' + (row.name || row.root), lines: lines};
+  });
+  drawStatus();
 }
 
 // 重绑这一屏：目标换了，旧的输出、待确认卡片、历史进度都属于**上一个**目标。
@@ -1665,7 +1972,7 @@ function setRunning(value) {
   goalBox.readOnly = value || readonly;
   syncSend();
   setThinking(value && thinking);
-  // 运行中那句提示在横幅上（见 drawTarget）：这一格变了就要重画一次，
+  // 运行中那句提示在状态区的详情里（见 drawTarget）：这一格变了就要重画一次，
   // 否则它会停在上一帧——"跑完了还写着正在跑"比不写还坏。
   if (was !== busy && lastState && lastState.target) { drawTarget(lastState); }
 }
@@ -1704,7 +2011,7 @@ function keyFor(root, name) {
 
 function applyState(state) {
   lastState = state;
-  // 只读与"在不在跑"必须在 drawTarget **之前**定下来：横幅里那两句
+  // 只读与"在不在跑"必须在 drawTarget **之前**定下来：状态区那两枚徽标
   // （只读 / 运行中）与发送键的两态都按它们算，晚一步就会画成上一帧的样子。
   showReadonly(state);
   running = Boolean(state.running);
@@ -1713,7 +2020,7 @@ function applyState(state) {
   const target = state.target || {};
   session = target.session || state.session || session;
   // 目标先画：它变了就**整屏重绑**（服务端在目标变了时会补一帧 state，
-  // 那一帧也要走这条重绑，不能只更新横幅）。
+  // 那一帧也要走这条重绑，不能只更新状态区）。
   if (drawTarget(state)) { resetView(); }
   // 高亮跟着服务端确认的目标走（乐观那一下到这里就交棒了）。**只有当它兑现了**
   // （回帧就是它）或压根没有时才清：人手快、连点了两行时，第一行的回帧不该
@@ -1741,22 +2048,13 @@ function applyState(state) {
 }
 
 // 配对码给人看。批准发生在另一个进程（本机敲 spool approve 加码），
-// 所以还要短轮询 /state，这一条才会自己消失。
+// 所以还要短轮询 /state，这一枚徽标才会自己消失。
 // 不能复用「应用/拒绝」：点应用会走 /confirm 去落盘改动。
+// 它现在是输入条那一行里的一枚徽标（+ 点开后的详情），不是一次性气泡：
+// 配对码要被抄进终端，划走就没了；而一条常驻的气泡又正是"顶部不干净"的来源。
 function showPairings(items) {
-  const keep = {};
-  for (const item of (items || [])) {
-    const key = 'pairing|' + item.code;
-    keep[key] = true;
-    showToast({
-      key: key, source: 'pairing', kind: 'ask',
-      title: '待批准的通道配对请求（来自手机 / 聊天通道）',
-      lines: ['在本机终端敲：spool approve ' + item.code,
-              '来自：' + item.user,
-              '点「应用」不会批准配对（那是落盘确认）。'],
-    });
-  }
-  pruneToasts('pairing', keep);
+  pairingRows = (items || []).slice();
+  drawStatus();
 }
 
 // 「这是什么时候探的」必须说得出：探活挪到后台之后，`/state` 给的是**最近一次**
@@ -1766,8 +2064,10 @@ function showPairings(items) {
 function probedAgo(health) {
   const info = health || {};
   const age = info.age_s;
+  // 既没有 `age_s` 也没有 `probed_at`：**不说**"还没探过"——有结果而没时间戳时
+  // 那句话会和"状态：正常"打架。照实说"没说什么时候探的"。
   if (age === null || age === undefined) {
-    return info.probed_at ? '' : '（还没探过）';
+    return info.probed_at ? '' : '（没说是什么时候探的）';
   }
   const seconds = Math.max(0, Math.round(Number(age)));
   if (seconds < 2) { return '（刚探过）'; }
@@ -1783,74 +2083,83 @@ function modelDownLine(kind, where, ago) {
   return '本机模型连不上' + where + ago;
 }
 
+// 探活那枚徽标的文字与详情都由这里算。异常**带字**（不是一枚沉默的绿点）：
+// 四件事（哪一步 / 哪个地址 / 可能为什么 / 下一步敲什么）里的后三件由 `explainFailure`
+// 给（与对话流里那一块**同一套**说法，不另写一套），分类优先用服务端**只增**的 `kind`；
+// "什么时候探的"由 `probedStamp` / `probedAgo` 补上——探活挪到后台之后 `/state` 给的
+// 是最近一次结果，**静默的**陈旧值等于假话。
+function probedStamp(info) {
+  const data = info || {};
+  const ago = probedAgo(data);
+  const at = Number(data.probed_at);
+  if (!at) { return ago; }
+  return (new Date(at * 1000).toLocaleString() + ' ' + ago).trim();
+}
+
 function showHealth(health) {
-  const keep = {};
   const info = health || {};
+  healthInfo = info;
   const model = info.model || {};
+  // 常态：`label` 为空 = 只剩一枚小圆点。**不是**画一句"一切正常"。
+  healthView = {cls: 'ok', label: '', lines: [], raw: ''};
   if (model.ok === false) {
-    // 失败通知要说全四件事：哪一步 / 哪个地址 / 可能为什么 / 下一步敲什么。
-    // 四句都由 `explainFailure` 给（与对话流里那一块**同一套**说法，不另写一套），
-    // 分类优先用服务端**只增**的 `kind`；"什么时候探的"由 `probedAgo` 补上——
-    // 探活挪到后台之后 `/state` 给的是最近一次结果，静默的陈旧值等于假话。
     const where = model.target ? '（' + model.target + '）' : '';
     const kind = model.kind || failureKind(model.detail) || 'connect';
     const parts = explainFailure(model.detail, {kind: kind, url: model.target});
-    const lines = (parts && parts.lines ? parts.lines : []).slice();
+    // `explainFailure` 那句"模型地址"与上面 `healthLines` 的"地址："是同一件事，
+    // 去掉它免得详情里同一句话出现两遍。
+    const lines = (parts && parts.lines ? parts.lines : []).filter(function (one) {
+      return one.indexOf('模型地址：') !== 0;
+    });
     if (kind === 'slow' && lines.length) {
       // 探活超时的下一步**不是**"把活拆小再发"（这里没人在等生成）：
       // 该做的是去看模型进程还在不在。
       lines[lines.length - 1] = '下一步：`spool service list` 看模型进程还在不在'
         + '（刚起 / 在加载模型就再等一会儿）';
     }
-    const key = 'health|model';
-    keep[key] = true;
-    showToast({
-      key: key, source: 'health', kind: 'error',
-      title: modelDownLine(kind, where, probedAgo(info)),
-      lines: lines,
+    healthView = {
+      cls: 'bad',
+      label: kind === 'slow' ? '模型回话慢' : '模型不通',
+      lines: [modelDownLine(kind, where, probedAgo(info))].concat(lines),
       raw: parts && parts.raw ? parts.raw : redact(model.detail || ''),
-    });
+    };
   } else if (info.state === 'unknown') {
-    // 后台探活刚起来：说"还没探过"，**不画成"通了"**（那是静默的假话）。
-    // 这一条是状态不是错误：模型一探通它自己就收了（不用人关）。
-    const key = 'health|unknown';
-    keep[key] = true;
-    showToast({
-      key: key, source: 'health', kind: 'warn',
-      title: '本机模型：还没探过（后台正在探，几秒后这里会自己更新）。',
-      lines: [],
-    });
+    // 后台探活刚起来：说"还没探过"，**不画成"通了"**（那是静默的假话），
+    // 也不画成"连不上"（那是另一种假话）。
+    healthView = {
+      cls: 'warn', label: '还没探过',
+      lines: ['本机模型：还没探过（后台正在探，几秒后这里会自己更新）。'],
+      raw: '',
+    };
   }
+  // 外接配方（llama / 隧道）与通道桥也在这一节里，不另开一枚徽标：
+  // 它们回答的是同一件事——"模型这一步现在通不通"。
+  const extra = [];
   for (const item of (info.services || [])) {
     if (item.ok === false) {
-      const key = 'health|service|' + (item.name || '外接服务');
-      keep[key] = true;
-      showToast({
-        key: key, source: 'health', kind: 'error',
-        title: (item.name || '外接服务') + '连不上'
-          + (item.target ? '（' + item.target + '）' : ''),
-        lines: [redact(item.detail || '连不上')],
-      });
+      extra.push((item.name || '外接服务') + '连不上'
+        + (item.target ? '（' + item.target + '）' : '')
+        + '：' + redact(item.detail || '连不上'));
     }
   }
   const bridge = info.bridge || {};
   if (bridge.name && bridge.ok === false) {
-    const key = 'health|bridge';
-    keep[key] = true;
-    showToast({
-      key: key, source: 'health', kind: 'error',
-      title: '通道已退出' + (bridge.target ? '（' + bridge.target + '）' : ''),
-      lines: [],
-    });
+    extra.push('通道已退出' + (bridge.target ? '（' + bridge.target + '）' : ''));
   }
-  // 这一拍没再出现的（模型又通了、外接服务起来了）：收掉。
-  pruneToasts('health', keep);
+  if (extra.length) {
+    if (healthView.cls === 'ok') {
+      healthView.cls = 'bad';
+      healthView.label = '外接服务不通';
+    }
+    healthView.lines = healthView.lines.concat(extra);
+  }
+  drawStatus();
 }
 
 // 短轮询 /state。这几样都**不一定伴随事件**：配对码是另一个进程在批，
 // 而「别处还有一条在跑」说的是别的目标上的任务——它在当前目标的事件流上
-// 一个字都不会出现，只轮不推的话这条提示永远不会亮。
-async function refreshBanners() {
+// 一个字都不会出现，只轮不推的话状态区永远不会亮。
+async function refreshStatus() {
   try {
     const response = await fetch('/state');
     if (!response.ok) { return; }
@@ -1859,7 +2168,7 @@ async function refreshBanners() {
     showPairings(state.pairings);
     showHealth(state.health);
     showElsewhere(state);
-  } catch (err) { /* 轮询失败就等下一拍，横幅停在上一帧 */ }
+  } catch (err) { /* 轮询失败就等下一拍，状态停在上一帧 */ }
 }
 
 // 「它想跑一条白名单外的命令」——把被问的东西摆进卡片：要执行什么、为什么。
@@ -1911,21 +2220,18 @@ function showActions() {
   if (cardReject) { cardReject.disabled = false; }
 }
 
-// 非回环绑定 = 只读（设计 §3.7）。这一句要说全三件事：为什么、能看什么、
-// 想驱动怎么办——只说"403"会让人以为壳坏了。
+// 非回环绑定 = 只读（设计 §3.7）。这段话说全三件事：为什么、能看什么、
+// 想驱动怎么办——只说"403"会让人以为壳坏了。它摆在输入条那行的**锁徽标**里
+// （悬停看得见标题、点开是全文）：这一页为什么点不动，仍然是可发现的。
 function showReadonly(state) {
   readonly = Boolean(state.readonly);
-  const box = document.getElementById('readonly');
-  if (!readonly) {
-    box.style.display = 'none';
-    box.replaceChildren();
-    return;
-  }
   const where = state.host ? '（绑在 ' + state.host + ' 上）' : '';
-  box.style.display = 'block';
-  box.textContent = '这条壳绑在非回环地址上' + where + '：只能看，不能驱动——'
-    + '发任务与确认改动会被拒。要驱动它，就在本机开一个网页壳'
-    + '（或把 --host 绑回 127.0.0.1）。工作区与会话仍可切换，那只是换"在看谁"。';
+  readOnlyNote = readonly
+    ? '这条壳绑在非回环地址上' + where + '：只能看，不能驱动——'
+      + '发任务与确认改动会被拒。要驱动它，就在本机开一个网页壳'
+      + '（或把 --host 绑回 127.0.0.1）。工作区与会话仍可切换，那只是换"在看谁"。'
+    : '';
+  drawStatus();
 }
 
 function onEvent(event) {
@@ -2136,12 +2442,16 @@ async function say() {
   closeDrawer();
   goalBox.value = '';
   autoGrow();
-  add('▶ ' + goal, 'me');
+  // 自己说的话就是自己说的：气泡底色 + 右对齐已经是"这条是你发的"。
+  // 这一行原来在 goal 前面拼了一个黑色三角形符号——它什么也没多说，
+  // 所以没了，也没有换成别的符号。
+  add(goal, 'me');
   await post('/run', {goal});
 }
 
-// Enter 发送 / Shift+Enter 换行。
+// Enter 发送 / Shift+Enter 换行 / Esc 收起状态详情。
 function onKeydown(event) {
+  if (event.key === 'Escape') { setStatusOpen(false); return; }
   if (event.key !== 'Enter') { return; }
   if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) { return; }
   event.preventDefault();
@@ -2188,6 +2498,23 @@ document.getElementById('menu').onclick = function () {
 scrim.onclick = closeDrawer;
 toastAllBtn.onclick = closeAllToasts;
 
+// 状态区：五枚徽标都是同一个开关——点开 / 收起详情面板。
+// 都在输入条那一行里，所以"点外面"就是点到 `#composer` 之外（用 `closest` 判）。
+for (const badge of [stHealth, stMode, stTarget, stPair, stElsewhere]) {
+  badge.onclick = function () { setStatusOpen(!statusOpen); };
+}
+document.onclick = function (event) {
+  if (!statusOpen) { return; }
+  const node = event && event.target;
+  const inside = node && node.closest && node.closest('#composer');
+  if (!inside) { setStatusOpen(false); }
+};
+// Esc 也收起：焦点不一定在输入框里（点过徽标之后焦点就在按钮上），
+// 所以除了 `goalBox.onkeydown` 那条，这里再挂一道。
+document.onkeydown = function (event) {
+  if (event && event.key === 'Escape' && statusOpen) { setStatusOpen(false); }
+};
+
 // 「应用 / 拒绝」：两个按钮是在建卡片时现绑的（`ensureCard`）——没有待确认内容时
 // 页面上根本没有这两个按钮，也就没有可聚焦的空控件。
 async function decide(apply) {
@@ -2208,10 +2535,15 @@ async function decide(apply) {
   settleCard(apply ? 'applied' : 'rejected');
 }
 
+// 状态区先画一遍（"探活中"那枚小圆点 + 收起详情），等第一帧 `/state` 到位再对齐。
+// `setStatusOpen(false)` 是**显式**收起的：面板的初始态不靠 HTML 里的类名，
+// 免得脚本与页面对"现在开着没有"各说各话。
+drawStatus();
+setStatusOpen(false);
 buildColumn();
 syncSend();
 connect();
-setInterval(refreshBanners, 3000);
+setInterval(refreshStatus, 3000);
 </script>
 </body>
 </html>
