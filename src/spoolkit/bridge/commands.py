@@ -21,35 +21,35 @@ from pathlib import Path
 from spoolkit import readroots
 
 HELP = """\
-直接说要做什么就行，例如：
+直接描述要做什么，例如：
   看看 calc.py 里 sum_to 是什么
   把它改成长度对半切
 
 这条通道只能读写当前工作区。
-别的盘、桌面、下载目录、没说在哪的文件都够不到；
-查资料、跑命令不在这条限制里。
-要放开某个目录：让主人在服务器上敲 spool extra add 目录，聊天里加不了。
+其它盘、桌面、下载目录、未指明位置的文件都在范围外；
+查资料、跑命令不受这条限制。
+放开某个目录只能由主人在服务器上执行 spool extra add <目录>；聊天里不开放。
 
-命令（直接发这一行）：
+命令（每条单独一行）：
 /status
-  现在指着哪个工作区、哪条会话
+  当前指向的工作区与会话
 /ws
-  列登记过的工作区
+  列出登记过的工作区
 /ws use 名字或序号
-  换一个工作区（换完不用重新配对）
+  切换工作区（无需重新配对）
 /sessions
-  列这个工作区的会话
+  列出该工作区的会话
 /use 序号或id或latest
-  切到另一条会话
+  切换到另一条会话
 /new 标题
-  开一条新会话
+  新建一条会话
 /allow-read
-  说明文件边界、已关联了哪些目录
+  说明文件边界与已关联目录
 /help
-  这一页
+  显示本页
 
-agent 有改动等你确认时：回 y 应用、n 丢弃。
-配对请求在本机处理：任意目录敲 spool approve 加配对码，或 spool chat 里 /approve
+agent 有改动待确认时：回 y 应用、n 丢弃。
+配对请求在本机处理：任意目录执行 spool approve <码>，或 spool chat 里 /approve
 （这条通道上不开放授权口）。
 """
 
@@ -59,25 +59,25 @@ def workspace_scope_notice(root: Path | str) -> str:
     here = Path(root).resolve()
     extras = readroots.existing(root)
     lines = [
-        f"这条是远程聊天通道：只能读写当前工作区（{here}）。"
+        f"这是远程聊天通道：只能读写当前工作区（{here}）。"
     ]
     if extras:
         listed = "、".join(str(item) for item in extras)
         lines.append(
-            f"主人在服务器上还关联了：{listed}。"
-            "这些目录可以读，写要等人确认。"
+            f"主人在服务器上关联了：{listed}。"
+            "这些目录可读；写入仍需确认。"
         )
     else:
         lines.append(
-            "别的盘、桌面、下载目录、没说在哪的文件，这边够不到。"
+            "其它盘、桌面、下载目录与未指明位置的文件都在范围外。"
         )
     lines.append(
-        "查资料、跑命令不在这条限制里——有工具就按工具做，没有就说没有，"
-        "不要说成一律禁止。"
+        "查资料、跑命令不受这条限制：有工具就调用，没有就如实说明，"
+        "不要表述成一律禁止。"
     )
     lines.append(
-        "不会在聊天里开放新的目录——远程通道上小模型分不清危险操作。"
-        "要关联目录，在服务器上用 `spool extra add <目录>`。"
+        "聊天里不开放新的目录（远程通道上小模型分不清危险操作）；"
+        "要关联目录用服务器上的 `spool extra add <目录>`。"
     )
     return "\n".join(lines)
 
@@ -127,7 +127,7 @@ def handle(
         return _use(target, " ".join(parts[1:]), client_key, sessions)
     if name == "/new":
         return _new(target, " ".join(parts[1:]), client_key, sessions)
-    return f"不认识的命令：{parts[0]}（/help 看有哪些）"
+    return f"不认识的命令：{parts[0]}（/help 查看全部）"
 
 
 def _sessions():
@@ -143,7 +143,7 @@ def _workspaces():
 
 
 def _no_client() -> str:
-    return "这条通道没有聊天身份，切不了工作区/会话——让主人看桥的日志。"
+    return "这条通道没有聊天身份，无法切换工作区/会话；请看桥的日志。"
 
 
 def _status(target) -> str:
@@ -166,7 +166,7 @@ def _status(target) -> str:
 def _ws_list(target, workspaces) -> str:
     items = workspaces.list_workspaces()
     if not items:
-        return "主人还没登记过任何工作区。让他在服务器上敲 `spool ws add <目录>`。"
+        return "主人尚未登记任何工作区。请在服务器上执行 `spool ws add <目录>`。"
     here = Path(target.root).resolve()
     lines = ["登记过的工作区："]
     for index, item in enumerate(items, start=1):
@@ -174,7 +174,7 @@ def _ws_list(target, workspaces) -> str:
         alias = f"（别名 {item.alias}）" if item.alias else ""
         lines.append(f"  {index}) {item.name}{alias}{mark}")
         lines.append(f"      {item.root}")
-    lines.append("用 `/ws use <名字|序号>` 换一个（换完不用重新配对）。")
+    lines.append("用 `/ws use <名字|序号>` 切换（无需重新配对）。")
     return "\n".join(lines)
 
 
@@ -193,14 +193,17 @@ def _ws_use(target, name: str, client_key: str, workspaces) -> str:
     if pointer is not None and pointer.workspace == root:
         session = pointer.session
     pointers.set(client_key, root, session)
-    return f"现在指向：{root}\n（下一条消息就在这儿干活；会话用 `/use` 挑或直接说事）"
+    return (
+        f"现在指向：{root}\n"
+        "下一条消息在此工作区执行；会话 `/use` 选择，或直接描述任务。"
+    )
 
 
 def _sessions_listing(target, sessions) -> str:
     root = Path(target.root)
     items = sessions.list_sessions(root, include_archived=True)
     if not items:
-        return "这个工作区还没有会话。`/new 标题` 开一条。"
+        return "这个工作区还没有会话。用 `/new <标题>` 新建。"
     current = str(getattr(target, "session", "") or "")
     lines = [f"{root} 的会话："]
     for index, item in enumerate(items, start=1):
@@ -211,7 +214,7 @@ def _sessions_listing(target, sessions) -> str:
             marks.append("已归档")
         tail = f"  ← {'、'.join(marks)}" if marks else ""
         lines.append(f"  {index}) {item.id}  {item.title or '（还没标题）'}{tail}")
-    lines.append("用 `/use <序号|id|latest>` 切，`/new [标题]` 开新的。")
+    lines.append("用 `/use <序号|id|latest>` 切换，`/new [标题]` 新建。")
     return "\n".join(lines)
 
 

@@ -87,7 +87,10 @@ def test_init_不往已有工作区里套一层(tmp_path, monkeypatch, capsys) -
     monkeypatch.chdir(deep)
     assert main(["init"]) == 0
     assert not (deep / ".agent").exists()
-    assert "不再套一层" in capsys.readouterr().out
+    # 要点：说明"不再嵌套一层"，并给出既存 .agent 的位置——不钉整句字面。
+    out = capsys.readouterr().out
+    assert "不再嵌套一层" in out
+    assert str(root / ".agent") in out
 
 
 def test_init_把_agent_写进_gitignore(tmp_path, monkeypatch) -> None:

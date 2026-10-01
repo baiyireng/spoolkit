@@ -26,26 +26,26 @@ def limits_command(args: argparse.Namespace) -> int:
         changed = 0
         for item in args.set:
             if "=" not in item:
-                print(f"要写成 name=value：{item}", file=sys.stderr)
+                print(f"需要写成 name=value：{item}", file=sys.stderr)
                 return 2
             name, _, raw = item.partition("=")
             name = name.strip()
             entry = limits.knob(name)
             if entry is None:
-                print(f"没有登记过这个标定值：{name}", file=sys.stderr)
-                print("用 `spool limits` 看全部名字。", file=sys.stderr)
+                print(f"未登记该标定值：{name}", file=sys.stderr)
+                print("用 `spool limits` 查看全部名称。", file=sys.stderr)
                 return 2
             if not entry.overridable:
                 print(
-                    f"{name} 是安全边界（{entry.note}），不提供覆盖入口——"
-                    "它防的是不可逆后果，和模型强弱无关。",
+                    f"{name} 是安全边界（{entry.note}），不提供覆盖入口；"
+                    "它针对的是不可逆后果，与模型强弱无关。",
                     file=sys.stderr,
                 )
                 return 2
             try:
                 overrides[name] = float(raw.strip())
             except ValueError:
-                print(f"值要是个数：{item}", file=sys.stderr)
+                print(f"值必须是数字：{item}", file=sys.stderr)
                 return 2
             changed += 1
         path = limits.save_overrides(project_root, overrides)
@@ -55,7 +55,7 @@ def limits_command(args: argparse.Namespace) -> int:
         for name in args.reset:
             overrides.pop(name, None)
         limits.save_overrides(project_root, overrides)
-        print("已恢复默认：" + "、".join(args.reset))
+        print("已恢复默认值：" + "、".join(args.reset))
 
     print(limits.render(overrides))
     return 0

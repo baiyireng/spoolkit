@@ -185,8 +185,8 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         type=int,
         default=0,
         help=(
-            "分批推进：每批排几步。给了它就变成「先做一批 → 回头看一眼 → "
-            "再排下一批」，后续步骤能吃到前面的实际结果。0 表示一次排完"
+            "分批推进：每批排定步数。启用后按「先做一批 → 回顾结果 → "
+            "再排下一批」推进，后续步骤可用前面的实际结果。0 表示一次排完"
         ),
     )
     parser.add_argument(
@@ -198,9 +198,9 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         "--cover",
         default="",
         help=(
-            "拆解后要检查覆盖的清单（逗号分隔）。目标明说「把这 N 件事都做完」"
-            "时才给；不给就不检查——什么算「必须覆盖」是关于目标的判断，"
-            "不该由 harness 猜"
+            "拆解后要检查覆盖的清单（逗号分隔）。仅当目标明确要求「把这 N 件事"
+            "都做完」时给出；不给即不检查；是否「必须覆盖」是对目标的判断，"
+            "不应由 harness 推断"
         ),
     )
     parser.add_argument(
@@ -504,9 +504,9 @@ def _add_web_command(sub: argparse._SubParsersAction) -> None:
         func=web_command,
         web_default=None,
         description=(
-            "机器级网页壳：**任意目录**都能起（不认 cwd），不给 --root 就不钉工作区，"
-            "进去再选工作区与会话。等价于 `spool hub` 不带 --channel 的那一半；"
-            "hub 有的参数它都有。要连聊天通道就用 `spool hub --channel …` 或 `spool qq`。"
+            "机器级网页壳：任意目录都能起（不认 cwd）；不给 --root 即不固定工作区，"
+            "进入后在页面选工作区与会话。等价于 `spool hub` 不带 `--channel`；"
+            "参数与 hub 一致。要连聊天通道用 `spool hub --channel …` 或 `spool qq`。"
         ),
     )
 
@@ -1067,7 +1067,7 @@ def _start_here(parser: argparse.ArgumentParser) -> int:
         if not onboarding.interactive():
             parser.print_help()
             return 2
-        answer = input("当前目录还不是工作区，在这里初始化吗？[Y/n] ").strip().lower()
+        answer = input("当前目录不是工作区，是否在此初始化？[Y/n] ").strip().lower()
         if answer not in ("", "y", "yes"):
             parser.print_help()
             return 1

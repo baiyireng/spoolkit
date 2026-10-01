@@ -20,7 +20,7 @@ def revert_command(args: argparse.Namespace) -> int:
     # 把之后的手工改动一起冲掉。
     baseline_path.unlink()
     for path in touched:
-        print(f"已恢复: {path}")
+        print(f"已恢复：{path}")
     print(f"共恢复 {len(touched)} 个文件。")
     return 0
 

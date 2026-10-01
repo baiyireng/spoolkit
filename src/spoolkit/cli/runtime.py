@@ -167,11 +167,11 @@ def provider_gateway(args, project_root):
             # 第一次用最容易撞这里：默认供应商是假模型，而报错原先只说
             # "需要 --script"，一个字都没提"你大概想接本地模型"。
             print(
-                "假模型只回放 --script，不能生成代码。"
-                "没有 LLM 时不要用 --provider fake 当兜底。\n"
-                "测试回放才需要 --script；真实任务请接本地或云端模型：\n"
+                "假模型只回放 --script，不能生成代码；"
+                "缺少 LLM 时不应以 --provider fake 作为兜底。\n"
+                "仅测试回放需要 --script；真实任务请接本地或云端模型：\n"
                 "  --provider llamacpp --base-url http://127.0.0.1:8080\n"
-                "想把它固定成默认（以后不用每次打）："
+                "固定为默认值（无需每次输入）："
                 " spool config --set provider=llamacpp "
                 "--set base_url=http://127.0.0.1:8080",
                 file=sys.stderr,
@@ -179,7 +179,7 @@ def provider_gateway(args, project_root):
             return None
         script_path = Path(raw_path)
         if not script_path.exists():
-            print(f"脚本文件不存在: {script_path}", file=sys.stderr)
+            print(f"脚本文件不存在：{script_path}", file=sys.stderr)
             return None
         raw = json.loads(script_path.read_text(encoding="utf-8"))
         script = tuple(
@@ -198,7 +198,7 @@ def provider_gateway(args, project_root):
     try:
         gateway = load_gateway(provider, config)
     except ProviderError as exc:
-        print(f"无法装载供应商 {provider}: {exc}", file=sys.stderr)
+        print(f"无法装载供应商 {provider}：{exc}", file=sys.stderr)
         return None
 
     # 本地服务的失败要在**开工之前**说清楚：连不上时后面的每一步都会以
@@ -207,9 +207,9 @@ def provider_gateway(args, project_root):
     if provider == "llamacpp" and gateway.context_window() is None:
         address = values["base_url"] or "(供应商默认地址)"
         print(
-            f"连不上 llama.cpp 服务：{address}\n"
-            f"（地址来自：{values.get('base_url_source') or '未设置'}）\n"
-            "先确认服务起着，例如：\n"
+            f"无法连接 llama.cpp 服务：{address}\n"
+            f"（地址来源：{values.get('base_url_source') or '未设置'}）\n"
+            "先确认服务已启动，例如：\n"
             "  llama-server.exe -m <模型.gguf> --host 127.0.0.1 --port 8080 "
             "-c 8192 -ngl 99 --reasoning off\n"
             "地址不对就用 --base-url 指定，或固定下来："

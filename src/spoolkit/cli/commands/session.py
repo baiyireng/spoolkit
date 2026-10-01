@@ -90,7 +90,7 @@ def session_command(args: argparse.Namespace) -> int:
         except sessions.SessionError as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        print("已归档（数据还在，只是默认不列出；`spool session --all` 看得到）")
+        print("已归档（数据仍保留，默认不再列出；`spool session --all` 可见）")
         return 0
     return _list(root, include_archived=bool(getattr(args, "all", False)))
 
@@ -121,7 +121,7 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
     某一条。工作区边界不动：跨工作区依旧不查。
     """
     if not query:
-        print("要给关键词：`spool session search <关键词>`。", file=sys.stderr)
+        print("需要关键词：`spool session search <关键词>`。", file=sys.stderr)
         return 2
 
     path = root / ".agent" / "memory.db"
@@ -241,7 +241,7 @@ def _list(root: Path, include_archived: bool = False) -> int:
 
     print()
     if shown == 0:
-        print(f"共 {len(everything)} 个会话，都归档了。`spool session --all` 看得到。")
+        print(f"共 {len(everything)} 个会话，均已归档。`spool session --all` 可见。")
     elif include_archived:
         print(f"共 {len(everything)} 个会话（含已归档）。用 `spool session use <序号|id>` 切。")
     else:

@@ -50,8 +50,8 @@ TRANSIENT_SEND = frozenset(
 # 陌生发送者拿到配对码时的回复模板。口令要写得像人话：这条消息会原样出现在
 # 别人的聊天窗口里。
 PAIRING_REPLY = (
-    "这条通道还不认识你。把下面这个配对码给机器的主人，"
-    "他在命令行执行 `spool approve {code}` 之后你就能用了：\n{code}"
+    "这条通道尚未放行你。把下面的配对码交给机器的主人，"
+    "他在命令行执行 `spool approve {code}` 后你即可使用：\n{code}"
 )
 
 
@@ -191,7 +191,7 @@ class Bridge:
             target = self.target_for(message.user)
         except WorkspaceError as exc:
             # 说不清这条消息该落到哪个工作区：**回一句，不进 agent**。
-            reply = f"{exc}\n（让主人先指定一个工作区，或发 /ws use 名字。）"
+            reply = f"{exc}\n让主人先指定一个工作区，或发送 /ws use <名字>。"
             self._send(reply, message.conversation)
             return Reply(user=message.user, text=reply, accepted=False, reason="说不清工作区")
         except Exception as exc:  # noqa: BLE001 - 坏状态文件不许变成"没人理"
@@ -199,8 +199,8 @@ class Bridge:
             # 时读路径可能抛任何东西。抛出去的后果不是"报错"，而是**用户发了消息
             # 没人理**——那正是这个模块最想避免的症状，所以这里必须回一句。
             reply = (
-                f"这条消息没能落到工作区上：{type(exc).__name__}: {exc}\n"
-                "（多半是状态文件坏了；让主人在服务器上看一眼 `spool ws`。）"
+                f"这条消息未能落到工作区上：{type(exc).__name__}: {exc}\n"
+                "状态文件可能已损坏；请主人在服务器上运行 `spool ws` 检查。"
             )
             self._send(reply, message.conversation)
             self._note(f"解析目标失败（{type(exc).__name__}）：{exc}")
@@ -219,8 +219,8 @@ class Bridge:
             return Reply(user=message.user, text=command, accepted=True)
         if len(text) > self.max_chars:
             reply = (
-                f"这条消息有 {len(text)} 字，超过上限 {self.max_chars} 字，"
-                "没有交给 agent。请拆短一点再发。"
+                f"这条消息 {len(text)} 字，超过上限 {self.max_chars} 字，"
+                "未交给 agent。请拆短后重发。"
             )
             self._send(reply, message.conversation)
             return Reply(user=message.user, text=reply, accepted=False, reason="超长")
@@ -233,7 +233,7 @@ class Bridge:
         try:
             answer = call(text)
         except Exception as exc:  # noqa: BLE001 - 桥不该被 agent 的异常带崩
-            answer = f"这一轮没跑起来：{type(exc).__name__}: {exc}"
+            answer = f"这一轮未能启动：{type(exc).__name__}: {exc}"
             self._send(answer, message.conversation)
             return Reply(user=message.user, text=answer, accepted=False, reason="runner 异常")
 
@@ -265,9 +265,9 @@ class Bridge:
             str(item) for item in self._trust.allowed_roots(self.channel_name, message.user)
         )
         reply = (
-            f"你还没被放行到 {target.root}。"
-            + (f"你能碰的是：{allowed}。" if allowed else "现在哪儿都没放行。")
-            + "\n发 /ws 看能切的地方。"
+            f"你尚未被放行到 {target.root}。"
+            + (f"已放行：{allowed}。" if allowed else "当前未放行任何工作区。")
+            + "\n发 /ws 查看可切换的工作区。"
         )
         self._send(reply, message.conversation)
         return Reply(user=message.user, text=reply, accepted=False, reason="没被放行到这个工作区")
@@ -308,8 +308,8 @@ class Bridge:
             target = self.target_for(user)
         except WorkspaceError:
             reply = (
-                "这条通道还不认识你，而且现在也说不清该把你放行到哪个工作区。"
-                "让机器的主人先在服务器上敲 `spool ws add <目录>`，再来一次。"
+                "这条通道尚未放行你，且无法确定应放行到哪个工作区。"
+                "请主人在服务器上先执行 `spool ws add <目录>`，然后重试。"
             )
             self._send(reply, message.conversation)
             self._note(f"有人要配对，但没有可指的工作区：{user}")
@@ -413,7 +413,7 @@ class Bridge:
         for row in self._watch.edges(rows):
             text = down_line(row)
             if not dest:
-                self._note("断开了，但还没有最近聊天可通知")
+                self._note("已断开，但没有可通知的最近聊天")
                 continue
             self._send(text, dest)
             sent.append(text)

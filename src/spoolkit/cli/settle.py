@@ -56,7 +56,7 @@ def settle(
             # 修改被一起丢掉，审查据此判它「测试尚未通过」，整份计划在
             # 43/49 处中止——剩下 6 题连试都没试。谨慎不等于把对的一起扔。
             dropped = pending.drop(blocked)
-            print(f"无人值守运行：范围外的 {len(dropped)} 处已丢弃，范围内的照落。")
+            print(f"无人值守运行：范围外的 {len(dropped)} 处已丢弃，范围内的照常落盘。")
             if len(pending) == 0:
                 return DENIED, []
             return AUTO_APPLIED, apply_with_audit(pending, baseline_path)

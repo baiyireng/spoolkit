@@ -78,7 +78,7 @@ def resolve_policy(args: argparse.Namespace, project_root: Path) -> str:
 
 
 def report_policy(policy: str, scope: Sequence[str]) -> None:
-    print(f"授权策略：{policy} —— {describe_policy(policy)}")
+    print(f"授权策略：{policy}；{describe_policy(policy)}")
     if policy == "auto":
         print(
             f"自动落盘范围：{'、'.join(scope)}"

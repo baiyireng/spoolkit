@@ -46,10 +46,10 @@ from spoolkit.envfile import (
 
 USAGE = (
     "用法：\n"
-    "  spool env                     看用户级 .env 的位置与键名（不印值）\n"
-    "  spool env path                只印路径（方便脚本里用）\n"
-    "  spool env set QQ_AppID=102… QQ_AppSecret=…   写进去（同键替换）\n"
-    "  spool env import --from <工作区的 .env> [--only KEY]   从工作区搬过来"
+    "  spool env                     查看用户级 .env 的位置与键名（不印值）\n"
+    "  spool env path                只印路径（供脚本使用）\n"
+    "  spool env set QQ_AppID=102… QQ_AppSecret=…   写入（同键替换）\n"
+    "  spool env import --from <工作区的 .env> [--only KEY]   从工作区导入"
 )
 
 # 临时文件的命名、陈旧阈值与那五个写辅助（`_temp_candidates` / `_sweep_stale_temps`
@@ -78,25 +78,25 @@ def _print_list() -> int:
     path = settings.env_path()
     print(f"用户级 .env：{path}")
     if path.is_dir():
-        print("  —— 这个路径是个目录，不是文件（`SPOOLKIT_ENV_FILE` 指错了？）")
+        print("  该路径是个目录，不是文件（`SPOOLKIT_ENV_FILE` 可能指向有误）。")
     elif not path.is_file():
         print(
-            "  不存在。建它的两种办法：\n"
-            "    spool env set KEY=VALUE              直接写\n"
-            "    spool env import --from <工作区的 .env>   把某个工作区里已经有的搬上来"
+            "  不存在。两种建立方式：\n"
+            "    spool env set KEY=VALUE              直接写入\n"
+            "    spool env import --from <工作区的 .env>   从工作区已有的一份导入"
         )
     else:
         table = load_env_file(path)
         if table:
-            print(f"  里面有 {len(table)} 个键（只印名字与形状，不印值）：")
+            print(f"  内有 {len(table)} 个键（只印键名与形状，不印值）：")
             for key in sorted(table):
                 print(f"    {key} = {mask(table[key])}")
         else:
-            print("  存在，但一行都没解析出来（只认 KEY=VALUE 的文本；可能是编码问题）")
+            print("  存在，但未解析出任何一行（只识别 KEY=VALUE 文本；可能是编码问题）")
     print(f"用户级 config.toml：{settings.effective_config_path()}")
     print(
-        "工作区级那一层跟着工作区走（`<工作区>/.env`）；**机器级服务（通道 / 网页壳 / MCP）"
-        "读的是这一层**，所以 QQ 之类的凭据放这里，就不必在哪个目录起命令。"
+        "工作区级那一层随工作区变化（`<工作区>/.env`）；机器级服务（通道 / 网页壳 / MCP）"
+        "读的是用户级这一层，所以 QQ 之类的凭据放这里即可，无需关心在哪个目录启动。"
     )
     return 0
 
@@ -107,13 +107,13 @@ def _do_set(items: list[str]) -> int:
         # **点名个数，不点名内容**：打错的常常就是密钥本身（少了个 `=`），
         # 原样回显等于把它打进终端。
         print(
-            f"有 {len(bad)} 个参数不是 KEY=VALUE 的形状（不回显，免得把值打进终端）。",
+            f"有 {len(bad)} 个参数不是 KEY=VALUE 的形状（不回显，以免把值写入终端）。",
             file=sys.stderr,
         )
         print(USAGE, file=sys.stderr)
         return 2
     if not updates:
-        print("没给 KEY=VALUE。", file=sys.stderr)
+        print("未给出 KEY=VALUE。", file=sys.stderr)
         print(USAGE, file=sys.stderr)
         return 2
     path = settings.env_path()
@@ -121,33 +121,33 @@ def _do_set(items: list[str]) -> int:
     print(f"已写入 {path}（只印形状，不印值）：")
     for key, value in updates.items():
         print(f"  {key} = {mask(value)}")
-    print("（想避免密钥进 shell 历史，用 `spool env import --from <工作区的 .env>`）")
+    print("避免密钥进入 shell 历史：用 `spool env import --from <工作区的 .env>`。")
     return 0
 
 
 def _do_import(source_raw: str, only: list[str]) -> int:
     source_raw = str(source_raw or "").strip()
     if not source_raw:
-        print("要指定来源。", file=sys.stderr)
+        print("需要指定来源。", file=sys.stderr)
         print(USAGE, file=sys.stderr)
         return 2
     wanted = [str(item).strip() for item in only]
     if any(not item for item in wanted):
         # `--only ""` 会被当成"给了一个名字叫空串的键"，然后输出说"没搬"
         # ——那不是在说人话。
-        print("`--only` 后面不能是空的。", file=sys.stderr)
+        print("`--only` 的值不能为空。", file=sys.stderr)
         print(USAGE, file=sys.stderr)
         return 2
     source = Path(source_raw).expanduser()
     if not source.is_file():
         # 路径要印出来（不然人不知道它找的是哪儿）；这里印的是**参数本身**，
         # 不是内容——与"不回显值"那条不冲突。
-        print(f"来源不是一个文件：{source}", file=sys.stderr)
+        print(f"来源路径不是文件：{source}", file=sys.stderr)
         return 1
     table = load_env_file(source)
     if not table:
         print(
-            f"{source} 里一行都没解析出来（只认 KEY=VALUE 的文本；可能是编码问题）",
+            f"{source} 未解析出任何一行（只识别 KEY=VALUE 文本；可能是编码问题）",
             file=sys.stderr,
         )
         return 1
@@ -158,18 +158,18 @@ def _do_import(source_raw: str, only: list[str]) -> int:
         # "像不像键名"根本判不出来——`sk_live_…`、`AKIA…`、`github_pat_…` 全长得像。
         # 要印就印**文件里真有哪些键**（那是文件自己的内容，`list` 早就印了）。
         print(
-            f"{len(wanted)} 个 `--only` 在来源里一个都没找到（不回显你给的值）。",
+            f"{len(wanted)} 个 `--only` 在来源里一个都没找到（不回显所给的值）。",
             file=sys.stderr,
         )
         print(f"{source} 里有这些键：{'、'.join(sorted(table))}", file=sys.stderr)
         return 1
     target = settings.env_path()
     update_env_file(target, picked)
-    print(f"从 {source} 搬到 {target}（{len(picked)} 个键；**来源文件没动**）：")
+    print(f"从 {source} 导入 {target}（{len(picked)} 个键；来源文件未修改）：")
     for key in sorted(picked):
         print(f"  {key} = {mask(picked[key])}")
     if missing:
-        print(f"另有 {len(missing)} 个 `--only` 来源里没有，没搬（不回显你给的值）。")
+        print(f"另有 {len(missing)} 个 `--only` 来源里没有，未导入（不回显所给的值）。")
         print(f"{source} 里可用的键：{'、'.join(sorted(table))}")
     return 0
 

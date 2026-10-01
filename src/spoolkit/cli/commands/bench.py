@@ -106,7 +106,7 @@ def _together(args, project_root: Path, tasks) -> int:
         / time.strftime("%Y%m%d-%H%M%S")
     )
     prepare_together(tasks, workspace)
-    print(f"整批一条会话：{len(tasks)} 道题铺在 {workspace}")
+    print(f"整批单会话：{len(tasks)} 道题布置在 {workspace}")
 
     pending = PendingChanges(workspace)
     gateway = load_gateway(
@@ -140,7 +140,7 @@ def _together(args, project_root: Path, tasks) -> int:
         print("轨迹：")
         for line in result.trace:
             print(f"  {line}")
-        print(f"它自己的收尾报告：\n{result.final}")
+        print(f"其收尾报告：\n{result.final}")
 
     results = verify_together(tasks, workspace)
     print()

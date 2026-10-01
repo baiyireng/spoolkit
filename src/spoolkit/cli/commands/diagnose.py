@@ -26,7 +26,7 @@ def diagnose_command(args: argparse.Namespace) -> int:
 
     if args.init_key:
         key = diagnosis.ensure_key()
-        print(f"签名密钥已就绪：{diagnosis.key_path()}（{len(key) * 8} 位）")
+        print(f"签名密钥已生成：{diagnosis.key_path()}（{len(key) * 8} 位）")
         return 0
 
     if args.report:
@@ -44,7 +44,7 @@ def diagnose_command(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        print(f"已写回报告 {request.id}。Agent 可以用 read_diagnosis 读到它。")
+        print(f"已写回报告 {request.id}。Agent 可用 read_diagnosis 读取。")
         return 0
 
     requests = diagnosis.load_requests(root)
@@ -55,7 +55,7 @@ def diagnose_command(args: argparse.Namespace) -> int:
     if args.show:
         target = diagnosis.find_request(root, args.show)
         if target is None:
-            print(f"没有这条诊断请求: {args.show}", file=sys.stderr)
+            print(f"没有这条诊断请求：{args.show}", file=sys.stderr)
             return 2
         print(f"编号：{target.id}")
         print(f"问题：{target.question}")
@@ -69,12 +69,12 @@ def diagnose_command(args: argparse.Namespace) -> int:
             for key, value in report.items():
                 print(f"  {key}: {value}")
         else:
-            print("（还没有报告）")
+            print("（尚未有报告）")
         return 0
 
     for item in requests:
         mark = "已回复" if item.answered else "待验证"
         print(f"{item.id}  [{mark}]  {item.question}")
     print()
-    print("用 --show <id> 看详情，--report <id> --verdict ... 写回结论。")
+    print("用 --show <id> 查看详情，用 --report <id> --verdict ... 写回结论。")
     return 0

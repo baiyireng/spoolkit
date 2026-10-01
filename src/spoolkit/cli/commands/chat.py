@@ -41,18 +41,18 @@ CLIENT = "cli"
 
 EXIT_WORDS = ("/exit", "/quit", "/q")
 HELP = """\
-直接输入要做的事就行，例如：
+直接输入要做的事，例如：
   看看 calc.py 里 sum_to 是什么
   把它改成返回 1 到 n 的和
 
-/history   看这个会话最近几轮（给人看的，不进入模型上下文）
-/ws        看登记过的工作区，`/ws use <名字>` 换一个（下次进 chat 生效）
-/sessions  看这个工作区的会话，`/use <序号|id|latest>` 切
-/new [标题] 开一条新会话，这次对话就接着往它写
-/config    看当前用的供应商/模型/地址，以及它们从哪来
-/policy    看授权策略（写操作怎么放行）
+/history   查看本会话最近几轮（仅供人阅读，不入模型上下文）
+/ws        列出登记过的工作区，`/ws use <名字>` 切换（下次进入 chat 生效）
+/sessions  列出该工作区的会话，`/use <序号|id|latest>` 切换
+/new [标题] 新建一条会话，本次对话写入其中
+/config    查看当前供应商/模型/地址及其来源
+/policy    查看授权策略（写操作如何放行）
 /approve   处理聊天通道的配对请求：/approve <码>、--list、--revoke <用户>
-/help      这一页
+/help      显示本页
 /exit      退出
 """
 
@@ -219,7 +219,7 @@ def chat_command(args: argparse.Namespace) -> int:
     policy = resolve_policy(args, project_root)
     scope = resolve_scope(args)
     print(_status_line(args, project_root, window, policy, scope, target))
-    print("进入对话模式（/help 看提示，/exit 退出）。最近几轮会带进本轮提示（截断），工具往返不塞回去。")
+    print("进入对话模式（/help 查看帮助，/exit 退出）。最近几轮截断后并入本轮提示；工具往返不重复计入。")
 
     # 正开着桥时，"有人要配对"原先只写在桥自己的终端上。这里补一条，
     # 让消息出现在你人正在的这个会话里（并且能就地批准）。
@@ -249,15 +249,15 @@ def chat_command(args: argparse.Namespace) -> int:
             if memory is not None:
                 show_history(memory, args.session, args.history)
             else:
-                print("（这次运行关了记忆，没有历史可看）")
+                print("（本次运行已关闭记忆，无历史可查）")
             continue
         if text == "/config":
             _show_config()
             continue
         if text == "/policy":
             print(f"当前授权策略：{policy}（范围 {('、'.join(scope) or '（无）')}）")
-            print("改当前会话：重启 chat 时加 --policy ask|auto|deny 与 --scope；")
-            print("改长期默认：spool policy --set auto")
+            print("修改本次会话：重启 chat 时加 --policy ask|auto|deny 与 --scope；")
+            print("修改长期默认：spool policy --set auto")
             continue
         if text == "/approve" or text.startswith("/approve "):
             _show_pairings(project_root, text[len("/approve") :])
@@ -310,13 +310,13 @@ def _ws_listing(project_root: Path) -> str:
         mark = "  ← 当前" if item.root == current else ""
         alias = f"（别名 {item.alias}）" if item.alias else ""
         lines.append(f"  {index}) {item.name}{alias}  {item.root}{mark}")
-    lines.append("用 `/ws use <名字|序号|路径>` 换一个（下一次进 chat 生效）。")
+    lines.append("用 `/ws use <名字|序号|路径>` 切换（下次进入 chat 时生效）。")
     return "\n".join(lines)
 
 
 def _ws_switch(name: str) -> str:
     if not name:
-        return "要切到哪个？例如 `/ws use 2` 或 `/ws use 我的项目`"
+        return "需要指定目标，例如 `/ws use 2` 或 `/ws use 我的项目`"
     try:
         root = workspaces.resolve_workspace(name)
     except WorkspaceError as exc:
@@ -328,15 +328,15 @@ def _ws_switch(name: str) -> str:
     pointers.set(CLIENT, root, session)
     return (
         f"指针现在指向：{root}\n"
-        "（这条对话仍然在原来的工作区里跑；下次进 chat 就在新的那个，"
-        "会话用 `spool session use` 挑或第一句话开一条新的）"
+        "本次对话仍在原工作区内运行；下次进入 chat 时使用新工作区，"
+        "会话用 `spool session use` 指定或由第一条消息新建。"
     )
 
 
 def _sessions_listing(project_root: Path, current: str) -> str:
     everything = sessions.list_sessions(project_root, include_archived=True)
     if not everything:
-        return "这个工作区还没有任何会话。`/new 标题` 开一条。"
+        return "这个工作区还没有任何会话。用 `/new <标题>` 新建。"
     lines = ["这个工作区的会话（序号与 `/use <序号>` 一致）："]
     for index, item in enumerate(everything, start=1):
         marks = []
@@ -346,7 +346,7 @@ def _sessions_listing(project_root: Path, current: str) -> str:
             marks.append("已归档")
         tail = f"  ← {'、'.join(marks)}" if marks else ""
         lines.append(f"  {index}) {item.id}  {item.title or '（还没标题）'}{tail}")
-    lines.append("用 `/use <序号|id|latest>` 切，`/new [标题]` 开新的。")
+    lines.append("用 `/use <序号|id|latest>` 切换，`/new [标题]` 新建。")
     return "\n".join(lines)
 
 

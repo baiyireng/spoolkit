@@ -26,7 +26,7 @@ IGNORE_LINE = ".agent/"
 def init_command(args: argparse.Namespace) -> int:
     target = Path(getattr(args, "path", None) or ".").resolve()
     if not target.is_dir():
-        print(f"没有这个目录：{target}")
+        print(f"目录不存在：{target}")
         return 2
 
     existing = workspace.find_root(target)
@@ -36,7 +36,7 @@ def init_command(args: argparse.Namespace) -> int:
             print(f"这个目录已经是工作区：{target}")
         else:
             print(
-                f"{target} 已经在工作区 {existing} 里面了，不再套一层。\n"
+                f"{target} 已位于工作区 {existing} 内，不再嵌套一层。\n"
                 f"（.agent 在 {existing / workspace.MARK}）"
             )
         _report_next()
@@ -46,7 +46,7 @@ def init_command(args: argparse.Namespace) -> int:
     workspace.register(target)
     print(f"已初始化工作区：{target}")
     print(f"  状态目录：{target / workspace.MARK}（记忆、索引、检查点、策略）")
-    print(f"  已登记到 {workspace.registry_path()}（所以在别的目录也能用 `spool approve`）")
+    print(f"  已登记到 {workspace.registry_path()}（因此可在任意目录使用 `spool approve`）")
     _note_gitignore(target)
     _report_next()
     return 0
@@ -55,7 +55,7 @@ def init_command(args: argparse.Namespace) -> int:
 def _note_gitignore(root: Path) -> None:
     path = root / ".gitignore"
     if not path.is_file():
-        print(f"  提示：这个目录没有 .gitignore；把 `{IGNORE_LINE}` 加进版本库忽略项")
+        print(f"  提示：该目录没有 .gitignore；请把 `{IGNORE_LINE}` 加入版本库忽略项")
         return
     try:
         text = path.read_text(encoding="utf-8")
@@ -74,4 +74,4 @@ def _note_gitignore(root: Path) -> None:
 
 
 def _report_next() -> None:
-    print("下一步：`spool chat`（对话式），或 `spool run --goal \"...\"`（跑一个任务）。")
+    print("下一步：`spool chat`（对话式），或 `spool run --goal \"...\"`（执行单个任务）。")

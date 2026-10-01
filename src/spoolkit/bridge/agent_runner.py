@@ -115,7 +115,7 @@ class AgentRunner:
         # agent 会在同一个工作区里同时跑起来（记忆、检查点、进度文件一起写）。
         runner = self._runner_for(client_key)
         if not runner.start(message):
-            return "上一轮还在跑，等它结束再发。"
+            return "上一轮仍在运行，等它结束后再发。"
         deadline = self._clock() + self.timeout
         while True:
             snapshot = runner.snapshot()
@@ -126,8 +126,8 @@ class AgentRunner:
             if self._clock() >= deadline:
                 self._watch_later(runner)
                 return (
-                    f"这一轮超过 {int(self.timeout)} 秒还没结束，我先不等了——"
-                    "它还在后台跑，跑完我会把结论发给你。"
+                    f"这一轮已超过 {int(self.timeout)} 秒仍未结束，不再等待；"
+                    "它仍在后台运行，结束后我会把结论发给你。"
                 )
             self._sleep(POLL_SECONDS)
 
@@ -181,7 +181,7 @@ class AgentRunner:
                 if snapshot.get("finished"):
                     text = self._final_text(snapshot)
                     try:
-                        self.notify(f"（这一轮跑完了）\n{text}")
+                        self.notify(f"（这一轮已结束）\n{text}")
                     except Exception:  # noqa: BLE001 - 补发失败不该影响谁
                         pass
                     return
@@ -244,7 +244,7 @@ class AgentRunner:
         text = str(final.get("text") or "").strip()
         if text:
             return text
-        return "这一轮没有产出结论，去工作区里看一眼吧。"
+        return "这一轮没有产出结论；请到工作区中确认。"
 
     def _pending_text(self, snapshot: dict) -> str:
         detail = snapshot.get("awaiting_detail") or {}
@@ -258,7 +258,7 @@ class AgentRunner:
                 "回 y 允许这一次\n"
                 "a 始终允许（记在本工作区）\n"
                 "n 拒绝\n"
-                "b 这类命令本轮别再问"
+                "b 本轮拒绝该类命令"
             )
         count = int(snapshot.get("awaiting") or 0)
         paths = [str(item.get("path") or "?") for item in snapshot.get("diffs") or []]

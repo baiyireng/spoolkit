@@ -88,7 +88,9 @@ def test_没被放行到的工作区够不到(tmp_path: Path) -> None:
     reply = bridge.handle(Incoming(user="u1", text="干活", conversation="c1"))
     assert reply.accepted is False
     assert ran == []
-    assert "没被放行" in "".join(text for _, text in channel.sent)
+    # 要点：说清"未被放行"到哪个工作区（而不是"够不到"这类口语）
+    denial = "".join(text for _, text in channel.sent)
+    assert "被放行" in denial and str(b) in denial
 
 
 def test_第一次说话会给这个聊天开一条会话(tmp_path: Path) -> None:

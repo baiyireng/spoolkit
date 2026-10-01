@@ -86,7 +86,7 @@ def _build_channel(args, log) -> object:
                     workspace=root,
                 )
             )
-        log("企业微信通道：发消息本机可用；**收**消息需要公网回调 URL（见文档）")
+        log("企业微信通道：发送消息本机可用；接收消息需公网回调 URL（见 docs/bridge.md）")
         return channel
     if args.channel == "qqbot":
         from spoolkit.bridge.qqbot import QQBotChannel
@@ -106,7 +106,7 @@ def _build_channel(args, log) -> object:
             raise SystemExit(qq_credentials_help(root))
         # 收事件是长连接，起后台线程；桥那边只是 poll。
         channel.start()
-        log("QQ 机器人通道已起：网关长连接在后台，消息进来就交给 agent。")
+        log("QQ 机器人通道已启动；网关长连接在后台，消息交由 agent 处理。")
         return channel
     # 内置的三种都不匹配：去装载的通道插件里找。
     # 这样接一家新通道（比如第三方 hook 的个人微信/QQ）不必改这个文件——
@@ -124,7 +124,7 @@ def _build_channel(args, log) -> object:
         )
     if factories:
         log(f"装载过的通道插件：{'、'.join(sorted(factories))}")
-    raise SystemExit(f"没有这种通道：{args.channel}")
+    raise SystemExit(f"未知通道：{args.channel}")
 
 
 def qq_credentials_help(root: Path | None) -> str:
@@ -141,18 +141,18 @@ def qq_credentials_help(root: Path | None) -> str:
     """
     lines = [
         "QQ 官方机器人需要 AppID 与 AppSecret。三种给法：",
-        "  1) 写进用户级 .env（推荐：通道是机器级服务，密钥就该放这一层）：",
+        "  1) 写进用户级 .env（推荐：通道是机器级服务，密钥应放在这一层）：",
         "       spool env set QQ_AppID=102xxxxxx QQ_AppSecret=xxxxxx",
         f"     或者直接编辑 {settings.env_path()}",
         "  2) 设环境变量 SPOOLKIT_QQ_APPID / SPOOLKIT_QQ_SECRET"
         "（改名前的 AGENTS_DEV_* 也认）",
         "  3) 命令行 --appid / --secret",
-        "（在 QQ 机器人开放平台建应用后能看到；沙箱加 --sandbox）",
+        "（在 QQ 机器人开放平台建应用后可获取；沙箱环境加 --sandbox）",
     ]
     if root is not None:
         # 钉住了一个工作区时那一份 `.env` 也在查找链上，而且**更具体、更优先**。
         # 不说这一句的话，"我照提示写进用户级了却没生效"会变成下一个问题。
-        lines.append(f"（这条通道绑着工作区 {root}，它自己的 .env 优先于用户级那份）")
+        lines.append(f"（本条通道绑定了工作区 {root}，其 .env 优先于用户级那一份）")
     lines.append("")
     lines.append(
         settings.describe_secret_search(
@@ -167,7 +167,7 @@ def _fake_loop(bridge: Bridge, channel: FakeChannel, user: str) -> int:
 
     它是"今天就能用"的那条路，也是不给外部凭据时唯一能验完整链路的方式。
     """
-    print("假通道已就绪：一行一条消息，回车发送；/exit 退出。")
+    print("假通道：一行一条消息，回车发送；/exit 退出。")
     for line in sys.stdin:
         text = line.strip()
         if not text:
@@ -252,12 +252,12 @@ def _pick_workspace(root: Path | None, ws_name: str) -> Path | None:
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
-        print("还没有登记过任何工作区，批不了旧式的配对码。", file=sys.stderr)
+        print("没有登记过任何工作区，无法批准旧式配对码。", file=sys.stderr)
         return None
     listed = "\n".join(f"  {item}" for item in candidates)
     print(
-        "登记表里有好几个工作区，说不清这个码是哪个的——"
-        "用 `spool approve <码> --ws <名字>` 点名：\n"
+        "登记表里有多个工作区，无法判断这个码属于哪一个；"
+        "用 `spool approve <码> --ws <名字>` 指定：\n"
         f"{listed}",
         file=sys.stderr,
     )
@@ -285,7 +285,7 @@ def approve_entry(args: argparse.Namespace) -> int:
     if getattr(args, "forget", ""):
         return forget_command(_root_or_die(root), args.forget)
     if not args.code:
-        print("给个配对码，或者用 --list / --revoke <用户>。", file=sys.stderr)
+        print("需要配对码，或用 --list / --revoke <用户>。", file=sys.stderr)
         return 2
     return approve_anywhere(args.code, root, str(getattr(args, "ws", "") or ""))
 
@@ -367,10 +367,10 @@ def list_pairings(root: Path | None) -> int:
 def revoke_command(root: Path, user: str) -> int:
     pairings = pairings_for(root)
     if not pairings.revoke(user):
-        print(f"这个人本来就不在放行名单里：{user}", file=sys.stderr)
+        print(f"该用户不在放行名单里：{user}", file=sys.stderr)
         return 2
     print(f"已撤销 {user}（{pairings.path}）")
-    print("他再发消息会重新拿到一个配对码。")
+    print("该用户再发消息会重新收到配对码。")
     return 0
 
 
@@ -503,7 +503,7 @@ def bridge_command(args: argparse.Namespace) -> int:
 
     claimed = _adopt_legacy(project_root, str(args.channel))
     if claimed:
-        print(f"已从旧配对记录认领 {claimed} 条放行（原文件没动）。", file=sys.stderr)
+        print(f"已从旧配对记录认领 {claimed} 条放行（原文件未改）。", file=sys.stderr)
 
     allowed = {str(item) for item in (getattr(args, "allow_user", []) or []) if str(item).strip()}
     access = args.access
@@ -512,14 +512,14 @@ def bridge_command(args: argparse.Namespace) -> int:
         access = ALLOWLIST
     if access == OPEN:
         print(
-            "⚠ access=open：**任何人都能驱动这个工作区**（你显式选了这一档）。",
+            "⚠ access=open：任何人都能驱动这个工作区；此档由你显式指定。",
             file=sys.stderr,
         )
     elif not allowed:
         print(
-            "按配对模式运行：陌生发送者会拿到一个配对码，"
-            "你用 `spool approve <码>` 放行（任意目录都能敲）；"
-            "看现状用 `spool approve --list`。",
+            "配对模式：未放行的发送者会收到配对码。\n"
+            "  放行：spool approve <码>（任意目录可用）\n"
+            "  查看：spool approve --list",
             file=sys.stderr,
         )
     if pairings is not None:
@@ -532,9 +532,9 @@ def bridge_command(args: argparse.Namespace) -> int:
             )
     if project_root is None:
         print(
-            "这条通道服务整台机器（没给 --root）：谁被放行到哪些工作区，"
-            "由 `spool approve --list` 说了算；每条聊天各指一个工作区，"
-            "聊天里用 `/ws use <名字>` 换。",
+            "这条通道服务整台机器（未给 --root）：已放行到哪些工作区，"
+            "查 spool approve --list；每条聊天各指一个工作区，"
+            "在聊天里用 /ws use <名字> 切换。",
             file=sys.stderr,
         )
 
@@ -572,15 +572,15 @@ def bridge_command(args: argparse.Namespace) -> int:
         return _fake_loop(bridge, channel, args.user)
 
     if notify:
-        print("断开时会给最近聊天发一句。", file=sys.stderr)
-    print(f"{args.channel} 通道已就绪，等消息（Ctrl-C 退出）。", file=sys.stderr)
+        print("断开时通知最近一次通信的聊天。", file=sys.stderr)
+    print(f"{args.channel} 通道已启动，等待消息（Ctrl-C 退出）。", file=sys.stderr)
     next_probe = 0.0
     try:
         while True:
             replies = bridge.run_once()
             for reply in replies:
                 if reply.accepted:
-                    print(f"· 处理了 {reply.user} 的一条消息", file=sys.stderr)
+                    print(f"· 已处理 {reply.user} 的消息", file=sys.stderr)
             now = time.monotonic()
             if now >= next_probe:
                 next_probe = now + 5.0
@@ -591,7 +591,7 @@ def bridge_command(args: argparse.Namespace) -> int:
                 # 长轮询通道自己会等；这里只是别把 CPU 打满。
                 time.sleep(0.2)
     except KeyboardInterrupt:
-        print("\n收到中断，退出。", file=sys.stderr)
+        print("\n收到中断信号，退出。", file=sys.stderr)
         return 0
     finally:
         channel.close()
@@ -626,7 +626,7 @@ def _check(project_root: Path | None, args) -> int:
         print(f"AppID：{credentials.mask(app_id)}（{id_source}）")
         print(f"AppSecret：{credentials.mask(secret)}（{secret_source}）")
         if not (app_id and secret):
-            print("\n缺凭据。")
+            print("\n缺少凭据。")
             return 2
         from spoolkit.bridge.qqbot import QQBotChannel
 
@@ -647,11 +647,11 @@ def _check(project_root: Path | None, args) -> int:
             print(f"换到了 access_token：{credentials.mask(token)}")
             print(f"网关地址：{qq.gateway_url()}")
         except Exception as exc:  # noqa: BLE001 - 给人看的失败也要说清楚
-            print(f"\n连不上或凭据不对：{exc}")
+            print(f"\n连接失败或凭据错误：{exc}")
             return 1
         finally:
             qq.close()
-        print("\n凭据可用。（真正跑起来：去掉 --check）")
+        print("\n凭据可用。去掉 --check 即为实跑。")
         return 0
     if channel == "telegram":
         print(
@@ -680,12 +680,12 @@ def _check(project_root: Path | None, args) -> int:
             f" / agent_id：{credentials.mask(agent_id)}"
         )
         if not (corp_id and secret and agent_id):
-            print("\n缺凭据。")
+            print("\n缺少凭据。")
             return 2
         # 企业微信**发**消息本机可用；**收**消息要一个公网回调 URL。`--check` 只能验
         # 凭据在不在，验不了回调通不通——这一句必须写出来，否则又是一次
         # "检查通过、真跑失败"（`--check` 不传代理那次就是这么骗人的）。
-        print("凭据齐全。（收消息还要一个公网回调 URL，见 docs/bridge.md）")
+        print("凭据齐全。接收消息还需一个公网回调 URL，见 docs/bridge.md。")
         return 0
-    print(f"{channel} 通道不需要凭据（或自己去 __init__ 里查）。")
+    print(f"{channel} 通道不需要凭据（或由自身的 __init__ 检查）。")
     return 0

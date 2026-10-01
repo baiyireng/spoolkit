@@ -12,7 +12,7 @@ from spoolkit import settings
 
 
 def _render(effective: dict[str, str], path) -> str:
-    lines = [f"配置文件：{path}" + ("" if path.is_file() else "（还没有）"), ""]
+    lines = [f"配置文件：{path}" + ("" if path.is_file() else "（尚未创建）"), ""]
     lines.append(f"{'键':<10}{'生效值':<34}来源")
     lines.append("-" * 70)
     for key in settings.KEYS:
@@ -38,7 +38,7 @@ def _render(effective: dict[str, str], path) -> str:
 #: 只标不删：删掉这一行，配了它的人连"我配过"都看不见了——那比标出来更坏。
 #: 这张表的键必须与"短命令实际读的那几个"互补，有测试钉住（`tests/cli/test_shortcuts.py`）。
 _NOT_READ_BY_SHORTCUTS = {
-    "root": "   ← 短命令不读这一项（要钉工作区在命令行给 --root）",
+    "root": "   ← 短命令不读取此项（要固定工作区用 --root）",
 }
 
 
@@ -86,7 +86,7 @@ def config_command(args: argparse.Namespace) -> int:
 
     for item in getattr(args, "set", []) or []:
         if "=" not in item:
-            print(f"要写成 键=值 的形式：{item}", file=sys.stderr)
+            print(f"需要写成 键=值：{item}", file=sys.stderr)
             return 2
         key, _, value = item.partition("=")
         key = key.strip()

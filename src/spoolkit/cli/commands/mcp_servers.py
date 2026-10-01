@@ -22,15 +22,15 @@ def mcp_servers_command(args: argparse.Namespace) -> int:
     servers = load_mcp_servers()
     print(f"配置文件：{config_path()}")
     if not servers:
-        print("没有配置外挂 MCP 服务。加一个的办法（写进上面的文件）：")
+        print("未配置外挂 MCP 服务。添加方式（写入上面的文件）：")
         print("")
         print("  [[mcp]]")
         print('  name = "filesystem"')
         print('  command = "npx"')
         print('  args = ["-y", "@modelcontextprotocol/server-filesystem", "D:\\\\proj"]')
         print("")
-        print("注意：Windows 路径里的反斜杠在 TOML 里要写双份（D:\\\\tools\\\\x.exe），")
-        print("      或者用单引号字符串（'D:\\tools\\x.exe'）；写错整份配置都会读不出来。")
+        print("注意：Windows 路径中的反斜杠在 TOML 里要写两份（D:\\\\tools\\\\x.exe），")
+        print("      或改用单引号字符串（'D:\\tools\\x.exe'）；写错会导致整份配置无法读取。")
         return 0
 
     print(f"配了 {len(servers)} 个：")
@@ -39,10 +39,10 @@ def mcp_servers_command(args: argparse.Namespace) -> int:
         print(line)
 
     if not getattr(args, "check", False):
-        print("\n（加 --check 会真的连一遍，看它们提供哪些工具）")
+        print("\n加 --check 会实际连接一次，列出它们提供的工具。")
         return 0
 
-    print("\n连一遍：")
+    print("\n连接一遍：")
     failed = 0
     for config in servers:
         client = McpClient(config)
@@ -55,7 +55,7 @@ def mcp_servers_command(args: argparse.Namespace) -> int:
             client.close()
             continue
         names = ", ".join(tool.name for tool in tools) or "（没有工具）"
-        print(f"  ✓ {config.name}：{len(tools)} 个工具 —— {names}")
+        print(f"  ✓ {config.name}：{len(tools)} 个工具：{names}")
         # 顺带验一下挂进注册表之后的名字，免得真跑起来才发现重名/挂不上。
         registry = ToolRegistry()
         register_mcp_tools(registry, [client])

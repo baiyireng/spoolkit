@@ -31,21 +31,21 @@ def ws_command(args: argparse.Namespace) -> int:
             return init_command(argparse.Namespace(path=name or "."))
         if action == "forget":
             root = workspaces.forget(name)
-            print(f"已从登记表摘掉：{root}（目录和 .agent/ 都没动）")
+            print(f"已从登记表移除：{root}（目录与 .agent/ 均未修改）")
             return 0
         if action == "alias":
             alias = str(getattr(args, "value", "") or "").strip()
             root = workspaces.resolve_workspace(name)
             workspaces.set_alias(root, alias)
-            print(f"{root} 现在也叫「{alias}」")
+            print(f"{root} 别名已设为「{alias}」")
             return 0
     except WorkspaceError as exc:
         print(str(exc), file=sys.stderr)
         return 2
     except OSError as exc:
-        print(f"写状态文件失败：{exc}", file=sys.stderr)
+        print(f"写入状态文件失败：{exc}", file=sys.stderr)
         return 2
-    print(f"不认识的用法：ws {action}", file=sys.stderr)
+    print(f"未知用法：ws {action}", file=sys.stderr)
     return 2
 
 
@@ -59,7 +59,7 @@ def _current() -> Path | None:
 def _list() -> int:
     items = workspaces.list_workspaces()
     if not items:
-        print("还没有登记过任何工作区。在这儿敲 `spool ws add` 把当前目录做成工作区。")
+        print("尚未登记任何工作区。执行 `spool ws add` 把当前目录初始化为工作区。")
         return 0
     here = _current()
     for index, item in enumerate(items, start=1):
@@ -70,13 +70,13 @@ def _list() -> int:
             marks.append(f"别名 {item.alias}")
         tail = f"  ← {'、'.join(marks)}" if marks else ""
         print(f"  {index}) {item.name}  {item.root}{tail}")
-    print("\n用 `spool ws use <名字|序号|路径>` 切；`spool ws alias <名字> <别名>` 起短名。")
+    print("\n用 `spool ws use <名字|序号|路径>` 切换；`spool ws alias <名字> <别名>` 设别名。")
     return 0
 
 
 def _use(name: str) -> int:
     if not name:
-        print("要切到哪个？例如 `spool ws use 2` 或 `spool ws use 我的项目`", file=sys.stderr)
+        print("需要指定目标，例如 `spool ws use 2` 或 `spool ws use 我的项目`", file=sys.stderr)
         return 2
     root = workspaces.resolve_workspace(name)  # 找不到会抛 WorkspaceError
     session = ""
@@ -86,5 +86,5 @@ def _use(name: str) -> int:
     pointers.set(CLIENT, root, session)
     print(f"现在指向：{root}")
     if not session:
-        print("（还没选会话；第一句话会开一条新的，或用 `spool session use` 挑一条）")
+        print("（尚未选择会话；第一条消息会新建一条，或用 `spool session use` 指定）")
     return 0

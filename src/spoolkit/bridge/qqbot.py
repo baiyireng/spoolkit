@@ -177,7 +177,7 @@ class QQBotChannel:
         headers = {"Authorization": f"QQBot {self.access_token()}"}
         chunks = _split_for_qq(text)
         if len(chunks) > 1:
-            self._note(f"答复太长（{len(text)} 字），分 {len(chunks)} 条发")
+            self._note(f"答复过长（{len(text)} 字），分 {len(chunks)} 条发送")
         for index, chunk in enumerate(chunks, start=1):
             self._send_one(url, chunk, kind, index, headers)
 
@@ -205,7 +205,7 @@ class QQBotChannel:
             # 被动回复被拒时退一步试**主动推送**（不带 msg_id）。真机上遇到过
             # `code=11001 不支持的调用`：哪天被动那条路被平台关了，主动这条
             # 至少还能把话送到；两条都不行才报错，并且把两次的原因都带上。
-            self._note(f"被动回复被拒（{passive_error}），改试主动推送")
+            self._note(f"被动回复被拒（{passive_error}），改用主动推送")
         active = self._client.post(
             url,
             json={"content": text, "msg_type": 0},
@@ -273,7 +273,7 @@ class QQBotChannel:
         while not self._stop.is_set():
             try:
                 self._run_gateway_once()
-                self._note("QQ 网关断开，5 秒后重连")
+                self._note("QQ 网关已断开，5 秒后重连")
             except Exception as exc:  # noqa: BLE001 - 隧道一断 httpx.ConnectError 也会来
                 # 网络抖动不该把通道打死：退一步重连（resume 留给下一步优化——
                 # 断了之后 QQ 会把没收到的事件按 op 0 重发一段时间）。
@@ -322,7 +322,7 @@ class QQBotChannel:
                     interval = float((payload.get("d") or {}).get("heartbeat_interval", 30000)) / 1000
                     ws.send_text(json.dumps(self._identify_payload()))
                     # 连上就说一声：真机排查时唯一能看到的"在线"信号。
-                    self._note(f"QQ 网关已连上（心跳 {interval:.0f}s，intents={INTENT_GROUP_AND_C2C}）")
+                    self._note(f"QQ 网关已连接（心跳 {interval:.0f}s，intents={INTENT_GROUP_AND_C2C}）")
                     # 识别之后立刻发一次心跳（各家客户端都这样），之后按间隔来。
                     heartbeat_at = self._clock()
                 elif op == 0:
