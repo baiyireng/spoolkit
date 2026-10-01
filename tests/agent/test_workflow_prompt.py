@@ -51,7 +51,12 @@ def test_有索引工具时给出查符号优先规则(tmp_path: Path) -> None:
 
 
 def test_有写工具时才提动手改(tmp_path: Path) -> None:
-    """只读角色看到「动手改」只会浪费步数去试它没有的工具。"""
+    """只读角色看到「动手改」只会浪费步数去试它没有的工具。
+
+    钉要点，不钉整句：这条规则守的是两件行为——信息够了就直接提出改动
+    （不要反复确认），以及同一个查询重复两次以上要换做法。措辞可以再改，
+    这两条丢了才是改坏，而它们该不该出现只由「有没有写工具」决定。
+    """
     from spoolkit.store.db import init_schema
 
     registry = ToolRegistry()
@@ -59,10 +64,14 @@ def test_有写工具时才提动手改(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "index.db")
     init_schema(conn)
     registry.register(find_symbol_spec(tmp_path, conn))
-    assert "信息够了就动手改" not in build_workflow(registry)
+    text = build_workflow(registry)
+    assert "不要反复确认" not in text
+    assert "更换做法" not in text
 
     registry.register(replace_lines_spec(tmp_path, PendingChanges(tmp_path)))
-    assert "信息够了就动手改" in build_workflow(registry)
+    text = build_workflow(registry)
+    assert "不要反复确认" in text  # 信息够了就动手，不要反复确认
+    assert "重复两次以上" in text and "更换做法" in text  # 打转就得换做法
 
 
 def test_只读角色看不到写工具(tmp_path: Path) -> None:
@@ -176,13 +185,19 @@ def test_有research时它是动作不是阶段():
     assert "research" in text
     assert "不是每轮必做的阶段" in text
     assert "不要先 web_read" in text
-    assert "有缓存" in text
-    assert "没配搜索" in text or "先搜" in text
+    # 钉要点：没抓过的页读不到，磁盘上有缓存也一样——不能因为「本地已有」
+    # 就以为 web_read 能直接取（T2 缓存洞就是这么漏的）。
+    assert "缓存" in text and "读不到" in text
+    # 钉要点：没有入口 URL 时它会先搜索；没有搜索能力时 URL 走 urls 参数。
+    assert "先搜索" in text and "urls" in text
     assert "不可信" in text
 
 
 def test_远程通道工作方式只限制文件读写() -> None:
-    """查天气被拒：工作方式写成「只能碰工作区」，模型把联网也砍了。"""
+    """查天气被拒：工作方式写成「只能碰工作区」，模型把联网也砍了。
+
+    钉要点：限制只覆盖文件读写、加目录只能主人来做、别的能力不许被说成禁止。
+    """
     text = build_workflow(ToolRegistry(), from_channel=True)
     assert "聊天通道" in text
     assert "当前工作区" in text
@@ -190,6 +205,10 @@ def test_远程通道工作方式只限制文件读写() -> None:
     assert "查资料" in text
     assert "不要" in text and "allow-read" in text
     assert "extra add" in text or "spool extra" in text
+    # 「不在这条限制里」与「不得说成一律禁止」这两半都要在：
+    # 少了任何一半，模型要么自己加限制，要么把没有的工具说成一律禁止。
+    assert "不在这条限制里" in text
+    assert "不得说成一律禁止" in text
 
 
 def test_本地运行不提远程通道那条() -> None:

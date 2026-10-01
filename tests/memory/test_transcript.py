@@ -4,6 +4,8 @@ from spoolkit.memory.store import init_memory_schema
 from spoolkit.memory.transcript import (
     ASSISTANT,
     DEICTIC_REMINDER,
+    DIGEST_HEADER,
+    PRIOR_HEADER,
     USER,
     conversational_prompt,
     recent_messages,
@@ -112,6 +114,18 @@ def test_长答复截断不把整段历史塞回去(tmp_path: Path) -> None:
 # --- 意图识别那两件（Task 4）：更早那一段的摘要 + 指代词提醒 ---------------
 
 
+def test_两行抬头各自点明用途与边界() -> None:
+    """抬头是发给模型的规格，不是装饰：两段都不是当前任务。
+
+    钉要点，不钉整句：措辞可以再改，但「截断摘要」「指代」「不是当前任务」
+    这几个限定丢了，模型就会把旧往来当成这一轮的要求。
+    """
+    assert "截断摘要" in DIGEST_HEADER
+    assert "指代" in DIGEST_HEADER and "承接" in DIGEST_HEADER
+    assert "不是当前任务" in DIGEST_HEADER
+    assert "指代" in PRIOR_HEADER and "不是当前任务" in PRIOR_HEADER
+
+
 def test_更早的往来进摘要_最近的仍是原文(tmp_path: Path) -> None:
     """上下文里天然带一段更早的摘要，模型不必自己去检索。"""
     conn = _conn(tmp_path)
@@ -123,9 +137,9 @@ def test_更早的往来进摘要_最近的仍是原文(tmp_path: Path) -> None:
     text = conversational_prompt(
         conn, "s", "那它支持中文吗", turns=2, digest_turns=6, digest_chars=400
     )
-    assert "更早的往来" in text
+    assert DIGEST_HEADER in text
     assert "导出功能" in text and "csv 模块" in text
-    assert "上一轮对话" in text and "帮助改好了" in text
+    assert PRIOR_HEADER in text and "帮助改好了" in text
     assert "当前：那它支持中文吗" in text
     assert text.count("那它支持中文吗") == 1
     conn.close()
@@ -142,13 +156,13 @@ def test_摘要是有界的_不把历史原文整段塞回去(tmp_path: Path) ->
         conn, "s", "读一下 config.py", turns=4, max_chars=40,
         digest_turns=12, digest_chars=200,
     )
-    head, sep, _ = text.partition("上一轮对话")
+    head, sep, _ = text.partition(PRIOR_HEADER)
     assert sep  # 两段都在
-    header = "更早的往来（截断摘要，用来理解指代与承接，不是当前任务）：\n"
+    header = DIGEST_HEADER + "\n"
     assert len(head) <= len(header) + 200
     assert "长" * 100 not in head  # 单条也截断：没有整段原文
     # 更早那一段排在最前、最近那几轮在后面，次序是时间正序。
-    assert text.index("更早的往来") < text.index("上一轮对话")
+    assert text.index(DIGEST_HEADER) < text.index(PRIOR_HEADER)
     conn.close()
 
 
@@ -162,7 +176,7 @@ def test_摘要单条也按字符预算截断(tmp_path: Path) -> None:
         conn, "s", "补一轮", turns=1, digest_turns=6, digest_chars=60
     )
     # 摘要那一段只装得下一条：被保留的是最新的那条（你），且按预算截断。
-    digest = text.split("上一轮对话")[0]
+    digest = text.split(PRIOR_HEADER)[0]
     assert "甲" * 61 not in digest
     assert "甲" * 60 in digest
     conn.close()
@@ -180,8 +194,8 @@ def test_摘要里不出现密钥值(tmp_path: Path) -> None:
     text = conversational_prompt(
         conn, "s", "那它呢", turns=1, digest_turns=3, digest_chars=400
     )
-    digest = text.split("上一轮对话")[0]
-    assert "更早的往来" in digest
+    digest = text.split(PRIOR_HEADER)[0]
+    assert DIGEST_HEADER in digest
     assert "SPOOLKIT_QQ_SECRET" in digest
     assert "abcdef123456" not in text
     conn.close()
@@ -195,7 +209,7 @@ def test_标定值为零时不带摘要(tmp_path: Path) -> None:
     text = conversational_prompt(
         conn, "s", "补一轮", turns=1, digest_turns=0, digest_chars=400
     )
-    assert "更早的往来" not in text
+    assert DIGEST_HEADER not in text
     assert "补一轮" in text
     conn.close()
 

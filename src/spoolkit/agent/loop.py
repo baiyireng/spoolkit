@@ -117,7 +117,10 @@ def _parse_feedback(failure: ParseFailure) -> str:
     """
     if failure.kind == "empty_turn":
         return T.EMPTY_TURN_FEEDBACK
-    return f"上一轮输出无法解析：{failure.reason}。请只输出规定的 JSON 对象。"
+    return (
+        f"上一轮输出无法解析：{failure.reason}。"
+        "这一轮只输出协议规定的 JSON 对象，不要有其他文字。"
+    )
 
 
 def _edit_fail_hint(streak: int) -> str:
@@ -128,16 +131,16 @@ def _edit_fail_hint(streak: int) -> str:
     常见错误原因和正确做法直接告诉它，打断死循环。
     """
     return (
-        f"⚠ 编辑工具已连续失败 {streak} 次。不要再原样重试，换一种做法：\n"
-        "- write_file 失败：确认 path 是相对工作区的路径（不是绝对路径），"
-        "content 是文件完整内容（不是 diff）。\n"
-        "- replace_text 失败：old 片段必须在文件里唯一存在。"
-        "先 read_file 看原文，把缩进、空格、引号都对上；"
-        "不唯一就多带几行上下文让它唯一。\n"
-        "- replace_lines 失败：start_line/end_line 是 1 起的行号，"
-        "end_line ≥ start_line，不能超出文件总行数。\n"
-        "- 如果文件不存在，用 write_file 新建，不要用 replace_*。\n"
-        "- 如果连续失败 3 次以上，考虑先 read_file 重新确认文件内容再动手。"
+        f"编辑工具已连续失败 {streak} 次。不得原样重试，改用另一种做法：\n"
+        "- write_file 失败时：确认 path 是相对工作区的路径，不是绝对路径；"
+        "content 是文件的完整内容，不是 diff。\n"
+        "- replace_text 失败时：old 片段必须在文件里唯一存在。"
+        "先用 read_file 看原文，把缩进、空格、引号对上；"
+        "片段不唯一时多带几行上下文，使它唯一。\n"
+        "- replace_lines 失败时：start_line 与 end_line 是 1 起的行号，"
+        "end_line 大于或等于 start_line，且不得超过文件总行数。\n"
+        "- 文件不存在时：用 write_file 新建，不要用 replace_ 系列工具。\n"
+        "- 连续失败 3 次以上时：先用 read_file 重新确认文件内容，再动手。"
     )
 
 
@@ -175,10 +178,14 @@ def _render_lessons(pushed: list[tuple[int, str]]) -> str:
 
     标题里点明来源，是为了让模型知道这是别人踩过的坑、不是当前项目的要求；
     否则它可能把教训当成任务约束照搬。
+
+    标题只从 `T.LESSONS_HEADER` 取：这里原先又硬编码了一遍同样的句子，
+    两处字面量会各自走散——改了模板而没改这里，模型看到的抬头与模板
+    记录的就不再是同一句，而两处都不会报错。
     """
     if not pushed:
         return ""
-    lines = ["以下是过去类似任务里踩过的坑，做之前先看一眼："]
+    lines = [T.LESSONS_HEADER]
     lines.extend(f"- {text}" for _, text in pushed)
     return "\n".join(lines)
 
@@ -498,7 +505,7 @@ class AgentLoop:
             Message(
                 role="user",
                 content=(
-                    f"继续之前未完成的任务（已进行 {state.step} 步）。"
+                    f"继续之前未完成的任务：已经进行 {state.step} 步。"
                     if resumed
                     else (prompt or goal)
                 ),
@@ -613,13 +620,13 @@ class AgentLoop:
                     asking = "这一轮的步数预算用完了，任务还没结束"
                 elif stuck_on_cycle:
                     asking = (
-                        f"短环：工具路径在 {report.cycle} 打转"
-                        "（参数每次都不同，精确指纹抓不到）"
+                        f"短环：工具路径在 {report.cycle} 打转，"
+                        "参数每次都不同，精确指纹抓不到"
                     )
                 elif stuck_on_oscillation:
                     asking = (
                         f"同一文件内容来回覆盖 {report.oscillations} 次，"
-                        "净效应可能为零"
+                        "改动可能相互抵消"
                     )
                 elif stuck_on_query:
                     asking = f"同一检索词已经查了 {report.same_query} 次"
@@ -627,7 +634,7 @@ class AgentLoop:
                     asking = f"它已经连续 {no_edit_steps} 步只看不写，没有任何产出"
                 else:
                     asking = (
-                        f"它已经连续 {repeats} 次调用同一个工具（参数也一样），还在重复"
+                        f"它已经连续 {repeats} 次调用同一个工具，参数也相同，仍在重复"
                     )
                 # 把「为什么把它叫起来」记下来：调这块时唯一能看的东西就是它。
                 trace.append(f"step{state.step}: 叫督导——{asking}")
@@ -1153,16 +1160,16 @@ class AgentLoop:
                 ok=False,
                 content=(
                     f"这个调用在最近几步里已经做过 {level - 1} 次，结果不会改变，"
-                    "因此没有执行。请换一种做法：换一个工具、换一组参数，"
-                    "或者先去看别的地方；如果任务其实已经完成，直接给出结论即可。"
+                    "因此没有执行。换一种做法：换一个工具、换一组参数，"
+                    "或者先查别的地方；任务确实已经完成时，直接给出结论。"
                 ),
             )
         result = self.registry.invoke(call)
         if level >= self.config.limit("repeat_warn_at"):
             if repeats >= self.config.limit("repeat_warn_at"):
-                note = "注意：这一步和上一步完全相同，你已经做过一次，结果也一样。"
+                note = "注意：这一步与上一步完全相同，该调用已经执行过一次，结果不会改变。"
             else:
-                note = "注意：这个调用你在最近几步里已经做过了，结果不会变。"
+                note = "注意：这个调用在最近几步里已经执行过，结果不会改变。"
             return ToolResult(
                 ok=result.ok,
                 content=(note + "如果它没有帮你推进，就换一种做法。\n" + result.content),
@@ -1182,7 +1189,7 @@ class AgentLoop:
         try:
             result = self.verify(changed or [])
         except Exception as exc:
-            return (f"自动验证没能跑起来（{type(exc).__name__}）：{exc}", False)
+            return (f"自动验证无法运行，错误类型 {type(exc).__name__}：{exc}", False)
         body = " ".join(result.content.split())[:400]
         if result.content.startswith(ENVIRONMENT_MARKER):
             # 记下来：任务没做成时，这决定要不要替它登记诊断请求。
@@ -1193,9 +1200,9 @@ class AgentLoop:
             # 实测在 20 道题的铺盘里做完 5 道就让它宣布完成——
             # 它把「这一批做完」当成了「任务完成」。
             return (
-                f"系统自动跑了一遍测试：**通过**（{body}）——"
-                "这说的是**这次改的地方**通过了。"
-                "任务整体做完没有由你判断：还有没做的接着做，"
+                f"系统自动跑了一遍测试：通过（{body}）。"
+                "这说的是这次改的地方通过了。"
+                "任务整体做完没有由你判断：还有未完成的接着做，"
                 "确实都做完再给出结论。",
                 True,
             )

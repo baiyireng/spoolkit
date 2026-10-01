@@ -93,7 +93,9 @@ def test_第二次相同调用会提醒但仍然执行(tmp_path: Path) -> None:
     loop.run("看看 a.txt")
 
     assert len(executed) == 2, "第二次应当照常执行"
-    assert "完全相同" in _last_prompt(loop)
+    # 钉要点：提醒必须说实话——这里上一步就是同一个调用，所以它该说的是
+    # 「与上一步完全相同」，而不是那句「最近几步里做过」。
+    assert "这一步与上一步完全相同" in _last_prompt(loop)
 
 
 def test_连续第三次不再执行(tmp_path: Path) -> None:
@@ -147,7 +149,8 @@ def test_中间插入别的调用后计数清零(tmp_path: Path) -> None:
     loop.run("看看 a.txt")
 
     assert len(executed) == 3
-    assert "完全相同" not in _last_prompt(loop)
+    # 中间那一步是别的调用，所以不许出现「与上一步完全相同」这个说法。
+    assert "这一步与上一步完全相同" not in _last_prompt(loop)
 
 
 def test_交替打转也会被拦住(tmp_path: Path) -> None:

@@ -21,6 +21,7 @@ from spoolkit.memory.store import init_memory_schema, record_session
 from spoolkit.memory.transcript import (
     ASSISTANT,
     DEICTIC_REMINDER,
+    DIGEST_HEADER,
     USER,
     record_message,
 )
@@ -82,7 +83,11 @@ def test_没有记忆时提醒也不把原话挤掉(tmp_path: Path) -> None:
 
 
 def test_摘要按标定值带进本轮提示(tmp_path: Path) -> None:
-    """更早那一段的摘要自动进上下文：模型不必自己去检索。"""
+    """更早那一段的摘要自动进上下文：模型不必自己去检索。
+
+    钉要点：那一段以摘要抬头的形式出现（抬头本身由模板用例守措辞），
+    而且被挤出最近窗口的那两句确实从摘要进来了。
+    """
     memory = _memory(tmp_path)
     record_message(memory._conn, "现在", USER, "给项目加个导出功能")
     record_message(memory._conn, "现在", ASSISTANT, "导出写完了，用了 csv 模块")
@@ -92,7 +97,7 @@ def test_摘要按标定值带进本轮提示(tmp_path: Path) -> None:
         record_message(memory._conn, "现在", ASSISTANT, f"中间第{index}答")
     record_message(memory._conn, "现在", USER, "读一下 config.py")
     text = prompt_for_turn(memory, "现在", "读一下 config.py", overrides=None)
-    assert "更早的往来" in text
+    assert DIGEST_HEADER in text
     assert "用了 csv 模块" in text
     memory._conn.close()
 
@@ -106,7 +111,7 @@ def test_标定值可覆盖_摘要能关掉(tmp_path: Path) -> None:
         memory, "现在", "读一下 config.py",
         overrides={"history_digest_turns": 0, "recent_chat_turns": 1},
     )
-    assert "更早的往来" not in text
+    assert DIGEST_HEADER not in text
     assert "当前：读一下 config.py" in text
     memory._conn.close()
 

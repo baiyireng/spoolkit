@@ -10,6 +10,7 @@ from pathlib import Path
 
 from spoolkit.agent.loop import NO_EDIT_LIMIT, AgentLoop
 from spoolkit.config import Config
+from spoolkit.context import templates as T
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
@@ -116,7 +117,9 @@ def test_收窄时说明原因(tmp_path: Path) -> None:
 
     last = loop.gateway.requests[NO_EDIT_LIMIT]
     text = "\n".join(message.content for message in last.messages)
-    assert "没有提出任何改动" in text
+    # 钉接线，不钉措辞：收窄时必须把这条说明发到它面前（用常量引用，
+    # 改词不再假红），它才知道工具为什么忽然变少。
+    assert T.FORCE_COMMIT in text
 
 
 def test_自动验证的结果会回灌给模型(tmp_path: Path) -> None:
@@ -134,7 +137,9 @@ def test_自动验证的结果会回灌给模型(tmp_path: Path) -> None:
 
     assert len(calls) == 1
     prompt = _text_of(loop.gateway.requests[-1])
-    assert "自动验证的结果" in prompt
+    # 钉要点：验证的结论与失败正文都要回灌给模型——它自己不会去跑测试，
+    # 措辞可以再改，这两件事缺了这条通路就是白跑。
+    assert "自动验证" in prompt
     assert "assert 1 == 2" in prompt
 
 

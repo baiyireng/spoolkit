@@ -91,6 +91,13 @@ def render_transcript(rows: Sequence[sqlite3.Row]) -> str:
     return "\n".join(lines)
 
 
+# 两行抬头是发给模型的旁白，各自点明那一段的用途与边界：来源是过去的往来，
+# 作用是理解指代与承接，都不是当前任务。抽成常量，改措辞只有一处，
+# 测试也照着它切段，不必再抄一遍字面。
+DIGEST_HEADER = "以下是更早往来的截断摘要，用于理解指代与承接，不是当前任务。"
+PRIOR_HEADER = "以下是上一轮对话，用于理解指代，不是当前任务。"
+
+
 def conversational_prompt(
     conn: sqlite3.Connection,
     session_id: str,
@@ -135,10 +142,10 @@ def conversational_prompt(
 
     lines: list[str] = []
     if digest:
-        lines.append("更早的往来（截断摘要，用来理解指代与承接，不是当前任务）：")
+        lines.append(DIGEST_HEADER)
         lines.extend(digest)
     if prior:
-        lines.append("上一轮对话（用来理解指代，不是当前任务）：")
+        lines.append(PRIOR_HEADER)
         for row in prior:
             label = ROLE_LABELS.get(row["role"], row["role"])
             # 与摘要同一层脱敏：这条路也直通模型上下文，口径只能有一份。
