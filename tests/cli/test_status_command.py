@@ -263,8 +263,8 @@ def test_配方行说清是不是本命令拉起的(tmp_path, monkeypatch, capsy
     """`service:<配方>` 与 `service list` 同一套口径：**pid 记录是判据**，探针报状态。
 
     端口上有东西（多半是用户自己手起的 llama / 隧道）→ 状态是 `up`（那个地址确实
-    在服务），但说明里必须点清"不是本命令拉起的"；写了自己的 pid 记录之后才叫
-    "我们拉起的在跑"。两边都不许把别人占着的端口说成我们的。
+    在服务），但说明里必须点清"非本命令启动"；写了自己的 pid 记录之后才叫
+    "本命令启动的进程存活"。两边都不许把别人占着的端口说成我们的。
     """
     from spoolkit import services
 
@@ -287,8 +287,8 @@ def test_配方行说清是不是本命令拉起的(tmp_path, monkeypatch, capsy
         row = [item for item in payload["rows"] if item["name"] == "service:tunnel"][0]
         assert code == 0
         assert row["state"] == "up"
-        assert "不是本命令拉起的" in row["detail"], row["detail"]
-        assert "本命令拉起的进程在跑" not in row["detail"]
+        assert "非本命令启动" in row["detail"], row["detail"]
+        assert "本命令启动的进程存活" not in row["detail"]
 
         # 记下本命令拉起的 pid（写活着的本进程，不用收尾）之后，口径才变成"在跑"。
         services.write_pid("tunnel", os.getpid())
@@ -297,8 +297,10 @@ def test_配方行说清是不是本命令拉起的(tmp_path, monkeypatch, capsy
         row = [item for item in payload["rows"] if item["name"] == "service:tunnel"][0]
         assert code == 0
         assert row["state"] == "up"
-        assert "本命令拉起的进程在跑" in row["detail"], row["detail"]
+        assert "本命令启动的进程存活" in row["detail"], row["detail"]
         assert f"pid {os.getpid()}" in row["detail"]
+        # 探针结果已经在上面那句里，不许再追加一遍（同一句话印两遍）。
+        assert row["detail"].count("端口开着") == 1, row["detail"]
     finally:
         sock.close()
 

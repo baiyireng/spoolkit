@@ -9,11 +9,15 @@ socket 扮演"端口被占"。清理一律在 `finally` 里。
 """
 
 import argparse
+import ctypes
+import json
 import os
 import socket
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from spoolkit import services as svc
 from spoolkit.cli.app import main
@@ -78,6 +82,32 @@ def _line_for(out: str, name: str) -> str:
     raise AssertionError(f"输出里没有 {name} 那一行：\n{out}")
 
 
+def _read(path: Path) -> str:
+    """日志内容（还没落盘 / 读不到都给空串，让等待循环继续试）。"""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _wait_for(pred, timeout: float) -> bool:
+    """等到 pred() 为真；超时给 False（不抛，让调用方说清是哪一条不成立）。"""
+    deadline = time.time() + timeout
+    while True:
+        if pred():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _console_pids() -> list[int]:
+    """本进程挂在哪个控制台上（控制台上的进程 pid 表）。"""
+    buf = (ctypes.c_uint32 * 16)()
+    count = int(ctypes.WinDLL("kernel32").GetConsoleProcessList(buf, 16))
+    return [int(buf[index]) for index in range(count)]
+
+
 #: 先留一个"我真的跑过"的印记，再绑端口：绑不上就骂一句死掉——`ssh -D` 的死法。
 BIND_FAIL = """\
 import pathlib, socket, sys
@@ -97,6 +127,30 @@ import sys
 for i in range(1, 6):
     print(f"line-{i}", file=sys.stderr)
 raise SystemExit(3)
+"""
+
+#: 活一会儿、监听端口、**到点自己退出**的短命配方（角色：一个真的在跑的服务）。
+#: 为什么自己退出：本机沙箱拦 `taskkill` / `TerminateProcess`（基线里那两条红的
+#: 根因），"收尾"只能靠它自己走——测试写完标记文件，它下一次轮询就退出；
+#: 最长寿命是硬上限，谁忘了收也绝不会长驻。
+LISTEN_UNTIL_FLAG = """\
+import ctypes, json, os, pathlib, socket, sys, time
+port, flag, max_seconds = int(sys.argv[1]), pathlib.Path(sys.argv[2]), float(sys.argv[3])
+sock = socket.socket()
+sock.bind(("127.0.0.1", port))
+sock.listen(8)
+console = []
+if os.name == "nt":
+    buf = (ctypes.c_uint32 * 16)()
+    count = int(ctypes.WinDLL("kernel32").GetConsoleProcessList(buf, 16))
+    console = [int(buf[index]) for index in range(count)]
+print(json.dumps({"listening": port, "console": console, "me": os.getpid()}), flush=True)
+deadline = time.monotonic() + max_seconds
+while time.monotonic() < deadline:
+    if flag.exists():
+        break
+    time.sleep(0.05)
+print("exiting", flush=True)
 """
 
 
@@ -214,7 +268,7 @@ def test_停没拉过的配方会说明(tmp_path: Path, monkeypatch, capsys) -> 
     )
     args = argparse.Namespace(action="stop", name="llama")
     assert service_command(args) == 2
-    assert "拉起" in capsys.readouterr().err
+    assert "没有本命令启动的进程" in capsys.readouterr().err
 
 
 def test_入口挂上了service(capsys) -> None:
@@ -258,7 +312,8 @@ def test_端口被别人占着也要照拉_拉不起来要说退出码与输出(
     assert "退出码 1" in message
     assert "bind: Address already in use" in message
     assert "不重复拉起" not in message
-    assert "上就有东西在听" in message  # 说清"端口被占"，不是只报 timed out
+    assert "上就有东西在听" not in message
+    assert "已有进程监听，非本命令启动" in message  # 说清"端口被占"，不是只报 timed out
     assert marker.is_file(), "端口被占着时也必须真去拉一次（判据是 pid，不是探针）"
     assert read_pid("tunnel") is None, "立刻退出的子进程不能留下 pid 记录"
 
@@ -361,7 +416,7 @@ def test_杀不掉时pid记录留着_免得再拉起一个(tmp_path: Path, monke
 
 
 def test_list_三种状态分得清(tmp_path: Path, monkeypatch) -> None:
-    """一行读清三种情形：本命令拉起的在跑 / 端口被别人的占着 / 没起。
+    """一行读清三种情形：运行中（本命令启动）/ 端口被占用（非本命令启动）/ 未运行。
 
     顺带钉住"没有 pid 记录就不许谎报我们在跑"。
     """
@@ -398,10 +453,161 @@ def test_list_三种状态分得清(tmp_path: Path, monkeypatch) -> None:
     tunnel = _line_for(out, "tunnel")
     llama = _line_for(out, "llama")
     mine = _line_for(out, "mine")
-    assert "被占用" in tunnel, tunnel
-    assert "不是本命令拉起的" in tunnel, tunnel
-    assert "在跑" not in tunnel, f"没有 pid 记录就不许说我们在跑：{tunnel}"
+    assert "端口被占用（非本命令启动）" in tunnel, tunnel
+    assert "端口有进程监听，非本命令启动" in tunnel, tunnel
+    assert "运行中" not in tunnel, f"没有 pid 记录就不许说我们在跑：{tunnel}"
     assert str(os.getpid()) not in tunnel
-    assert "没起" in llama, llama
-    assert "在跑" in mine and f"pid {os.getpid()}" in mine, mine
+    assert "未运行" in llama, llama
+    assert "未运行：" in llama, llama
+    assert "运行中（本命令启动）" in mine and f"pid {os.getpid()}" in mine, mine
+    assert out.count("在跑") == 0, "口语状态词「在跑」不该再出现在 list 里"
+    assert "配了" not in out and "没起 = 都没有" not in out, "表头不该再把图例塞进括号"
+
+
+# --- 拉起的子进程要脱离本控制台（2026-10-02：同控制台的 Ctrl-C 连坐） ----------
+
+
+def test_拉起子进程时给了脱离控制台的creationflags(tmp_path: Path, monkeypatch) -> None:
+    """结构性：Windows 上 `creationflags` 必须含 `CREATE_NEW_PROCESS_GROUP`。
+
+    改之前这里恒红：`start_new_session=True` 是 **POSIX only**（CPython 文档写明），
+    Windows 上被忽略，于是子进程与我们在同一个进程组、同一个控制台——用户在
+    **同一个窗口**按 Ctrl-C，控制台把 CTRL_C_EVENT 广播给它，服务跟着死。
+    `DETACHED_PROCESS` 一起钉住：它让子进程连控制台都不挂（CTRL_BREAK 也到不了）。
+    """
+    if os.name != "nt":
+        pytest.skip("creationflags 是 Windows 专有：POSIX 走 start_new_session")
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path / "state"))
+    _write_recipe(path, name="tunnel", command=[sys.executable, "-c", "pass"])
+
+    seen: list[int] = []
+    real_popen = svc.subprocess.Popen
+
+    def spy(*args, **kwargs):
+        seen.append(int(kwargs.get("creationflags", 0)))
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(svc.subprocess, "Popen", spy)
+    start_service("tunnel")
+    assert seen, "配方该被真的拉起一次"
+    flags = seen[0]
+    assert flags & svc._CREATE_NEW_PROCESS_GROUP, f"缺 CREATE_NEW_PROCESS_GROUP：{flags:#x}"
+    assert flags & svc._DETACHED_PROCESS, f"缺 DETACHED_PROCESS：{flags:#x}"
+
+
+def test_Job不放开breakaway时退掉这一位重试也要能起来(tmp_path: Path, monkeypatch) -> None:
+    """`CREATE_BREAKAWAY_FROM_JOB` 拿不到时要被容忍：退掉这一位重试，不许因此起不来。
+
+    Job 没开 `JOB_OBJECT_LIMIT_BREAKAWAY_OK` 时 `CreateProcess` 就是"拒绝访问"。
+    这里把**带 breakaway 的那一次**改成那个错，看第二次（不带它）有没有真把配方拉起来。
+    """
+    if os.name != "nt":
+        pytest.skip("creationflags 是 Windows 专有")
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path / "state"))
+    _write_recipe(path, name="tunnel", command=[sys.executable, "-c", "pass"])
+
+    attempts: list[int] = []
+    real_popen = svc.subprocess.Popen
+
+    def spy(*args, **kwargs):
+        flags = int(kwargs.get("creationflags", 0))
+        attempts.append(flags)
+        if flags & svc._CREATE_BREAKAWAY_FROM_JOB:
+            raise PermissionError(13, "Access is denied")
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(svc.subprocess, "Popen", spy)
+    code, message = start_service("tunnel")
+    assert len(attempts) == 2, f"该带 breakaway 试一次、不带它再试一次：{attempts}"
+    assert attempts[0] & svc._CREATE_BREAKAWAY_FROM_JOB
+    assert not attempts[1] & svc._CREATE_BREAKAWAY_FROM_JOB
+    assert "拉不起来" not in message, message
+    assert code in (0, 1), message  # 1 = 那条命令自己立刻退了，但它**真被拉起来过**
+
+
+def test_拉起的子进程不在本进程的控制台上(tmp_path: Path, monkeypatch) -> None:
+    """行为性证据：子进程自己报出的控制台进程表里**没有本进程**。
+
+    Ctrl-C 是"往本控制台广播"的东西，不在这个控制台上就吃不到。真发一次
+    `GenerateConsoleCtrlEvent` 在本机沙箱里做不到（它返回成功但一个进程都不受影响
+    ——实测连 `ping` 这种默认处理程序都活着），所以这里钉的是那个**原因**。
+    改之前恒红：不给 creationflags 的子进程继承我们的控制台，表里就有本进程。
+    """
+    if os.name != "nt":
+        pytest.skip("控制台是 Windows 的概念")
+    mine = _console_pids()
+    if os.getpid() not in mine:
+        pytest.skip("本进程没有控制台，这条用例证明不了什么")
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path / "state"))
+    script = _script(tmp_path / "console.py", LISTEN_UNTIL_FLAG)
+    port = _closed_port()
+    flag = tmp_path / "stop.flag"
+    _write_recipe(
+        path,
+        name="tunnel",
+        command=[sys.executable, str(script), str(port), str(flag), "5"],
+        health=f"tcp:127.0.0.1:{port}",
+    )
+    pid = None
+    try:
+        start_service("tunnel")
+        pid = read_pid("tunnel")
+        log = svc.log_path("tunnel")
+        assert _wait_for(lambda: "console" in _read(log), 5.0), _read(log)
+        report = json.loads(_read(log).splitlines()[0])
+        assert report["me"] != os.getpid()
+        assert os.getpid() not in report["console"], (
+            f"子进程还在我们的控制台里（{report['console']}），同控制台的 Ctrl-C 会连坐它"
+        )
+    finally:
+        flag.write_text("stop", encoding="utf-8")
+        _wait_for(lambda: pid is None or not pid_alive(pid), 10.0)
+        svc.clear_pid("tunnel")
+
+
+def test_能拉起一个监听的短命配方_列表说运行中_日志有它的输出(tmp_path: Path, monkeypatch) -> None:
+    """真实走一遍：start → `list` 说"运行中（本命令启动）" → 日志里有它的输出 → 收干净。
+
+    配方**会活一会儿**（最长 20 秒）并监听端口，所以这是"真拉起"而不是"起完就死"。
+    收尾在 `finally`：本机沙箱拦 `taskkill`（基线里那两条红的根因），所以除了 `stop`
+    还写一个标记文件让配方自己退出——**绝不留进程**。
+    """
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path / "state"))
+    port = _closed_port()
+    flag = tmp_path / "stop.flag"
+    script = _script(tmp_path / "listen.py", LISTEN_UNTIL_FLAG)
+    _write_recipe(
+        path,
+        name="tunnel",
+        command=[sys.executable, str(script), str(port), str(flag), "20"],
+        health=f"tcp:127.0.0.1:{port}",
+    )
+    code, message = start_service("tunnel")
+    pid = read_pid("tunnel")
+    reaped = False
+    try:
+        assert code == 0, message
+        assert pid is not None and pid_alive(pid), f"配方没起来：{message}"
+        line = _line_for(render_status(), "tunnel")
+        assert "运行中（本命令启动）" in line, line
+        assert f"pid {pid}" in line, line
+        assert f"127.0.0.1:{port}" in line, line
+        log = svc.log_path("tunnel")
+        assert _wait_for(lambda: "listening" in _read(log), 5.0), f"日志里没有它的输出：{_read(log)}"
+    finally:
+        flag.write_text("stop", encoding="utf-8")
+        stop_service("tunnel")  # 能收就收；本机沙箱拦 taskkill，靠上面那个标记兜底
+        reaped = _wait_for(lambda: pid is None or not pid_alive(pid), 20.0)
+        svc.clear_pid("tunnel")
+    assert reaped, "配方进程必须收干净（不许留进程）"
+    assert read_pid("tunnel") is None
+
 

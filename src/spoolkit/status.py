@@ -629,14 +629,19 @@ def _service_row(item, timeout: float) -> Row:
     进程占着时不许说成"我们拉起的在跑"，没有 pid 记录时也不许谎报"我们在跑"。
 
     被占用仍然是 `up`（那个地址上确实有东西在服务，多半就是用户自己手起的），
-    只是状态列写成「被占用」、说明里点清"不是本命令拉起的"：把它判成没起会让
+    只是状态列写成「被占用」、说明里点清"非本命令启动"：把它判成没起会让
     退出码变 1，而"别人替我起着"并不是"这台机器上少了什么"。
     """
     state = services.inspect_service(item, timeout=timeout, cached=False)
     probe = _readable_probe(state.probe_detail) if state.probe_detail else ""
     if state.state == services.STATE_OURS:
+        # 说明里已经带了探针结果（`本命令启动的进程存活：pid …；HTTP 200`）：
+        # `_readable_probe` 没补人话（返回值就是探针原话）时不再追加，否则同一句
+        # 会印两遍；它真补了人话（`timed out` → 端口在超时内没接上…）时才追加。
         row_state, label = STATE_UP, ""
-        detail = state.detail + (f"；{probe}" if probe else "")
+        detail = state.detail
+        if probe and probe != state.probe_detail:
+            detail += f"；{probe}"
     elif state.state == services.STATE_OCCUPIED:
         row_state, label = STATE_UP, "被占用"
         detail = state.detail + (f"；{probe}" if probe else "")

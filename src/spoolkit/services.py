@@ -11,11 +11,15 @@
 
 1. `start` 先看**自己记的 pid 还活着吗**；活着 → 明确说"已经在跑（pid …）"，
    同一条配方最多一个进程；记录里那个进程没了（或 pid 被复用）才动手拉起。
-2. 探针只用来报状态：`service list` 把三种情形分开写——**本命令拉起的在跑 /
-   端口有东西但不是我们的（被占用）/ 没起**。没有 pid 记录时绝不谎报"我们在跑"。
+2. 探针只用来报状态：`service list` 把三种情形分开写——**运行中（本命令启动）/
+   端口被占用（非本命令启动）/ 未运行**。没有 pid 记录时绝不谎报"我们在跑"。
 3. 子进程**启动后立刻退出**时，把它的退出码与最后几行输出带出来，完整输出留在
    `<用户状态目录>/services/<配方>.log`：`ssh -D 1080` 撞上被占的端口正是
    "bind: Address already in use" 然后死掉，改之前那一个字都看不到。
+4. 拉起的子进程**脱离本控制台**（Windows 给 `creationflags`，POSIX 给
+   `start_new_session=True`，见 `spawn_flags`）：不给的话，用户在**同一个窗口**
+   按 Ctrl-C，控制台会把 CTRL_C_EVENT 广播给服务进程——"`spool qq` 之后隧道
+   自己没了"就是这么来的（`start_new_session` 在 Windows 上被忽略）。
 
 pid 记录（`<用户状态目录>/services/<配方>.pid`）里除了 pid 还留一份**进程创建
 时刻的指纹**：Windows 用 `GetProcessTimes`，Linux 用 `/proc/<pid>/stat` 的第 22
@@ -35,6 +39,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,21 +58,22 @@ START_GRACE = 0.6
 TAIL_LINES = 3
 
 #: 一条配方现在的样子。三种**要分得清**的情形（`state`）：
-#: - `STATE_OURS`：本命令拉起的进程还活着（pid 记录就是判据）
-#: - `STATE_OCCUPIED`：探针通，但不是我们起的——端口被别人的进程占着
-#: - `STATE_DOWN`：没有本命令的活进程，探针也不通
-#: - `STATE_UNKNOWN`：这条配方没写探活地址，也没有 pid 记录——看不出
+#: - `STATE_OURS`：本命令启动的进程还活着（pid 记录就是判据）→ 运行中（本命令启动）
+#: - `STATE_OCCUPIED`：探针通，但不是本命令起的——地址被别的进程占着
+#: - `STATE_DOWN`：没有本命令的活进程，探针也不通 → 未运行
+#: - `STATE_UNKNOWN`：这条配方没写探活地址，也没有 pid 记录 → 无法判定
 STATE_OURS = "ours"
 STATE_OCCUPIED = "occupied"
 STATE_DOWN = "down"
 STATE_UNKNOWN = "unknown"
 
-#: 状态 → 给人看的两个字（`service list` 的行首那一个词）。
+#: 状态 → 给人看的那个词（`service list` 行里紧挨着 `[可启]` 的那一段）。
+#: 三个词各自把"是不是本命令起的"说全：图例就不必再塞进表头。
 STATE_LABELS: dict[str, str] = {
-    STATE_OURS: "在跑",
-    STATE_OCCUPIED: "被占用",
-    STATE_DOWN: "没起",
-    STATE_UNKNOWN: "看不出",
+    STATE_OURS: "运行中（本命令启动）",
+    STATE_OCCUPIED: "端口被占用（非本命令启动）",
+    STATE_DOWN: "未运行",
+    STATE_UNKNOWN: "无法判定",
 }
 
 #: OpenProcess 的访问位（Windows）。只要这两个：判活 + 读创建时刻。
@@ -75,6 +81,12 @@ _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _SYNCHRONIZE = 0x00100000
 _WAIT_TIMEOUT = 0x00000102
 _ERROR_ACCESS_DENIED = 5
+
+#: 拉起服务子进程时给的 `creationflags`（Windows）。三个位各有各的用，
+#: 见 `spawn_flags` 与 `_popen_service`。
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_DETACHED_PROCESS = 0x00000008
+_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 _WIN32 = None
 
@@ -359,17 +371,17 @@ def inspect_service(
     if ours:
         state = STATE_OURS
         tail = probe_detail if item.health else "这条配方没写探活地址"
-        detail = f"本命令拉起的进程在跑（pid {pid}）；{tail}"
+        detail = f"本命令启动的进程存活：pid {pid}；{tail}"
     elif item.health and probe_ok:
         # 端口上有东西，可我们的记录里没有活着的进程：那不是我们起的。
         state = STATE_OCCUPIED
-        detail = "端口有东西在听，但不是本命令拉起的（多半被别的进程占着：要自己的就换端口或先停掉它）"
+        detail = "端口有进程监听，非本命令启动；改用其他端口，或先停止该进程"
     elif not item.health:
         state = STATE_UNKNOWN
-        detail = "看不出（这条配方没写探活地址，也没有本命令的 pid 记录）"
+        detail = "无法判定：这条配方没写探活地址，也没有本命令的 pid 记录"
     else:
         state = STATE_DOWN
-        detail = f"没起（{probe_detail}）"
+        detail = f"未运行：{probe_detail}"
     return ServiceState(
         name=item.name,
         state=state,
@@ -402,6 +414,64 @@ def probe_all() -> list[dict]:
     return rows
 
 
+def spawn_flags() -> int:
+    """拉起服务子进程时给的 Windows `creationflags`（非 Windows 返回 0）。
+
+    为什么要有它：`start_new_session=True` 是 **POSIX only**（CPython 文档写明），
+    Windows 上被忽略——不给 creationflags 的子进程与我们在同一个进程组、同一个
+    控制台，用户在**同一个窗口**按 Ctrl-C，控制台把 CTRL_C_EVENT 广播给这个控制台
+    上的所有进程，服务跟着一起死（"spool qq 之后隧道自己没了"就是这么来的）。
+
+    三个位：
+    - `CREATE_NEW_PROCESS_GROUP`：新进程组默认**不处理 CTRL+C**；
+    - `DETACHED_PROCESS`：干脆不挂控制台，CTRL_BREAK 之类的控制台事件也到不了；
+    - `CREATE_BREAKAWAY_FROM_JOB`：终端 / IDE 常把整棵进程树放进 Job 对象，Job 一关
+      就连坐；这一位让子进程脱出来。它是"能带就带"，见 `_popen_service`。
+    """
+    if os.name != "nt":
+        return 0
+    return _CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS | _CREATE_BREAKAWAY_FROM_JOB
+
+
+def _popen_service(command: Sequence[str], log: Path) -> subprocess.Popen:
+    """拉起一条配方：输出落进 `log`，并让它**脱离本控制台**。
+
+    Windows 只能靠 `creationflags`（见 `spawn_flags`）；POSIX 用
+    `start_new_session=True`（新会话，没有控制终端，终端里的 Ctrl-C 到不了它）。
+
+    `CREATE_BREAKAWAY_FROM_JOB` 失败要能被容忍：Job 没开
+    `JOB_OBJECT_LIMIT_BREAKAWAY_OK` 时 `CreateProcess` 会以"拒绝访问"失败，所以
+    失败就**退掉这一位重试一次**——宁可脱不出 Job，也不能因此起不来。别的失败
+    （命令不存在）重试得到的是同一个错，代价只有一次 `CreateProcess`。
+    """
+    with open(log, "wb") as sink:
+        if os.name != "nt":
+            return subprocess.Popen(
+                list(command),
+                stdin=subprocess.DEVNULL,
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        flags = spawn_flags()
+        try:
+            return subprocess.Popen(
+                list(command),
+                stdin=subprocess.DEVNULL,
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                creationflags=flags,
+            )
+        except OSError:
+            return subprocess.Popen(
+                list(command),
+                stdin=subprocess.DEVNULL,
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                creationflags=flags & ~_CREATE_BREAKAWAY_FROM_JOB,
+            )
+
+
 def start_service(name: str) -> tuple[int, str]:
     if not SAFE_NAME.match(name):
         return 2, f"配方名不合法：{name}"
@@ -425,19 +495,12 @@ def start_service(name: str) -> tuple[int, str]:
         ok, target, _detail = probe_spec(item.health, cached=False)
         if ok:
             where = target or item.health
-            occupied = f"；启动前 {where} 上就有东西在听（不是本命令拉起的）"
+            occupied = f"；启动前 {where} 已有进程监听，非本命令启动"
 
     # 子进程的输出落进日志：它启动后立刻退出时，那几行就是唯一的原因。
     log = log_path(name)
     try:
-        with open(log, "wb") as sink:
-            proc = subprocess.Popen(
-                list(item.command),
-                stdin=subprocess.DEVNULL,
-                stdout=sink,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+        proc = _popen_service(item.command, log)
     except OSError as exc:
         return 2, f"拉不起来：{exc}"
     write_record(name, PidRecord.for_pid(proc.pid, item.command))
@@ -491,7 +554,7 @@ def stop_service(name: str) -> tuple[int, str]:
         return 2, f"配方名不合法：{name}"
     record = read_record(name)
     if record is None:
-        return 2, f"{name} 没有本命令拉起的进程（pid 记录是空的）"
+        return 2, f"{name} 没有本命令启动的进程：pid 记录为空"
     if not pid_alive(record.pid):
         clear_pid(name)
         return 2, f"{name} 之前拉起的进程（pid {record.pid}）已经不在了，pid 记录清掉"
@@ -575,7 +638,7 @@ def render_status() -> str:
             ]
         )
         return "\n".join(lines)
-    lines.append(f"配了 {len(items)} 个（在跑 = 本命令拉起的；被占用 = 端口有东西但不是我们的；没起 = 都没有）：")
+    lines.append(f"本机配方 {len(items)} 条：")
     for item in items:
         state = inspect_service(item, cached=False)
         how = "只探" if not item.command else "可启"
