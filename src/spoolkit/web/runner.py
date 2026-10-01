@@ -108,7 +108,7 @@ def health_snapshot(
 
 #: `NOISE_LINES` 里那几行怎么归到"模型那一步坏了"的哪一类。
 #:
-#: 只用来**分类**（页面据此说人话），不做任何业务判断——循环该不该继续、
+#: 只用来**分类**（页面据此给出可读说明），不做任何业务判断——循环该不该继续、
 #: 要不要重试，都由内核自己的代码决定，跟这里的词一个关系都没有。
 MODEL_FAILURE_MARKS = (
     ("connect", ("无法连接 llama-server", "ConnectError", "ConnectTimeout",
@@ -125,7 +125,7 @@ def model_failure(extra_args: Sequence[str], noise: Sequence[str]) -> dict | Non
     "进程退出，退出码 1：<几行回溯>"——页面照原样显示出来就是一行原始异常，
     而人需要的是「哪一步 / 哪个地址 / 可能为什么 / 下一步敲什么」。
     这里**只增**：`final` 的既有字段与文字一个字都没动，只是多了一个 `error` 键
-    （`{stage, url, kind}`），展示层（`page.py` 的 `explainFailure`）拿它说人话。
+    （`{stage, url, kind}`），展示层（`page.py` 的 `explainFailure`）据此给出可读说明。
 
     `url` 就是这次运行生效的 `--base-url`（没有就给空串，页面退回探活给的地址）。
     地址里可能带查询串，页面显示前还会过一遍遮蔽（`redact`）。

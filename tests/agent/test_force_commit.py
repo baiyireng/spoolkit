@@ -185,7 +185,12 @@ def test_连续空回合会提前收尾(tmp_path: Path) -> None:
     result = loop.run("改一下")
 
     assert result.finished is False
-    assert "停住了" in result.final
+    # 钉要点：这条 final 是给用户的收尾说明——必须讲清「提出改动之后连续几轮
+    # 没有可执行的回合」，并说明改动留在待确认清单里由用户判断。不再钉「停住了」
+    # 这一旧字面（措辞可改，这三件事丢了才是改坏）。
+    assert "提出改动" in result.final
+    assert "连续几轮" in result.final
+    assert "待确认清单" in result.final
     # 只跑了「一次改动 + 两次空回合」，没有把 12 步预算烧光
     assert result.steps <= 4
 

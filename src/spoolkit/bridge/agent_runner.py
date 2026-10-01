@@ -25,7 +25,7 @@ from spoolkit.web.runner import Runner
 
 POLL_SECONDS = 0.5
 
-# "应用 / 丢弃"怎么回答。中英文都给：用户在手机上打字，越短越顺手。
+# "应用 / 丢弃"怎么回答。中英文都给：用户在手机上打字，越短越好输入。
 YES_WORDS = frozenset({"y", "yes", "是", "好", "可以", "应用", "1"})
 NO_WORDS = frozenset({"n", "no", "不", "否", "丢弃", "不要", "0"})
 # 命令授权比"是/否"多两档：始终允许（记进本工作区）、本轮全拒。

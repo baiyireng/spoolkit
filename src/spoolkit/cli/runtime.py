@@ -156,7 +156,7 @@ def provider_gateway(args, project_root):
     """按命令行参数装载网关。失败时打印原因并返回 None。
 
     集中在一处：三条执行路径都要用它，各写一遍的结果是某一条上
-    悄悄漏掉代理或密钥来源，而那种问题只会表现为「连不上」。
+    漏掉代理或密钥来源而不报错，而那种问题只会表现为「连不上」。
     """
     values = resolve_provider_args(args)
     provider = values["provider"]
@@ -259,7 +259,7 @@ def attach_index(
         # 而建索引是按文件数花钱的。项目明显太大时直接不做，
         # 别先花十几秒再把它丢掉。
         #
-        # 顺序很重要：**必须在开库之前判断**。开库会顺手建出 .agent 目录，
+        # 顺序很重要：**必须在开库之前判断**。开库会一并建出 .agent 目录，
         # 于是「跳过了索引」反而在用户的项目里留下一个空壳。
         # 上限是能力/机器标定值：本机 27B 上建索引的收益与代价在 2000 文件
         # 附近平衡，换个模型或换台机器就不是这个数了。
@@ -343,7 +343,7 @@ _MCP_CLIENTS: list = []
 def attach_mcp(registry: ToolRegistry, announce=None) -> list:
     """把用户配置里的 MCP 服务挂成工具。没配就是空操作。
 
-    连不上的服务**跳过并说出来**：悄悄降级的结果是模型找不到工具、
+    连不上的服务**跳过并说出来**：不声不响地降级，结果是模型找不到工具、
     开始自己造轮子，而人以为配好了。
     """
     from spoolkit import settings
@@ -491,7 +491,7 @@ def assemble_loop(
     mcp_clients = attach_mcp(registry, announce=print) if parts.mcp else []
     # 「收齐这一处该看的」是一个**动作**，不是一个必经阶段：模型自己决定
     # 何时用、看哪一处。它省的是步数——原先要「列目录 → 猜文件名 → 读 →
-    # 猜错了再换」，实测模型猜错过文件名，那一步就白花了。
+    # 猜错了再换」，实测模型猜错过文件名，那一步就浪费了。
     registry.register(
         survey_spec(
             project_root,
@@ -586,7 +586,7 @@ def _tavily_api_key(project_root: Path | None) -> str:
     """Tavily 的 key：环境变量 → 工作区 `.env` → 用户级 `.env` → 用户配置。
 
     两个环境变量名的**先后不动**（原来是 `TAVILY_API_KEY` 在前），免得同一个
-    key 在两处都设过的人，行为在升级后悄悄变了。最后那条是旧位置：
+    key 在两处都设过的人，行为在升级后变了而没有提示。最后那条是旧位置：
     写进 `config.toml` 的人不用搬家。
     """
     value, _ = settings.resolve_secret(

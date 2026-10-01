@@ -355,6 +355,8 @@ def test_步骤提示带上整体位置() -> None:
     assert "总目标" in text
     assert "已完成：第一步" in text
     assert "本次只做这一步：第二步" in text
+    # 这句来自 `spoolkit/agents/plan.py` 的步骤渲染（本轮未点名该文件，原样保留），
+    # 不是 `cli/commands/plan.py` 里那条派发约束。
     assert "不要顺手做后面步骤的事" in text
 
 

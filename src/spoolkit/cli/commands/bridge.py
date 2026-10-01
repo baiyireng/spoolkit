@@ -631,8 +631,8 @@ def _check(project_root: Path | None, args) -> int:
         from spoolkit.bridge.qqbot import QQBotChannel
 
         # 代理必须传下去。**这条是踩出来的**：原先 `--check` 没传，于是它测的是
-        # 直连——而 QQ 平台有 IP 白名单，直连和借云主机出去是两条不同的路。
-        # 结果是"检查通过、真跑失败"，检查工具本身在骗人。
+        # 直连，而 QQ 平台有 IP 白名单，直连和借云主机出去是两条不同的路。
+        # 结果是"检查通过、真跑失败"，也就是这项检查本身给出了错误结论。
         qq = QQBotChannel(
             app_id=app_id,
             secret=secret,
@@ -684,7 +684,7 @@ def _check(project_root: Path | None, args) -> int:
             return 2
         # 企业微信**发**消息本机可用；**收**消息要一个公网回调 URL。`--check` 只能验
         # 凭据在不在，验不了回调通不通——这一句必须写出来，否则又是一次
-        # "检查通过、真跑失败"（`--check` 不传代理那次就是这么骗人的）。
+        # "检查通过、真跑失败"（`--check` 不传代理那次就是这么错判的）。
         print("凭据齐全。接收消息还需一个公网回调 URL，见 docs/bridge.md。")
         return 0
     print(f"{channel} 通道不需要凭据（或由自身的 __init__ 检查）。")

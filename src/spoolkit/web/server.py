@@ -15,7 +15,7 @@ SSE 每写完一条都要 flush：不 flush 的话事件攒在缓冲里，
 
 `POST /run/stop` 是**温和停止**：复用 `Runner.stop()`（先 terminate 请它自己收尾、
 到点才 kill），已经写进记忆库的往来与已经发出来的事件一条都不删；`/state` 里
-`stopped` 与 `running`（只增的键）合起来说得出"这一轮是被停掉的"。空闲时停 → 409 说人话；
+`stopped` 与 `running`（只增的键）合起来说得出"这一轮是被停掉的"。空闲时停 → 409 并给出可读说明；
 它和 `/run` 一样进 `WRITE_PATHS`，非回环绑定一律 403。
 
 **探活不在请求路径上**（`web/probe.py`）：模型地址连不上时，一次探测要等到超时
@@ -412,7 +412,7 @@ class WebState:
             try:
                 root = kernel_workspaces.resolve_workspace(name)
             except WorkspaceError as exc:
-                # 名字对不上就**说人话**：抛回溯等于让页面显示一坨栈，
+                # 名字对不上时给出可读说明：抛回溯等于让页面显示一整段调用栈，
                 # 而人需要的是"登记表里现在有这些"。
                 return 400, {"error": str(exc)}
             workspace_source = "explicit"
@@ -474,7 +474,7 @@ class WebState:
         不给就照既有约定自动生成。
 
         `name` 与"没给"分得开是刻意的：`{"session": ""}` 是**给了一个空名字**
-        （400 说人话），而不是"你替我起一个"。
+        （400 并给出可读说明），而不是"你替我起一个"。
 
         **不写指针**：建一条会话不等于"选了它"——口径与 `POST /target` 的空 body
         一致（只有显式选择才落盘，见 `_remember`）。页面接着发的那次
@@ -493,7 +493,7 @@ class WebState:
             try:
                 wanted = kernel_sessions.validate_session_name(name)
             except SessionError as exc:
-                # 名字非法就说人话（与 `/target` 同一条口径），绝不悄悄改成别的名字：
+                # 名字非法时给出可读说明（与 `/target` 同一条口径），绝不静默改成别的名字：
                 # 改掉之后页面上让人看到的名字与他敲的那个不一样，而目录已经建了。
                 return 400, {"error": str(exc)}
         try:
@@ -536,7 +536,7 @@ class WebState:
         try:
             picked = kernel_sessions.resolve_session(target.root, raw)
         except SessionError as exc:
-            # 名字对不上就说人话（与 `POST /target` 同一条口径），绝不静默新建。
+            # 名字对不上时给出可读说明（与 `POST /target` 同一条口径），绝不静默新建。
             return 400, {"error": str(exc)}
         if restore:
             kernel_sessions.archive_session(target.root, picked, archived=False)
@@ -616,7 +616,7 @@ class WebState:
         （在跑的任务不会被它碰到）；但**落盘是另一回事**：指针会留到下次启动，
         等于让一个网络来的人改这台机器的持久状态，而本批没有任何鉴权来兜底。
         所以线划在"改进程内视图可以，改机器级持久状态不行"，而不是"整个 /target 拒掉"：
-        拒掉的话远程连"看一眼别的工作区"都做不到，而那是这个功能存在的理由。
+        拒掉之后远程端连查看别的工作区都做不到，而查看别的工作区是这个功能存在的理由。
 
         写不进去**不能挡住切换**：目标已经在进程内生效了，这时报错等于告诉人
         "没切成"，而它其实是切成了。指针是便利，不是数据（`kernel/pointers.py` 的自述）。
@@ -957,7 +957,7 @@ def _handler_for(state: WebState):
                     )
                     return
                 if not runner.running:
-                    # 空闲时说人话：点一下"停止"却什么都没发生时，人会以为壳坏了。
+                    # 空闲时给出可读说明：点一下"停止"却什么都没发生时，人会以为壳坏了。
                     self._json(409, {"error": "现在没有在跑的任务，不用停。"})
                     return
                 runner.stop()

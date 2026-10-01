@@ -9,7 +9,7 @@ HTTP 发消息 + WebSocket 网关收事件。所以不需要第三方 hook，也
 1. **拿凭证**：`POST https://bots.qq.com/app/getAppAccessToken`，
    用 AppID + AppSecret 换 access_token（有有效期，缓存起来）。
 2. **发消息**：被动回复要带 `msg_id`（+`msg_seq`）——这是平台的规矩，
-   带上才算"回复那条消息"，不带就是主动推送（有配额限制）。
+   带上它才构成"回复那条消息"，不带就是主动推送（有配额限制）。
    私聊走 `/v2/users/{openid}/messages`，群里 @ 走 `/v2/groups/{openid}/messages`。
 3. **收事件**：WebSocket 网关（op 10 HELLO → 发 op 2 IDENTIFY → 心跳 op 1）。
    私聊事件是 `C2C_MESSAGE_CREATE`、群 @ 是 `GROUP_AT_MESSAGE_CREATE`，
@@ -370,7 +370,7 @@ class QQBotChannel:
         return messages
 
     def _passive_fields(self, kind: str, seq: int = 1) -> dict:
-        """被动回复的字段：带上 msg_id 才算"回复那条消息"（有 5 分钟窗口）。
+        """被动回复的字段：带上 msg_id 才构成"回复那条消息"（有 5 分钟窗口）。
 
         `msg_seq` 是**同一条消息的第几条回复**：分条发的时候必须递增，否则平台
         会把后面的当重复消息丢掉（真机上试出来过 `40054005 消息被去重`）。

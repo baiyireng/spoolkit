@@ -1,7 +1,7 @@
 """计划相关命令：生成、推进、自主执行。
 
 三条路径共用同一套「执行一步并结算」的逻辑。共用是刻意的：
-各写一遍的结果，是策略在其中一条路径上悄悄失效——那种 bug 不报错，
+各写一遍的结果，是策略在其中一条路径上失效且不报错，
 只让用户以为「我明明设了只读」。
 """
 
@@ -61,7 +61,7 @@ from spoolkit.memory.lessons import record_lesson
 
 
 def _survey(project_root: Path, goal: str, tokenizer) -> str:
-    """拆解**之前**先看一眼环境。
+    """拆解**之前**先收集环境信息。
 
     这一步不是可选的。实测：不看的拆解产出的是**形状完美、内容全错**的计划
     ——20 步、每步都有验收标准和范围，而范围写的是 `task_1/`…`task_20/`
@@ -178,7 +178,7 @@ def _plan_phase(
         counting,
         args.goal,
         context=surveyed,
-        # 分批推进时，第一批只排 batch 步——一次排满就没有"回头看一眼"的机会了。
+        # 分批推进时，第一批只排 batch 步；一次排满就没有「复盘这一批」的机会了。
         limit=int(limit if limit is not None else args.limit),
         # `plan` 子命令没有 --window，`run --autonomous` 有：两边都要能用。
         window=resolve_window(gateway, getattr(args, "window", 0)),
@@ -334,7 +334,7 @@ def _delegate_step(ctx: StepRun, step, loop, pending) -> object:
         goal=step.goal,
         targets=step.scope,
         acceptance=step.acceptance,
-        constraints=("只做这一步，不要顺手做后面步骤的事",),
+        constraints=("只做这一步，不要做后续步骤的工作",),
     )
     plan = ctx.plan
     outcome = run_delegated(
@@ -539,7 +539,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
             return 0
         print(plan.render())
         return 1
-    # 分批推进时第一批只排 batch 步：一次排满就没有"回头看一眼"的机会了。
+    # 分批推进时第一批只排 batch 步：一次排满就没有「复盘这一批」的机会了。
     # 材料读一次，第一批与后面的续排共用——不给续排材料，它排出来的
     # 步骤会退化成"修复 04 目录下的编程题"这种话（实测）。
     context = _survey(project_root, args.goal, counter_for(gateway))
@@ -568,7 +568,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         plan=plan,
         non_interactive=True,
     )
-    # 教训要写进记忆库：分批推进的"回头看"只有存下来，才能在后面的同类任务里
+    # 教训要写进记忆库：分批推进的复盘结论只有存下来，才能在后面的同类任务里
     # 被主动推送（那才是"在任务中成长"）。--no-memory 时不建，也不留状态。
     lesson_memory = (
         None
@@ -580,7 +580,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
             model=f"{getattr(args, 'provider', '')}:{getattr(args, 'model', '') or '默认'}",
         )
     )
-    # 分批推进：先做一批 → 回头看一眼 → 再排下一批。
+    # 分批推进：先做一批 → 复盘这一批 → 再排下一批。
     #
     # 这样每一批都能吃到前一批的**实际结果**（某个接口不是那样、某个约束
     # 计划里没料到），而不是把五十步一次排死。要看完整目标时才用 --no-roll。
@@ -597,10 +597,10 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
             completed += 1
         if not rolling or completed >= int(getattr(args, "limit", 0) or 0):
             break
-        # 这一批做完了：回头看一眼，再排下一批。
+        # 这一批做完了：复盘这一批，再排下一批。
         reflection, lessons = reflect_progress(gateway, plan.goal, plan.steps)
         if reflection:
-            print(f"\n回头看这一批：{reflection}")
+            print(f"\n这一批复盘：{reflection}")
         stored = _keep_lessons(lessons, lesson_memory)
         if stored:
             print(f"（记下 {stored} 条教训——后面同类任务会主动推给它）")
@@ -629,10 +629,10 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
 
 
 def _keep_lessons(lessons, memory) -> int:
-    """把回头看得来的教训写进教训库，返回写了几条。
+    """把复盘得来的教训写进教训库，返回写了几条。
 
     没有记忆会话（`--no-memory`）时就丢掉——这是刻意的：不写记忆的运行
-    不该偷偷留下状态。
+    不该静默留下状态。
 
     教训的**触发词**由模型给（"什么时候该把这条推出来"）。没有它这条教训
     永远不会被推送，所以解析时已经把没触发词的丢掉了。

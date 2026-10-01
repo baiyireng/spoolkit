@@ -47,7 +47,10 @@ def test_有索引工具时给出查符号优先规则(tmp_path: Path) -> None:
     registry.register(find_callers_spec(conn))
     text = build_workflow(registry)
     assert "要改的文件必须先看到它的当前内容" in text
-    assert "看波及面" in text
+    # 钉要点：改代码前先用 find_callers 查调用方，避免改坏调用方。措辞可以再改，
+    # 这条行为丢了才是改坏（原句钉的是「看波及面」这个说法）。
+    assert "find_callers" in text and "改代码前" in text
+    assert "调用方" in text
 
 
 def test_有写工具时才提动手改(tmp_path: Path) -> None:
