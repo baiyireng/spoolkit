@@ -1,6 +1,10 @@
+import os
 import sys
 from pathlib import Path
 
+import pytest
+
+from spoolkit.tools import exec as exec_module
 from spoolkit.tools.exec import (
     MAX_OUTPUT_CHARS,
     resolve_argv,
@@ -242,6 +246,87 @@ def test_优先使用项目虚拟环境(tmp_path: Path) -> None:
     fake = venv_dir / "python.exe"
     fake.write_text("", encoding="utf-8")
     assert resolve_argv(["python"], tmp_path)[0] == str(fake)
+
+
+# --- 命令解释器：候选根 [工作区, spoolkit 检出根] ---------------------------
+#
+# 与 `tests/test_bench.py` 的验收解释器是同一个问题、同一份实现，只是第一个
+# 候选根是工作区。真实的翻车：spool 装在 uv tool / pipx / 系统 Python 里时，
+# agent 自测的 `pytest` 落到 `sys.executable`——那个环境没有 pytest，于是每次
+# 自测都撞 `No module named pytest`，模型转而去「修」一个它修不了的环境问题。
+
+
+def _fake_venv(root: Path) -> Path:
+    """造一个假虚拟环境解释器（只要求文件在；选择逻辑不看它能不能跑）。"""
+    venv_dir = root / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    venv_dir.mkdir(parents=True)
+    fake = venv_dir / ("python.exe" if os.name == "nt" else "python")
+    fake.write_text("", encoding="utf-8")
+    return fake
+
+
+def _isolated_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """把「检出目录」指到 tmp 里，免得测试结果取决于这台机器上的真实 .venv。"""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setattr(exec_module, "spoolkit_checkout_root", lambda: checkout)
+    return checkout
+
+
+def test_命令解释器优先用工作区虚拟环境(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """① 工作区自带 `.venv` 时用它——那才是这个项目的环境。
+
+    证伪：把候选顺序改成「检出目录优先」或「永远 sys.executable」，这条就红。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    checkout = _isolated_checkout(tmp_path, monkeypatch)
+    mine = _fake_venv(workspace)
+    _fake_venv(checkout)
+
+    assert resolve_argv(["python", "x.py"], workspace)[0] == str(mine)
+    assert resolve_argv(["pytest", "-q"], workspace)[0] == str(mine)
+
+
+def test_工作区没有虚拟环境时用检出目录的(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """② 工作区没有 `.venv` 时用检出目录的——uv tool / pipx / 系统 Python 那条路靠它。
+
+    证伪：把候选根改回「只有工作区」（即 `[root]`），这条就红——那时选中的是
+    `sys.executable`，而不是这里的检出目录解释器。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    checkout = _isolated_checkout(tmp_path, monkeypatch)
+    theirs = _fake_venv(checkout)
+    assert str(theirs) != sys.executable
+
+    assert resolve_argv(["python", "x.py"], workspace)[0] == str(theirs)
+    assert resolve_argv(["pytest", "-q"], workspace)[:1] == [str(theirs)]
+    assert resolve_argv(["pytest", "-q"], workspace)[1:] == ["-m", "pytest", "-q"]
+
+
+def test_两处都没有虚拟环境时退回当前解释器(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """③ 一个都没有就退回当前解释器：旧行为，任何环境下都还能用。
+
+    证伪：把兜底改成「没有 .venv 就抛异常/返回固定路径」，这条就红。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _isolated_checkout(tmp_path, monkeypatch)
+
+    assert resolve_argv(["python", "x.py"], workspace)[0] == sys.executable
+    assert resolve_argv(["pytest", "-q"], workspace) == [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+    ]
 
 
 def test_非python命令不做换算(tmp_path: Path) -> None:

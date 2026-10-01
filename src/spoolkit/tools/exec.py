@@ -23,7 +23,11 @@ import re
 from pathlib import Path
 
 from spoolkit.errors import PathOutsideProjectError
-from spoolkit.interpreter import PYTHON_PROGRAMS, resolve_python_argv
+from spoolkit.interpreter import (
+    PYTHON_PROGRAMS,
+    resolve_python_argv,
+    spoolkit_checkout_root,
+)
 from spoolkit.paths import resolve_within
 from spoolkit.tools.trial import trial_workspace
 from spoolkit.tools.types import ToolResult, ToolSpec
@@ -155,11 +159,25 @@ def resolve_argv(argv: list[str], root: Path) -> list[str]:
     """把模型写的命令名换算成本机真实可用的可执行文件。
 
     模型不该知道也不该猜「用哪个解释器」——那是环境细节，不是任务信息。
-    优先项目自带虚拟环境，其次当前解释器。
 
-    **选择与映射的实现不在这里**，在 `spoolkit.interpreter`：bench 的验收命令
-    要问同一个问题（裸 `python` / `pytest` 指向谁），而它多两个候选根。
-    这一处只交出自己的那一份候选——**当前工作区**，顺序也照旧。
+    候选根按优先级排：**① 工作区 `.venv` → ② spoolkit 检出根 `.venv` →
+    ③ `sys.executable`**。选择与映射的实现都不在这里，在 `spoolkit.interpreter`
+    （bench 的验收命令问的是同一个问题，只是第一个候选根换成任务工作区）；
+    这一处只交出自己那两份候选。顺序即优先级，不能调换。
+
+    **为什么要有第二个候选根（代价与边界，写在这里免得以后有人惊讶）**：
+    第一候选仍是项目自带的 `.venv`，所以**正常项目不受影响**——它自己的环境
+    永远排在前面。只有当工作区**没有** `.venv` 时，才会退回**检出目录**的
+    `.venv`（那里有 spoolkit 自己的 dev 依赖，包括 pytest），而**不是**
+    `sys.executable`。这是有意的：agent 的自动验证/自测要和「跑 spool 的那套
+    环境」解耦。spool 由 uv tool / pipx / 系统 Python 启动时，`sys.executable`
+    里通常没有 pytest，于是 agent 每次自测都撞 `No module named pytest`——
+    判定没错，但轨迹和 token 被污染，模型还会去「修」一个它修不了的环境问题。
+    **代价**：用户工作区里跑 `python x.py`，若这个脚本依赖项目独有的第三方包、
+    而工作区**又没有** `.venv`，它可能拿到检出环境的解释器，而不是 spool 环境的。
+    这种情况本来就拿不到 spool 环境的包（spool 环境里也没有该项目的依赖），
+    但依赖「恰好装在 spool 那个解释器里」的脚本会受影响——要消除这个歧义，
+    给工作区建 `.venv` 即可。
 
     **Windows 上的 `.cmd` 垫片**：`node` 这类命令常常不是 `.exe`，而是一个
     `.cmd` 垫片（nvm-for-windows、volta、pnpm 装的都是；本机 DSH 提供的 node 也是
@@ -177,7 +195,7 @@ def resolve_argv(argv: list[str], root: Path) -> list[str]:
     if not argv:
         return argv
     if argv[0] in PYTHON_PROGRAMS:
-        return resolve_python_argv(argv, [root])
+        return resolve_python_argv(argv, [root, spoolkit_checkout_root()])
 
     if argv[0] in ("node", "node.exe"):
         import os
