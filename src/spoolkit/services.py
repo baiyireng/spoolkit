@@ -2,17 +2,17 @@
 
 产品内核（hub）不启 llama-server / 隧道。这里是可选快捷方式：
 人在这台机器的配置里写 `[[service]]`，`spool service start` 才动手。
-退出只杀**本命令写下 pid 的孩子**，不扫别人的进程。
+退出只杀**本命令写下 pid 的子进程**，不扫别人的进程。
 
 **判据是本命令记下的 pid，不是探针**（2026-10-01 改）。探针只回答"那个端口
-通不通"，而"端口通"与"是不是我们起的"是两回事——1080 常被 Clash 这类进程
+通不通"，而"端口通"与"是不是本命令起的"是两回事——1080 常被 Clash 这类进程
 占着，拿探针当判据就会说"已经通了，不重复拉起"，于是用户以为自己有隧道、
 其实一个都没起；刚 `stop` 完再说"已经通了"也是同一个根因。现在：
 
 1. `start` 先看**自己记的 pid 还活着吗**；活着 → 明确说"已经在跑（pid …）"，
    同一条配方最多一个进程；记录里那个进程没了（或 pid 被复用）才动手拉起。
 2. 探针只用来报状态：`service list` 把三种情形分开写——**运行中（本命令启动）/
-   端口被占用（非本命令启动）/ 未运行**。没有 pid 记录时绝不谎报"我们在跑"。
+   端口被占用（非本命令启动）/ 未运行**。没有 pid 记录时绝不谎报"本命令在跑"。
 3. 子进程**启动后立刻退出**时，把它的退出码与最后几行输出带出来，完整输出留在
    `<用户状态目录>/services/<配方>.log`：`ssh -D 1080` 撞上被占的端口正是
    "bind: Address already in use" 然后死掉，改之前那一个字都看不到。
@@ -23,7 +23,7 @@
 
 pid 记录（`<用户状态目录>/services/<配方>.pid`）里除了 pid 还留一份**进程创建
 时刻的指纹**：Windows 用 `GetProcessTimes`，Linux 用 `/proc/<pid>/stat` 的第 22
-个字段。没有指纹就分不出"我们那个进程"和"pid 被系统复用给的新进程"，而后者会
+个字段。没有指纹就分不出"本命令拉起的进程"和"pid 被复用后的新进程"，而后者会
 让 `stop` 去杀一个无辜的进程。
 
 配方名字可改。文档示例用 `llama`（本机模型）和 `tunnel`（通道 SOCKS，
@@ -51,10 +51,10 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 STOP_WAIT = 3.0
 
 #: 拉起后盯多久：这段时间内退出就算"启动失败"（而不是"已拉起"）。
-#: 0.6 秒的依据：绑不上端口、找不到主机、凭据不对这几种死法都在几十毫秒内；
-#: 等更久只是让 `start` 变慢，而**正常服务**不会被这段时间影响（我们只等"死"）。
+#: 0.6 秒的依据：绑不上端口、找不到主机、凭据不对这几种失败都在几十毫秒内；
+#: 等更久只是让 `start` 变慢，而**正常服务**不受这段时间影响（只等它退出）。
 START_GRACE = 0.6
-#: 立刻退出时带出来的输出行数。带多了会把"哪一行才是原因"淹掉。
+#: 立刻退出时带出来的输出行数。带多了会把"哪一行是原因"淹没。
 TAIL_LINES = 3
 
 #: 一条配方现在的样子。三种**要分得清**的情形（`state`）：
@@ -67,7 +67,7 @@ STATE_OCCUPIED = "occupied"
 STATE_DOWN = "down"
 STATE_UNKNOWN = "unknown"
 
-#: 状态 → 给人看的那个词（`service list` 行里紧挨着 `[可启]` 的那一段）。
+#: 状态 → 展示词（`service list` 行里紧挨着 `[可启]` 的那一段）。
 #: 三个词各自把"是不是本命令起的"说全：图例就不必再塞进表头。
 STATE_LABELS: dict[str, str] = {
     STATE_OURS: "运行中（本命令启动）",
@@ -108,7 +108,7 @@ def log_path(name: str) -> Path:
 
 @dataclass(frozen=True)
 class PidRecord:
-    """我们自己拉起的那条配方的登记：pid ＋ 创建时刻指纹 ＋ 当时的命令。
+    """本命令拉起的那条配方的登记：pid ＋ 创建时刻指纹 ＋ 当时的命令。
 
     `start` 为 `None` 的两种来由：升级前写下的裸 pid 文件（老记录），
     以及这个平台拿不到指纹（见 `process_start_token`）。那时退回"只按 pid 判"。
@@ -189,9 +189,9 @@ def clear_pid(name: str) -> None:
 
 
 def pid_alive(pid: int) -> bool:
-    """这个 pid 上有个活着的进程吗（**不判断是不是我们的**）。
+    """这个 pid 上有个活着的进程吗（**不判断归属**）。
 
-    Windows 上**不用** `os.kill(pid, 0)` 探活：POSIX 那条"0 号信号只是看一眼"
+    Windows 上**不用** `os.kill(pid, 0)` 探活：POSIX 那条"0 号信号只探活"
     的规则在 Windows 上不成立——CPython 把任何信号都实现成 `OpenProcess` ＋
     `TerminateProcess`（python/cpython#125298），拿它探活有把进程探死的风险；
     本机的文件沙箱还会把那次 `TerminateProcess` 拦下来，于是它既不杀、也答不准
@@ -245,7 +245,7 @@ def _win32_pid_alive(pid: int) -> bool:
     """`OpenProcess(SYNCHRONIZE)` ＋ `WaitForSingleObject(0)`。
 
     已退出 = 句柄被信号（`WAIT_OBJECT_0`）；还活着 = `WAIT_TIMEOUT`。
-    打不开句柄时说"活着"更安全：权限不够（别人家的进程）是打不开的常见原因，
+    打不开句柄时按"活着"办更安全：权限不够（别的进程）是打不开的常见原因，
     而认错了的代价只是"少拉一个"，反过来是"同一条配方两个进程抢同一个端口"。
     """
     import ctypes
@@ -316,7 +316,7 @@ def _proc_start_token(pid: int) -> int | None:
 
 
 def record_alive(record: PidRecord | None) -> bool:
-    """记录里那个进程**还是我们那个**吗——"要不要拉起"的唯一判据。
+    """记录里那个进程**还是原来那个**吗——"要不要拉起"的唯一判据。
 
     拿不到指纹（老记录 / 没实现的平台 / 临时问不到）时只按 pid 判，且**宁可
     认为活着**：认错的代价是"少拉一个"，反过来是"同一条配方两个进程"。
@@ -357,7 +357,7 @@ def inspect_service(
     timeout: float = PROBE_TIMEOUT_SECONDS,
     cached: bool = True,
 ) -> ServiceState:
-    """看一眼这条配方：**先看 pid 记录，再拿探针报状态**。两边都不改只读。"""
+    """查这条配方：**先看 pid 记录，再拿探针报状态**。两边都不改只读。"""
     record = read_record(item.name)
     ours = record_alive(record)
     pid = record.pid if ours and record is not None else None
@@ -373,7 +373,7 @@ def inspect_service(
         tail = probe_detail if item.health else "这条配方没写探活地址"
         detail = f"本命令启动的进程存活：pid {pid}；{tail}"
     elif item.health and probe_ok:
-        # 端口上有东西，可我们的记录里没有活着的进程：那不是我们起的。
+        # 端口有进程监听，而记录里没有活着的进程：那不是本命令起的。
         state = STATE_OCCUPIED
         detail = "端口有进程监听，非本命令启动；改用其他端口，或先停止该进程"
     elif not item.health:
@@ -397,7 +397,7 @@ def probe_all() -> list[dict]:
     """给 `/state` 用的红绿列表。没配方就是空的。
 
     `ok` 仍是**探针口径**（端口 / HTTP 通不通）：网页壳那一列回答的是"这个地址
-    现在能不能用"。**是不是我们起的**进 `detail`，与 `service list` 同一句话。
+    现在能不能用"。**是不是本命令起的**进 `detail`，与 `service list` 同一句话。
     """
     rows: list[dict] = []
     for item in settings.load_services():
@@ -418,7 +418,7 @@ def spawn_flags() -> int:
     """拉起服务子进程时给的 Windows `creationflags`（非 Windows 返回 0）。
 
     为什么要有它：`start_new_session=True` 是 **POSIX only**（CPython 文档写明），
-    Windows 上被忽略——不给 creationflags 的子进程与我们在同一个进程组、同一个
+    Windows 上被忽略——不给 creationflags 的子进程与本进程同一个进程组、同一个
     控制台，用户在**同一个窗口**按 Ctrl-C，控制台把 CTRL_C_EVENT 广播给这个控制台
     上的所有进程，服务跟着一起死（"spool qq 之后隧道自己没了"就是这么来的）。
 
@@ -481,7 +481,7 @@ def start_service(name: str) -> tuple[int, str]:
     if not item.command:
         return 2, f"{name} 只探测、没有启动命令"
 
-    # 判据一：我们自己记的 pid 还活着吗。活着就是"同一条配方最多一个进程"。
+    # 判据一：本命令记下的 pid 还活着吗。活着就是"同一条配方最多一个进程"。
     record = read_record(name)
     if record is not None and record_alive(record):
         return 0, f"{name} 已经在跑（pid {record.pid}），不重复拉起"
@@ -489,7 +489,7 @@ def start_service(name: str) -> tuple[int, str]:
         # 过期记录：那个进程没了，或者 pid 已经被别的进程复用。清掉再拉。
         clear_pid(name)
 
-    # 探针只用来**报状态**：端口上本来就有东西吗（可能是别人的 Clash）。
+    # 探针只用来**报状态**：端口上本来就有进程监听吗（可能是别的进程）。
     occupied = ""
     if item.health:
         ok, target, _detail = probe_spec(item.health, cached=False)
@@ -502,7 +502,7 @@ def start_service(name: str) -> tuple[int, str]:
     try:
         proc = _popen_service(item.command, log)
     except OSError as exc:
-        return 2, f"拉不起来：{exc}"
+        return 2, f"拉起失败：{exc}"
     write_record(name, PidRecord.for_pid(proc.pid, item.command))
     code = _wait_start(proc)
     if code is not None:
@@ -513,7 +513,7 @@ def start_service(name: str) -> tuple[int, str]:
 
 
 def _wait_start(proc: subprocess.Popen) -> int | None:
-    """盯一小会儿：退出了给退出码，还活着给 None（`poll` 顺手把子进程收掉）。"""
+    """盯一小会儿：退出了给退出码，还活着给 None（`poll` 同时回收子进程）。"""
     deadline = time.monotonic() + START_GRACE
     while True:
         code = proc.poll()
@@ -544,7 +544,7 @@ def _exit_message(name: str, code: int, log: Path, occupied: str) -> str:
         body.append(f"最后 {len(tail)} 行输出：")
         body.extend(f"    {line}" for line in tail)
     else:
-        body.append("（它一个字都没输出）")
+        body.append("（没有输出）")
     body.append(f"完整输出：{log}")
     return "\n".join(body)
 
@@ -561,10 +561,10 @@ def stop_service(name: str) -> tuple[int, str]:
     if record.start is not None:
         current = process_start_token(record.pid)
         if current is not None and current != record.start:
-            # pid 被系统复用给了别的进程：**不能杀**，那不是我们的孩子。
+            # pid 被系统复用给了别的进程：**不能杀**，那不是本命令拉起的进程。
             clear_pid(name)
             return 2, (
-                f"{name} 那个 pid（{record.pid}）现在不是我们拉起的进程（pid 被复用了），"
+                f"{name} 那个 pid（{record.pid}）现在不是本命令拉起的进程（pid 被复用了），"
                 "不杀它；pid 记录清掉"
             )
     _kill(record.pid)
@@ -620,7 +620,7 @@ def render_status() -> str:
                 "",
                 "  # llama：本机语言模型。hub 按 provider/base_url 探活；",
                 "  # 这条只方便 spool service start/stop：判据是本命令记下的 pid，",
-                "  # 有活着的就不重复拉起（端口通不通只看不说）。",
+                "  # 有活着的就不重复拉起（端口通不通只作参考）。",
                 "  [[service]]",
                 '  name = "llama"',
                 '  command = ["llama-server", "-m", "你的模型.gguf", "--port", "8080"]',
@@ -633,7 +633,7 @@ def render_status() -> str:
                 '  command = ["ssh", "-N", "-D", "1080", "你的跳板"]',
                 '  health = "tcp:127.0.0.1:1080"',
                 "",
-                "command 可空：空就只探测、不替你启动。",
+                "command 可空：空则只探测、不启动。",
                 "拉起：spool service start llama",
             ]
         )

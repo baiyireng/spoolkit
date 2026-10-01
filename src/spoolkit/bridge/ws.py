@@ -88,7 +88,7 @@ def encode_frame(opcode: int, payload: bytes, mask: bool = True) -> bytes:
     """编一个帧。客户端发出的帧**必须**加掩码（RFC 6455 §5.3）。
 
     掩码位是第二个字节的最高位——**只把负载 XOR 了、没设这一位**，
-    对端就会按"没掩码"去读，收到一堆乱字节。（这个 bug 是被
+    对端就会按"没掩码"去读，收到一段乱字节。（这个 bug 是被
     test_qqbot 的回环服务端当场抓到的：它读到的首字节是 0x9b。）
     """
     head = bytearray([0x80 | opcode])  # FIN=1 + opcode
@@ -276,7 +276,7 @@ class WebSocket:
 
         `timeout` 只对这一次调用生效（不传就用建连接时的）。为什么需要它：
         用的人往往有"过一会儿必须做点别的事"的需求（比如按时发心跳），而单靠
-        建连接时的那个固定超时，这件事做不准——真机上就是这么被平台掐线的。
+        建连接时的那个固定超时，这件事判不准——真机上就是这样被平台断开的。
         """
         if timeout is None:
             return self._recv_text()
@@ -293,7 +293,7 @@ class WebSocket:
                     pass
 
     def _recv_text(self) -> str | None:
-        """分片按 FIN 拼起来；心跳在这里就地回答（不回它，对端会认为我们掉线）。"""
+        """分片按 FIN 拼起来；心跳在这里就地回答（不回它，对端会判定本端掉线）。"""
         buffer = bytearray()
         while True:
             frame = read_frame(self._sock)
@@ -333,7 +333,7 @@ class WebSocket:
 
 
 def _close_text(payload: bytes) -> str:
-    """把关闭帧的负载翻成人话：前两字节是码，其余是原因。"""
+    """把关闭帧的负载解出来：前两字节是码，其余是原因。"""
     if len(payload) < 2:
         return "对端没给关闭码"
     code = struct.unpack("!H", payload[:2])[0]
@@ -343,7 +343,7 @@ def _close_text(payload: bytes) -> str:
 
 def _parse_proxy(proxy: str) -> tuple[str, int]:
     """把 `socks5://host:port` 拆开。写在文件末尾是因为它当初插在类中间，
-    把后面几个方法**吞进了它自己的函数体**（缩进还在，于是它们成了
+    把后面几个方法**并进了它自己的函数体**（缩进还在，于是它们成了
     `_parse_proxy` 里永远执行不到的内部函数）——症状是 `WebSocket` 上
     没有 `send_text`，而单测看不出来，真机一跑就炸。
     """

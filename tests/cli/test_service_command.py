@@ -390,7 +390,7 @@ def test_pid被复用时不杀无辜进程(tmp_path: Path, monkeypatch) -> None:
     svc.write_record("tunnel", svc.PidRecord(pid=os.getpid(), start=1, command=()))
     code, message = stop_service("tunnel")
     assert code == 2, message
-    assert "复用" in message or "不是我们拉起的" in message
+    assert "复用" in message and "不杀" in message, message
     assert pid_alive(os.getpid()), "那个 pid 是别人的进程，绝不能被杀"
     assert read_pid("tunnel") is None, "过期记录要清掉，别占着判据"
 
@@ -525,7 +525,7 @@ def test_Job不放开breakaway时退掉这一位重试也要能起来(tmp_path: 
     assert len(attempts) == 2, f"该带 breakaway 试一次、不带它再试一次：{attempts}"
     assert attempts[0] & svc._CREATE_BREAKAWAY_FROM_JOB
     assert not attempts[1] & svc._CREATE_BREAKAWAY_FROM_JOB
-    assert "拉不起来" not in message, message
+    assert "拉起失败" not in message, message
     assert code in (0, 1), message  # 1 = 那条命令自己立刻退了，但它**真被拉起来过**
 
 

@@ -123,10 +123,10 @@ class RunnerRegistry:
     def running_targets(self) -> list[dict]:
         """谁在跑。给 `/state` 用：页面必须**说得出**"别处还有一条在跑"。
 
-        刻意只取 `Runner.brief()` 而不是完整快照：这一行要的只是"在不在跑、在做什么"，
+        刻意只取 `Runner.brief()` 而不是完整快照：这一行要的只是"是否在跑、在做什么"，
         而快照还要读历史库与配对文件——`Runner.snapshot()` 默认还会发一次 HTTP 探活
         （网页壳那边已经把它挪到后台、给快照喂缓存，但直接用它时没有那个探针）。
-        页面每几秒轮一次 `/state`，给每个在跑的 Runner 各整一份纯属白干。
+        页面每几秒轮一次 `/state`，给每个在跑的 Runner 各整一份没有收益。
         """
         with self._lock:
             items = list(self._runners.items())

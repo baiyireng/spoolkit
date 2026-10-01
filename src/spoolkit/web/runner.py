@@ -1,13 +1,13 @@
 """子进程运行器。
 
-一次只跑一个运行。这不是偷懒：并发要处理多个待确认队列怎么合并、
-状态归属哪个运行，而这是本地单人用的壳——那些复杂度换不来任何东西。
+一次只跑一个运行。理由：并发要处理多个待确认队列怎么合并、
+状态归属哪个运行，而这是本地单人用的壳——那些复杂度没有收益。
 
 读取放在后台线程。主线程必须能随时响应 HTTP 请求，尤其是「确认」——
 它不能等 stdout 读完才被处理，否则点了按钮界面会僵住。
 
 `command()` 被设计成可覆盖的方法：测试要能换掉命令行而不改动其它逻辑，
-否则「确认流程」这种时序敏感的东西只能靠真 agent 跑几十秒来验证。
+否则「确认流程」这种时序敏感的行为只能靠真 agent 跑几十秒来验证。
 """
 
 import queue
@@ -55,7 +55,7 @@ TRACE_TURNS = 4
 # 所以事件必须留一段。留全量不行：长任务的事件是几千条，内存里攒着没意义。
 EVENT_LOG = 400
 
-# 聊天区域里回放多少条历史。页面上的往来给人看；模型拿的是另一份
+# 聊天区域里回放多少条历史。面向页面的往来；模型拿的是另一份
 # 截断后的最近几轮（`conversational_prompt`），不是这份完整回放。
 HISTORY_LIMIT = 20
 
@@ -71,7 +71,7 @@ def health_snapshot(
     *,
     timeout: float = health_mod.PROBE_TIMEOUT_SECONDS,
 ) -> dict:
-    """模型（以及 hub 可选附带的通道）通不通。给人看的，不进模型上下文。
+    """模型（以及 hub 可选附带的通道）通不通。展示用的，不进模型上下文。
 
     单独拎成模块级函数：机器级网页壳在**还没有当前目标**时也要能给出这一块
     （页面横幅读的就是它），而那时连一个 Runner 都还没有。探活失败不得把状态
@@ -144,13 +144,13 @@ def model_failure(extra_args: Sequence[str], noise: Sequence[str]) -> dict | Non
 def trace_line(event: Event) -> dict | None:
     """把一条事件翻成"给人回看的思考轨迹"里的一行；不值得记的给 None。
 
-    为什么要这样一份东西：子进程的思考过程（第几步 / 调了什么工具 / 为什么失败）
+    为什么要这样一份轨迹：子进程的思考过程（第几步 / 调了什么工具 / 为什么失败）
     原先只以**瞬时**的界面行存在——页面刷新、切走再切回，那一轮的排错线索就没了。
     轨迹由**已经有的事件**推出来（不新造协议、不新造存储），封存进 Runner，
     随 `/state` 只增地交出去，页面据此画一个默认收起的「思考过程」。
 
     `diff` 单独给 None：那份正文可能有几百行，而且它已经作为待确认卡片有了自己的
-    位置（`diffs` 字段一个字没动），塞进轨迹只会把它淹掉。`start` 也不是一步。
+    位置（`diffs` 字段一个字没动），塞进轨迹只会把它淹没。`start` 也不是一步。
     """
     kind = event.type
     data = event.data
@@ -440,7 +440,7 @@ class Runner:
             messages = self._transcript()
             # **只增**：每条消息多一个 `trace`（这一轮的思考轨迹，默认空表）。
             # 刷新 / 切走再切回时，页面靠它把「思考过程」重新画出来——那一轮停在
-            # 哪一步、哪次调用为什么失败，是排错唯一要看的东西。
+            # 哪一步、哪次调用为什么失败，是排错唯一需要的内容。
             attach_traces(messages, self._turns)
             data = {
                 "running": self.running,
@@ -454,7 +454,7 @@ class Runner:
                 "session": self.session,
                 "messages": messages,
                 # 顶层别名：外部驱动者（MCP 客户端等）不读源码时靠直觉就能判断
-                # 「做完了没」「成功没」。finished/final 仍然保留，不破坏老接口。
+                # 「是否结束」「是否成功」。finished/final 仍然保留，不破坏老接口。
                 "done": self._finished,
                 "ok": final.get("ok") if final else None,
                 # **只增**：这一轮（正在跑或刚跑完）的轨迹 + 是不是被手动停掉的。
@@ -474,10 +474,10 @@ class Runner:
     def brief(self) -> dict:
         """一行状态：给"别处还有哪些目标在跑"用（页面上的那条提示）。
 
-        刻意**不是** `snapshot()`：这一行要的只是"在不在跑、在做什么"，而快照还要
+        刻意**不是** `snapshot()`：这一行要的只是"是否在跑、在做什么"，而快照还要
         读历史库与配对文件——`Runner.snapshot()` 默认还会**发一次 HTTP** 探活
         （网页壳那边已经把探活挪到后台、给快照喂缓存，但直接用它时没有那个探针）。
-        页面每几秒轮一次 `/state`，给每个在跑的 Runner 各整一份纯属白干。
+        页面每几秒轮一次 `/state`，给每个在跑的 Runner 各整一份没有收益。
         """
         with self._lock:
             return {
@@ -488,7 +488,7 @@ class Runner:
             }
 
     def _health_snapshot(self, health: dict | None = None) -> dict:
-        """模型（以及 hub 可选附带的通道）通不通。给人看的。
+        """模型（以及 hub 可选附带的通道）通不通。展示用的。
 
         给了 `health` 就原样用它（网页壳的后台探针给的那一份），否则同步探一次。
         """
@@ -497,14 +497,14 @@ class Runner:
         return health_snapshot(self.extra_args, self._extra_health)
 
     def _pending_pairings(self) -> list[dict]:
-        """待批准的配对码。给人看的，不进模型上下文。"""
+        """待批准的配对码。展示用的，不进模型上下文。"""
         pending = Pairings(
             self.project_root / ".agent" / "bridge-pairings.json"
         ).pending
         return [{"code": code, "user": user} for code, user in pending]
 
     def _transcript(self) -> list[dict]:
-        """这个会话之前的往来——**给人看的**，不进入模型上下文。
+        """这个会话之前的往来——**展示用的**，不进入模型上下文。
 
         两者混为一谈会得出"那就把历史塞回上下文吧"的结论，而那会把这个项目
         的支点（短上下文）直接推翻。所以它只出现在页面快照里。

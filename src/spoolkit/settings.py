@@ -5,25 +5,25 @@
 - **工作区级**（`.agent/limits.json`、`.agent/policy.json`）：属于这个项目，
   跟着项目走，已经齐了；
 - **命令行**：一次一给，用于临时覆盖；
-- **用户级**（本模块 + 同目录的 `.env`）：属于这台机器上的你。缺了它，同一件事
+- **用户级**（本模块 + 同目录的 `.env`）：属于这台机器上的用户。缺了它，同一件事
   每天都要重打一遍 `--provider llamacpp --base-url http://127.0.0.1:8080`——
-  而这类重复输入最后的下场是被人做成一个 .bat，然后没人知道真正的配置在哪。
+  而这类重复输入通常会被做成一个 .bat，于是没人知道真正的配置在哪。
   **密钥只放 `.env`**（`%APPDATA%\\spoolkit\\.env`，见 `env_path()`），本文件只放
   非密钥默认值：TOML 有键白名单，写错一个字母的症状是"设置了却没生效"，
-  而密钥得能随手加一行。
+  而密钥需要能逐行追加。
 
 优先级：**命令行 > 环境变量 > 用户配置 > 内置默认**。顺序不能反：命令行是
 本次运行的意图，环境变量是这次 shell 的意图，配置文件是长期默认。
 
 文件位置：`SPOOLKIT_CONFIG` 指到哪就用哪；否则 Windows 用
 `%APPDATA%\\spoolkit\\config.toml`，其它平台用 `~/.config/spoolkit/config.toml`。
-**不放在工作区里**：工作区是要提交、要分享的东西，不该承载某台机器的默认值。
+**不放在工作区里**：工作区是要提交、要分享的目录，不该承载某台机器的默认值。
 
 本机外接也写在这份文件的 `[[service]]` 里（不进仓库）。常见两段、名字可改：
 
 - **llama**：本机语言模型进程。hub / serve 按 `provider` / `base_url` 探活；
   配方只方便 `spool service start/stop`，**判据是本命令记下的 pid**：有活着的就
-  不重复拉起，探针只报状态（端口被别人占着时不许当成"我们的在跑"）。
+  不重复拉起，探针只报状态（端口被别的进程占着时不许当成"本命令在跑"）。
 - **tunnel**：给聊天通道出网的本机 SOCKS（通常是 `ssh -D`）。QQ 等平台有
   IP 白名单时，借跳板把出口固定成那台主机；`spool hub --bridge-proxy
   socks5://127.0.0.1:1080` 去连它。这和 `--proxy`（模型供应商）不是一回事。
@@ -79,7 +79,7 @@ KEYS: tuple[str, ...] = (
 # 对应的环境变量名：SPOOLKIT_<KEY 大写>。
 ENV_PREFIX = "SPOOLKIT_"
 # 改名前的旧前缀。**故意继续认**：别人 .bat / 快捷方式里写好的
-# `AGENTS_DEV_PROVIDER` 不该因为我们改了个名字就失效。新前缀优先。
+# `AGENTS_DEV_PROVIDER` 不该因为改了个名字就失效。新前缀优先。
 LEGACY_ENV_PREFIX = "AGENTS_DEV_"
 
 
@@ -179,7 +179,7 @@ def describe_secret_search(names: Sequence[str], workspace: Path | None = None) 
     四种情况要分开说，因为它们指向完全不同的下一步：**不存在**（去建）、
     **不是文件**（路径指到目录了）、**存在但一行都没解析出来**（多半是编码，
     例如记事本存的 UTF-16 或非文本文件）、**没有要找的键**（那就把文件里
-    有哪些键列出来，通常一眼就能看出拼写差在哪）。
+    有哪些键列出来，拼写差在哪即可比对）。
     """
     lines = ["找过这些位置："]
     set_names = [name for name in names if (os.environ.get(name) or "").strip()]
@@ -222,7 +222,7 @@ def describe_secret_search(names: Sequence[str], workspace: Path | None = None) 
 
 
 def _size_hint(path: Path) -> str:
-    """给"存在但解析不出"那句配个大小：0 字节就是空文件，否则是"有东西但读不懂"。"""
+    """给"存在但解析不出"那句配个大小：0 字节就是空文件，否则是"有内容但读不懂"。"""
     try:
         size = path.stat().st_size
     except OSError:
@@ -234,7 +234,7 @@ def effective_config_path() -> Path:
     """**实际会读到**的那一份。改名兼容就发生在这里（见模块开头）。
 
     显式指定过位置（`SPOOLKIT_CONFIG` / 旧名）时不猜：**指定就是指定**。
-    否则"把配置指到一个空文件"会被旧位置那份真实配置悄悄盖住——测试里
+    否则"把配置指到一个空文件"会被旧位置那份真实配置静默盖住——测试里
     正是这么栽的（开发机上的 provider 泄漏进了断言）。
     """
     target = config_path()
@@ -251,7 +251,7 @@ def describe_missing() -> str:
 
     为什么值得单独写一段：改名之后配置有两个可能的位置（新的 `spoolkit`、旧的
     `agents-dev`），"它又问了我一遍"这件事本来就容易让人怀疑代码。真发生过一次
-    用户机器上弹出向导，而**当时那份旧配置明明还在**——问题是我们没有留下任何
+    用户机器上弹出向导，而**当时那份旧配置明明还在**——问题在于没有留下任何
     "它到底看了哪儿"的痕迹，于是只能靠复现去猜。这一行输出就是那条痕迹。
     """
     lines = ["没找到供应商配置，找过这些位置："]
@@ -285,7 +285,7 @@ def read_config(path: Path | None = None) -> tuple[dict, str]:
     """读整个配置文件，返回（内容, 错误说明）。
 
     **错误要能说出口**。原先解析失败一律返回空，症状是"我明明配了却没生效"
-    ——而人只会怀疑代码。TOML 里最常踩的坑正是 Windows 路径：
+    ——而人只会怀疑代码。TOML 里最常见的失败是 Windows 路径：
     `command = "D:\\tools\\x.exe"` 少一个反斜杠就整份读不出来。
     """
     target = path or effective_config_path()
@@ -503,7 +503,7 @@ def _channel_value_problem(key: str, raw) -> str:
 
     `timeout` 的下界定在 **> 0** 的依据：它是"一轮最多等多少秒"，消费方是
     `bridge/agent_runner.py` 的 `deadline = now + timeout`——0 与负数意味着
-    **每一轮当场就到点**，人看到的是"它说超过 -5 秒还没结束，先不等了"。同一仓里
+    **每一轮当场就到点**，症状是"它说超过 -5 秒还没结束，先不等了"。同一仓里
     `tools/exec.py` 对命令超时的写法就是拒绝（"timeout 必须在 1 到 N 秒之间"），
     这里沿用同一条口径：认不出来就退回下一层，而不是把 -5 原样递给桥。
     """
@@ -524,7 +524,7 @@ def _channel_value_problem(key: str, raw) -> str:
 
 
 def display_channel_value(value) -> str:
-    """把一个通道值印成人看的样子。`spool qq` 的起手行与 `spool config` 共用。
+    """把一个通道值转成展示字面。`spool qq` 的起手行与 `spool config` 共用。
 
     两条规矩，都是"印出来的字必须与生效值对得上"：
 
@@ -566,7 +566,7 @@ class ChannelValues:
         return self.sources.get(key, "未设置")
 
     def notes(self) -> str:
-        """给人看的一两行：这一节里有什么不对。没问题时返回空串。"""
+        """展示用的一两行：这一节里有什么不对。没问题时返回空串。"""
         lines = []
         if self.unknown:
             lines.append(
@@ -667,7 +667,7 @@ def known_channels(path: Path | None = None) -> list[str]:
 
 
 def resolve(key: str, flag: str = "", env: dict[str, str] | None = None) -> tuple[str, str]:
-    """返回（值, 来源）。来源要能说出来——不然"我明明设了"就成了口头禅。"""
+    """返回（值, 来源）。来源要能说出来——不然"我明明设了"就会反复出现。"""
     if flag:
         return flag, "命令行"
     table = load()
@@ -734,7 +734,7 @@ def load_mcp_servers(path: Path | None = None) -> list[McpServer]:
 class ExternalService:
     """本机外接配方。写在用户配置的 `[[service]]` 里，不进仓库。
 
-    `command` 可空：空就只探测、不替你启动。地址、gguf 路径、ssh 主机
+    `command` 可空：空则只探测、不启动。地址、gguf 路径、ssh 主机
     都由这台机器的人自己写，产品不绑死。常见名字的用途：`llama` 是本机
     语言模型；`tunnel` 是通道出网的 SOCKS（配合 `--bridge-proxy`），不是
     模型的 `--proxy`。

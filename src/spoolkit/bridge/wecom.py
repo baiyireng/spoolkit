@@ -9,7 +9,7 @@
   （给个假 transport）。
 - **收**：企业微信是**回调推送**——它要求一个公网可达的 URL，并且带
   URL 验证（`echostr`）与 AES 加密。这一版只实现"把回调报文解析成
-  `Incoming`"（`parse_callback`），**不改动 agent 侧的任何东西**；
+  `Incoming`"（`parse_callback`），**不改动 agent 侧的任何代码**；
   把它接到公网入口是部署问题（文档里写了形状）。
 
 凭据来源：`AGENTS_DEV_WECOM_CORP_ID` / `AGENTS_DEV_WECOM_SECRET` /
@@ -67,7 +67,7 @@ class WeComChannel:
     def send(self, text: str, to: str = "") -> None:
         target = to or self._default_to
         if not target:
-            raise RuntimeError("不知道发给谁：这条通道还没收到过消息（缺 userid）")
+            raise RuntimeError("没有收件人：这条通道还没收到过消息（缺 userid）")
         response = self._client.post(
             "/cgi-bin/message/send",
             params={"access_token": self.access_token()},

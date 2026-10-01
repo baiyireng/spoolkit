@@ -46,7 +46,7 @@ OP_IDENTIFY = 2
 OP_HEARTBEAT = 1
 OP_RESUME = 6
 
-# QQ 对单条消息的内容有上限（按**字节**算，中文一个字 3 字节）。超了我们这边
+# QQ 对单条消息的内容有上限（按**字节**算，中文一个字 3 字节）。超了本端
 # 拿不到任何回应——用户那边就是"看不见结论"。所以长答复要分条发。
 # 取 3000 字节：比常见的 4000 字节上限留足余量，又不至于把一条正常结论切碎。
 MAX_CONTENT_BYTES = 3000
@@ -68,7 +68,7 @@ def _split_for_qq(text: str, limit: int = MAX_CONTENT_BYTES) -> list[str]:
     return chunks
 
 # 心跳**提前**这么多秒发。刚好卡在间隔边界上有风险：平台那边也在数秒，
-# 网络抖一下就成了"这一轮没心跳"。提前一点点不影响规矩（平台只查有没有按时）。
+# 网络抖动一次就成了"这一轮没心跳"。提前一点不影响断言（平台只查有没有按时）。
 HEARTBEAT_MARGIN = 1.0
 
 
@@ -142,7 +142,7 @@ class QQBotChannel:
         # 默认回复目标：从最后一条收到的消息来（回给同一个人/同一个群）。
         # 存成 (kind, openid) 而不是拼好的字符串——省的号段里再拆一次。
         self._default_to = ""      # "c2c:<openid>" / "group:<openid>"：最近一条消息
-        self._last_event_id = ""   # 被动回复要带 msg_id，就靠它记住
+        self._last_event_id = ""   # 被动回复要带 msg_id，靠它记录
         self._last_kind = ""       # "c2c" / "group"（规范化过的，不是事件类型名）
         self._seq = 0
         self._thread: threading.Thread | None = None
@@ -164,7 +164,7 @@ class QQBotChannel:
         """
         target = to or self._default_to
         if not target:
-            raise RuntimeError("不知道发给谁：这条通道还没收到过消息")
+            raise RuntimeError("没有收件人：这条通道还没收到过消息")
         kind, _, openid = target.partition(":")
         if not openid:
             kind, openid = (self._last_kind or "c2c"), kind
@@ -219,7 +219,7 @@ class QQBotChannel:
             ) from second
 
     def poll(self) -> list[Incoming]:
-        """取走网关线程攒下的消息。**不阻塞**——没有就返回空列表。"""
+        """取走网关线程收到的消息。**不阻塞**——没有就返回空列表。"""
         messages, self._queue = self._queue, []
         return messages
 
@@ -275,7 +275,7 @@ class QQBotChannel:
                 self._run_gateway_once()
                 self._note("QQ 网关已断开，5 秒后重连")
             except Exception as exc:  # noqa: BLE001 - 隧道一断 httpx.ConnectError 也会来
-                # 网络抖动不该把通道打死：退一步重连（resume 留给下一步优化——
+                # 网络抖动不该终止通道：退一步重连（resume 留给下一步优化——
                 # 断了之后 QQ 会把没收到的事件按 op 0 重发一段时间）。
                 self._note(f"QQ 网关出错（{type(exc).__name__}: {exc}），5 秒后重连")
             # 两句提示都写着"5 秒后重连"，但当初只有出错那条真的等了——正常返回
@@ -297,7 +297,7 @@ class QQBotChannel:
                     ws.send_text(json.dumps({"op": OP_HEARTBEAT, "d": self._seq or None}))
                     heartbeat_at = self._clock() + _heartbeat_delay(interval)
                 # 关键：**等到下一次心跳之前就要醒**。
-                # 真机踩过的坑：心跳间隔 41.25s，而 recv 一次要阻塞 20s，心跳只在
+                # 真机实测：心跳间隔 41.25s，而 recv 一次要阻塞 20s，心跳只在
                 # 两次 recv 之间检查——于是它总在 60s 左右才发出去，平台直接掐线，
                 # 表现成"每 60 秒断一次、反复重连"，看着像网络问题，其实是自己的时序。
                 if heartbeat_at is None:

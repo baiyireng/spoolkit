@@ -92,7 +92,7 @@ TARGET_POLL_SECONDS = 1.0
 #: 看起来像没反应。拿到结果之后立刻回到 5 秒的节拍。
 FIRST_RESULT_POLL_SECONDS = 1.0
 
-# 机器级网页壳还没有当前目标时，`target.note` 要能告诉人下一步做什么。
+# 机器级网页壳还没有当前目标时，`target.note` 要能给出下一步动作。
 # 这句话会出现在 `/state` 的空态与启动提示里。**它必须与页面一致**：页面顶上那条
 # 选择栏（工作区 / 会话两条下拉）就是"选一个工作区"的地方。改回"在页面上选"是
 # 有言在先的——Task 3 当时只能写 `POST /target`，是因为选择栏还没接上。
@@ -124,7 +124,7 @@ POINTER_CLIENT = "web"
 # `_stream` 里那个"还没订阅过"的哨兵：没有它，第一圈会以为"目标没变"而不订阅。
 _UNSET = object()
 
-#: 非回环绑定时给人看的那句话（终端与 403 响应体共用同一句）。
+#: 非回环绑定时展示用的那句话（终端与 403 响应体共用同一句）。
 #:
 #: 为什么要说"要驱动它就在本机来"：这条壳只读是**故意的**（设计 §3.7：远程可写要
 #: 单独一个开关，先想清楚鉴权与传输），所以不能只说"403"，得给出路——否则人只会
@@ -494,7 +494,7 @@ class WebState:
                 wanted = kernel_sessions.validate_session_name(name)
             except SessionError as exc:
                 # 名字非法时给出可读说明（与 `/target` 同一条口径），绝不静默改成别的名字：
-                # 改掉之后页面上让人看到的名字与他敲的那个不一样，而目录已经建了。
+                # 改掉之后页面上显示的名字与他敲的不一样，而目录已经建了。
                 return 400, {"error": str(exc)}
         try:
             made = kernel_sessions.create_session(
@@ -505,7 +505,7 @@ class WebState:
         except SessionError as exc:
             return 400, {"error": str(exc)}
         except OSError as exc:
-            # 磁盘满 / 状态目录没权限：不冒栈，给人话。
+            # 磁盘满 / 状态目录没权限：不冒栈，给出可读说明。
             return 500, {"error": f"会话没建起来（{target.root} 写不进去）：{exc}"}
         return 200, {"ok": True, "session": made, "title": str(title or "")}
 
@@ -612,7 +612,7 @@ class WebState:
         推断的，不是人选的结果），以及空 body 的 no-op 切换。
 
         **非回环（只读壳）也不写**（设计 §3.7）：这一条是"远程只能看"的落地点。
-        `POST /target` 仍然放行——它改的只是"这个进程现在看谁"，不驱动任何东西
+        `POST /target` 仍然放行——它只改"这个进程现在看谁"，不驱动任何任务
         （在跑的任务不会被它碰到）；但**落盘是另一回事**：指针会留到下次启动，
         等于让一个网络来的人改这台机器的持久状态，而本批没有任何鉴权来兜底。
         所以线划在"改进程内视图可以，改机器级持久状态不行"，而不是"整个 /target 拒掉"：
@@ -752,7 +752,7 @@ def _handler_for(state: WebState):
             为什么这不是洁癖，两个后果都是真的：
 
             - 客户端用 keep-alive 时，**没读完的字节会被当成下一个请求的行**——
-              第二个响应变成 http.server 自己发的 400/501，而不是我们发的那一个
+              第二个响应变成 http.server 自己发的 400/501，而不是本模块发的那一个
               （报错还说"Bad request syntax"，看起来像客户端发了坏包）；
             - 客户端说 `Connection: close` 时（urllib 默认就是这样），带着没读完的
               接收数据去关 socket，Windows 发的是 **RST 不是 FIN**，客户端会在收
@@ -761,7 +761,7 @@ def _handler_for(state: WebState):
               `tests/web` 就红一条，症状与代码毫无关系的样子。
 
             读的字节数以 `Content-Length` 为准，分块丢弃：body 可以很大，不必整个
-            装进内存。它撒谎（说得多、发得少）时 `read` 会一直等到客户端关连接——
+            装进内存。长度多报（说得多、发得少）时 `read` 会一直等到客户端关连接——
             这一点与 `_body()` 原先的行为一致，没有变坏。
             """
             remaining = int(self.headers.get("Content-Length") or 0)
@@ -972,7 +972,7 @@ def _handler_for(state: WebState):
                 if runner is None:
                     self._json(
                         409,
-                        {"error": "还没有选工作区，没有可确认的东西。"},
+                        {"error": "还没有选工作区，没有可确认的改动。"},
                     )
                     return
                 if not runner.confirm(bool(payload.get("apply"))):
@@ -1040,13 +1040,13 @@ def build_state(
     # 判据只看 `project_root`，**不看 `target`**：早先写成 `and target is None` 时，
     # `build_state(root, target=T)` 与 `serve(root, target=T)` 会得出不同的 `pinned`
     # （复审记的就是这处不对称）。虽然当时没有调用点，但"同一组参数、两个入口两个结果"
-    # 是后面一定会踩的坑。
+    # 是后面一定会遇到的问题。
     if project_root is not None:
         pinned = True
     if pinned and target is None and project_root is None:
-        # 钉住却没给钉什么：这种组合没有意义，而"悄悄当成机器级"会让调用方以为
+        # 钉住却没给钉什么：这种组合没有意义，而"静默当成机器级"会让调用方以为
         # 自己钉住了。宁可当场说清楚（`serve_command` / `hub_command` 都不会这么调）。
-        raise ValueError("pinned=True 必须给 project_root 或 target：钉住要有东西可钉。")
+        raise ValueError("pinned=True 必须给 project_root 或 target：钉住要有对象可钉。")
     registry = RunnerRegistry(
         lambda root, name: Runner(
             root,
@@ -1172,7 +1172,7 @@ def serve(
     # 与 `build_state` 里同一条归一（那里也有一份，因为它是个公开入口）：
     # 给了 `project_root` 就是钉住它。这里还要这份，是因为下面那句提示语
     # 直接读 `pinned`——不归一的话，`serve(root)` 会去钉别的目标、终端还印着
-    # "机器级网页壳"，两句话都在骗人。
+    # "机器级网页壳"这两个说法不成立。
     pinned = pinned or project_root is not None
     state = build_state(
         project_root,

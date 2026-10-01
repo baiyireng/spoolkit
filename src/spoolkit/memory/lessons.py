@@ -35,7 +35,7 @@ PUSH_THRESHOLD = 0.45
 PRUNE_THRESHOLD = 0.35
 
 # 样本少于这个数就不调整置信度：一两次成败说明不了什么，
-# 过早调整只会让置信度来回抖，反而不可信。
+# 过早调整只会让置信度反复波动，反而不可信。
 MIN_SAMPLES = 3
 
 MAX_PUSHED = 3
@@ -84,8 +84,8 @@ def match_lessons(
 ) -> list[Memory]:
     """挑出与当前场景相关的教训，按置信度排序。
 
-    匹配是关键词包含：触发词出现在任务描述里就算命中。规则很土，
-    但它是可解释的——推送了不该推的教训，你能一眼看出是哪个词匹配上的。
+    匹配是关键词包含：触发词出现在任务描述里就算命中。规则简单，
+    但它是可解释的——推送了不该推的教训时，能直接看出是哪个词匹配上的。
     """
     if not context.strip():
         return []
@@ -147,7 +147,7 @@ def prune_lessons(conn: sqlite3.Connection) -> list[int]:
     """把样本足够但效果很差的教训清出推送池，返回被清理的 id。
 
     不是删除——它仍然留在库里，检索时还可能被翻出来。直接删掉会丢掉
-    「我们试过这条路」这个信息本身。
+    「这条路试过了」这个信息本身。
     """
     rows = conn.execute(
         "SELECT id FROM memory WHERE kind = ? AND applied_count >= ?"

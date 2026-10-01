@@ -67,7 +67,7 @@ def archive_task(
         outcome=outcome,
     )
 
-    # 「已排除」是失败记忆里性价比最高的一类：它直接防止同一个坑踩第二次。
+    # 「已排除」是失败记忆里价值最高的一类：它直接防止同一种错误再犯。
     for excluded in state.excluded:
         add_memory(
             conn,

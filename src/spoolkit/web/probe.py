@@ -38,7 +38,7 @@ from spoolkit.web.runner import health_snapshot
 #: 依据是**原来那条路的实际节拍**：页面每 3 秒轮一次 `/state`
 #: （`page.py` 的 `setInterval(refreshBanners, 3000)`），而 `health.CACHE_TTL`
 #: 也是 3 秒——等于"每次轮询都有一份新结果，且最多只探这么勤"。
-#: 照抄这个节拍：页面上看到的鲜度不降级，锤模型的次数也不增加。
+#: 照抄这个节拍：页面上看到的鲜度不降级，探测次数也不增加。
 HEALTH_INTERVAL_SECONDS = 3.0
 
 #: 探测线程收工最多等多久才放手。
@@ -116,7 +116,7 @@ class HealthProbe:
         self._extra_health = extra_health
         self._interval = float(interval)
         self._timeout = float(timeout)
-        # `probed_at` 给人看（epoch 秒），`age_s` 用单调钟算：墙上时钟被改过
+        # `probed_at` 展示（epoch 秒），`age_s` 用单调钟算：墙上时钟被改过
         # （对时、夏令时）时"多久以前"不该跟着跳。
         self._clock = clock
         self._monotonic = monotonic

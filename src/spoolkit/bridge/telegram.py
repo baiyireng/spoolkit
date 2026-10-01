@@ -56,7 +56,7 @@ class TelegramChannel:
     def send(self, text: str, to: str = "") -> None:
         chat_id = to or self._default_to
         if not chat_id:
-            raise RuntimeError("不知道发给谁：这条通道还没收到过消息")
+            raise RuntimeError("没有收件人：这条通道还没收到过消息")
         response = self._client.post(
             "/sendMessage",
             json={"chat_id": chat_id, "text": text[:4096]},

@@ -21,7 +21,7 @@ from pathlib import Path
 from spoolkit import readroots
 
 HELP = """\
-直接描述要做什么，例如：
+直接描述你的需求，例如：
   看看 calc.py 里 sum_to 是什么
   把它改成长度对半切
 
@@ -55,7 +55,7 @@ agent 有改动待确认时：回 y 应用、n 丢弃。
 
 
 def workspace_scope_notice(root: Path | str) -> str:
-    """远程通道的文件边界。给人看的斜杠命令用；不进模型上下文，也不主动推给用户。"""
+    """远程通道的文件边界。展示用的斜杠命令用；不进模型上下文，也不主动推给用户。"""
     here = Path(root).resolve()
     extras = readroots.existing(root)
     lines = [

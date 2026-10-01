@@ -1,6 +1,6 @@
 """内嵌的单页 HTML。
 
-做成 Python 字符串而不是外置文件：跑起来只有一个东西要分发，也避免
+做成 Python 字符串而不是外置文件：跑起来只有一个文件要分发，也避免
 打包时漏文件。代价是编辑时没有语法高亮，可以接受。
 
 这里刻意做得很薄——不持有状态、不做业务判断，只渲染事件、发请求
@@ -8,11 +8,11 @@
 以及轮 `/state` 补通知），
 以及把待批准的配对码、模型通断、"别处还有谁在跑"和当前目标画出来。
 配对和探活都不进模型上下文，也不能点「应用/拒绝」来批准或重连——那两个按钮是落盘确认。
-前端出错只能靠人看出来，所以它必须小到一眼能看完。
+前端出错只能靠人工判断，所以它必须小到一屏读完。
 
 **外观是 ChatGPT 那一挂**（左侧会话栏 + 中间对话流 + 底边输入条），
 但这一层只做**布局与视觉**：所有行为判据都在服务端，页面只是把 `/state` 与
-`/events` 已经有的东西摆对位置。零新依赖：不引 CDN、不引外部字体、不引图标
+`/events` 已经有的数据摆对位置。零新依赖：不引 CDN、不引外部字体、不引图标
 库、不引框架，桌面上是对话面、手机上是抽屉 + 满宽气泡，**断网也能用**
 （图标是内联 SVG，字体是系统字体栈，主题色是一张 CSS 变量表）。
 
@@ -32,7 +32,7 @@
   一个节点都不新建——这条有行为用例（`tests/web/page_dom.js`）钉着。
 - **运行中那一枚键变成「停止」**：服务端有 `POST /run/stop`（复用 `Runner.stop()` 的
   温和停止语义：先 terminate 请它自己收尾、到点才 kill），所以这里**不再**摆一个
-  点了就骗人的灰键。点了立刻进"正在停止…"（禁用一下防连点），真正回到"发送"由
+  点了却不生效的灰键。点了立刻进"正在停止…"（禁用一下防连点），真正回到"发送"由
   `final` 事件或下一拍 `/state` 的 `running` 落回假决定；那一拍是兜底：`final`
   因为断线漏掉时，那一枚键不会永远卡在"正在停止…"。手动停止**不当失败画**：
   `/state` 的 `stopped`（只增字段）说得出这一轮是被停掉的。
@@ -72,9 +72,9 @@
   与 ChatGPT 的工具调用卡片同一挂：谁的 / 哪个文件或哪条命令 / diff 摘要 / 两个按钮），
   没有的时候**这块 UI 在页面上不存在**——没有 DOM 占位、也没有可聚焦的空按钮。
   点完「应用/拒绝」它就变成一行"已应用 / 已拒绝"的状态行留在对话流里。只读壳（非回环）
-  下那两个按钮根本不建（既有契约：点一下被 403 拒是骗人）。
-- **历史不加"给人看"的说明**：从记忆库取出来的往来仍然画在对话流里（略淡 + 一条分隔线），
-  但不再写"这是给人看的、不进模型上下文"这类实现细节——那是说给实现者听的。
+  下那两个按钮根本不建（既有契约：点它必被 403 拒）。
+- **历史不加面向用户的说明**：从记忆库取出来的往来仍然画在对话流里（略淡 + 一条分隔线），
+  但不再写"这是给人看的、不进模型上下文"这句话（它属于实现说明）。
 - **失败要给出可读说明**：`final` 失败与 `error` 事件都走 `showFailure`，把
   "连模型那一步失败了"翻译成「哪一步 / 哪个地址 / 可能为什么 / 下一步敲什么」，
   而不是甩一行原始异常。线索优先用服务端**只增**的 `error: {stage, url, kind}`，
@@ -224,7 +224,7 @@ HTML = """<!DOCTYPE html>
         容器**不吃点击**（`pointer-events:none`），只有气泡与「全部关闭」自己吃（`auto`）：
         它跟对话流叠在一起时（宽屏上右侧那一列会压到居中的卡片），底下的按钮照样点得动。
         可堆叠（竖着排，不叠在一起）、每条一个关闭键；`info` 自己会走，
-        **`error` / `warn` 不会**——错误在人看到之前消失，比不提示更糟。 */
+        **`error` / `warn` 不会**——错误在用户看到之前消失，比不提示更糟。 */
   .toast-all { display:none; align-self:flex-end; padding:4px 12px;
                border-radius:999px; border:1px solid var(--line);
                background:var(--panel-2); color:var(--text-dim);
@@ -300,7 +300,7 @@ HTML = """<!DOCTYPE html>
             flex-direction:column; gap:8px; }
   #toasts.show { display:flex; }
 
-  /* ── 顶条：抽屉开关 + 当前目标（"我在哪儿"必须一眼看得出） ── */
+  /* ── 顶条：抽屉开关 + 当前目标（"我在哪儿"必须直接可读） ── */
   #top {
     display:flex; align-items:center; gap:10px; padding:8px 12px;
     border-bottom:1px solid var(--line-soft); background:var(--panel);
@@ -381,8 +381,8 @@ HTML = """<!DOCTYPE html>
   .bubble { padding:9px 14px; border-radius:14px; white-space:pre-wrap;
             overflow-wrap:anywhere; word-break:break-word; min-width:0;
             max-width:100%; }
-  /* 普通正文与代码必须看得出是两种东西：正文是一段话（保留换行），
-     行内代码是带底色的等宽小片——一眼就能分开。 */
+  /* 普通正文与代码必须看得出是两类：正文是一段话（保留换行），
+     行内代码是带底色的等宽小片——样式上即可区分。 */
   .prose { white-space:pre-wrap; }
   .prose + .prose { margin-top:9px; }
   .inline-code { font:0.92em/1.5 var(--mono); background:var(--inline-bg);
@@ -462,7 +462,7 @@ HTML = """<!DOCTYPE html>
 
   /* ── 待确认：**对话流里**的一张卡片（ChatGPT 的工具调用卡片那一挂） ──
      没有待确认内容时它整个不存在：HTML 里没有这块的占位，节点也不建。
-     一个空框会让人以为"有东西在等我"，而框里那两个按钮是空的、还能被 Tab 到。 */
+     一个空框会被读成"有待确认项"，而框里那两个按钮是空的、还能被 Tab 到。 */
   .ask-card { align-self:stretch; border:1px solid var(--line);
               border-radius:12px; background:var(--panel-2);
               padding:10px 12px; min-width:0; }
@@ -680,7 +680,7 @@ HTML = """<!DOCTYPE html>
 const ICON = {
   menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"></path><path d="M4 12h16"></path><path d="M4 17h16"></path></svg>',
   send: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 12l15-7-6 7 6 7z"></path></svg>',
-  // 运行中那一枚键变成「停止」：一个方块（与"发送"的箭头一眼分得开）。
+  // 运行中那一枚键变成「停止」：一个方块（与"发送"的箭头形状上可分开）。
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg>',
   down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"></path><path d="M6 13l6 6 6-6"></path></svg>',
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg>',
@@ -696,7 +696,7 @@ const whereBox = document.getElementById('where');
 const toastsBox = document.getElementById('toasts');
 const toastAllBtn = document.getElementById('toast-all');
 // 状态区那几枚徽标（在右上角 `#hints` 里，脱离文档流）：常态下只剩一枚小圆点，
-// 所以徽标里的东西都得现建。
+// 所以徽标里的节点都得现建。
 const stHealth = document.getElementById('st-health');
 const stMode = document.getElementById('st-mode');
 const stTarget = document.getElementById('st-target');
@@ -739,12 +739,12 @@ let sidebarSig = '';
 let chosen = {root: '', session: ''};
 // 值了"确认移除"的那一行（二次确认的第一下）。
 let armed = '';
-// 最近一帧状态：切换失败时用它把选择栏拨回当前目标，别停在选中态骗人。
+// 最近一帧状态：切换失败时用它把选择栏拨回当前目标，别停在假的选中态。
 let lastState = {};
 // 模型是不是正在生成。"正在思考"与发送键的可用性都由它推。
 let thinking = false;
 // 对话流里那张"待确认"卡片。`card` 为 null 就是**页面上没有这块 UI**——
-// 不是隐藏、也没有 DOM 占位（一个空框会让人以为"有东西在等我"）。
+// 不是隐藏、也没有 DOM 占位（一个空框会被误认为有待确认项）。
 let card = null;
 // 卡片是不是还在"等你点"。点完（或服务端说没有待确认了）它就不再是问句，
 // 只剩一行"已应用 / 已拒绝"的状态。
@@ -771,7 +771,7 @@ let pinned = false;
 // 顶部那行只剩"我在哪儿"之后，空态引导与"运行中"这类说明搬进了详情面板。
 let targetNotes = [];
 let targetMissing = false;
-// 详情面板开着没有。默认关（页面一上来不该顶着一块东西）。
+// 详情面板开着没有。默认关（页面一上来不该顶着一块面板）。
 let statusOpen = false;
 
 // 等待时那一行里**不许**出现探活那条通知的名字：红色的"未连接"说的是模型，
@@ -782,7 +782,7 @@ const RUN_MARK = '运行中';
 // 钉住（--root）时两段列表都只读。用类而不是 disabled：这里是 div 行，不是控件。
 const LOCK = 'lock';
 // 只有 `info` 那一档的提示自己会走（几秒）；错误那些**永远不自动消失**
-// ——在人看到之前消失，比不提示更糟。
+// ——在用户看到之前消失，比不提示更糟。
 const AUTO_CLOSE_MS = 5000;
 
 /* ── 通知：右上角的浮动气泡（可关、可堆叠） ──
@@ -943,7 +943,7 @@ function notifyFailure(head, text, parts) {
    点徽标展开 `#st-panel`（绝对定位，浮在输入条上方，同样不占文档流）；再点、点别处、
    按 Esc 都收起。 */
 
-// 每个徽标里的东西（圆点 / 锁图标 / 标签）现建：HTML 里只摆了空按钮。
+// 每个徽标里的节点（圆点 / 锁图标 / 标签）现建：HTML 里只摆了空按钮。
 // 为什么不用 `querySelector` 去取静态 HTML 里写好的那几个 span——假 DOM（测试台）
 // 只按 id 造空壳，不解析静态子节点；靠它取就会在测试里拿到 null。
 function badgeParts(box, withDot, withLock) {
@@ -1189,7 +1189,7 @@ function makeSystem(text, cls) {
   return wrap;
 }
 
-// 助手的话里有三样东西要分开画：**正文**、**围栏代码块**（``` 围起来）、
+// 助手的话里有三类内容要分开画：**正文**、**围栏代码块**（``` 围起来）、
 // **行内代码**（` 围起来）。全都用 textContent 装配而不是拼 innerHTML：
 // 模型输出是不可信输入，拼标签等于把页面交给它。
 //
@@ -1284,7 +1284,7 @@ function copyText(text, button) {
    `error: {stage, url, kind}`（别的一概没动）；② 没有它时按错误文本里的词
    自己认（老服务端、别的失败路径）。地址还能退回 `/state` 的探活结果。
 
-   页面上的东西一律先过 `redact`：密钥、Bearer 串、KEY=VALUE 不许出现在页面上。 */
+   页面上的内容一律先过 `redact`：密钥、Bearer 串、KEY=VALUE 不许出现在页面上。 */
 const FAIL_KINDS = [
   {kind: 'connect', marks: ['无法连接 llama-server', 'ConnectError', 'ConnectTimeout',
     'Connection refused', '连接被拒绝', '连接失败']},
@@ -1474,7 +1474,7 @@ function toggleTrace(box) {
 }
 
 // 标题那一行：几行 + **有没有失败**。一行都没有时也要说得出"这里现在是空的"，
-// 而失败必须一眼看得见（藏在收起块里的失败等于没提示）。
+// 而失败必须直接可见（藏在收起块里的失败等于没提示）。
 function drawTraceHead(box) {
   const lines = box._lines || [];
   let text = '思考过程 · ' + lines.length + ' 行';
@@ -1661,7 +1661,7 @@ function liveCardFor(item) {
   return null;
 }
 
-// 快照里这一条"已经画过了"吗？是就认领回来（补上服务端那份轨迹），**不新建节点**。
+// 快照里这一条已经画过就认领回来（补上服务端那份轨迹），**不新建节点**。
 // 乐观画过的那条用户消息、这一轮已经渲染成卡片的回复，都属于这一类：
 // 这是"不许留下陈旧占位、也不许重复一条"的关键一步。
 function adoptMessage(item, isLast) {
@@ -1750,7 +1750,7 @@ function drawHistory(messages) {
   if (!items.length || drawn === items.length) { return; }
   const stick = atBottom();
   if (drawn === 0) {
-    // 一条**光秃秃的分隔线**：以前这里挂着一句说给实现者听的话，那不是给用户看的。
+    // 一条**纯分隔线**：以前这里挂着一句实现说明，那不是页面文案。
     // 历史本身照旧画出来（见下面的 `.history`：略淡，但一条都不少）。
     const sep = document.createElement('div');
     sep.className = 'history-sep';
@@ -1804,11 +1804,11 @@ function add(text, cls) {
 }
 
 /* ── 顶上的目标选择（原来是两条下拉，现在是左栏两段） ──
-   「我在哪个工作区」必须一眼看得出：批次一踩过绑错工作区、把 __init__.py 写空的坑，
+   「我在哪个工作区」必须直接可读：批次一出现过绑错工作区、把 __init__.py 写空的故障，
    而机器级壳服务的是整台机器（设计 §3.3）。 */
 function fillSelect(box, rows, value) {
   // 备选与当前值都没变就别动它：`replaceChildren` 一次就是几十个节点，
-  // 而每一帧状态都会走到这里（同一帧重复到达时纯属白干）。
+  // 而每一帧状态都会走到这里（同一帧重复到达时没有收益）。
   const sign = JSON.stringify([rows, value]);
   if (box.dataset.fill === sign) { box.value = value; return; }
   box.dataset.fill = sign;
@@ -2178,7 +2178,7 @@ function drawTarget(state) {
   }
   if (busy) {
     // 运行中那一枚键变成「停止」（`syncSend`）：这里只说清"点了会发生什么"，
-    // 因为"停止"这两个字本身回答不了"已产出的东西会不会没了"。
+    // 因为"停止"这两个字本身回答不了"已产出的内容会不会丢失"。
     notes.push('本轮运行中：点输入条右侧的「停止」可中断它'
       + '（温和停止，已产出的内容保留）。');
   }
@@ -2199,7 +2199,7 @@ function short(text, limit) {
 // 「别处还有一条在跑」：切走不杀任务（设计 §3.4），页面就必须**说得出**这件事，
 // 不能让它看起来只有一条。这一条不走事件流——别的目标上起来的任务，在本目标的
 // 事件流上什么都没有，只能按 `/state` 的 `running_targets` 轮出来。
-// 它是"看一眼就该知道"的状态，不是"刚刚发生了什么"的事件：所以收进状态区那一行
+// 它是"当前值"型的状态，不是"刚刚发生了什么"的事件：所以收进状态区那一行
 // 的一枚徽标（点开是哪几条），而不是一条要人自己关、又一直挂着的气泡。
 function showElsewhere(state) {
   const others = (state.running_targets || []).filter(function (row) {
@@ -2219,7 +2219,7 @@ function resetView() {
   drawn = 0;
   armed = '';
   // 卡片节点已经跟着 `replaceChildren` 一起没了：引用与状态也得一起清，
-  // 否则下一帧会以为"卡片还在"，往一个已经不在页面上的节点上写东西。
+  // 否则下一帧会以为"卡片还在"，往一个已经不在页面上的节点上写内容。
   card = null;
   cardAsking = false;
   cardApply = null;
@@ -2238,10 +2238,10 @@ function resetView() {
 /* ── 对话流里的待确认卡片 ──
    有待确认内容时才建节点；没有的时候这块 UI **在页面上不存在**（HTML 里没有占位、
    也没有可聚焦的空按钮）。点完「应用/拒绝」它就变成一行状态，留在对话流里当记录。
-   只读壳里那两个按钮**根本不建**：点一下被 403 拒是骗人，而藏起来的空按钮还能被 Tab 到。 */
+   只读壳里那两个按钮**根本不建**：点它必被 403 拒，而藏起来的空按钮还能被 Tab 到。 */
 
 // 卡片上写的"谁的"：机器级壳服务整台机器，只说"有 1 处改动待确认"，
-// 人根本不知道自己批的是哪个工作区、哪条会话里的东西。
+// 用户根本不知道自己批的是哪个工作区、哪条会话里的内容。
 function targetLabel() {
   const t = (lastState || {}).target || {};
   if (!t.root) { return '目标：未选择'; }
@@ -2345,7 +2345,7 @@ function removeCard() {
 }
 
 // 确认完了：卡片**就地**变成一行"已应用 / 已拒绝"，留在对话流里当记录
-// （它不是横幅）。同时把"当前那张卡片"这个位置让出来：以后又有待确认的东西，
+// （它不是横幅）。同时把"当前那张卡片"这个位置让出来：以后又有待确认项，
 // 是另起一张新卡片，而不是把这一行状态改回问句。
 function settleCard(outcome) {
   if (!card || !cardAsking) { return; }
@@ -2372,7 +2372,7 @@ function showPending(items) {
   if (!items.length) { clearPending(); return; }
   pendings = items;
   // 同一份待确认内容（补帧 / 重连后的一帧）只更新，不重建：
-  // diff 正文可能有几百行，重建一次就是白干一次。
+  // diff 正文可能有几百行，重建一次没有收益。
   const sig = JSON.stringify(['diffs', items.map(function (one) {
     return [one.path, one.text];
   })]);
@@ -2410,7 +2410,7 @@ function setRunning(value) {
 // 停止请求已发出=正在停止…（禁用一下，免得连点发两次）。只读壳里它一律禁用。
 //
 // 为什么不是"运行中禁用 + 说明"：服务端现在有停止入口了（`POST /run/stop`，
-// 复用 `Runner.stop()` 的温和停止语义），再摆一个灰键就是骗人。
+// 复用 `Runner.stop()` 的温和停止语义），再摆一个灰键没有意义。
 function syncSend() {
   const mode = busy ? (stopping ? 'stopping' : 'stop') : 'send';
   sendBtn.disabled = stopping || readonly;
@@ -2499,7 +2499,7 @@ function applyState(state) {
   // 那一帧也要走这条重绑，不能只更新状态区）。
   if (drawTarget(state)) { resetView(); }
   // 高亮跟着服务端确认的目标走（乐观那一下到这里就交棒了）。**只有当它兑现了**
-  // （回帧就是它）或压根没有时才清：人手快、连点了两行时，第一行的回帧不该
+  // （回帧就是它）或根本没有时才清：人手快、连点了两行时，第一行的回帧不该
   // 把第二行刚点亮的选择抹掉。
   const settled = (chosen.root === '' && chosen.session === '')
     || keyFor(chosen.root, chosen.session) === keyFor(target.root, target.session);
@@ -2526,7 +2526,7 @@ function applyState(state) {
   showElsewhere(state);
 }
 
-// 配对码给人看。批准发生在另一个进程（本机敲 spool approve 加码），
+// 配对码展示用。批准发生在另一个进程（本机敲 spool approve 加码），
 // 所以还要短轮询 /state，这一枚徽标才会自己消失。
 // 不能复用「应用/拒绝」：点应用会走 /confirm 去落盘改动。
 // 它现在是输入条那一行里的一枚徽标（+ 点开后的详情），不是一次性气泡：
@@ -2668,7 +2668,7 @@ async function refreshStatus() {
   } catch (err) { /* 轮询失败就等下一拍，状态停在上一帧 */ }
 }
 
-// 「它想跑一条白名单外的命令」——把被问的东西摆进卡片：要执行什么、为什么。
+// 「它想跑一条白名单外的命令」——把被问的内容摆进卡片：要执行什么、为什么。
 // 授权和落盘是两件事：一个是问"能不能跑"，一个是问"要不要写入"，
 // 混成一句「有 1 处改动待确认」，人根本不知道自己在批什么。
 function showCommandAsk(detail) {
@@ -2707,7 +2707,7 @@ function showCommandAsk(detail) {
 }
 
 // 卡片上那两个按钮的可用态。只读壳里**连按钮都没建**（见 ensureCard），
-// 所以这里第一句就是只读早退——那是既有契约：点一下被 403 拒是骗人。
+// 所以这里第一句就是只读早退——那是既有契约：点它必被 403 拒。
 function showActions() {
   if (readonly) { return; }
   if (!card || !cardAsking || !card._foot) { return; }
@@ -2735,7 +2735,7 @@ function onEvent(event) {
   const data = JSON.parse(event.data);
   if (data.type === 'state') { applyState(data); return; }
   // 点下「开始」到服务回话之间按钮还是可点的，再点一次会被拒（409）。
-  // 拿事件里的 start 当权威信号，按钮就不会骗人。
+  // 拿事件里的 start 当权威信号，按钮状态就不会失真。
   if (data.type === 'start') {
     setRunning(true);
     setThinking(true);
@@ -2864,7 +2864,7 @@ async function switchTarget(payload) {
   markChosen();
   const next = await post('/target', payload);
   if (next === null) {
-    // 没切成（409/400）：把选中态拨回当前目标，别停在选中态骗人。
+    // 没切成（409/400）：把选中态拨回当前目标，别停在假的选中态。
     chosen = {root: '', session: ''};
     drawTarget(lastState);
     markChosen();
@@ -3035,7 +3035,7 @@ async function decide(apply) {
   if (cardReject) { cardReject.disabled = true; }
   const next = await post('/confirm', {apply});
   if (next === null) {
-    // 被拒（409 没有待确认 / 只读 403）：卡片退回"等你点"，别停在"已应用"上骗人。
+    // 被拒（409 没有待确认 / 只读 403）：卡片退回"等你点"，别错误地停在"已应用"。
     // 理由已经由 post() 摆进对话区与通知里了。
     decided = false;
     if (cardApply) { cardApply.disabled = false; }
