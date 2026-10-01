@@ -7,8 +7,11 @@ import time
 from pathlib import Path
 
 from spoolkit.bench import (
+    EXIT_ENVIRONMENT_BLOCKED,
     TOGETHER_GOAL,
     WorkspaceUnavailableError,
+    check_acceptance_environment,
+    describe_environment_problem,
     load_tasks,
     prepare_together,
     render_report,
@@ -40,6 +43,23 @@ def bench(args: argparse.Namespace) -> int:
         return 2
 
     print(f"共 {len(tasks)} 个任务，供应商 {args.provider}")
+
+    # 开跑前先确认验收环境跑得起来。这一步是**省钱**的：模型压根没启动，
+    # 报告里也不会出现「验收 0/N」这种会被读成「模型不行」的东西。
+    environment = check_acceptance_environment(tasks)
+    if environment.blocked:
+        print(describe_environment_problem(environment), file=sys.stderr)
+        return EXIT_ENVIRONMENT_BLOCKED
+    if environment.missing_pytest:
+        # 这批任务的验收只用到 python，所以不拦；但要说一声——否则以后有人往
+        # 题集里加一道 pytest 题，会以为是模型突然变差了。
+        print(
+            "注意：选中的解释器里没有 pytest"
+            f"（{environment.interpreter}）；这批任务的验收命令用不到它，照跑。"
+            "要跑 pytest 类任务就得换解释器（见 docs/benchmarking.md）。",
+            file=sys.stderr,
+        )
+
     if args.together:
         return _together(args, project_root, tasks)
 
@@ -96,6 +116,10 @@ def bench(args: argparse.Namespace) -> int:
 
     print()
     print(render_report(results))
+    if any(item.blocked for item in results):
+        # 有任务的验收根本没跑起来（环境问题）。这时候「整体失败」是错的结论，
+        # 所以用一个与「有任务没过」不同的退出码，脚本也能分辨。
+        return EXIT_ENVIRONMENT_BLOCKED
     return 0 if all(item.passed for item in results) else 1
 
 
@@ -169,4 +193,6 @@ def _together(args, project_root: Path, tasks) -> int:
             },
         )
     )
+    if any(item.blocked for item in results):
+        return EXIT_ENVIRONMENT_BLOCKED
     return 0 if all(item.passed for item in results) else 1

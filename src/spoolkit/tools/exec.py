@@ -19,11 +19,11 @@
 
 import shutil
 import subprocess
-import sys
 import re
 from pathlib import Path
 
 from spoolkit.errors import PathOutsideProjectError
+from spoolkit.interpreter import PYTHON_PROGRAMS, resolve_python_argv
 from spoolkit.paths import resolve_within
 from spoolkit.tools.trial import trial_workspace
 from spoolkit.tools.types import ToolResult, ToolSpec
@@ -157,6 +157,10 @@ def resolve_argv(argv: list[str], root: Path) -> list[str]:
     模型不该知道也不该猜「用哪个解释器」——那是环境细节，不是任务信息。
     优先项目自带虚拟环境，其次当前解释器。
 
+    **选择与映射的实现不在这里**，在 `spoolkit.interpreter`：bench 的验收命令
+    要问同一个问题（裸 `python` / `pytest` 指向谁），而它多两个候选根。
+    这一处只交出自己的那一份候选——**当前工作区**，顺序也照旧。
+
     **Windows 上的 `.cmd` 垫片**：`node` 这类命令常常不是 `.exe`，而是一个
     `.cmd` 垫片（nvm-for-windows、volta、pnpm 装的都是；本机 DSH 提供的 node 也是
     `ELECTRON_RUN_AS_NODE=1 "…DeepSeek Harness.exe"`）。`subprocess` 在 Windows 上
@@ -172,18 +176,8 @@ def resolve_argv(argv: list[str], root: Path) -> list[str]:
     """
     if not argv:
         return argv
-    if argv[0] in ("python", "python3", "pytest"):
-        candidates = (
-            root / ".venv" / "Scripts" / "python.exe",
-            root / ".venv" / "bin" / "python",
-        )
-        interpreter = next(
-            (str(path) for path in candidates if path.exists()), sys.executable
-        )
-
-        if argv[0] == "pytest":
-            return [interpreter, "-m", "pytest", *argv[1:]]
-        return [interpreter, *argv[1:]]
+    if argv[0] in PYTHON_PROGRAMS:
+        return resolve_python_argv(argv, [root])
 
     if argv[0] in ("node", "node.exe"):
         import os
