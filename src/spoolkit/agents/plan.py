@@ -659,7 +659,8 @@ def render_step_prompt(
         f"本次只做这一步：{step.goal}\n"
         f"{contract}"
         f"验收标准：{step.acceptance}\n"
-        "不要顺手做后面步骤的事。"
+        "只做本步要求的事：改动范围以本步声明的涉及范围与契约为界，"
+        "范围之外的改动一律不做，也不提前做后续步骤的事。"
     )
 
 

@@ -1,10 +1,10 @@
-"""`spool status`：这台机器上 spoolkit 相关服务现在什么状态，以及怎么起 / 怎么停。
+"""`spool status`：这台机器上 spoolkit 相关服务现在什么状态，以及起停方式。
 
 为什么要有它：用户报的原话是"**缺乏全局命令能够观察/管理服务状态**"。原先要看
 本机配方得 `spool service`、看通道凭据得 `spool bridge --check`、看网页壳得去翻
 另一个终端、看密钥落点得 `spool env`——而且**没有一条命令回答"现在到底有没有东西
 在跑"**。这一条把机器级的那几样摆成一张表：每行给状态、地址或说明，以及
-**怎么起 / 怎么停**（最后两列是这条命令的一半价值：用户要的是"观察**和管理**"）。
+**起停方式**（最后两列是这条命令的一半价值：用户要的是"观察**和管理**"）。
 
 三条硬约束（都有用例钉着）：
 
@@ -12,7 +12,7 @@
    几行**只报凭据从哪来，不去连平台**（真连是 `spool bridge --check` 的事）。
 2. **绝不打印密钥值**：只印"从哪个文件 / 哪个环境变量来的"（`settings.resolve_secret`
    给的就是来源说明，值连拼都不拼进输出）。
-3. **探测失败不冒栈**：每个探测点都是短超时（`DEFAULT_TIMEOUT`，0.5 秒）＋一句人话；
+3. **探测失败不冒栈**：每个探测点都是短超时（`DEFAULT_TIMEOUT`，0.5 秒）＋一句可读说明；
    整体退出码见 `render_human` 的页脚。
 
 超时取 0.5 秒的依据：这里探的全是**回环地址**，正常监听时连接在毫秒级完成，
@@ -54,7 +54,7 @@ STATE_DOWN = "down"
 STATE_UNKNOWN = "unknown"
 STATE_NONE = "none"
 
-#: 状态 → 给人看的字。`--json` 给的是左边的英文（脚本按它判）。
+#: 状态 → 面向人的字面。`--json` 给的是左边的英文（脚本按它判）。
 STATE_LABELS: dict[str, str] = {
     STATE_UP: "在跑",
     STATE_SLOW: "起来了但慢",
@@ -75,7 +75,7 @@ _CHANNEL_CREDENTIALS: dict[str, tuple[tuple[str, ...], ...]] = {
     "fake": (),
 }
 
-#: 通道名 → 怎么起。认不出的通道（插件注册的）给一句通用的。
+#: 通道名 → 启动命令。认不出的通道（插件注册的）给一句通用的。
 _CHANNEL_START: dict[str, str] = {
     "qqbot": "spool qq",
     "telegram": "spool hub --channel telegram",
@@ -89,7 +89,7 @@ class Row:
     """表里的一行。
 
     `name` 是**稳定的机器名**（`--json` 里给脚本用，例如 `model`、`web:8765`、
-    `service:llama`），`label` 才是给人看的（带上了通道名 / 配方名 / 端口）。
+    `service:llama`），`label` 才是面向人的（带上了通道名 / 配方名 / 端口）。
     """
 
     name: str
@@ -99,7 +99,7 @@ class Row:
     detail: str = ""
     start: str = ""
     stop: str = ""
-    #: 关键项：没起就影响退出码。定义见 `render_human` 的页脚（那里印给人看）。
+    #: 关键项：没起就影响退出码。定义见 `render_human` 的页脚（那里印给用户）。
     critical: bool = False
     #: 这一行的状态用别的字说（`--json` 里仍是 `state`）。
     #: 为什么需要：配置 / 密钥 / 工作区那几行说的是"有没有这个东西"，
@@ -134,7 +134,7 @@ def _one_line(exc: object) -> str:
 def _readable_probe(detail: str) -> str:
     """探活失败的原话是操作系统的英文（`timed out` / `Connection refused`）。
 
-    照抄给用户看等于让他自己翻译；这里补一句人话，但**把原话留在括号里**——
+    照抄给用户看等于让他自己翻译；这里补一句可读说明，但**把原话留在括号里**——
     排查时那串英文是有用的（"被挡"与"没起"在系统层是两回事）。
     """
     text = str(detail or "").strip()
@@ -150,7 +150,7 @@ def _probe_tcp(host: str, port: int, timeout: float) -> tuple[str, bool]:
     """试连一下端口。返回（问题说明或空串, 是不是"超时"）。
 
     分成两种是刻意的：**连接被拒**＝那儿没东西（"没起"）；**连接超时**＝
-    那儿可能有东西但很慢（"起来了但慢"）。这两种的下一步完全不同。
+    那儿可能有进程但很慢（"起来了但慢"）。这两种的下一步完全不同。
     """
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -181,7 +181,7 @@ def _probe_http(url: str, timeout: float) -> tuple[str, str]:
             response = client.get(url)
     except httpx.TimeoutException:
         return STATE_SLOW, f"端口在，但 {timeout:g}s 里没有 HTTP 应答（加载中？）"
-    except Exception as exc:  # noqa: BLE001 - 给人看的失败也要说清楚
+    except Exception as exc:  # noqa: BLE001 - 面向人的失败也要说清楚
         return STATE_DOWN, f"端口在，请求失败：{_one_line(exc)}"
     if 200 <= response.status_code < 300:
         return STATE_UP, f"HTTP {response.status_code}"
@@ -193,7 +193,7 @@ def _probe_http(url: str, timeout: float) -> tuple[str, str]:
 def _recipe_for(target_url: str, recipes: list) -> object | None:
     """哪条配方管着这个地址：先按 `health` 里的 host:port 认，再按常见名字认。
 
-    为什么要认：模型那一行的"怎么起"必须落到**用户自己的配方名**上——
+    为什么要认：模型那一行的"启动命令"必须落到**用户自己的配方名**上——
     写死 `spool service start llama` 对改了名字的人是句假话。
     """
     try:
@@ -296,8 +296,8 @@ def _web_row(port: int, timeout: float) -> Row:
 
     判据是 `GET /state` 的 JSON 形状（`readonly` 那个键）——**不是"端口开着"**：
     8765 上完全可能是别的程序。分四种答法，因为下一步完全不同：没人听
-    （起一个）、有别的东西在听（换端口）、是我们的壳（在跑，看状态）、
-    答的东西形状不对（多半是别的壳）。
+    （起一个）、有别的程序在听（换端口）、是我们的壳（在跑，看状态）、
+    答的形状不对（多半是别的壳）。
     """
     url = f"http://127.0.0.1:{port}/state"
     problem, slow = _probe_tcp("127.0.0.1", port, timeout)
@@ -324,7 +324,7 @@ def _web_row(port: int, timeout: float) -> Row:
             start=_web_start(port),
             stop="Ctrl-C（前台，没有停入口）",
         )
-    except Exception as exc:  # noqa: BLE001 - 给人看的失败也要说清楚
+    except Exception as exc:  # noqa: BLE001 - 面向人的失败也要说清楚
         return Row(
             name=f"web:{port}",
             label=f"网页壳 :{port}",
@@ -628,7 +628,7 @@ def _service_row(item, timeout: float) -> Row:
     （`services.inspect_service`）：**pid 记录是判据**，探针只报状态——端口被别的
     进程占着时不许说成"我们拉起的在跑"，没有 pid 记录时也不许谎报"我们在跑"。
 
-    被占用仍然是 `up`（那个地址上确实有东西在服务，多半就是用户自己手起的），
+    被占用仍然是 `up`（那个地址上确实有进程在服务，多半就是用户自己手起的），
     只是状态列写成「被占用」、说明里点清"非本命令启动"：把它判成没起会让
     退出码变 1，而"别人替我起着"并不是"这台机器上少了什么"。
     """
@@ -636,8 +636,8 @@ def _service_row(item, timeout: float) -> Row:
     probe = _readable_probe(state.probe_detail) if state.probe_detail else ""
     if state.state == services.STATE_OURS:
         # 说明里已经带了探针结果（`本命令启动的进程存活：pid …；HTTP 200`）：
-        # `_readable_probe` 没补人话（返回值就是探针原话）时不再追加，否则同一句
-        # 会印两遍；它真补了人话（`timed out` → 端口在超时内没接上…）时才追加。
+        # `_readable_probe` 没补可读说明（返回值就是探针原话）时不再追加，否则同一句
+        # 会印两遍；它真补了可读说明（`timed out` → 端口在超时内没接上…）时才追加。
         row_state, label = STATE_UP, ""
         detail = state.detail
         if probe and probe != state.probe_detail:
@@ -745,7 +745,7 @@ def status_exit_code(report: Report) -> int:
 
 
 def _display_width(text: str) -> int:
-    """中文占两列。不按这个算，表格就会歪（而"一眼看清"全靠它）。"""
+    """中文占两列。不按这个算，表格就会歪（而表格是否对齐全靠它）。"""
     width = 0
     for char in text:
         if unicodedata.combining(char):
@@ -803,10 +803,10 @@ def _wrap(text: str, width: int) -> list[str]:
     return pieces
 
 
-#: 五列。宽度按"最要紧的内容先放得下"定：**怎么起 / 怎么停不许被截**（那是这条
+#: 五列。宽度按"最要紧的内容先放得下"定：**起停方式不许被截**（那是这条
 #: 命令的一半价值），长说明走下面的缩进行（`_DETAIL_*`）。
 #: 合计 121 列 ＋ 8 个间隔 = 129；说明行最多 `_DETAIL_INDENT` + 100 列。
-_COLUMNS = ("服务", "状态", "地址 / 说明", "怎么起", "怎么停")
+_COLUMNS = ("服务", "状态", "地址 / 说明", "启动命令", "停止命令")
 _WIDTHS = (19, 11, 28, 37, 26)
 _GAP = "  "
 _DETAIL_INDENT = "  ↳ "
@@ -837,7 +837,7 @@ def _row_lines(row: Row) -> list[str]:
 
 
 def render_human(report: Report) -> str:
-    """给人看的表 ＋ 页脚（页脚里定义"关键"是哪些、退出码是什么意思）。"""
+    """面向人的表 ＋ 页脚（页脚里定义"关键"是哪些、退出码是什么意思）。"""
     lines = [
         f"spoolkit 服务状态（探测用时 {report.elapsed_ms}ms，超时 {report.timeout:g}s，"
         "只打本机地址）",

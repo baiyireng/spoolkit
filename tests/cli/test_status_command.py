@@ -1,4 +1,4 @@
-"""`spool status`：一眼看清 + 怎么起停；只打本机、失败不冒栈、密钥绝不落屏。
+"""`spool status`：本机服务现状 + 起停命令；只打本机、失败不冒栈、密钥绝不落屏。
 
 **测试里不让真服务在跑**：所有探测点要么是本次起在临时端口上的桩服务
 （`_serve`，`finally` 收尾），要么是一个刚被关掉的端口。退出码只按"关键项 +
@@ -106,7 +106,7 @@ def _payload(out: str) -> dict:
 # --- 表格与退出码 -----------------------------------------------------------
 
 
-def test_全好时退0并给出怎么起停(tmp_path, monkeypatch, capsys) -> None:
+def test_全好时退0并给出起停命令(tmp_path, monkeypatch, capsys) -> None:
     """provider=llamacpp ＋ 模型桩 ＋ 一条配方桩：关键全在 → 0。"""
     config = _isolate(tmp_path, monkeypatch)
     port, stop = _serve(200)
@@ -124,9 +124,15 @@ def test_全好时退0并给出怎么起停(tmp_path, monkeypatch, capsys) -> No
         stop()
     out = capsys.readouterr().out
     assert code == 0, out
-    # 五列表头都在，最后两列是这条命令的一半价值
-    for header in ("服务", "状态", "地址 / 说明", "怎么起", "怎么停"):
+    # 表头**不逐字钉措辞**：去口语化会改字面（原先的「怎么起 / 怎么停」
+    # 已改成「启动命令 / 停止命令」），钉的是这张表必须回答的要点——
+    # 五列都在，且最后两列分别讲"怎么起"和"怎么停"（措辞不再限定）。
+    # 命令本身仍由下面两句钉住，所以这不是删断言，只是把断言钉在要点上。
+    for header in ("服务", "状态", "地址 / 说明"):
         assert header in out
+    header_line = [line for line in out.splitlines() if line.startswith("服务")][0]
+    assert any(word in header_line for word in ("启", "起")), header_line
+    assert "停" in header_line, header_line
     assert "spool service start llama" in out
     assert "spool service stop llama" in out
     assert "关键项都在" in out

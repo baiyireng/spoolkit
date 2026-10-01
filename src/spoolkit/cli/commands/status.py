@@ -1,4 +1,4 @@
-"""`spool status`：一眼看清这台机器上的 spoolkit 服务，以及怎么起 / 怎么停。
+"""`spool status`：本机 spoolkit 相关服务的现状，以及起停方式。
 
 这一层只做三件事：把参数变成 **秒数 / 端口号**、把配置读坏的情况挡在探活之前
 （读不出来时那张表全是假象）、把报告打到 stdout 并返回有意义的退出码。
@@ -15,7 +15,7 @@ from spoolkit import status as status_report
 
 
 def _seconds(raw: object, flag: str, default: float) -> float | None:
-    """`--timeout` / `--mcp-timeout` 的取值。给了不合形状的就**说出来**，别静默用默认值。"""
+    """`--timeout` / `--mcp-timeout` 的取值。给了不合形状的就**说出来**，不得静默沿用默认值。"""
     if raw is None:
         return default
     try:

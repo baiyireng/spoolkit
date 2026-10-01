@@ -1,8 +1,8 @@
-"""给人看的探活：模型通不通。不进模型上下文。
+"""面向人的探活：模型通不通。不进模型上下文。
 
 不启 llama-server，也不认某台机器的地址。地址来自这次运行已经生效的
 `--provider` / `--base-url`（或用户配置）。页面每几秒打一次 `/state`，
-所以探活带几秒缓存，别每次都锤模型。
+所以探活带几秒缓存，不必每次都真去请求模型。
 
 **网页壳上探活不在请求路径里**（`web/probe.py`）：那里有一条后台线程按
 `CACHE_TTL` 同样的节拍探，`/state` 只读最近一次结果。这里的缓存于是成了
@@ -25,7 +25,7 @@ CACHE_TTL = 3.0
 #: 一次探活的超时。1 秒的依据：本机 llama-server 起没起是**连接层**的问题，
 #: 一秒内一定有答案（立刻连上 / 明确被拒 / 连不上）。等更久只是把这次探测拖长，
 #: 而它要么长在请求路径上（网页壳改后台之前：实测切换卡 3.4 秒），要么占着
-#: 后台线程——探活是"看一眼"，不是"等一等"。
+#: 后台线程——探活是取一次状态，不是等一个结果。
 PROBE_TIMEOUT_SECONDS = 1.0
 
 #: 探活结果的分类（`_result` 里那个**只增**的 `kind`）。为什么值得有：
@@ -108,7 +108,7 @@ def _probe_uncached(*, provider: str, target: str, timeout: float) -> dict:
         return _result(ok=False, target=target, detail=detail, kind=KIND_CONNECT)
     except httpx.TimeoutException as exc:
         # 连上了、只是没在超时内回话（模型在加载 / 太慢）：这一种要说成"慢"，
-        # 因为人的下一步与"根本没有东西在听"不一样。
+        # 因为人的下一步与"根本没有进程在听"不一样。
         detail = str(exc).strip() or type(exc).__name__
         return _result(ok=False, target=target, detail=detail, kind=KIND_SLOW)
     except Exception as exc:
