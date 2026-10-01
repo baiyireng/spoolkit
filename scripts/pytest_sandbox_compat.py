@@ -25,6 +25,10 @@ mode=0o700)`，`tempfile.mkdtemp` 也是 0o700），于是每条用例都在 set
 把所有 `mkdir` / `mkdtemp` 的 mode 统一抬成 0o777（Windows 上本来就不看这个
 位，这里只是别让沙箱把目录锁死）。**不改测试、不改产品代码。**
 
+实现**只有一份**，在 `src/spoolkit/sandbox_dirs.py`：bench 建任务工作区
+（`spool bench` 的临时目录，同一个坑、同样的 WinError 5）走的是同一套函数，
+所以两处不会各自长出一份、日后悄悄分叉。这里只负责「整进程装一次」。
+
 ## 怎么用
 
 用 `scripts/pytest.ps1`（推荐，它把下面几条都设好了）：
@@ -44,27 +48,15 @@ mode=0o700)`，`tempfile.mkdtemp` 也是 0o700），于是每条用例都在 set
 这个插件，否则那 50 条照样全红。
 """
 
-import os
 import pathlib
-import tempfile
+import sys
 
-_orig_path_mkdir = pathlib.Path.mkdir
-_orig_os_mkdir = os.mkdir
-_orig_mkdtemp = tempfile.mkdtemp
+# 这个插件是 pytest 的 `-p` 加载的，可能早于 pytest 的 `pythonpath=src`
+# 生效，所以自己把仓库的 src 摆上——不然 `import spoolkit` 会看运气。
+_SRC = pathlib.Path(__file__).resolve().parent.parent / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
+from spoolkit.sandbox_dirs import install  # noqa: E402
 
-def _path_mkdir(self, mode=0o777, parents=False, exist_ok=False):  # noqa: ANN001
-    return _orig_path_mkdir(self, 0o777, parents, exist_ok)
-
-
-def _os_mkdir(path, mode=0o777, *, dir_fd=None):  # noqa: ANN001
-    return _orig_os_mkdir(path, 0o777, dir_fd=dir_fd)
-
-
-def _mkdtemp(suffix=None, prefix=None, dir=None):  # noqa: ANN001
-    return _orig_mkdtemp(suffix, prefix, dir)
-
-
-pathlib.Path.mkdir = _path_mkdir
-os.mkdir = _os_mkdir
-tempfile.mkdtemp = _mkdtemp
+install()

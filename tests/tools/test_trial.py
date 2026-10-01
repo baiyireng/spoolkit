@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from spoolkit.tools.edit import PendingChanges, replace_lines_spec
@@ -80,4 +81,21 @@ def test_没有待落盘改动时在原地执行(tmp_path: Path) -> None:
     # 原文件有 bug，测试应当失败——说明确实跑在原地
     assert result.ok is False
     assert "1 failed" in result.content
+
+
+def test_试跑副本不靠测试侧补丁也能建出来(
+    tmp_path: Path, raw_dir_creation
+) -> None:
+    """试跑副本的创建点得自己抬 mode，不能指望测试插件的补丁。
+
+    受限环境里 `mkdtemp` 写死 0o700，建出来的目录当场不可访问，紧接着的
+    `copytree` 连 makedirs 都过不去——自动验证于是报「环境问题」，
+    而「改完能不能自己验」正是回归集要量的东西。改回裸 `mkdtemp`，这里就是红的。
+    """
+    _project(tmp_path)
+    with trial_workspace(tmp_path, []) as work:
+        assert os.listdir(work)  # 旧写法：走到这行就 PermissionError
+        assert (work / "calc.py").exists()
+        base = work.parent
+    assert not base.exists()  # 摘掉补丁也不影响退出时清理
 

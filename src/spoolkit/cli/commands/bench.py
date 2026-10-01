@@ -8,6 +8,7 @@ from pathlib import Path
 
 from spoolkit.bench import (
     TOGETHER_GOAL,
+    WorkspaceUnavailableError,
     load_tasks,
     prepare_together,
     render_report,
@@ -83,9 +84,15 @@ def bench(args: argparse.Namespace) -> int:
             settle(pending, AUTO, task.scope or ("**",), non_interactive=True)
 
         print(f"  → {task.name}")
-        results.append(
-            run_task(task, build, settle_changes=settle_now, verbose=args.verbose)
-        )
+        try:
+            results.append(
+                run_task(task, build, settle_changes=settle_now, verbose=args.verbose)
+            )
+        except WorkspaceUnavailableError as exc:
+            # 环境把目录权限锁死了。这是环境的问题，不是题目也不是模型的问题——
+            # 所以给一句人话（含路径与原因），别把原始 traceback 扔出来。
+            print(str(exc), file=sys.stderr)
+            return 2
 
     print()
     print(render_report(results))
@@ -105,7 +112,12 @@ def _together(args, project_root: Path, tasks) -> int:
         / "bench-together"
         / time.strftime("%Y%m%d-%H%M%S")
     )
-    prepare_together(tasks, workspace)
+    try:
+        prepare_together(tasks, workspace)
+    except WorkspaceUnavailableError as exc:
+        # 同上：环境限制目录权限时给人话，不抛裸 traceback。
+        print(str(exc), file=sys.stderr)
+        return 2
     print(f"整批单会话：{len(tasks)} 道题布置在 {workspace}")
 
     pending = PendingChanges(workspace)

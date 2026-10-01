@@ -1,6 +1,11 @@
 import json
+import os
+import shutil
 from pathlib import Path
 
+import pytest
+
+from spoolkit import bench
 from spoolkit.bench import (
     Task,
     TaskResult,
@@ -175,3 +180,73 @@ def test_任务描述与验收命令来自文件(tmp_path: Path) -> None:
     assert task.command == ("python", "-m", "pytest")
     assert task.acceptance_files == ("t.py",)
     assert task.scope == ("src",)
+
+
+def test_任务工作区建出来就能用(raw_dir_creation) -> None:
+    """建出来的工作区必须当场可遍历、可写、可往下 copytree。
+
+    受限环境（Windows + 文件沙箱）里，`mode=0o700` 建出来的目录连
+    `os.scandir` 都 WinError 5，事后 `chmod` 也救不回来——所以只能创建那一刻抬。
+    改回 `tempfile.TemporaryDirectory(...)` 裸用，这里的 `os.listdir` 就是红的。
+
+    `raw_dir_creation` 先把测试插件那层抬 mode 的补丁摘掉：真实 CLI 里没有它，
+    bench 得自己抬（不摘的话，改回旧写法也照样绿）。
+    """
+    with bench.temporary_workspace() as root:
+        assert os.listdir(root) == []
+
+        source = root / "source"
+        (source / "sub" / "deep").mkdir(parents=True)
+        (source / "a.txt").write_text("a", encoding="utf-8")
+        (source / "sub" / "deep" / "b.txt").write_text("b", encoding="utf-8")
+
+        workdir = root / "project"
+        shutil.copytree(source, workdir)
+        (workdir / "新文件.txt").write_text("写进去了", encoding="utf-8")
+
+        assert sorted(os.listdir(workdir)) == ["a.txt", "sub", "新文件.txt"]
+        assert (workdir / "sub" / "deep" / "b.txt").read_text(encoding="utf-8") == "b"
+
+
+def test_工作区里碰不得的子目录不影响收尾(raw_dir_creation) -> None:
+    """验收跑过 pytest 之后，工作区里会留下它自己用 0o700 建的垃圾目录。
+
+    收尾必须真的「忽略清理错误」——否则任务全跑完了、结果却在收尾时抛掉，
+    人看到的是一场空。实测 `TemporaryDirectory(ignore_cleanup_errors=True)`
+    在本沙箱里**照样抛**（它的处理器会去 `chmod` 那个目录，而 `chmod` 也被拒），
+    所以这里必须是 `shutil.rmtree(..., ignore_errors=True)`。
+    """
+    with bench.temporary_workspace() as root:
+        poisoned = root / "poisoned"
+        os.mkdir(poisoned, 0o700)  # 走未被抬 mode 的那一份
+        try:
+            os.listdir(poisoned)
+        except PermissionError:
+            # 本沙箱：0o700 的目录确实碰不得，收尾时正好会踩到它。
+            pass
+    # 能走到这里 = 退出 with 时没抛，这正是要钉的那条。
+
+
+def test_权限被环境限制时给人话(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """抬不起权限时的兜底：说清是**环境**限制了**目录权限**、并指出**路径**。
+
+    钉的是要点，不是整句——原话以后可以改，但这三样不能说没就没
+    （现在的表现是裸 traceback 糊到人脸上，正是这条要挡住的）。
+    """
+    home = tmp_path / "task"
+    (home / "project").mkdir(parents=True)
+    (home / "project" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    task = Task(name="t", goal="g", command=("python", "-c", "pass"), home=home)
+
+    def _denied(*args, **kwargs):
+        raise PermissionError(5, "拒绝访问。")
+
+    monkeypatch.setattr(bench.shutil, "copytree", _denied)
+    workdir = tmp_path / "w"
+    with pytest.raises(bench.WorkspaceUnavailableError) as caught:
+        bench.prepare(task, workdir)
+
+    message = str(caught.value)
+    assert "环境" in message
+    assert "权限" in message
+    assert str(workdir) in message

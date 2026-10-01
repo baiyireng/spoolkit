@@ -21,19 +21,98 @@ agent 改测试让测试通过就能拿分，那是作弊，而且很难发现�
 判定只看验收命令的退出码。不看 agent 自己说做完了没有，也不看它写得漂不漂亮。
 """
 
+import contextlib
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from spoolkit import sandbox_dirs
 from spoolkit.config import Config
 
 DEFAULT_BENCH_ROOT = "benchmarks/tasks"
 DEFAULT_TIMEOUT = 300
+
+
+class WorkspaceUnavailableError(RuntimeError):
+    """任务工作区在当前环境里用不了。
+
+    与「任务失败」分开：这是**环境**的问题（目录权限被限制），不是题目、
+    也不是模型的问题。混在一起的话，报告上只会多一个「失败」，而人会开始
+    怀疑模型——所以它一路抛到 CLI，由那边给一句人话。
+    """
+
+
+def describe_workspace_error(exc: PermissionError, path: Path) -> str:
+    """把「环境不让用这个目录」翻成人话：指出路径，并说清不是题目/模型的错。"""
+    lines = [
+        f"任务工作区不可用：{path}",
+        "当前运行环境限制了目录权限：受限沙箱里，目录建出来就无法遍历或写入，"
+        "而且事后再抬权限也会被拒。",
+        "任务工作区必须能遍历、能读写；被限制时 bench 准备不了题目。",
+    ]
+    failing = getattr(exc, "filename", None)
+    if failing and str(failing) != str(path):
+        lines.append(f"系统报错位置：{failing}")
+    lines.append(f"系统报错：{exc}")
+    lines.append("换个不受限的位置，或退出文件沙箱后再跑。")
+    return "\n".join(lines)
+
+
+def _failing_path(exc: PermissionError, fallback: Path) -> Path:
+    """异常里自带的那条路径优先——它比我们猜的准。"""
+    failing = getattr(exc, "filename", None)
+    return Path(failing) if failing else fallback
+
+
+@contextlib.contextmanager
+def temporary_workspace(prefix: str = "spool-bench-") -> Iterator[Path]:
+    """建任务工作区用的临时根目录，保证**建出来就能用**。
+
+    这里踩过一个真实的坑：`tempfile` 建目录时写死 0o700，而在带文件沙箱的
+    Windows 上，用 0o700 建出来的目录**当场**就不可访问——`os.scandir` 都是
+    WinError 5，连事后 `os.chmod` 也一起被拒，只能**创建那一刻**抬 mode。
+    `shutil.copytree` 的 `os.makedirs` 正是撞在这上面崩的。
+
+    所以这里不裸用 `TemporaryDirectory`，而是走 `spoolkit.sandbox_dirs`：
+    与 `scripts/pytest_sandbox_compat.py`（pytest tmpdir 的同一个坑）
+    **同一招、同一份实现**，不给这个仓库留第二份补丁。
+
+    清理也**不能用 `TemporaryDirectory`**：工作区里跑过 pytest 之后会留下它自己
+    用 0o700 建的 `pytest-cache-files-*`，而 `ignore_cleanup_errors=True` 在本沙箱里
+    挡不住——它的处理器会去 `chmod` 那个目录，`chmod` 同样被拒，于是任务全跑完了
+    却在收尾时抛出来（实测）。`shutil.rmtree(..., ignore_errors=True)` 才是真的
+    「忽略清理错误」：索引数据库的连接在整个进程里都开着（SQLite 在 Windows 上
+    会锁住文件），硬要在退出时删掉只会把结果一起吞掉。删不掉的留给系统回收。
+
+    这一层的 `except PermissionError` **刻意包住整段任务**，不只是建目录那一下：
+    受限环境里权限拒绝可能发生在 prepare、工作区遍历、验收等任何一步，而它们
+    都是同一件事——环境不让用这个工作区。要求是**人话**，不是裸 traceback，
+    所以兜底放在最外面；真正的位置由异常自带的路径（`exc.filename`）指出。
+    """
+    try:
+        root = sandbox_dirs.make_accessible_temp_dir(prefix)
+    except PermissionError as exc:
+        # 连目录都没建出来：只能报「打算建在哪儿」。
+        raise WorkspaceUnavailableError(
+            describe_workspace_error(
+                exc, _failing_path(exc, Path(tempfile.gettempdir()) / f"{prefix}*")
+            )
+        ) from None
+    try:
+        yield root
+    except PermissionError as exc:
+        # 建出来之后才撞上权限：同一类问题，同一句人话。
+        raise WorkspaceUnavailableError(
+            describe_workspace_error(exc, _failing_path(exc, root))
+        ) from None
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @dataclass(frozen=True)
@@ -89,11 +168,17 @@ def load_tasks(bench_root: Path) -> list[Task]:
 def prepare(task: Task, workdir: Path) -> None:
     """把起始代码与验收测试一起复制进工作区。"""
     source = task.home / "project"
-    if not source.exists():
-        workdir.mkdir(parents=True, exist_ok=True)
-    else:
-        shutil.copytree(source, workdir)
-    _copy_acceptance(task, workdir)
+    try:
+        if not source.exists():
+            workdir.mkdir(parents=True, exist_ok=True)
+        else:
+            shutil.copytree(source, workdir)
+        _copy_acceptance(task, workdir)
+    except PermissionError as exc:
+        # 工作区用不了是环境问题，别让它以裸 traceback 的形式糊到人脸上。
+        raise WorkspaceUnavailableError(
+            describe_workspace_error(exc, workdir)
+        ) from None
 
 
 def _copy_acceptance(task: Task, workdir: Path) -> None:
@@ -155,12 +240,9 @@ def run_task(
     这样回归测试本身不绑定任何具体模型。
     """
     started = time.time()
-    # 忽略清理错误：索引数据库的连接在整个进程里都开着（SQLite 在 Windows 上
-    # 会锁住文件），硬要在退出时删掉只会把结果一起吞掉。临时目录留给系统回收。
-    with tempfile.TemporaryDirectory(
-        prefix="spool-bench-", ignore_cleanup_errors=True
-    ) as temp:
-        workspace = workdir or Path(temp) / "project"
+    # 工作区根目录必须是「建出来就能用」的那种，见 temporary_workspace。
+    with temporary_workspace() as temp:
+        workspace = workdir or temp / "project"
         if workdir is None:
             prepare(task, workspace)
 

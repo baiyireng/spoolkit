@@ -12,11 +12,11 @@
 """
 
 import shutil
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Sequence
 
+from spoolkit import sandbox_dirs
 from spoolkit.tools.edit import PendingChange
 
 EXCLUDED_DIRS = frozenset(
@@ -48,7 +48,11 @@ def copy_project(root: Path, target: Path) -> None:
 @contextmanager
 def trial_workspace(root: Path, changes: Sequence[PendingChange]) -> Iterator[Path]:
     """产出应用了待授权改动的临时项目，退出时清理。"""
-    base = Path(tempfile.mkdtemp(prefix="spool-trial-"))
+    # 建目录这一步在受限环境（Windows + 文件沙箱）里是**会炸的**：mkdtemp 写死
+    # 0o700，建出来的目录当场不可访问，下面的 copytree 连 makedirs 都过不去，
+    # 自动验证于是报「环境问题」——而这条路的成败正是回归集要量的东西。
+    # 抬 mode 的实现与 bench、pytest 插件共一份，见 spoolkit.sandbox_dirs。
+    base = sandbox_dirs.make_accessible_temp_dir("spool-trial-")
     copy_root = base / "project"
     try:
         copy_project(root, copy_root)
