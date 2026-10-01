@@ -3,6 +3,7 @@ from pathlib import Path
 from spoolkit.memory.store import init_memory_schema
 from spoolkit.memory.transcript import (
     ASSISTANT,
+    DEICTIC_REMINDER,
     USER,
     conversational_prompt,
     recent_messages,
@@ -204,8 +205,9 @@ def test_指代词命中才加那一行提醒(tmp_path: Path) -> None:
     record_message(conn, "s", USER, "先看 python 那个脚本")
     record_message(conn, "s", USER, "继续刚才那件事")
     text = conversational_prompt(conn, "s", "继续刚才那件事", turns=1)
-    assert text.startswith("这条消息含指代或承接")
-    assert text.count("这条消息含指代或承接") == 1
+    # 钉「加了那一行、且只有那一行」：字面措辞由模板自己的用例守。
+    assert text.startswith(DEICTIC_REMINDER)
+    assert text.count(DEICTIC_REMINDER) == 1
     conn.close()
 
 
@@ -215,8 +217,7 @@ def test_普通消息不带提醒(tmp_path: Path) -> None:
     record_message(conn, "s", USER, "给 python 脚本加参数")
     record_message(conn, "s", USER, "读一下 config.py")
     text = conversational_prompt(conn, "s", "读一下 config.py", turns=1)
-    assert not text.startswith("这条消息含指代或承接")
-    assert "先确认它指的是什么" not in text
+    assert DEICTIC_REMINDER not in text
     conn.close()
 
 
@@ -224,7 +225,7 @@ def test_没有上一轮时也要提醒指代(tmp_path: Path) -> None:
     """没有历史可看时更要提醒——「它」指什么，模型这一步并不知道。"""
     conn = _conn(tmp_path)
     text = conversational_prompt(conn, "s", "还是按之前那样做")
-    assert text.startswith("这条消息含指代或承接")
+    assert text.startswith(DEICTIC_REMINDER)
     assert "还是按之前那样做" in text
     conn.close()
 

@@ -63,13 +63,19 @@ def test_作用域口径进到系统提示(tmp_path: Path) -> None:
     loop = _loop(tmp_path)
     loop.run("读一下 a.py")
     prompt = "\n".join(m.content for m in loop.gateway.requests[0].messages)
-    # 默认只查当前会话，跨会话必须显式——这条不写进提示，模型就不知道。
+    # 钉**要点**，不钉整句：这些是语义要求，措辞可以再改，丢了才是改坏。
+    # ① 检索默认只覆盖当前会话；② 跨会话必须显式声明；③ 结果要标出来源会话。
     assert "默认只查当前会话" in prompt
     assert 'session="*"' in prompt
-    assert "来自多条会话" in prompt or "标着来源会话" in prompt
-    # 指代/承接那几条规则也在（原文里的关键词）。
+    assert "来源会话" in prompt
+    # ④ 指代/承接**先检索再答**，顺序写死（不是答完再补一次检索）。
+    assert "先调用 search_history" in prompt and "再作答" in prompt
+    # ⑤ 触发词表：漏掉哪个说法，那一类消息就退化成靠猜。
     for mark in ("那个", "上次", "刚才", "继续", "它", "前面提到的", "还是按之前那样"):
         assert mark in prompt
-    assert "没找到就直说没找到" in prompt
-    # 「关键词取自当前问题里的实体」——否则它会把整句话当查询，命中率归零。
+    # ⑥ 没检索到必须直说，且不许推测性补全。
+    assert "未检索到" in prompt and "不得推测性补全" in prompt
+    # ⑦ 检索词取自当前问题里的实体——否则它会把整句话当查询，命中率归零。
     assert "当前问题里的实体" in prompt
+    # ⑧ 别的**工作区**的历史不在检索范围内。
+    assert "工作区" in prompt and "不在检索范围内" in prompt

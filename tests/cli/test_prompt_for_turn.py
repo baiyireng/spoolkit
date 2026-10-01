@@ -18,7 +18,12 @@ from spoolkit.cli.runtime import prompt_for_turn
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.session import MemorySession
 from spoolkit.memory.store import init_memory_schema, record_session
-from spoolkit.memory.transcript import ASSISTANT, USER, record_message
+from spoolkit.memory.transcript import (
+    ASSISTANT,
+    DEICTIC_REMINDER,
+    USER,
+    record_message,
+)
 from spoolkit.store.db import open_db
 
 
@@ -40,25 +45,38 @@ def test_命中指代时加那一行_且只有一行(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
     record_message(memory._conn, "现在", USER, "先看 python 那个脚本")
     text = prompt_for_turn(memory, "现在", "继续刚才那件事")
-    assert text.startswith("这条消息含指代或承接")
-    assert text.count("这条消息含指代或承接") == 1
+    # 钉「提醒就是那一行」而不是它的字面：措辞可以改，位置与条数不能变。
+    assert text.startswith(DEICTIC_REMINDER)
+    assert text.count(DEICTIC_REMINDER) == 1
     assert "当前：继续刚才那件事" in text
     memory._conn.close()
+
+
+def test_指代提醒必须含住三件要点() -> None:
+    """提醒是发给模型的一行规格：先检索再答、默认只查当前会话、没检索到不许猜。
+
+    钉要点而不是钉整句：措辞一改，钉字面的断言就只会红在字面上，
+    而它真正要守的是这三条语义。
+    """
+    assert "先调用 search_history" in DEICTIC_REMINDER
+    assert "再作答" in DEICTIC_REMINDER
+    assert "默认只查当前会话" in DEICTIC_REMINDER
+    assert "未检索到" in DEICTIC_REMINDER and "不得推测" in DEICTIC_REMINDER
 
 
 def test_普通消息一个字的提醒都不加(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
     record_message(memory._conn, "现在", USER, "给 python 脚本加参数")
     text = prompt_for_turn(memory, "现在", "读一下 config.py")
-    assert not text.startswith("这条消息含指代或承接")
-    assert "先确认它指的是什么" not in text
+    # 一个字都不加 = 整条提醒（任何一种措辞）都不出现。
+    assert DEICTIC_REMINDER not in text
     assert "当前：读一下 config.py" in text
     memory._conn.close()
 
 
 def test_没有记忆时提醒也不把原话挤掉(tmp_path: Path) -> None:
     text = prompt_for_turn(None, "现在", "还是按之前那样做")
-    assert text.startswith("这条消息含指代或承接")
+    assert text.startswith(DEICTIC_REMINDER)
     assert "还是按之前那样做" in text
     assert prompt_for_turn(None, "现在", "读一下 config.py") == "读一下 config.py"
 
