@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -256,6 +257,50 @@ def test_写了command但看不出状态也算没就绪(tmp_path, monkeypatch, c
     row = [item for item in payload["rows"] if item["name"] == "service:tunnel"][0]
     assert row["state"] == "unknown"
     assert row["critical"] is True
+
+
+def test_配方行说清是不是本命令拉起的(tmp_path, monkeypatch, capsys) -> None:
+    """`service:<配方>` 与 `service list` 同一套口径：**pid 记录是判据**，探针报状态。
+
+    端口上有东西（多半是用户自己手起的 llama / 隧道）→ 状态是 `up`（那个地址确实
+    在服务），但说明里必须点清"不是本命令拉起的"；写了自己的 pid 记录之后才叫
+    "我们拉起的在跑"。两边都不许把别人占着的端口说成我们的。
+    """
+    from spoolkit import services
+
+    config = _isolate(tmp_path, monkeypatch)
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(8)
+    port = int(sock.getsockname()[1])
+    try:
+        _write(
+            config,
+            'provider = "gemini"\n'
+            "[[service]]\n"
+            'name = "tunnel"\n'
+            'command = ["ssh", "-N", "-D", "1080", "跳板"]\n'
+            f'health = "tcp:127.0.0.1:{port}"\n',
+        )
+        code = _run(["--timeout", "0.2", "--json"])
+        payload = _payload(capsys.readouterr().out)
+        row = [item for item in payload["rows"] if item["name"] == "service:tunnel"][0]
+        assert code == 0
+        assert row["state"] == "up"
+        assert "不是本命令拉起的" in row["detail"], row["detail"]
+        assert "本命令拉起的进程在跑" not in row["detail"]
+
+        # 记下本命令拉起的 pid（写活着的本进程，不用收尾）之后，口径才变成"在跑"。
+        services.write_pid("tunnel", os.getpid())
+        code = _run(["--timeout", "0.2", "--json"])
+        payload = _payload(capsys.readouterr().out)
+        row = [item for item in payload["rows"] if item["name"] == "service:tunnel"][0]
+        assert code == 0
+        assert row["state"] == "up"
+        assert "本命令拉起的进程在跑" in row["detail"], row["detail"]
+        assert f"pid {os.getpid()}" in row["detail"]
+    finally:
+        sock.close()
 
 
 # --- 网页壳 -----------------------------------------------------------------

@@ -22,7 +22,8 @@
 本机外接也写在这份文件的 `[[service]]` 里（不进仓库）。常见两段、名字可改：
 
 - **llama**：本机语言模型进程。hub / serve 按 `provider` / `base_url` 探活；
-  配方只方便 `spool service start/stop`，已经通了不重复拉起。
+  配方只方便 `spool service start/stop`，**判据是本命令记下的 pid**：有活着的就
+  不重复拉起，探针只报状态（端口被别人占着时不许当成"我们的在跑"）。
 - **tunnel**：给聊天通道出网的本机 SOCKS（通常是 `ssh -D`）。QQ 等平台有
   IP 白名单时，借跳板把出口固定成那台主机；`spool hub --bridge-proxy
   socks5://127.0.0.1:1080` 去连它。这和 `--proxy`（模型供应商）不是一回事。

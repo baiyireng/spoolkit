@@ -35,7 +35,6 @@ from spoolkit import settings
 from spoolkit import services
 from spoolkit.bridge import credentials
 from spoolkit.envfile import load_env_file
-from spoolkit.health import probe_spec
 from spoolkit.kernel import pointers
 from spoolkit.kernel import trust
 from spoolkit.kernel import workspaces as kernel_workspaces
@@ -625,18 +624,28 @@ def _config_rows() -> list[Row]:
 
 
 def _service_row(item, timeout: float) -> Row:
-    """`[[service]]` 里的一条配方。与 `spool service` 同一套探活口径。"""
-    target = item.health or "（没写探活地址）"
-    if item.health:
-        ok, _target, detail = probe_spec(item.health, timeout=timeout, cached=False)
-        state = STATE_UP if ok else STATE_DOWN
-        detail = _readable_probe(detail)
+    """`[[service]]` 里的一条配方。与 `spool service list` **同一套口径**
+    （`services.inspect_service`）：**pid 记录是判据**，探针只报状态——端口被别的
+    进程占着时不许说成"我们拉起的在跑"，没有 pid 记录时也不许谎报"我们在跑"。
+
+    被占用仍然是 `up`（那个地址上确实有东西在服务，多半就是用户自己手起的），
+    只是状态列写成「被占用」、说明里点清"不是本命令拉起的"：把它判成没起会让
+    退出码变 1，而"别人替我起着"并不是"这台机器上少了什么"。
+    """
+    state = services.inspect_service(item, timeout=timeout, cached=False)
+    probe = _readable_probe(state.probe_detail) if state.probe_detail else ""
+    if state.state == services.STATE_OURS:
+        row_state, label = STATE_UP, ""
+        detail = state.detail + (f"；{probe}" if probe else "")
+    elif state.state == services.STATE_OCCUPIED:
+        row_state, label = STATE_UP, "被占用"
+        detail = state.detail + (f"；{probe}" if probe else "")
+    elif state.state == services.STATE_UNKNOWN:
+        row_state, label = STATE_UNKNOWN, ""
+        detail = state.detail
     else:
-        pid = services.read_pid(item.name)
-        if pid and services.pid_alive(pid):
-            state, detail = STATE_UP, f"进程在跑（pid {pid}）；这条配方没有探活地址"
-        else:
-            state, detail = STATE_UNKNOWN, "没有探活地址，也没看到本命令拉起的 pid（看不出）"
+        row_state, label = STATE_DOWN, ""
+        detail = state.detail
     if item.command:
         start = f"spool service start {item.name}"
         stop = f"spool service stop {item.name}"
@@ -646,8 +655,9 @@ def _service_row(item, timeout: float) -> Row:
     return Row(
         name=f"service:{item.name}",
         label=f"本机配方 {item.name}",
-        state=state,
-        target=target,
+        state=row_state,
+        state_label=label,
+        target=state.target or item.health or "（没写探活地址）",
         detail=detail,
         start=start,
         stop=stop,

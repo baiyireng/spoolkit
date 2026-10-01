@@ -207,7 +207,7 @@ spool qq --root D:\某个工作区              # 给了就钉住这一个；不
 
 ```toml
 [[service]]
-name = "llama"                       # 本机语言模型：hub 按 provider / base_url 探活，通了不重复拉起
+name = "llama"                       # 本机语言模型：hub 按 provider / base_url 探活；start 看 pid 记录，不重复拉起
 command = ["llama-server", "-m", "你的模型.gguf", "--port", "8080"]
 health = "http://127.0.0.1:8080/props"
 
@@ -218,6 +218,16 @@ health = "tcp:127.0.0.1:1080"
 ```
 
 `command` 可空：空就只探测、不替你启动。`health` 认 `http(s)://…`（GET）和 `tcp:host:port`；停掉只杀 `spool service start` 写下 pid 的孩子。`spool config --set` 不会抹掉 `[[service]]` / `[[mcp]]`。
+
+**"要不要拉起"的判据是这条命令自己记下的 pid，不是探针**（探针只报状态）：所以同一条配方最多一个进程，有活着的记录就说"已经在跑（pid …）"。`list` 那一行照这个口径读：
+
+| 行首 | 怎么读 |
+|---|---|
+| 在跑 | pid 记录里那个进程还活着（`start` 写下的）；后面的探针结果只是"端口现在通不通" |
+| 被占用 | 端口上有东西在听，但**不是本命令拉起的**（没有活着的 pid 记录）——别人占着，别当成你的隧道 |
+| 没起 / 看不出 | 没有 pid 记录、探针也不通；"看不出"是这条配方连 `health` 都没写 |
+
+没有活着的 pid 记录才动手拉：子进程**启动后立刻退出**时，输出里会给它的**退出码与最后几行输出**（`ssh -D 1080` 撞上被占的端口，`bind: Address already in use` 就在那儿），完整输出留在用户状态目录的 `services\<配方>.log`。
 
 ## spool status
 
@@ -232,7 +242,7 @@ health = "tcp:127.0.0.1:1080"
 | `mcp:<名字>` | 外挂 MCP 登记了哪些；`--probe` 才真连一次（会拉起它们的子进程，超时另算） |
 | `workspace` | 登记了几个工作区、网页壳与命令行的指针各指向谁 |
 | `config` / `env:user` / `env:workspace` | `config.toml`、用户级 `.env`、当前工作区 `.env` 的**路径与存在性**（只印键数，不印值） |
-| `service:<配方>` | 用户配置 `[[service]]` 里的每条配方（与 `spool service` 同一套探活） |
+| `service:<配方>` | 用户配置 `[[service]]` 里的每条配方（与 `spool service list` 同一套：**pid 记录是判据**，探针报状态；端口被别人的进程占着时写「被占用」，不谎报成我们拉起的） |
 
 | 参数 | 说明 |
 |---|---|
