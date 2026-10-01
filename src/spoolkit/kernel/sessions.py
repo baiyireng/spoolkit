@@ -52,6 +52,12 @@ class SessionExists(SessionError):
     """这个名字已经有会话了（新建时撞名）。"""
 
 
+def _exists_message(name: str) -> str:
+    """撞名时给人的那句话。两处抛 `SessionExists` 共用——查到了、和抢输了，
+    对人来说是同一件事，措辞不该分叉（网页壳把它映成 409，见 `web/server.py`）。"""
+    return f"已经有叫 {name} 的会话了：换一个名字，或者直接切到那一条。"
+
+
 @dataclass(frozen=True)
 class Session:
     id: str
@@ -209,19 +215,45 @@ def create_session(root: Path | str, title: str = "", session_id: str = "") -> s
 
     存储位置与命名与老路完全一样：`.agent/sessions/<safe(id)>/meta.json`
     加记忆库的一行；两条路都只经由这里，不另写一套建法。
+
+    **点名的这条走独占创建（`jsonstore.create_json`），不只是"先查再写"**：
+    查一下再写是有缝的——网页壳两个请求同时到达（双击、双标签页、脚本并发），
+    两边都会在对方落盘**之前**查到"没有"，于是**都**返回 200，而磁盘上只剩
+    后写的那一份标题：人看到的是"我建的两条会话变成了一条"。独占创建把裁决
+    交给内核，同一个名字只有一次 `open` 能过，输的那个拿到 `SessionExists`
+    （网页壳照旧映成 409），一个字节都不覆盖赢家的 `meta.json`。
+
+    自动 id 那条**不动**：它的名字是时间戳 + 两位随机，撞名的概率与"人点了两次
+    同一个名字"根本不是一个量级，而且它是既有行为（`spool session new`、桥、
+    `spool chat --new` 都走它）——为它换建法等于顺手改一条没人报过问题的路。
     """
     wanted = str(session_id or "")
+    now = time.time()
     if wanted:
         wanted = validate_session_name(wanted)
         if has_session(root, wanted):
-            raise SessionExists(
-                f"已经有叫 {wanted} 的会话了：换一个名字，或者直接切到那一条。"
-            )
+            raise SessionExists(_exists_message(wanted))
         session_id = wanted
+        try:
+            # 先建目录由 create_json 负责；这里只声明"这条会话的初始内容"。
+            jsonstore.create_json(
+                meta_path(root, wanted),
+                {
+                    "id": wanted,
+                    "created_at": now,
+                    "last_active": now,
+                    "title": str(title or ""),
+                },
+            )
+        except FileExistsError:
+            # 并发：另一个请求在"查过之后、写之前"把它建好了。明确失败，
+            # 不覆盖——这正是这个函数存在的理由。
+            raise SessionExists(_exists_message(wanted)) from None
     else:
         session_id = time.strftime("%y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
-    now = time.time()
-    write_meta(root, session_id, created_at=now, last_active=now, title=str(title or ""))
+        write_meta(
+            root, session_id, created_at=now, last_active=now, title=str(title or "")
+        )
     conn = _db(root)
     if conn is not None:
         try:

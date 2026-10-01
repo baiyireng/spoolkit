@@ -566,3 +566,115 @@ def test_整批单会话那条路也把环境阻塞单列(
     # 阻塞的不进「没过的」
     assert "没过的" not in text
 
+
+# --- 第二次跑同一个工作区：验收环境里的 PYTEST_ADDOPTS ------------------------
+#
+# 真实翻车（本沙箱实测）：验收命令 `python -m pytest -q` 会建 `pytest-cache-files-*`
+# （`.pytest_cache` 在受限环境里建不出来时 pytest 改用 0o700 临时目录），而那个
+# 目录下一次**收集**时就是 PermissionError——第一次「1 passed」，第二次
+# 「Interrupted: 1 error during collection」，退出码 2。题做对了却在第二次验收里
+# 变成"失败"，这种误判比真的失败更难查。
+#
+# 修法刻意**不改验收命令**（那是题库数据）：环境里补 `-p no:cacheprovider`，
+# 并且是**合并**进用户已有的 `PYTEST_ADDOPTS`，不是覆盖。
+
+
+def test_验收环境合并pytest_addopts而不是覆盖() -> None:
+    """用户那一条必须留着——其中可能就是 repo 的 `-p pytest_sandbox_compat`。
+
+    证伪：把合并改成 `environment["PYTEST_ADDOPTS"] = ACCEPTANCE_...`（覆盖），
+    前两条断言红。
+    """
+    merged = bench.acceptance_env({"PYTEST_ADDOPTS": "-p pytest_sandbox_compat -x"})
+    assert merged["PYTHONIOENCODING"] == "utf-8"
+    assert "-p pytest_sandbox_compat" in merged["PYTEST_ADDOPTS"]
+    assert "-x" in merged["PYTEST_ADDOPTS"]
+    assert bench.ACCEPTANCE_PYTEST_ADDOPTS in merged["PYTEST_ADDOPTS"]
+
+    # 已经有就不重复加
+    assert bench.acceptance_env(
+        {"PYTEST_ADDOPTS": "-p no:cacheprovider"}
+    )["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+
+    # 用户没设过也要带上
+    assert bench.acceptance_env({})["PYTEST_ADDOPTS"] == bench.ACCEPTANCE_PYTEST_ADDOPTS
+
+
+def test_验收命令真的带上了合并后的环境(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """光有 `acceptance_env` 不算数：`verify` 得真的用它（这条钉住接线）。
+
+    证伪：把 verify 里那行改回 `dict(os.environ)`，这条红。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p pytest_sandbox_compat")
+
+    seen: dict = {}
+
+    class _Done:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _run(command, **kwargs):
+        seen.update(kwargs)
+        return _Done()
+
+    monkeypatch.setattr(bench.subprocess, "run", _run)
+
+    passed, _ = verify(Task(name="t", goal="g", command=("pytest", "-q")), workspace)
+
+    assert passed is True
+    assert seen["env"]["PYTEST_ADDOPTS"] == (
+        "-p pytest_sandbox_compat -p no:cacheprovider"
+    )
+    assert seen["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_同一个工作区连续两次验收都成功(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**真跑**两次：第一次留下的 0o700 临时目录不许让第二次收集失败。
+
+    证伪（实测）：去掉 `acceptance_env` 那行（改回 `dict(os.environ)`），
+    第一次 `1 passed`、磁盘上留下 `pytest-cache-files-*`，第二次
+    `PermissionError ... Interrupted: 1 error during collection`，这条红。
+
+    `PYTEST_ADDOPTS` 先清掉是**故意的**：跑测试的这套环境里它带着
+    `-p pytest_sandbox_compat`（那个插件把临时目录的 mode 抬成 0o777），
+    不清就等于把要复现的那个坑填平了——真实用户那里没有这个插件，
+    而 bench 要修的正是他那条路。清掉之后这里测的是"验收子进程只用
+    `acceptance_env` 给的环境"。
+    """
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    home = tmp_path / "task"
+    (home / "project").mkdir(parents=True)
+    (home / "acceptance").mkdir()
+    (home / "project" / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"
+    )
+    (home / "acceptance" / "test_acceptance.py").write_text(
+        "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+        encoding="utf-8",
+    )
+    task = Task(
+        name="t",
+        goal="g",
+        command=("python", "-m", "pytest", "-q"),
+        acceptance_files=("test_acceptance.py",),
+        home=home,
+    )
+    workspace = tmp_path / "ws"
+    prepare(task, workspace)
+
+    first, detail_first = verify(task, workspace)
+    second, detail_second = verify(task, workspace)
+
+    assert first is True, detail_first
+    assert second is True, detail_second
+    # 根因也钉住：那个会毒化下一次收集的目录压根不该被建出来
+    assert list(workspace.glob("pytest-cache-files-*")) == []
+
+

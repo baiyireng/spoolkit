@@ -390,6 +390,43 @@ def describe_missing_pytest(interpreter: str, output: str) -> str:
     )
 
 
+#: 验收环境里必须带上的 pytest 参数：关掉缓存插件。
+#:
+#: 为什么是**环境**而不是改验收命令：验收命令是**题库数据**（`task.json` 里
+#: 写死的），改它等于改题目——题面、TASK.md、50 道题的对照表全跟着变。
+#: 而这条要修的东西跟题目毫无关系：`pytest-cache-files-*` 是 pytest 自己建的
+#: 临时目录。受限环境里 `.pytest_cache` 建不出来（0o700 目录，见
+#: `pytest_sandbox_compat`），它就改用同样 0o700 的临时目录，**第二次在同一个
+#: 工作区跑验收**时收集阶段直接 `PermissionError`：
+#:
+#:     第一次：1 passed, 1 warning          退出码 0
+#:     第二次：Interrupted: 1 error during collection   退出码 2
+#:
+#: 于是"题做对了"在第二次验收里变成"验收失败"——这正是 bench 最不能有的那种
+#: 误判。关掉 cacheprovider 是 pytest 官方开关，对被测代码零影响。
+ACCEPTANCE_PYTEST_ADDOPTS = "-p no:cacheprovider"
+
+
+def acceptance_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """验收命令要用的环境变量：UTF-8 输出 + 关掉 pytest 缓存插件。
+
+    `PYTEST_ADDOPTS` 是**合并**，不是覆盖：用户自己那一条必须留着。两个具体的
+    理由：① 它可能带着 repo 的 `-p pytest_sandbox_compat`——那个插件是 bench
+    派生的 pytest 子进程唯一能拿到它的途径（`scripts/pytest_sandbox_compat.py`
+    的说明里写了），顶掉它整批验收子进程会全红；② 用户自己的调参（`-x`、
+    `-n auto` 之类）被顶掉，验收就跑在与他的设定不同的规则下，而报告上看不出来。
+
+    已经有 `no:cacheprovider` 时不重复加：命令行越叠越长，排查时更难读。
+    """
+    environment = dict(os.environ if base is None else base)
+    environment["PYTHONIOENCODING"] = "utf-8"
+    existing = str(environment.get("PYTEST_ADDOPTS") or "").strip()
+    if "no:cacheprovider" not in existing:
+        environment["PYTEST_ADDOPTS"] = (
+            f"{existing} {ACCEPTANCE_PYTEST_ADDOPTS}".strip()
+        )
+    return environment
+
 
 def verify(task: Task, workdir: Path) -> tuple[bool, str]:
     """用原始验收测试覆盖工作区里的同名文件，再跑验收命令。只看退出码。
@@ -408,8 +445,10 @@ def verify(task: Task, workdir: Path) -> tuple[bool, str]:
     interpreter = choose_interpreter(roots)
     command = resolve_python_argv(list(task.command), roots)
 
-    environment = dict(os.environ)
-    environment["PYTHONIOENCODING"] = "utf-8"
+    # 环境走 `acceptance_env`：UTF-8 输出 + 关掉 pytest 缓存插件（第二次跑同一个
+    # 工作区时，那个插件建的 0o700 临时目录会让收集阶段直接失败）。用户自己的
+    # `PYTEST_ADDOPTS` 在里面被**合并**保留，见那里的说明。
+    environment = acceptance_env()
     try:
         proc = subprocess.run(
             command,

@@ -6,6 +6,9 @@
 安全边界靠四条：
 1. **白名单命令**，不做任意 shell 透传；
 2. **不经过 shell**，参数里的 `;`、`|`、`&&` 都是普通字符；
+   （唯一的例外是 Windows 上解析到 `.cmd`/`.bat` 垫片的命令——那种只能经
+   `cmd.exe` 起，见 `resolve_argv`：那时参数里的 `& | < > ^ % "` 一律
+   **明确拒绝并说人话**，绝不悄悄拼进命令行。）
 3. **工作目录锁在项目内**；
 4. **超时强杀 + 输出截断**——跑不完或吐出海量日志的命令会直接吃掉上下文。
 
@@ -17,6 +20,7 @@
 或指向错误的虚拟环境。实测中模型为此白白烧掉了十步。
 """
 
+import os
 import shutil
 import subprocess
 import re
@@ -104,6 +108,28 @@ def _check_python(args: list[str]) -> str | None:
     return None
 
 
+# --- Windows 上的 `.cmd`/`.bat` 垫片：能起，但不许经它偷渡 shell 元字符 --------
+#
+# 背景（一条被误判过很久的"环境债"）：Windows 上 `subprocess` 只按 PATH 找
+# `.exe`/`.com`，而 `node`、`pnpm`、`ruff` 这类工具在 nvm-for-windows / volta /
+# 本机 DSH 下都是 `.cmd` 垫片。直接 spawn 会报「找不到命令: <名字>」——**而它
+# 明明装着**，报错还把人往"没装"的方向带。得包成 `cmd /c call <垫片> …` 才起得来。
+#
+# 代价是 `cmd.exe` 会把命令行重新解释一遍。所以这里有两条硬规矩：
+# ① 参数**逐字**传（仍是 argv 数组，引用交给 `subprocess.list2cmdline`：
+#    不做任何字符串拼接，也就不存在"拼错一个引号、参数被切开"这回事）；
+# ② 参数里出现 `cmd` 会重新解释的字符就**明确拒绝**，不猜、不转义、不静默丢。
+
+#: `cmd.exe` 会重新解释的字符：`&` 分句、`|`/`<`/`>` 转向、`^` 转义、`%` 展开。
+#: 直接 spawn 一个 `.exe` 时它们都是普通字符（`shell=False`），经 `cmd.exe` 就不是了。
+CMD_METACHARS = "&|<>^%"
+
+#: 双引号单独说：`list2cmdline` 用 `\"` 转义它，而 `cmd.exe` **不认反斜杠转义**
+#: ——`a"b` 会被切成两个参数。既然这条路保证不了"逐字到达"，就不放行。
+#: 何况参数本来就是数组里的一项，不需要自己加引号。
+CMD_QUOTE = '"'
+
+
 def validate_command(argv: list[str]) -> str | None:
     """校验命令是否在白名单内。通过返回 None。"""
     if not argv:
@@ -141,9 +167,11 @@ def validate_command(argv: list[str]) -> str | None:
                 )
             # 目标路径里不许有 shell 元字符。原因很具体：Windows 上 node 常常是
             # `.cmd` 垫片（nvm/volta/pnpm/本机 DSH 都是），`resolve_argv` 得把它包成
-            # `cmd /c <垫片> …` 才起得来，而 `cmd` 会把 `& | ^ < > %` 重新当元字符。
+            # `cmd /c call <垫片> …` 才起得来，而 `cmd` 会把 `& | ^ < > %` 重新当元字符。
             # 不收这一条，包装就等于在本模块"不经过 shell"的边界上开了个口子。
-            if any(ch in target for ch in "&|^<>%"):
+            # （`resolve_argv` 那道口子上还有同一套检查兜着，见 `CMD_METACHARS`；
+            # 这里是更早、更具体的一层：它连"要不要批准"都不用问。）
+            if any(ch in target for ch in CMD_METACHARS):
                 return (
                     "node --check 的目标路径里不能有 shell 元字符（& | ^ < > %）："
                     "Windows 上 node 可能是 `.cmd` 垫片，得经 cmd.exe 起它，"
@@ -153,6 +181,57 @@ def validate_command(argv: list[str]) -> str | None:
         return "node 只允许 --check（语法检查），不允许执行脚本"
 
     return f"命令不在白名单内: {program}"
+
+
+class CmdShimRejected(RuntimeError):
+    """这条命令只能经 `cmd.exe` 起（`.cmd`/`.bat` 垫片），而参数里有 cmd 会重新
+    解释的字符。消息就是给人看的那句话，`_run` 原样交给模型。"""
+
+
+def _cmd_shim(program: str) -> str | None:
+    """这个程序名在本机解析到的 `.cmd`/`.bat` 垫片；不是垫片就 None。
+
+    判据只有"解析到的文件后缀"这一条，**不挑程序名**：`node`、`pnpm`、`ruff.cmd`
+    在 Windows 上是同一类东西，没有理由只给其中一个开这条路。
+    `.exe`/`.com` 返回 None——它们直接 spawn 就行，多包一层 `cmd` 只会多一处
+    引号与元字符的坑。
+    """
+    if os.name != "nt":
+        return None
+    found = shutil.which(program)
+    if not found:
+        return None
+    return found if Path(found).suffix.lower() in (".cmd", ".bat") else None
+
+
+def _shim_problem(shim: str, argv: list[str]) -> str | None:
+    """参数（含垫片路径本身）里有没有"经 cmd 就不是原样"的字符。
+
+    返回给人看的那句话；干净就 None。要点三样：**为什么**（这条命令得经
+    `cmd.exe`）、**哪一个值**出问题、**怎么办**（去掉字符，而不是让它反复试）。
+    """
+    offenders: list[str] = []
+    labelled = [("垫片路径", shim)]
+    labelled += [(f"参数 {i}", arg) for i, arg in enumerate(argv[1:], 1)]
+    for label, value in labelled:
+        bad = [ch for ch in CMD_METACHARS if ch in value]
+        if bad:
+            offenders.append(f"{label} {value!r}（含 {' '.join(bad)}）")
+        elif CMD_QUOTE in value:
+            offenders.append(f"{label} {value!r}（含双引号）")
+    if not offenders:
+        return None
+    return (
+        "这条命令在本机解析到的是 `.cmd`/`.bat` 垫片，Windows 上只能经 cmd.exe 起它：\n"
+        f"  {shim}\n"
+        "而 cmd.exe 会把命令行里的 & | < > ^ % 重新解释（分句、转向、转义、展开），"
+        '双引号也会打乱它的引用规则——参数就不是原来那个了，所以这里明确不跑，'
+        "也不替你转义（转义过的参数到底变成什么，没法保证）：\n"
+        "  " + "\n  ".join(offenders) + "\n"
+        "怎么办：把这些字符从参数里去掉。换目录请用 cwd 参数，串联命令请拆成多次调用；"
+        "参数本来就是数组里的一项，不需要自己加引号。"
+        "确实必须原样执行这条命令时，请让用户手动跑。"
+    )
 
 
 def resolve_argv(argv: list[str], root: Path) -> list[str]:
@@ -179,32 +258,47 @@ def resolve_argv(argv: list[str], root: Path) -> list[str]:
     但依赖「恰好装在 spool 那个解释器里」的脚本会受影响——要消除这个歧义，
     给工作区建 `.venv` 即可。
 
-    **Windows 上的 `.cmd` 垫片**：`node` 这类命令常常不是 `.exe`，而是一个
-    `.cmd` 垫片（nvm-for-windows、volta、pnpm 装的都是；本机 DSH 提供的 node 也是
+    **Windows 上的 `.cmd`/`.bat` 垫片（对任意命令生效）**：`node`、`pnpm`、
+    `ruff` 这类命令常常不是 `.exe`，而是一个 `.cmd` 垫片（nvm-for-windows、
+    volta、pnpm 装的都是；本机 DSH 提供的 node 也是
     `ELECTRON_RUN_AS_NODE=1 "…DeepSeek Harness.exe"`）。`subprocess` 在 Windows 上
-    只按 `PATH` 找 `.exe`/`.com`，于是直接 spawn 会报「找不到命令: node」——
+    只按 `PATH` 找 `.exe`/`.com`，于是直接 spawn 会报「找不到命令: <名字>」——
     **而那个命令明明装着**，报错还把人往"没装"的方向带。这里把它包成
-    `cmd /c <垫片> …`（只有这一种形状，见下）。
+    `cmd /c call <垫片> …`（只有这一种形状）。
 
-    为什么**只对 `node` 且只对 `--check`** 这么做：经 `cmd.exe` 起进程等于让
-    `&`/`|`/`%` 重新变成元字符，而本模块自述的边界之一是"不经过 shell"。
-    `validate_command` 已经把 `node` 限死在 `--check <file.js>`，并且**拒绝目标路径里
-    出现 shell 元字符**（见那里的注释）——两条凑齐，这条包装才是安全的。
-    其它 `.cmd` 命令一律维持原样（找不到就是找不到，不改边界）。
+    为什么是 `cmd /c call …` 而不是 `cmd /c …`（实测四种形状，只有它稳）：
+    `cmd /c "C:\\Program Files\\x\\node.cmd" a b` 会命中 cmd 自己的引号剥离规则
+    ——命令行上出现两对以上引号时，它把**首尾各一个**引号去掉，路径就从空格处
+    断成两截，报的是"`C:\\Program Files\\x\\shim` 不是内部或外部命令"。加一个
+    `call`（它是 cmd 内建，不多起进程）之后，cmd 不再对 `/c` 之后的部分做那套
+    剥离，引号原样交给批处理；实测带空格路径 + 带空格/中文参数逐字到达，
+    退出码也照原样传出来（`exit /b 3` → 3）。
+
+    为什么敢经 `cmd.exe`（本模块自述的边界之一是"不经过 shell"）：
+    **参数逐字进、元字符一律挡在门外。**
+    - 逐字：仍然是 argv 数组，一个参数一个元素，引用交给
+      `subprocess.list2cmdline`（`shell=False` 时它就是这条命令的引用实现）——
+      这里**不做字符串拼接**，所以不存在"引号拼错、参数被切开"这回事。
+    - 挡在门外：解析到垫片、且参数（或垫片路径）里有 `& | < > ^ % "` 时，
+      抛 `CmdShimRejected` 并给出人话（见 `_shim_problem`），**不转义、不猜**。
+      经 `cmd.exe` 的转义结果没法保证，与其悄悄改写参数，不如明确拒绝。
+
+    其余的换算维持原样：`.exe`/`.com` 不包 `cmd`；`python`/`python3`/`pytest`
+    先走解释器换算（那条路不经过这里）；不是垫片、也不在白名单里的命令原样返回，
+    找不到就是找不到。
     """
     if not argv:
         return argv
     if argv[0] in PYTHON_PROGRAMS:
         return resolve_python_argv(argv, [root, spoolkit_checkout_root()])
 
-    if argv[0] in ("node", "node.exe"):
-        import os
-        import shutil
-
-        found = shutil.which(argv[0])
-        if found and os.name == "nt" and Path(found).suffix.lower() in (".cmd", ".bat"):
-            return ["cmd", "/c", found, *argv[1:]]
-    return argv
+    shim = _cmd_shim(argv[0])
+    if shim is None:
+        return argv
+    problem = _shim_problem(shim, argv)
+    if problem is not None:
+        raise CmdShimRejected(problem)
+    return ["cmd", "/c", "call", shim, *argv[1:]]
 
 
 def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
@@ -388,6 +482,15 @@ def _run(
     level, reason = classify(argv)
     if level == DENIED:
         return ToolResult(ok=False, content=reason)
+
+    # 换算（解释器 / `.cmd` 垫片）**在申请授权之前**做完：一条注定起不来的命令
+    # 不该先去打扰人。垫片加元字符的那条拒绝在这里落地——归因要说对，它不是
+    # "没权限"（那会把它引去申请授权），而是"这条路走不通，换写法"。
+    try:
+        resolved = resolve_argv(argv, root)
+    except CmdShimRejected as exc:
+        return ToolResult(ok=False, content=str(exc))
+
     if level == ASK:
         store = grants if grants is not None else Grants()
         if store.blocks(argv):
@@ -420,7 +523,6 @@ def _run(
             content="未找到 uv，无法执行该命令。可以直接告诉用户需要手动安装依赖。",
         )
 
-    resolved = resolve_argv(argv, root)
     cwd_arg = args.get("cwd", ".")
 
     # 有未落盘的改动时，在试跑副本里执行：模型以为文件已经改了，
