@@ -859,7 +859,7 @@ async function extras() {
   // 空态（还没有目标）：那一枚"未选工作区"徽标 + 怎么选的说明。
   ctx.applyState(frame('', 'a1', WROWS, SROWS_A, history(0, ''), {
     target: { root: '', session: 'a1', pinned: false, workspace_source: 'none',
-      session_source: 'default', note: '还没有选工作区：在左边的「工作区」里选一个。' },
+      session_source: 'default', note: '未选择工作区：在左侧「工作区」段选一项。' },
   }));
   out.status_no_target = { visible: visibleBadges(), label: stLabel('st-target') };
   ctx.setStatusOpen(true);
@@ -1075,7 +1075,8 @@ async function extras2() {
     ...cardInfo(lastCard()),
     stream_bubbles: streamBubbles(),
     texts: bubbleTexts(),
-    has_placeholder: streamText().indexOf('正在思考') >= 0,
+    has_placeholder: streamText().indexOf('生成中') >= 0,
+    bubble_placeholder: bubbleTexts().indexOf('生成中') >= 0,
   };
 
   // 刷新页面 / 切走再切回之后：只喂一帧 `/state`（历史里那条消息带着 trace），
@@ -1094,7 +1095,8 @@ async function extras2() {
   out.refresh_trace = {
     ...cardInfo(lastCard()),
     stream_bubbles: streamBubbles(),
-    has_placeholder: streamText().indexOf('正在思考') >= 0,
+    has_placeholder: streamText().indexOf('生成中') >= 0,
+    bubble_placeholder: bubbleTexts().indexOf('生成中') >= 0,
   };
   // 刷新之后一键展开（展开键没建出来时不抛异常，让断言去红）。
   const freshHead = lastCard() ? lastCard().querySelector('.trace-head') : null;

@@ -37,7 +37,7 @@
   因为断线漏掉时，那一枚键不会永远卡在"正在停止…"。手动停止**不当失败画**：
   `/state` 的 `stopped`（只增字段）说得出这一轮是被停掉的。
 - **回复长在同一张消息卡片里，思考过程可折叠、事后还能回看**：一轮开始时先摆一张
-  助手卡片（占位"正在思考"），`final` 一到就地换成真正的回复；`/state` 稍后把同一条
+  助手卡片（占位"生成中"），`final` 一到就地换成真正的回复；`/state` 稍后把同一条
   从记忆库里再送一次时**认领**同一张卡片（不新建节点、不重复一条）。步骤 / 工具调用 /
   失败详情进这张卡片上的「思考过程」，**默认收起**（收起时一个节点都不建）。
   刷新页面、切走再切回之后，页面按 `/state` 里每条消息带着的 `trace`（服务端**只增**
@@ -63,7 +63,7 @@
   `tests/web/page_dom.js` 的 `no_squeeze`，而且那条模型先被反证过它量得出"挤"）。
   常态下只剩一枚小圆点，异常 / 只读 / 钉住 / 待配对 / 别处在跑时才多出一枚可点开的
   徽标，点开是详情（状态 / 地址 / `probed_at` 与 `age_s` / 可能原因 / 下一步敲哪条
-  **真存在**的命令）。**异常仍然看得见**：那时徽标是红的并且带字（"模型不通"），
+  **真存在**的命令）。**异常仍然看得见**：那时徽标是红的并且带字（"模型未连接"），
   不是一枚沉默的绿点——静默的陈旧值比报错更糟。
 - **自己说的话不加符号前缀**：发出去的那一条前面原来挂着一个黑色三角形符号，
   它什么也没说明（气泡底色 + 右对齐已经说清"这是我说的"），所以它没了，也没换成
@@ -83,7 +83,7 @@
   复制键固定在右上角），行内 `` ` `` 是带底色的等宽小片，其余是正文。
 - **流式输出默认跟到底，人往上翻就不抢**：`stick` 在**改动 DOM 之前**读，
   翻上去读到一半不会被新事件弹回底部；那时右下角浮出「回到最新」。
-- **"正在思考"由既有的 `wait` / `start` / `final` 驱动**，不新造协议：
+- **"生成中"由既有的 `wait` / `start` / `final` 驱动**，不新造协议：
   `wait` 心跳（模型生成中）亮，`final` 灭。
 
 主题：默认深色，跟随 `prefers-color-scheme`；颜色全在 `:root` 的那张变量表里，
@@ -633,7 +633,7 @@ HTML = """<!DOCTYPE html>
 </div>
 <div id="top">
   <button id="menu" title="会话列表" aria-label="会话列表"></button>
-  <span id="where" class="empty">连接中…</span>
+  <span id="where" class="empty">连接中</span>
 </div>
 <div id="scrim"></div>
 <div id="body">
@@ -650,15 +650,15 @@ HTML = """<!DOCTYPE html>
       <div id="workspaces"></div>
       <div id="sessions"></div>
     </div>
-    <div id="side-foot"><span id="meta" class="dim">连接中…</span></div>
+    <div id="side-foot"><span id="meta" class="dim">连接中</span></div>
   </aside>
   <div id="thread">
     <div id="stream"></div>
-    <div id="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span>正在思考</div>
+    <div id="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span>生成中</div>
     <button id="toBottom" title="回到最新" aria-label="回到最新"></button>
     <div id="composer">
       <div class="box">
-        <textarea id="goal" rows="1" placeholder="给 agent 发消息…"></textarea>
+        <textarea id="goal" rows="1" placeholder="发送给 agent 的任务"></textarea>
         <button id="send" title="发送"></button>
       </div>
       <!-- 输入条下面那一行：**只剩"Enter 发送"这句静态提示**。
@@ -671,7 +671,7 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
 </div>
-<div id="conn">与服务的连接断开了，重连中…</div>
+<div id="conn">与服务连接已断开，正在重连</div>
 <script>
 /* 内联 SVG：零外链图标。
    下面这几行里有 "<"，但它长在**字符串里面**，不是 HTML 解析器看得见的位置：
@@ -774,11 +774,11 @@ let targetMissing = false;
 // 详情面板开着没有。默认关（页面一上来不该顶着一块东西）。
 let statusOpen = false;
 
-// 等待时那一行里**不许**出现探活那条通知的名字：红色的"连不上"说的是模型，
+// 等待时那一行里**不许**出现探活那条通知的名字：红色的"未连接"说的是模型，
 // 不是"还在生成"（两者混在一起，人会以为模型挂了）。
 const WAIT_PREFIX = '模型生成中，已等待';
 // 左栏里"在跑"的标记：它自己会消失，所以必须随每一帧状态重画。
-const RUN_MARK = '正在跑';
+const RUN_MARK = '运行中';
 // 钉住（--root）时两段列表都只读。用类而不是 disabled：这里是 div 行，不是控件。
 const LOCK = 'lock';
 // 只有 `info` 那一档的提示自己会走（几秒）；错误那些**永远不自动消失**
@@ -984,11 +984,12 @@ function modeBadgeText() {
 function healthStateText(info, model) {
   if (model.ok === false) {
     const kind = model.kind || failureKind(model.detail);
-    if (kind === 'slow') { return '回话慢（连上了，但没在超时内回话）'; }
-    return '连不上';
+    if (kind === 'slow') { return '连接超时（对方未在超时内回话）'; }
+    if (kind === 'server') { return '服务异常（回话是错误）'; }
+    return '未连接（连接被拒）';
   }
   if (info.state === 'unknown' || model.ok === null || model.ok === undefined) {
-    return '还没探过（后台正在探，几秒后自己更新）';
+    return '未知（后台正在探测）';
   }
   return '正常';
 }
@@ -999,8 +1000,8 @@ function healthLines() {
   const rows = [{text: '状态：' + healthStateText(info, model),
     cls: healthView.cls === 'bad' ? 'bad' : ''}];
   // 地址：优先用这一次探活报的地址，其次配置里那个。
-  rows.push({text: '地址：' + (model.target || info.url || '（按配置里的地址）')});
-  rows.push({text: '探活时间：' + probedStamp(info)});
+  rows.push({text: '模型服务地址：' + (model.target || info.url || '未提供，按配置取')});
+  rows.push({text: '最近一次探测：' + probedStamp(info)});
   for (const one of healthView.lines) { rows.push({text: one}); }
   return rows;
 }
@@ -1008,12 +1009,12 @@ function healthLines() {
 // 模式那一节：这一页现在能不能驱动、目标为什么切不动——"为什么点不动"的答案。
 function modeLines() {
   const rows = [{text: '驱动：' + (readonly
-    ? '不可以（这一页只读，写请求会被服务端拒）'
-    : '可以（本机回环）')}];
+    ? '不可用（这一页只读，写请求会被服务端拒）'
+    : '可用（本机回环）')}];
   if (readOnlyNote) { rows.push({text: readOnlyNote}); }
   if (pinnedNote) { rows.push({text: pinnedNote}); }
   if (!readOnlyNote && !pinnedNote) {
-    rows.push({text: '目标没有钉住：左栏里点一行就切过去。'});
+    rows.push({text: '目标未钉住：在左栏点一行即可切换。'});
   }
   return rows;
 }
@@ -1023,8 +1024,8 @@ function targetLines() {
   const t = (lastState || {}).target || {};
   const rows = [{text: t.root
     ? '目标：' + t.root + ' · 会话 ' + (t.session || '')
-    : '目标：还没有选'}];
-  rows.push({text: '运行：' + (busy ? '正在跑一条' : '空闲')});
+    : '目标：未选择'}];
+  rows.push({text: '运行状态：' + (busy ? '运行中' : '空闲')});
   for (const one of targetNotes) { rows.push({text: one}); }
   return rows;
 }
@@ -1037,9 +1038,9 @@ function pairSections() {
       title: '待批准的通道配对请求（来自手机 / 聊天通道）',
       lines: [
         {text: '配对码：' + item.code},
-        {text: '在本机终端敲：spool approve ' + item.code},
+        {text: '在本机终端执行：spool approve ' + item.code},
         {text: '来自：' + (item.user || '未知')},
-        {text: '点「应用」不会批准配对（那是落盘确认）。'},
+        {text: '「应用」不批准配对（那是落盘确认，批准在终端）。'},
       ],
     });
   }
@@ -1110,7 +1111,7 @@ function drawStatus() {
   stHealth.className = 'st-item ' + (bad ? healthView.cls : 'ok');
   healthLabel.classList.toggle('hidden', healthView.label === '');
   healthLabel.textContent = healthView.label;
-  stHealth.title = '模型探活：' + (healthView.label || '正常') + '（点开看详情）';
+  stHealth.title = '模型探活：' + (healthView.label || '正常') + '（点开查看）';
   stHealth.setAttribute('aria-label', stHealth.title);
 
   const mode = modeBadgeText();
@@ -1123,7 +1124,7 @@ function drawStatus() {
   stTarget.classList.toggle('hidden', !targetMissing);
   targetLabelBox.textContent = targetMissing ? '未选工作区' : '';
   stTarget.title = targetMissing
-    ? '还没有选工作区（点开看怎么选）' : '当前目标';
+    ? '尚未选择工作区（点开查看可选范围）' : '当前目标';
   stTarget.setAttribute('aria-label', stTarget.title);
 
   stPair.classList.toggle('hidden', pairingRows.length === 0);
@@ -1132,14 +1133,14 @@ function drawStatus() {
     ? ('配对码 ' + pairingRows[0].code)
     : (pairingRows.length ? ('待配对 ' + pairingRows.length) : '');
   stPair.title = pairingRows.length
-    ? '有通道配对请求等你在本机终端批准（点开看码与命令）' : '通道配对';
+    ? '有通道配对请求待在本机终端批准（点开查看配对码与命令）' : '通道配对';
   stPair.setAttribute('aria-label', stPair.title);
 
   stElsewhere.classList.toggle('hidden', elsewhereRows.length === 0);
   elsewhereLabel.textContent = elsewhereRows.length
     ? ('别处 ' + elsewhereRows.length + ' 条在跑') : '';
   stElsewhere.title = elsewhereRows.length
-    ? '别的目标上还有任务在跑（点开看是哪几条）' : '别处的任务';
+    ? '其他目标上还有任务在运行（点开查看是哪些）' : '别处的任务';
   stElsewhere.setAttribute('aria-label', stElsewhere.title);
 
   renderStatusPanel();
@@ -1263,7 +1264,7 @@ function codeBlock(raw) {
 // 复制走 navigator.clipboard；失败就选中那段代码让人自己按 Ctrl+C——
 // 不弹第二个对话框（本地壳上"复制"点一下就该完事）。
 function copyText(text, button) {
-  const done = function (ok) { button.textContent = ok ? '已复制' : '复制失败'; };
+  const done = function (ok) { button.textContent = ok ? '已复制' : '复制未成功'; };
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(
       function () { done(true); },
@@ -1313,23 +1314,23 @@ function failureKind(text) {
 }
 
 function failureCause(kind) {
-  if (kind === 'connect') { return '模型服务没起 / 端口不对 / 代理挡了'; }
-  if (kind === 'slow') { return '这次要生成的内容太长 / 模型太慢 / 服务卡住'; }
+  if (kind === 'connect') { return '模型服务未启动 / 端口不对 / 被代理拦截'; }
+  if (kind === 'slow') { return '本次生成内容过长 / 模型响应慢 / 服务端未响应'; }
   if (kind === 'server') { return '服务端参数不对 / 上下文超限 / 进程刚重启'; }
   return '';
 }
 
 function failureNext(kind) {
   if (kind === 'connect') {
-    return '`spool service list` 看本机模型配方在不在跑'
-      + '（配方表里那条叫 llama 的话，`spool service start llama` 就能起它）；'
-      + '`spool config` 看 provider 与 base_url 是从哪来的；把它起好再发一次';
+    return '`spool service list` 查看本机模型配方是否在运行'
+      + '（配方表里那条叫 llama 的话，`spool service start llama` 即可启动它）；'
+      + '`spool config` 查看 provider 与 base_url 的来源；启动后重新发送';
   }
   if (kind === 'slow') {
-    return '把活拆小再发；`spool service list` 看模型进程还在不在';
+    return '把任务拆小后重发；`spool service list` 查看模型进程是否还在';
   }
   if (kind === 'server') {
-    return '看下面那行原始信息；`spool service list` 看服务状态';
+    return '查看下面那行原始信息；`spool service list` 查看服务状态';
   }
   return '';
 }
@@ -1363,13 +1364,13 @@ function explainFailure(text, extra) {
   const stage = kind === 'connect' ? '连接模型'
     : kind === 'slow' ? '等模型生成' : '模型服务回话';
   const lines = [
-    '模型地址：' + (where === '' ? '（按配置里的地址）' : where),
+    '模型地址：' + (where === '' ? '未提供，按配置取' : where),
     '可能原因：' + failureCause(kind),
     '下一步：' + failureNext(kind),
   ];
   const raw = redact(usefulLine(text)).slice(0, 300);
   return {
-    head: '失败环节：' + stage + '（这一步没过去，后面的活一件都没做）',
+    head: '失败环节：' + stage + '（这一步未通过，后续步骤未执行）',
     lines: lines,
     raw: raw,
   };
@@ -1481,7 +1482,7 @@ function drawTraceHead(box) {
     if (one.ok === false) { text += ' · 有失败'; break; }
   }
   box._head.textContent = text;
-  box._head.title = text + '（点开看这一轮的步骤、工具调用与失败原因）';
+  box._head.title = text + '（点开查看本轮步骤、工具调用与失败原因）';
 }
 
 // 正文：**只追加没画过的那几行**（增量追加，重复到达不会叠）。收起时不建节点。
@@ -1593,7 +1594,7 @@ function ensureLive() {
   const trace = makeTrace();
   const bubble = document.createElement('div');
   bubble.className = 'bubble pending';
-  bubble.textContent = '正在思考…';
+  bubble.textContent = '生成中';
   wrap.appendChild(trace);
   wrap.appendChild(bubble);
   // `turnGoal` 是"这张卡片属于哪一轮"：刷新 / 补帧时靠它认出"还是同一轮"，
@@ -1636,7 +1637,7 @@ function finishLive(ok, text, extra, stopped) {
   } else if (stopped) {
     // 手动停止**不是失败**：低调说一句，别给它套一个红色的失败块。
     card.bubble.className = 'bubble stopped';
-    card.bubble.textContent = redact(text) || '已停止这一轮（已产出的内容保留）';
+    card.bubble.textContent = redact(text) || '本轮已停止（已产出的内容保留）';
   } else {
     notifyFailure('失败：', text, explainFailure(text, extra));
     failIntoBubble(card.bubble, '失败：', text, extra);
@@ -2024,7 +2025,7 @@ function renderSidebar(wrows, srows, sremoved, key, locked) {
     wsSpecs.push(lineSpec('empty-line', function () {
       const none = document.createElement('div');
       none.className = 'empty-line';
-      none.textContent = '（登记表是空的：先在工作区目录里敲 spool init）';
+      none.textContent = '（登记表为空：先在工作区目录里执行 spool init）';
       return none;
     }));
   }
@@ -2062,7 +2063,7 @@ function renderSidebar(wrows, srows, sremoved, key, locked) {
       function () {
         const sub = document.createElement('div');
         sub.className = 'grp-sub';
-        sub.textContent = '已移除（' + sremoved.length + '）— 点「恢复」放回来';
+        sub.textContent = '已移除（' + sremoved.length + '）：点「恢复」放回列表';
         return sub;
       }));
     for (const one of sremoved) {
@@ -2163,8 +2164,8 @@ function drawTarget(state) {
   // 空态引导是"未选工作区"那枚徽标 + 详情。判据一个字都没丢，占位没了。
   pinned = locked;
   pinnedNote = locked
-    ? '这条壳是用 --root 起的：只有这一个目标，切不了。'
-      + '去掉 --root 重启就是机器级。'
+    ? '这条壳由 --root 启动：只有这一个目标，无法切换。'
+      + '去掉 --root 重启即为机器级。'
     : '';
   targetMissing = !t.root;
   const notes = [];
@@ -2172,17 +2173,17 @@ function drawTarget(state) {
     // 空态要**引导人选**，不是摆一堆空白：候选清单就在左边那条工作区段里。
     // 但那张表也可能是**空的**（一个工作区都没登记过）——那时说"在左边选一个"
     // 就是死路，所以补一句怎么造出候选来（评审逮到的就是这条）。
-    notes.push(t.note || '还没有选工作区：在左边的「工作区」里选一个'
-      + '（表是空的就先在工作区目录里敲 spool init）。');
+    notes.push(t.note || '未选择工作区：在左侧「工作区」段选一项；'
+      + '登记表为空时先 `spool init`。');
   }
   if (busy) {
     // 运行中那一枚键变成「停止」（`syncSend`）：这里只说清"点了会发生什么"，
     // 因为"停止"这两个字本身回答不了"已产出的东西会不会没了"。
-    notes.push('这条正在跑：点输入条右边那枚「停止」可以中断它'
-      + '（温和停止，已经产出的内容保留）。');
+    notes.push('本轮运行中：点输入条右侧的「停止」可中断它'
+      + '（温和停止，已产出的内容保留）。');
   }
   if (!busy && (lastState || {}).stopped) {
-    notes.push('上一轮是**手动停止**的（已产出的内容保留）；接着发下一条就行。');
+    notes.push('上一轮已手动停止（已产出的内容保留），可直接发送下一条。');
   }
   targetNotes = notes;
   // 状态区收尾重画：目标（空态）、模式（钉住）、运行中那几句都在这一下里对齐。
@@ -2206,8 +2207,8 @@ function showElsewhere(state) {
   });
   elsewhereRows = others.map(function (row) {
     const lines = ['会话 ' + row.session + ' — ' + short(row.goal, 60)];
-    if (row.awaiting) { lines.push('它在等你确认'); }
-    return {title: '别处还有一条在跑：' + (row.name || row.root), lines: lines};
+    if (row.awaiting) { lines.push('该会话正在等待确认'); }
+    return {title: '其他目标仍在运行：' + (row.name || row.root), lines: lines};
   });
   drawStatus();
 }
@@ -2243,7 +2244,7 @@ function resetView() {
 // 人根本不知道自己批的是哪个工作区、哪条会话里的东西。
 function targetLabel() {
   const t = (lastState || {}).target || {};
-  if (!t.root) { return '还没有目标'; }
+  if (!t.root) { return '目标：未选择'; }
   return '工作区 ' + t.root + ' · 会话 ' + (t.session || '');
 }
 
@@ -2414,8 +2415,8 @@ function syncSend() {
   const mode = busy ? (stopping ? 'stopping' : 'stop') : 'send';
   sendBtn.disabled = stopping || readonly;
   sendBtn.dataset.mode = mode;
-  sendBtn.title = readonly ? '只能看：这条壳绑在非回环地址上，写请求会被拒'
-    : busy ? (stopping ? '正在停止…' : '停止这一轮（已产出的内容保留）')
+  sendBtn.title = readonly ? '只读：这条壳绑在非回环地址上，写请求会被拒'
+    : busy ? (stopping ? '停止中' : '停止本轮（已产出的内容保留）')
     : '发送';
   // 按钮里只有一个图标：读屏得有个名字（只给 title 是不够稳的）。
   sendBtn.setAttribute('aria-label', sendBtn.title);
@@ -2447,7 +2448,7 @@ async function requestStop() {
     return;
   }
   stoppedRun = true;
-  add('已请求停止这一轮：服务端在收尾，已经产出的内容保留。', 'dim');
+  add('已请求停止本轮：服务端正在收尾，已产出的内容保留。', 'dim');
 }
 
 // 「正在思考」：由既有的 wait / start / final 驱动，不新造协议。
@@ -2542,23 +2543,23 @@ function showPairings(items) {
 function probedAgo(health) {
   const info = health || {};
   const age = info.age_s;
-  // 既没有 `age_s` 也没有 `probed_at`：**不说**"还没探过"——有结果而没时间戳时
-  // 那句话会和"状态：正常"打架。照实说"没说什么时候探的"。
+  // 既没有 `age_s` 也没有 `probed_at`：**不说**"未探测"——有结果而没时间戳时
+  // 那句话会和"状态：正常"打架。照实说时间戳缺失。
   if (age === null || age === undefined) {
-    return info.probed_at ? '' : '（没说是什么时候探的）';
+    return info.probed_at ? '' : '（时间戳缺失）';
   }
   const seconds = Math.max(0, Math.round(Number(age)));
-  if (seconds < 2) { return '（刚探过）'; }
-  if (seconds < 60) { return '（' + seconds + ' 秒前探过）'; }
-  return '（' + Math.round(seconds / 60) + ' 分钟前探过）';
+  if (seconds < 2) { return '（刚刚）'; }
+  if (seconds < 60) { return '（' + seconds + ' 秒前）'; }
+  return '（' + Math.round(seconds / 60) + ' 分钟前）';
 }
 
 // 探活不通那一行的开头。`slow`（连上了、只是没在超时内回话）与别的不通对人的
 // 下一步不一样（去看模型是不是在加载 vs 去把服务起起来），所以不合成一句
-// "连不上"——两句话都由 `failureCause` / `failureNext` 往下说。
+// "未连接"——两句话都由 `failureCause` / `failureNext` 往下说。
 function modelDownLine(kind, where, ago) {
-  if (kind === 'slow') { return '本机模型没在超时内回话' + where + ago; }
-  return '本机模型连不上' + where + ago;
+  if (kind === 'slow') { return '本机模型连接超时' + where + ago; }
+  return '本机模型未连接' + where + ago;
 }
 
 // 探活那枚徽标的文字与详情都由这里算。异常**带字**（不是一枚沉默的绿点）：
@@ -2571,7 +2572,7 @@ function probedStamp(info) {
   const ago = probedAgo(data);
   const at = Number(data.probed_at);
   if (!at) { return ago; }
-  return (new Date(at * 1000).toLocaleString() + ' ' + ago).trim();
+  return (new Date(at * 1000).toLocaleTimeString('zh-CN', {hour12: false}) + ' ' + ago).trim();
 }
 
 function showHealth(health) {
@@ -2592,21 +2593,21 @@ function showHealth(health) {
     if (kind === 'slow' && lines.length) {
       // 探活超时的下一步**不是**"把活拆小再发"（这里没人在等生成）：
       // 该做的是去看模型进程还在不在。
-      lines[lines.length - 1] = '下一步：`spool service list` 看模型进程还在不在'
-        + '（刚起 / 在加载模型就再等一会儿）';
+      lines[lines.length - 1] = '下一步：`spool service list` 查看模型进程是否还在'
+        + '（刚启动 / 正在加载模型则再等一会儿）';
     }
     healthView = {
       cls: 'bad',
-      label: kind === 'slow' ? '模型回话慢' : '模型不通',
+      label: kind === 'slow' ? '模型连接超时' : (kind === 'server' ? '模型服务异常' : '模型未连接'),
       lines: [modelDownLine(kind, where, probedAgo(info))].concat(lines),
       raw: parts && parts.raw ? parts.raw : redact(model.detail || ''),
     };
   } else if (info.state === 'unknown') {
-    // 后台探活刚起来：说"还没探过"，**不画成"通了"**（那是静默的假话），
-    // 也不画成"连不上"（那是另一种假话）。
+    // 后台探活刚起来：说"未探测"，**不画成"通了"**（那是静默的假话），
+    // 也不画成"未连接"（那是另一种假话）。
     healthView = {
-      cls: 'warn', label: '还没探过',
-      lines: ['本机模型：还没探过（后台正在探，几秒后这里会自己更新）。'],
+      cls: 'warn', label: '未探测',
+      lines: ['本机模型：未探测（后台正在探测，几秒后此处自动更新）。'],
       raw: '',
     };
   }
@@ -2615,9 +2616,9 @@ function showHealth(health) {
   const extra = [];
   for (const item of (info.services || [])) {
     if (item.ok === false) {
-      extra.push((item.name || '外接服务') + '连不上'
+      extra.push('外接服务未连接：' + (item.name || '未具名')
         + (item.target ? '（' + item.target + '）' : '')
-        + '：' + redact(item.detail || '连不上'));
+        + (item.detail ? '：' + redact(item.detail) : ''));
     }
   }
   const bridge = info.bridge || {};
@@ -2627,7 +2628,7 @@ function showHealth(health) {
   if (extra.length) {
     if (healthView.cls === 'ok') {
       healthView.cls = 'bad';
-      healthView.label = '外接服务不通';
+      healthView.label = '外接服务未连接';
     }
     healthView.lines = healthView.lines.concat(extra);
   }
@@ -2697,7 +2698,7 @@ function showCommandAsk(detail) {
   box.appendChild(why);
   const how = document.createElement('div');
   how.className = 'dim';
-  how.textContent = '点「应用」= 允许这一次；要长期允许，去 .agent/grants.json';
+  how.textContent = '点「应用」仅允许这一次；长期允许需写入 .agent/grants.json';
   box.appendChild(how);
   node._body.appendChild(box);
   if (node._foot) { node._foot.style.display = 'flex'; }
@@ -2725,7 +2726,7 @@ function showReadonly(state) {
   readOnlyNote = readonly
     ? '这条壳绑在非回环地址上' + where + '：只能看，不能驱动——'
       + '发任务与确认改动会被拒。要驱动它，就在本机开一个网页壳'
-      + '（或把 --host 绑回 127.0.0.1）。工作区与会话仍可切换，那只是换"在看谁"。'
+      + '（或把 --host 绑回 127.0.0.1）。工作区与会话仍可切换：那只是换"在看谁"。'
     : '';
   drawStatus();
 }
@@ -2775,7 +2776,7 @@ function onEvent(event) {
     // auto 策略下改动是静默落盘的，界面上必须留一句话，
     // 否则「它自己改了文件」这件事只有翻 git 才知道。
     if (data.auto) {
-      add('自动应用 ' + data.count + ' 处改动（策略 auto 且范围内）', 'dim');
+      add('自动应用 ' + data.count + ' 处改动（策略 auto 且在授权范围内）', 'dim');
     }
     addTraceLine(liveTraceLine(data));
     clearPending();
@@ -2891,7 +2892,7 @@ function requestRemove(value) {
   }
   armed = '';
   markArmed();
-  act('/session/delete', {session: value}, '已移除会话 ' + value + '（归档：数据没动）');
+  act('/session/delete', {session: value}, '已移除会话 ' + value + '（归档：数据未改动）');
 }
 
 // 「恢复」：把归档过的那一条放回列表（同一个端点，另一个方向）。
@@ -2929,7 +2930,7 @@ async function act(url, payload, note) {
 // 不等下一轮 `/state`（也不必等，`/target` 的响应体就是新的完整状态）。
 async function newSession() {
   if (readonly || (lastState.target || {}).pinned) { return; }
-  const name = window.prompt('新会话的名字（字母 / 数字 / 横线）', 'web-' + Date.now());
+  const name = window.prompt('新会话名称（字母 / 数字 / 横线）', 'web-' + Date.now());
   if (name === null) { return; }
   const clean = String(name).trim();
   if (!clean) { return; }

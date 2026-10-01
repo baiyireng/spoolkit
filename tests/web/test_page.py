@@ -116,63 +116,78 @@ def test_页面能按快照重建待确认面板() -> None:
 
 
 def test_页面按快照显示模型断开() -> None:
-    """配对是待批准；模型不通是另一条，不能复用「应用/拒绝」。
+    """配对是待批准；模型未连接是另一条，不能复用「应用/拒绝」。
 
     它现在是输入条那一行的**状态徽标**（+ 点开的详情），不是顶部横幅、也不是气泡：
-    常态下只剩一枚小圆点，不通才变色并**带字**——一枚沉默的绿点会把"连不上"藏起来。
+    常态下只剩一枚小圆点，不通才变色并**带字**——一枚沉默的绿点会把"未连接"藏起来。
+
+    这里钉的是**要点**（状态词是可判定的名词 + 详情那段复用同一套说法），
+    不是整句字面：口径改成"未连接 / 连接超时"时这条不该跟着碎掉，
+    而"异常不带字"这类回退必须照样红。
     """
     assert "showHealth" in HTML
     assert 'id="st-health"' in HTML
-    assert "模型连不上" in HTML
+    assert "未连接" in HTML
     assert "state.health" in HTML
-    # 三个短标签都在：不通 / 回话慢 / 还没探过。
+    # 三个短标签都在：未连接 / 连接超时 / 未探测（可判定的状态词，不是口语）。
     body = _body("showHealth")
-    assert "模型不通" in body
-    assert "模型回话慢" in body
-    assert "还没探过" in body
+    assert "模型未连接" in body
+    assert "模型连接超时" in body
+    assert "'未探测'" in body
     # 详情那几句复用 `explainFailure` / `modelDownLine`（不另写一套说法）。
     assert "explainFailure(" in body, "探活那条没有复用失败那套说法"
     assert "modelDownLine(" in body
 
 
 def test_页面也报外接配方断开() -> None:
-    """llama / 隧道是本机配方，不通时进同一个状态详情，不另开一枚徽标。"""
+    """llama / 隧道是本机配方，不通时进同一个状态详情，不另开一枚徽标。
+
+    钉要点：**哪一个**外接服务没连上说得出（名字 + 地址在），而且它进的是
+    探活那一枚徽标的详情（`healthView.lines`），不是另开一枚徽标。
+    """
     assert "services" in HTML
-    assert "连不上" in HTML
+    assert "未连接" in HTML
     body = _body("showHealth")
     assert "item.ok === false" in body
-    assert "外接服务不通" in body
+    assert "外接服务未连接" in body
     assert "healthView.lines" in body
 
 
-def test_探活详情说得出什么时候探的与还没探过() -> None:
+def test_探活详情说得出什么时候探的与未探测() -> None:
     """探活挪到后台之后（`web/probe.py`），`/state` 给的是**最近一次**结果。
 
-    所以详情必须说得出"3 秒前探过"（陈旧值可以接受，**静默的**陈旧值不行），
-    而"还没探过"既不是通也不是断——三条分支缺一个就红。行为数字（那些文字真的
+    所以详情必须说得出"3 秒前"（陈旧值可以接受，**静默的**陈旧值不行），
+    而"未探测"既不是通也不是断——三条分支缺一个就红。行为数字（那些文字真的
     被画进了详情）在 `test_page_dom.py` 里。
+
+    这一层钉**要点**：时间戳与陈旧度都在、状态词分得开、`slow` 与不通不许合成
+    一句、时间戳缺失时不许冒充"未探测"。整句字面不再钉。
     """
     body = _body("showHealth")
     assert "probedAgo(info)" in body, "说了不通却不说这是什么时候探的"
     assert "model.kind || failureKind(model.detail)" in body, (
         "没用服务端只增的 kind：慢与不通就分不开了"
     )
-    assert "state === 'unknown'" in body, "还没探过那一档没有分支"
-    assert "本机模型：还没探过" in body
+    assert "state === 'unknown'" in body, "未探测那一档没有分支"
+    assert "本机模型：未探测" in body
 
     ago = _body("probedAgo")
     assert "age_s" in ago
-    assert "秒前探过" in ago and "分钟前探过" in ago
-    # 有结果却没时间戳时**不许**说"还没探过"：那句话会和"状态：正常"打架。
-    assert "没说是什么时候探的" in ago
+    # 陈旧度：秒与分钟两档都要说得出（措辞是"（3 秒前）"这一类）。
+    assert "' 秒前）'" in ago and "' 分钟前）'" in ago
+    # 有结果却没时间戳时**不许**说"未探测"：那句话会和"状态：正常"打架。
+    assert "时间戳缺失" in ago
 
     down = _body("modelDownLine")
-    assert "没在超时内回话" in down, "慢与不通被合成了一句"
-    assert "模型连不上" in down
+    assert "连接超时" in down, "慢与不通被合成了一句"
+    assert "模型未连接" in down
 
-    # 详情里"这是什么时候探的"用的是服务端给的 `probed_at`（那一秒的墙钟）。
+    # 详情里"这是什么时候探的"用的是服务端给的 `probed_at`（那一刻的墙钟）。
     stamp = _body("probedStamp")
-    assert "probed_at" in stamp and "toLocaleString()" in stamp
+    assert "probed_at" in stamp and "toLocaleTimeString(" in stamp
+    # 页面上给的必须是**时刻**：光有"3 秒前"说不清是哪一次探的。
+    lines = _body("healthLines")
+    assert "'最近一次探测：'" in lines and "probedStamp(info)" in lines
 
 
 def test_页面按快照显示待批准的配对码() -> None:
@@ -191,9 +206,9 @@ def test_页面按快照显示待批准的配对码() -> None:
     section = _body("pairSections")
     assert "spool approve ' + item.code" in section
     assert "配对码：" in section, "详情里没把码写全"
-    assert "点「应用」不会批准配对（那是落盘确认）。" in section, (
-        "没说清那两个按钮不批配对"
-    )
+    # 钉要点：那两个按钮**不批配对**这件事必须说得出（口径可以换词，这条事实不行）。
+    assert "不批准配对" in section, "没说清那两个按钮不批配对"
+    assert "批准在终端" in section, "没说清批配对到底在哪做"
     assert "'配对码 ' + pairingRows[0].code" in _body("drawStatus"), (
         "只有一条配对时码没有直接写在徽标上"
     )
@@ -831,15 +846,17 @@ def test_常驻提示在右上角浮层里而不是占着输入条那一行() ->
 def test_状态区常态只剩一枚圆点() -> None:
     """探活收进一枚小圆点：正常时 `label` 是空的——**不画**"一切正常"那句。
 
-    判据在两条分支上：常态给空标签，异常给短标签；而徽标在右上角那一列里
-    （`#hints`），不是输入条那一行——那一行现在只有一句静态提示。
+    判据在两条分支上：常态给空标签，异常给短标签（可判定的状态词）；而徽标在右上角
+    那一列里（`#hints`），不是输入条那一行——那一行现在只有一句静态提示。
     """
     assert 'id="st-health"' in HTML
     body = _body("showHealth")
     assert "label: ''" in body, "常态还在徽标上写一句话"
-    assert "label: kind === 'slow' ? '模型回话慢' : '模型不通'" in body, (
-        "异常没有带字：一枚沉默的绿点会把「连不上」藏起来"
+    # 异常必须**带字**（不是一枚沉默的绿点），而且 slow 与别的状态分得开。
+    assert "label: kind === 'slow' ? '模型连接超时'" in body, (
+        "异常没有带字：一枚沉默的绿点会把「未连接」藏起来"
     )
+    assert "'模型未连接'" in body, "连接不通那一档没有短标签"
     status = _body("drawStatus")
     assert "healthLabel.classList.toggle('hidden', healthView.label === '')" in status, (
         "常态那枚圆点旁边还挂着空标签"
@@ -852,12 +869,13 @@ def test_状态详情保留四项而且异常仍然看得见() -> None:
     """详情里要有：状态 / 地址 / 探活时间（`probed_at` + `age_s`）/ 可能原因 / 下一步。
 
     "下一步"必须是一条**真存在**的命令（既有的 `failureNext` 给的是 `spool service
-    list` / `spool config` 这类），不能是"请联系管理员"。
+    list` / `spool config` 这类），不能是"请联系管理员"。标签钉的是**要点**
+    （地址在、时刻在、原因与下一步接进来了），不是整句字面。
     """
     lines = _body("healthLines")
     assert "'状态：'" in lines
-    assert "'地址：'" in lines
-    assert "'探活时间：'" in lines
+    assert "'模型服务地址：'" in lines, "详情里没有地址那一行"
+    assert "'最近一次探测：'" in lines, "详情里没有探活时刻那一行"
     assert "probedStamp(info)" in lines
     assert "healthView.lines" in lines, "可能原因 / 下一步那几行没有接进详情"
 
@@ -1095,14 +1113,15 @@ def test_默认滚到底但人不被抢滚动() -> None:
     assert "scrollDown()" in click, "按钮摆出来却回不到最新"
 
 
-# --- 正在思考 ---
+# --- 生成中指示 ---
 
 
-def test_等待模型时有正在思考的指示() -> None:
-    """等待时显示动效指示，而且由**既有**的 wait 事件驱动（不新造协议）。"""
+def test_等待模型时有生成中的指示() -> None:
+    """等待时显示动效指示（状态词是**生成中**，不是拟人的"正在思考"），
+    而且由**既有**的 wait 事件驱动（不新造协议）。"""
     assert 'id="thinking"' in HTML
     assert "#thinking" in HTML
-    assert "正在思考" in HTML
+    assert "生成中" in HTML
     assert "thinking-dots" in HTML
 
     block = _body("setThinking")
@@ -1162,7 +1181,8 @@ def test_运行中发送键变成停止而不是禁用() -> None:
         "运行中那一枚键又被禁用了：点不动就等于没有停止入口"
     )
     assert "sendBtn.dataset.mode = mode" in send, "没有任何地方说得出它现在是哪一档"
-    assert "'停止这一轮（已产出的内容保留）'" in send, "运行中那枚键的说明里没写清会丢什么"
+    # 那枚键的说明里必须写清"已产出的内容保留"（措辞可以短，这条事实不行）。
+    assert "'停止本轮（已产出的内容保留）'" in send, "运行中那枚键的说明里没写清会丢什么"
     assert "ICON.stop" in send and "stop: '<svg" in _script(), "停止那一档没有自己的图标"
 
     # 点它：运行中走停止，空闲才走发送；返回值是那一条 POST 的 promise

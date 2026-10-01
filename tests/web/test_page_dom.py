@@ -160,14 +160,15 @@ def test_常驻提示出现展开收起都不挤对话区(dom: dict) -> None:
 def test_回复到达时占位被真正的回复替换(dom: dict) -> None:
     """用户报的第二条：AI 回复之后卡片不会自动更新（要刷新才看得见）。
 
-    判据是一条**时间线**：`start` 摆出占位「正在思考」→ 边跑边攒轨迹（收起，正文
+    判据是一条**时间线**：`start` 摆出占位「生成中」→ 边跑边攒轨迹（收起，正文
     一个节点都不建）→ 一键展开看得到那三行 → `final` 到达时**同一张卡片**里的占位
     被换成真正的回复。整条时间线里 `.bubble` 只该有一个：不许留下占位、也不许
     另起一张。
     """
     placeholder = dom["reply_placeholder"]
     assert placeholder["pending"] is True, "start 之后没有摆出占位卡片"
-    assert placeholder["bubble_text"] == "正在思考…", f"占位不是那句话：{placeholder}"
+    # 占位是**名词性**的状态词（不是拟人的"正在思考"）：它说的是"这一轮在生成"。
+    assert placeholder["bubble_text"] == "生成中", f"占位不是那句话：{placeholder}"
     assert placeholder["bubbles"] == 1
     assert placeholder["trace_nodes"] == 0, "轨迹默认就该是收起的（不占版面）"
     assert placeholder["trace_aria"] == "false"
@@ -210,7 +211,9 @@ def test_库里那条回复到达时不新建节点也不重复(dom: dict) -> No
     )
     assert persisted["bubbles"] == 1, "同一张卡片里被填了两遍"
     assert persisted["bubble_text"] == "改好了：加了校验", "正文叠了一遍"
-    assert persisted["has_placeholder"] is False, "页面上还留着「正在思考」那句占位"
+    # 「生成中」这句占位不许留在**气泡**里（`has_placeholder` 是整条对话流的文字，
+    # 而等待心跳那行也带"生成中"三个字——所以这里钉的是气泡那一处）。
+    assert persisted["bubble_placeholder"] is False, "气泡里还留着「生成中」那句占位"
 
 
 def test_刷新之后思考过程与失败原因依然回看得见(dom: dict) -> None:
@@ -258,7 +261,8 @@ def test_运行中发送键变停止点了就调那个端点(dom: dict) -> None:
     assert clicked["calls"] == ["/run/stop"], f"没有调那个端点：{clicked['calls']}"
     assert clicked["mode"] == "stopping", "点了没有立刻反馈"
     assert clicked["disabled"] is True, "正在停止时还能再点（会重复发请求）"
-    assert "正在停止" in clicked["title"], clicked["title"]
+    # 停止请求已发出：按钮上是**停止中**（不是"正在停止…"那种旁白口气）。
+    assert "停止中" in clicked["title"], clicked["title"]
     assert clicked["last_line"] is True, "点了之后对话区里没有一句回执"
 
     settled = dom["stop_settled"]
@@ -311,9 +315,12 @@ def test_别的失败不冒充模型故障(dom: dict) -> None:
 
 
 def test_只按错误文本也能认出来(dom: dict) -> None:
-    """老服务端（或别的失败路径）不给结构化字段时，仍按文本里的词认。"""
+    """老服务端（或别的失败路径）不给结构化字段时，仍按文本里的词认。
+
+    没有地址可退时那一行要**照实说**"地址没给"（不是留空、也不是编一个）。
+    """
     assert dom["failure_by_text"] is True
-    assert "按配置里的地址" in dom["address_fallback"]
+    assert "未提供" in dom["address_fallback"], dom["address_fallback"]
 
 
 def test_页面上的错误文本先遮蔽密钥(dom: dict) -> None:
@@ -414,13 +421,13 @@ def test_探活正常时只剩一枚圆点(dom: dict) -> None:
 
 
 def test_探活异常时变色带字而不是一枚沉默的绿点(dom: dict) -> None:
-    """"异常必须仍然看得见"：不通时徽标是红的并且**带字**，不是一枚沉默的绿点；
-    "还没探过"是黄的（既不是通也不是断）。
+    """"异常必须仍然看得见"：未连接时徽标是红的并且**带字**（可判定的状态词，
+    不是一枚沉默的绿点）；"未探测"是黄的（既不是通也不是断）。
 
     证伪法：把 `showHealth` 里的 `label` 去掉（只留变色），这条红。
     """
     down = dom["health_down"]
-    assert down["label"] == "模型不通", f"异常没有带字：{down}"
+    assert down["label"] == "模型未连接", f"异常没有带字：{down}"
     assert "bad" in down["cls"], f"异常没有变色：{down}"
     assert down["visible"] == ["st-health"], "异常时冒出了别的徽标"
     # 变色那一下不该重建节点（`/state` 是 3 秒一拍，重建就是每 3 秒抖一次）。
@@ -429,8 +436,8 @@ def test_探活异常时变色带字而不是一枚沉默的绿点(dom: dict) ->
     assert dom["health_repeat"]["created"] == 0, "同一份探活被重建了"
 
     unknown = dom["health_unknown"]
-    assert unknown["label"] == "还没探过" and "warn" in unknown["cls"]
-    assert "连不上" not in dom["health_line_unknown"], "还没探过被画成了连不上"
+    assert unknown["label"] == "未探测" and "warn" in unknown["cls"]
+    assert "未连接" not in dom["health_line_unknown"], "未探测被画成了未连接"
 
     # 模型又通了：回到常态，而且没有留下任何气泡。
     back = dom["health_back"]
@@ -440,15 +447,17 @@ def test_探活异常时变色带字而不是一枚沉默的绿点(dom: dict) ->
 def test_探活详情保留状态地址探活时间与下一步(dom: dict) -> None:
     """详情里要有：状态 / 地址 / 探活时间（`probed_at` + `age_s`）/ 可能原因 / 下一步。
 
-    "3 秒前探过"必须在——探活挪到后台之后 `/state` 给的是最近一次结果，
+    钉的是**要点**：状态词可判定、地址在、"什么时候探的"（时刻 + 陈旧度）在、
+    原因与下一步接进来了。探活挪到后台之后 `/state` 给的是最近一次结果，
     **静默的**陈旧值比报错更糟。
     """
     panel = dom["health_panel"]
     assert panel["open"] is True
     text = panel["text"]
-    assert "状态：连不上" in text, f"详情里没有状态：{text}"
-    assert "地址：http://127.0.0.1:8080" in text, f"详情里没有地址：{text}"
-    assert "探活时间：" in text and "3 秒前探过" in text, f"没说这是什么时候探的：{text}"
+    assert "状态：未连接" in text, f"详情里没有状态：{text}"
+    assert "模型服务地址：http://127.0.0.1:8080" in text, f"详情里没有地址：{text}"
+    assert "最近一次探测：" in text, f"详情里没有探活时刻：{text}"
+    assert "3 秒前" in text, f"没说这是什么时候探的：{text}"
     assert "可能原因：" in text, f"详情里没有可能原因：{text}"
     assert "下一步：" in text and "spool service list" in text, f"没有下一步的命令：{text}"
     assert "拒绝连接" in text, "原始信息被藏掉了"
@@ -514,24 +523,33 @@ def test_待配对与别处在跑收进状态区但都不丢(dom: dict) -> None:
     assert "st-pair" in pair["visible"]
     text = dom["status_pair_panel"]["text"]
     assert "spool approve 482913" in text and "来自：u-1" in text, text
-    assert "点「应用」不会批准配对" in text, "没说清那两个按钮不批配对"
+    # 钉要点：那两个按钮**不批配对**这件事必须说得出（措辞可以换，这条事实不行）。
+    assert "不批准配对" in text, "没说清那两个按钮不批配对"
 
     elsewhere = dom["status_elsewhere"]
     assert elsewhere["label"] == "别处 1 条在跑"
     assert "st-elsewhere" in elsewhere["visible"]
     et = dom["status_elsewhere_panel"]["text"]
-    assert "别处还有一条在跑：ws-c" in et and "它在等你确认" in et, et
+    # 钉要点：是**哪个**目标在跑、以及它在等确认——这两件事都不许丢。
+    assert "ws-c" in et and "仍在运行" in et, et
+    assert "等待确认" in et, et
 
     # 都收掉之后那一行又只剩圆点。
     assert dom["status_clean"]["visible"] == ["st-health"]
 
 
 def test_没有目标时那枚徽标仍然指得动路(dom: dict) -> None:
-    """空态引导从顶部横幅搬到了「未选工作区」徽标 + 详情：那句话一个字都没少。"""
+    """空态引导从顶部横幅搬到了「未选工作区」徽标 + 详情：那句话一个字都没少。
+
+    钉要点：空态**说得出下一步怎么选**（去哪一段选、表空的怎么办），
+    而不是只摆一个"没目标"。
+    """
     empty = dom["status_no_target"]
     assert empty["label"] == "未选工作区"
     assert "st-target" in empty["visible"]
-    assert "还没有选工作区" in dom["status_no_target_panel"]["text"]
+    text = dom["status_no_target_panel"]["text"]
+    assert "未选择工作区" in text and "工作区" in text, text
+    assert "spool init" in text or "选一项" in text, f"空态没给出路：{text}"
 
 
 # --- ① 通知**不许把页面挤下去** ---

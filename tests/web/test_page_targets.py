@@ -114,14 +114,19 @@ def test_state帧会重画目标与历史() -> None:
 
 def test_空态引导人选工作区() -> None:
     """顶部那条常驻横幅没了：空态引导改由输入条那行的「未选工作区」徽标承载
-    （点开是同一句话）。判据一个字都没丢，只是不再占顶部的位置。"""
+    （点开是同一句话）。判据一个字都没丢，只是不再占顶部的位置。
+
+    钉**要点**：空态说得出"没选工作区"这件事，也给出下一步（去哪一段选、
+    表空的怎么造出候选），并且那句话仍以服务端为准、页面只兜底。
+    """
     assert 'id="st-target"' in HTML
     assert 'id="target-note"' not in HTML, "顶部那条常驻横幅还在"
 
     body = _body("drawTarget")
 
     assert "if (!t.root)" in body
-    assert "还没有选工作区" in body
+    assert "未选择工作区" in body
+    assert "登记表为空" in body, "登记表为空时没给出路（只让人对着空列表选）"
     assert "t.note" in body, "空态那句话以服务端为准，页面只兜底"
     assert "targetMissing = !t.root" in body, "空态那枚徽标没有画出来"
     assert "drawStatus()" in body, "空态那句话没有落到状态区"
@@ -138,12 +143,18 @@ def test_pinned时选择栏禁用并说明原因() -> None:
 
 
 def test_别处还有一条在跑() -> None:
-    """切走不杀任务（设计 §3.4），页面就必须说得出这件事，别让它看起来只有一条。"""
+    """切走不杀任务（设计 §3.4），页面就必须说得出这件事，别让它看起来只有一条。
+
+    钉**要点**：说的是"其他目标仍在运行"、**是哪一个**目标、以及它在等确认；
+    措辞可以换（"别处还有一条在跑"→"其他目标仍在运行"），这三件事实不行。
+    """
     body = _body("showElsewhere")
 
     assert "state.running_targets" in body
     assert "!row.current" in body
-    assert "别处还有一条在跑" in body
+    assert "仍在运行" in body, "读不出「别处还有任务在跑」"
+    assert "row.name" in body, "没说是哪个目标在跑"
+    assert "awaiting" in body and "等待确认" in body, "它在等确认这件事丢了"
     assert "short(row.goal, 60)" in body, "目标要截断，一条长 goal 会把这一行撑爆"
 
     # 别的目标上的任务，在本目标的事件流上**一个字都不会出现**：只能轮 /state
