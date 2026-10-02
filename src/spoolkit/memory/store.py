@@ -102,15 +102,21 @@ class Memory:
 def normalize_for_fts(text: str) -> str:
     """把中文字符逐字分开，让 FTS5 默认分词器能切出可检索的中文词。
 
-    **`memory` / `memory_fts` 侧的逐字口径，本函数一个字不改**（决议 7 的只读
-    精神 + T4 的「不许扩大改动面」）：`semantic` 一族从 T4 起走双字 shingle
-    （见 `normalize_for_fts_bigram`），两套口径**并存而不是替换**。
+    **这是 `memory` / `memory_fts` 侧的逐字口径，也是 T5 起 `semantic_fts`
+    召回侧的口径**：T4 一度把 `semantic` 的召回换成双字 shingle
+    （`normalize_for_fts_bigram`），T5 的实测把那一步**回退**掉了——双字召回
+    抓不到跨词边界的查询，P@5/R@5 都低于逐字（原始读数见 `bigram_tokens`
+    上方的实测记录）。本函数一个字不改（决议 7 的只读精神 + 「不许扩大改动面」）。
     """
     return _CJK.sub(lambda match: f" {match.group(0)} ", text)
 
 
 def _match_query(query: str) -> str:
-    """把查询规范化并转成 FTS5 OR 匹配：任一分词命中即可（`memory` 侧逐字口径）。"""
+    """把查询规范化并转成 FTS5 OR 匹配：任一分词命中即可。
+
+    逐字口径，**两处召回共用**：`memory_fts`（P0 起）与 `semantic_fts`
+    （T5 起——T4 的双字召回已按裁决回退，见 `bigram_tokens` 上方的实测记录）。
+    """
     tokens = [t for t in normalize_for_fts(query).split() if len(t) >= 1]
     if not tokens:
         return ""
@@ -119,9 +125,26 @@ def _match_query(query: str) -> str:
     return " OR ".join(tokens)
 
 
-# ---- T4：`semantic` 侧的双字 shingle 口径（设计稿 §14.8 方案 A）-------------
+# ---- T4 的双字 shingle 口径：T5 起**只做重排/打分信号**，不在召回路径上 -------
 #
-# 口径（**索引与查询同一份**，都走 `normalize_for_fts_bigram`）：
+# 先把历史写清楚，免得后人再走一遍：
+#
+# · T4（设计稿 §14.8 方案 A）把 `semantic` 侧的**召回口径**从逐字换成相邻双字
+#   shingle，假设「双字比单字更有信息量」。T4 的实测判定它是**负结果**：16 条
+#   语料 / 13 条查询上，逐字臂 `P@5=0.3384615384615385`、`R@5=0.5961538461538461`
+#   （top1 `0.7692307692307693`），双字臂 `P@5=0.23076923076923078`、
+#   `R@5=0.46153846153846156`（top1 反而更好：`1.0`）。原因很直白：双字**抓不到
+#   跨词边界的查询**——查 `清理旧文件` 时逐字召回 `[1,3,5,9,13]`（`旧` 命中了
+#   `归档旧的任务记录`），双字只召回 `[3]`（`旧文` 这个双字在语料里不存在）。
+#   两者互补，但召回的损失比 top1 的收益大。
+# · T5 的裁决：**召回阶段回到逐字**（`normalize_for_fts` + `_match_query`），
+#   双字只保留下来做**重排/打分信号**（`bigram_coverage`），并在仪器里留一条
+#   `bigram` 对照臂（`normalize_for_fts_bigram` + `semantic_match_query`）。
+#   所以本节四个函数**不是死代码，但也都不在召回路径上**；谁把它们接回召回，
+#   谁就要先拿出「P@5/R@5 不低于逐字」的读数（T4 的仪器在
+#   `scripts/memory_relevance.py` 里，跑 `--arm bigram` 就能复核）。
+#
+# 口径（索引与查询同一份，都走 `normalize_for_fts_bigram`）：
 #
 # 1. 先把文本切成**连续同类段**：CJK 段（`[\u3400-\u9fff\uf900-\ufaff]+`）与
 #    字母数字段（`[A-Za-z0-9]+`）。段与段之间的标点、空白、`/`、`-` 等
@@ -134,12 +157,13 @@ def _match_query(query: str) -> str:
 # 4. 字母数字段按**整段**处理：`uv` / `requirements` / `FTS5` 原样成 token
 #    （不按字符切，否则 `uv` 会碎成 `u`、`v` 两个毫无信息的 token）。
 #
-# **单字查询的回退**（计划 T4 验收 2 / §14.8 点名的「粒度」案例）：长度 < 2 的
+# **单字查询与双字召回**（计划 T4 验收 2 / §14.8 点名的「粒度」案例）：长度 < 2 的
 # 查询（如 `归`）切不出任何双字，`semantic_match_query` 给出的 `"归"` 对应不上
-# 任何双字索引行；这时**不静默返回空**，而是走
-# `semantic._semantic_single_char_fallback` 对 `semantic` 的**原文列**做子串
-# 匹配（LIKE）。理由：`归` 要能查到 `归档旧的任务记录`——它是设计稿 §14.8 专门
-# 点出来的粒度案例；把单字查询的召回打到 0 是**回归**，不是"更精确"。
+# 任何双字索引行。**这条回退留在 `semantic.search_semantic` 里**：FTS 命中为空时
+# 对 `semantic` 的**原文列**做子串匹配（LIKE），不静默返回空。T5 把召回换回逐字
+# 之后，逐字 OR 自己就能命中 `归`（`_match_query("归") == '"归"'`），回退从
+# 「双字的兜底」退化成一条安全网——但它在单字查询上仍是被钉住的回归锚
+# （`tests/memory/test_bigram.py`），**删掉它反而会丢掉那条锚**。
 #
 # `_BIGRAM_RUN` 的分支顺序是**必须**的：`[^\W_]+` 在 Unicode 默认模式下**也吃掉
 # CJK**（"归档" 是 `\w`），所以若用它当"字母数字段"，`用uv管理依赖` 会被整段吞成
@@ -158,8 +182,11 @@ def _bigram_runs(text: str) -> list[str]:
 def bigram_tokens(text: str) -> list[str]:
     """把文本切成相邻双字 token（顺序即出现顺序，重复保留）。
 
-    这是 T4 的**口径函数**：索引侧与查询侧都调它，所以不存在「索引按双字、
-    查询按逐字」这种自己跟自己错开的形态。空文本与纯标点文本返回 `[]`。
+    **T5 起它的用途是「重排/打分信号」，不是召回口径**（见本节开头的实测记录）：
+    消费它的有 `bigram_coverage`（打分信号）与仪器里的 `bigram` 对照臂
+    （`normalize_for_fts_bigram` + `semantic_match_query`）。信号本身**也没有**
+    进生产排序——T5 实测它与 `bm25()` 的读数逐位相同（见 `bigram_coverage`）。
+    空文本与纯标点文本返回 `[]`。
     """
     tokens: list[str] = []
     for run in _bigram_runs(text):
@@ -176,14 +203,18 @@ def bigram_tokens(text: str) -> list[str]:
 def normalize_for_fts_bigram(text: str) -> str:
     """双字 shingle 规范化：token 之间用一个空格分开（FTS5 默认分词器照用）。
 
-    与 `normalize_for_fts`（逐字拆）**并存**：`memory_fts` 侧仍走逐字，
-    `semantic_fts` 侧从 T4 起走本函数（写入与查询同一份口径）。
+    它把双字**当索引文本**用的时候，只属于仪器里的 `bigram` 对照臂
+    （`run_arm("bigram")`）；生产召回走 `normalize_for_fts`（逐字）。
     """
     return " ".join(bigram_tokens(text))
 
 
 def semantic_match_query(query: str) -> str:
     """把查询转成 FTS5 MATCH 串（双字口径，OR 连接）。
+
+    与 `_match_query`（逐字，生产口径）成对：本函数是**双字对照臂**的查询侧，
+    索引侧是 `normalize_for_fts_bigram`，两者同一份口径，不会「索引按双字、
+    查询按逐字」地自己跟自己错开。
 
     单字查询切不出双字，但**切得出一个单字 token**（口径 3 的查询侧对应物），
     所以这里照常给出 `"归"` 这样的 MATCH 串——它对应不上任何双字索引行，
@@ -195,6 +226,65 @@ def semantic_match_query(query: str) -> str:
     if not tokens:
         return ""
     return " OR ".join(f'"{token}"' for token in tokens)
+
+
+def bigram_coverage(query: str, text: str) -> float:
+    """双字覆盖率：查询切出的双字里有多少**不重复地**出现在 `text` 里。
+
+    这是 T5 保留 `bigram_tokens` 的**唯一用途**——重排/打分信号，不是召回：
+    召回已经由逐字 OR 做完（逐字负责"抓得到"），双字负责在候选里分辨"更像"
+    （`归档旧的任务记录` 对 `归档` 覆盖率 1.0，对 `清理旧文件` 覆盖率 0.0）。
+    取**集合**交并而不是多重集：重复出现的同一个双字不该把分数抬起来。
+
+    分母是**查询的双字数**（"查询覆盖了多少"），不是 Jaccard：条目越长越容易
+    碰到查询里的某个双字，除以并集会让长条目吃亏（那是 T6 五维打分要权衡的
+    事，不在本函数里）。查询切不出双字时返回 `0.0`。
+
+    实测（16 条语料 / 13 条查询）：把它当次序号加在 `bm25()` 后面，三项读数与
+    「只用 `bm25()`」**逐位相同**——所以它**没有**进生产排序（见
+    `scripts/memory_relevance.py` 的 `char+bm25+bigram` 臂）。
+    """
+    query_tokens = set(bigram_tokens(query))
+    if not query_tokens:
+        return 0.0
+    return len(query_tokens & set(bigram_tokens(text))) / len(query_tokens)
+
+
+# ---- T5：`bm25()` 的原值与方向（先实测钉住符号，再拿它排序）------------------
+#
+# **不假设符号**（计划 T5 风险 ①：猜错会让整个排序反向，而用例可能看不出来）。
+# 实测（SQLite 自带 FTS5，逐字索引，`SELECT bm25(semantic_fts)`）：
+#
+#   · 查 `依赖管理`（MATCH `依 OR 赖 OR 管 OR 理`）：
+#     `本项目统一用 uv 管理依赖`（4 个逐字命中）raw = -6.8386；
+#     `清理历史数据并备份`（只有 `理` 命中）raw = -1.7271。
+#   · 查 `归档` 只剩 `归档旧的任务记录` / `把过期条目存档` 时：
+#     raw 分别是 -4.2183 / -1.9047。
+#
+# 结论：**原值越小（越负）越相关**，`ORDER BY bm25(semantic_fts)`（升序）就是
+# 「最相关在前」。方向用例见 `tests/memory/test_semantic_search.py` 的第一条。
+def bm25_score(raw: float) -> float:
+    """把 `bm25()` 原值翻成「**越大越相关**」的分数（= `-raw`）。
+
+    为什么需要这一步：设计稿 §6.1 写的 `rel = 1 - exp(-bm25)` 里那个 `bm25`
+    必须是"越大越相关"的量，而 SQLite 给的原值恰好相反（越负越相关）。所以
+    §6.1 的公式配的是**本函数的返回值**，不是原值；T6 的 `bm25_norm` 以本函数
+    为输入，T13 的 `why` 则要把**原值与本函数的返回值两个都打**（§6.3），
+    否则"排序错"与"归一化错"分不清。
+
+    实测到的两个边界（T5 记录，免得后人把它当 bug 追）：
+
+    - FTS5 的词权重是 `log((N-n+0.5)/(n+0.5))`（`N` = 条目数，`n` = 含该词的条目
+      数）：一个词出现在**一半**条目附近时它过零（`N=2, n=1` 时恰好是 0），出现在
+      **多数**条目里时为负。所以"每个查询词几乎所有条目都含"时原值会被压到
+      `1e-06` 量级（8 条都含查询里四个字时实测 `-4.08e-06`），排序几乎只剩
+      **长度归一化**——**短的在前**。负 IDF 与长度惩罚都是 bm25 的定义，不是实现
+      错误；
+    - 因此"相关"与"更长/更完整"不总是同向：`归档策略：迁移前先备份` 在
+      「8 条里 7 条都含 `归`/`档`」的语料上会排在 `策略条目甲` 后面。五维重排
+      （T6）要给 `importance` / `use` 这些维度留出纠偏的位置，正是这个原因。
+    """
+    return -raw
 
 
 def _escape_like(needle: str) -> str:
