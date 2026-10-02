@@ -42,7 +42,10 @@ class MemorySession:
         if not sections:
             return ""
         kept, _ = trim_to_budget(
-            sections, self._counter, hot_budget(self._window, overrides=self._overrides)
+            sections,
+            self._counter,
+            hot_budget(self._window, overrides=self._overrides),
+            overrides=self._overrides,
         )
         if not kept:
             return ""

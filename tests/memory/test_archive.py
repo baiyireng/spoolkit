@@ -4,7 +4,7 @@ from spoolkit.agent.state import TaskState
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.archive import archive_task
 from spoolkit.memory.hot import read_hot, write_hot
-from spoolkit.memory.store import init_memory_schema, list_memories
+from spoolkit.memory.store import add_memory, init_memory_schema, list_memories
 from spoolkit.store.db import open_db
 
 
@@ -93,15 +93,18 @@ def test_提升候选写入热记忆(tmp_path: Path) -> None:
 
 def test_超出预算的条目下沉到冷记忆(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
-    long_entry = "很长的一段记忆内容" * 40
+    # 两条都在 hot_item_chars=200 以内（所以它们进得了热记忆），但 token 预算装不下：
+    # 1200 窗口的热预算 = int(1200×0.85×0.15) = 153，而两条渲染后 190。
+    long_entry = "很长的一段记忆内容" * 15
+    short_fact = "短" * 80
     result = archive_task(
         conn,
         tmp_path / "memory.md",
         _state(),
         session_id="s1",
         counter=OfflineTokenCounter(),
-        context_window=2000,
-        promote=[("doing", long_entry), ("fact", "短事实")],
+        context_window=1200,
+        promote=[("doing", long_entry), ("fact", short_fact)],
     )
     assert result.demoted
     assert any("很长的一段记忆内容" in m.text for m in list_memories(conn, kind="episode"))
@@ -436,4 +439,192 @@ def test_既有热记忆里的密钥在重写时也被盖掉(tmp_path: Path) -> 
     hot_text = hot_path.read_text(encoding="utf-8")
     assert "abcdef123456" not in hot_text
     assert "TOOL_TOKEN" in hot_text
+    conn.close()
+
+
+# ---- 跨任务/跨蒸馏的结构性去重（设计稿 §3 缺陷 2 / §5.3 ④ 第 1 级）----
+#
+# 现状病根是 `archive.py` 的落点无条件 append：`distill._merge` 只管单次
+# 蒸馏分治内的合并，跨任务/跨蒸馏没有任何判重，于是同一句寒暄能存三条。
+# 这一组用例钉的是「同一事实只落一次 + 报告里说出被去重几条」。
+
+
+def _archive(conn, tmp_path: Path, promote, **kwargs):
+    return archive_task(
+        conn,
+        tmp_path / "memory.md",
+        _state(),
+        session_id="s1",
+        counter=OfflineTokenCounter(),
+        context_window=8000,
+        promote=promote,
+        **kwargs,
+    )
+
+
+def test_跨任务同一事实不再二次入库(tmp_path: Path) -> None:
+    """连续两次归档同一事实：热记忆只有一条，第二次一条都没新增。"""
+    conn = _conn(tmp_path)
+    fact = "测试命令是 pytest -q"
+    first = _archive(conn, tmp_path, [("fact", fact)])
+    assert first.promoted == [fact]
+    assert first.duplicates == []
+
+    second = _archive(conn, tmp_path, [("fact", fact)])
+    assert read_hot(tmp_path / "memory.md")["fact"] == [fact]
+    assert second.promoted == []
+    assert second.duplicates == [fact]
+    conn.close()
+
+
+def test_同一批里重复条目只留一条(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    fact = "测试命令是 pytest -q"
+    result = _archive(conn, tmp_path, [("fact", fact), ("fact", fact)])
+    assert read_hot(tmp_path / "memory.md")["fact"] == [fact]
+    assert result.promoted == [fact]
+    assert result.duplicates == [fact]
+    conn.close()
+
+
+def test_规范化后相等即算同一条(tmp_path: Path) -> None:
+    """「测试命令是 pytest -q」与「测试命令是 pytest -q。」是同一条。"""
+    conn = _conn(tmp_path)
+    first = _archive(conn, tmp_path, [("fact", "测试命令是 pytest -q")])
+    assert first.promoted == ["测试命令是 pytest -q"]
+    second = _archive(conn, tmp_path, [("fact", "测试命令是 pytest -q。")])
+    assert read_hot(tmp_path / "memory.md")["fact"] == ["测试命令是 pytest -q"]
+    assert second.duplicates == ["测试命令是 pytest -q。"]
+
+    # 大小写/空白/全角半角同属一个口径。
+    third = _archive(conn, tmp_path, [("fact", "  测试命令是  PYTEST - Q ")])
+    assert third.promoted == []
+    conn.close()
+
+
+def test_库里已有同一事实时只记一次使用(tmp_path: Path) -> None:
+    """既有行在库里（不在热记忆里）也要判重：命中就 touch，不新增行。"""
+    conn = _conn(tmp_path)
+    fact = "测试命令是 pytest -q"
+    existing = add_memory(conn, kind="fact", text=fact)
+    result = _archive(conn, tmp_path, [("fact", fact)])
+    assert result.promoted == []
+    assert result.duplicates == [fact]
+    assert "fact" not in read_hot(tmp_path / "memory.md")
+    row = conn.execute(
+        "SELECT use_count FROM memory WHERE id = ?", (existing.id,)
+    ).fetchone()
+    assert row["use_count"] == 1
+    # 不新增行：库里的条数仍然是「已排除的失败记忆 1 条 + 既有那条事实 1 条」。
+    assert conn.execute("SELECT count(*) AS n FROM memory").fetchone()["n"] == 2
+    assert (
+        conn.execute(
+            "SELECT count(*) AS n FROM memory WHERE kind = 'fact' AND text = ?",
+            (fact,),
+        ).fetchone()["n"]
+        == 1
+    )
+    conn.close()
+
+
+def test_降级下沉的落点也判重(tmp_path: Path) -> None:
+    """被拒条目落进 memory.kind='episode' 的那条路也要判重，否则照样三份。"""
+    conn = _conn(tmp_path)
+    rejected = "任务已完成。请确认最终文件状态并宣告完成。"
+    first = _archive(conn, tmp_path, [("fact", rejected)])
+    assert first.downgraded and first.duplicates == []
+    second = _archive(conn, tmp_path, [("fact", rejected)])
+    assert second.downgraded == []
+    assert second.duplicates == [rejected]
+    count = conn.execute(
+        "SELECT count(*) AS n FROM memory WHERE kind = 'episode' AND text = ?",
+        (rejected,),
+    ).fetchone()["n"]
+    assert count == 1
+    # 去重不是把降级也吞掉：这条被拒条目在库里仍然只有一行。
+    assert (
+        conn.execute(
+            "SELECT count(*) AS n FROM memory WHERE text = ?", (rejected,)
+        ).fetchone()["n"]
+        == 1
+    )
+    conn.close()
+
+
+def test_三条逐字相同只落一条并报出去重条数(tmp_path: Path) -> None:
+    """`duplicates` 的条数就是被去重的条数：实测病灶就是三条逐字相同的寒暄。"""
+    conn = _conn(tmp_path)
+    fact = "测试命令是 pytest -q"
+    result = _archive(
+        conn, tmp_path, [("fact", fact), ("fact", fact), ("fact", fact)]
+    )
+    assert len(result.duplicates) == 2
+    assert read_hot(tmp_path / "memory.md")["fact"] == [fact]
+    conn.close()
+
+
+def test_去重口径可被工作区覆盖(tmp_path: Path) -> None:
+    """关掉去标点：两条只差标点的条目就不再是同一条。"""
+    conn = _conn(tmp_path)
+    overrides = {"dedup_strip_punct": 0}
+    _archive(conn, tmp_path, [("fact", "测试命令是 pytest -q")], overrides=overrides)
+    second = _archive(
+        conn, tmp_path, [("fact", "测试命令是 pytest -q。")], overrides=overrides
+    )
+    assert second.duplicates == []
+    assert read_hot(tmp_path / "memory.md")["fact"] == [
+        "测试命令是 pytest -q",
+        "测试命令是 pytest -q。",
+    ]
+    conn.close()
+
+
+# ---- 单条长度线 hot_item_chars（设计稿 §4.3 容量口径 / §7.1）----
+
+
+def test_超长条目不进热记忆(tmp_path: Path) -> None:
+    """201 字按 hot_item_chars=200 不收：理由含 too_long，内容不丢。"""
+    conn = _conn(tmp_path)
+    long_entry = "这是一条超过两百字的条目。" * 20
+    assert len(long_entry) == 260
+    result = _archive(
+        conn, tmp_path, [("fact", long_entry)], final=f"结论：{long_entry[:50]}"
+    )
+    assert "fact" not in read_hot(tmp_path / "memory.md")
+    assert result.promoted == []
+    assert len(result.downgraded) == 1
+    text, reason = result.downgraded[0]
+    assert text == long_entry
+    assert reason.startswith("too_long")
+    assert "hot_item_chars" in reason
+    # 不丢：结论仍在事件摘要里，可以核对。
+    summary = conn.execute("SELECT summary FROM episode").fetchone()["summary"]
+    assert long_entry[:50] in summary
+    conn.close()
+
+
+def test_恰好两百字的条目仍进热记忆(tmp_path: Path) -> None:
+    """钉住边界方向：200 是「超过才不收」，等号那条仍然收。"""
+    conn = _conn(tmp_path)
+    entry = "热记忆的单条长度线是两百字。" * 15
+    assert len(entry) == 210
+    ok = entry[:200]
+    assert len(ok) == 200
+    result = _archive(conn, tmp_path, [("fact", ok)])
+    assert read_hot(tmp_path / "memory.md")["fact"] == [ok]
+    assert result.downgraded == []
+    conn.close()
+
+
+def test_单条长度线可被工作区覆盖(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    entry = "短条目也要能按工作区调线。"
+    result = _archive(
+        conn,
+        tmp_path,
+        [("fact", entry)],
+        overrides={"remember_max_chars": 400, "hot_item_chars": 5},
+    )
+    assert "fact" not in read_hot(tmp_path / "memory.md")
+    assert result.downgraded[0][1].startswith("too_long")
     conn.close()

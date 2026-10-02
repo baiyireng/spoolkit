@@ -15,7 +15,9 @@ P0 只实现 J1/J3/J4，以及 J5 的「lesson 必须有触发词」；J2（`evi
 阈值一律从 `limits` 取，不在本模块里写死（本仓既有规矩，设计稿 §4.3）。
 """
 
+import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Callable
 
@@ -180,6 +182,175 @@ def judge(
         if detail:
             return Verdict(False, f"{rule.id} {rule.title}（{detail}）")
     return Verdict(True)
+
+
+# ---- 去重指纹（设计稿 §4.3 / §5.3 ④ 第 1 级：精确级）----
+#
+# 口语化记忆的一句寒暄可以写成「你好！」「你好!」「 你好 ，」，**字符不同、
+# 事实相同**——逐字相等挡不住它们，人工逐条比对也挡不住。所以「是不是同一条」
+# 由**归一化后的指纹**回答：先按一套写明了的口径把文本压成比较用的形状，
+# 再取 sha1 前若干位。口径本身是这个模块的公开接口（`NormalizePolicy`），
+# 四个开关的值从 `limits` 取、可被 `.agent/limits.json` 覆盖——按工作区调一版
+# 去重口径不该改代码（本仓既有规矩，设计稿 §4.3）。
+#
+# **只做结构性去重。** 这一级只认「归一化后逐字相同」，抓不到近似改写：
+# 「用 uv 管理依赖」与「本仓统一用 uv」在它眼里是两条，编辑距离/Jaccard
+# （`dedupe_similarity`）与冲突检测属 P1（设计稿 §5.3 ④ 第 2 级与 ⑤）——
+# 这里**不引嵌入、不设相似度阈值**，也**不假装**做到了语义去重。
+#
+# 另外两条纪律：
+#
+# - **归一化只用于比较，不改写正文**：`judge` 与所有落点看到的仍是原文
+#   （去标点后的「已确认」不再是 `ONESHOT_MARKERS` 里的「请确认」，
+#   拿指纹当判据输入会把判据悄悄改掉）。
+# - **归一化不动 CJK**：全角转半角只覆盖 U+FF01..U+FF5E 这一档（标准里与
+#   ASCII 可打印字符一一对应），CJK 标点（`（`/`「`/`，`）逐个映射；汉字与
+#   假名原样保留——不这样划界，韩文半角字母 U+FFA0..U+FFDC 也会被卷进来。
+
+# 归一化口径里唯一的定点数：全角（U+FF01..U+FF5E）与 ASCII 可打印字符
+# （U+0021..U+007E）之间的固定偏移，Unicode 标准定的，不是可调参数。
+_FULLWIDTH_OFFSET = 0xFF01 - 0x21
+# U+FF5F（半角左白括号）之后不再一一对应：只转 ASCII 那一档。
+_FULLWIDTH_ASCII_END = 0xFF5E
+
+# 中英文标点之间的映射。ASCII 标点走上面的全角规则，这里收 CJK 侧那几种
+# **分类上是字母/符号、语义上是标点**的字符。
+_PUNCT_MAP = {
+    "，": ",",
+    "。": ".",
+    "、": ",",
+    "：": ":",
+    "；": ";",
+    "？": "?",
+    "！": "!",
+    "（": "(",
+    "）": ")",
+    "《": "<",
+    "》": ">",
+    "「": '"',
+    "」": '"',
+    "『": '"',
+    "』": '"',
+    "【": "[",
+    "】": "]",
+    "〔": "(",
+    "〕": ")",
+    "—": "-",
+    "–": "-",
+    "…": ".",
+    "·": ".",
+    "〃": '"',
+}
+
+# 「空白」的显式清单：Unicode 的 Zs 之外，零宽与软连字符也算——
+# 它们肉眼不可见，却会让两条本该相同的文本各走一条。
+_ZERO_WIDTH = frozenset("\u200b\u200c\u200d\u2060\ufeff\u00ad")
+
+
+def _is_whitespace(ch: str) -> bool:
+    return ch in _ZERO_WIDTH or unicodedata.category(ch) == "Zs"
+
+
+def _is_punctuation(ch: str) -> bool:
+    """标点/符号。用 Unicode 分类而不是手写字符表：手写表必然漏。"""
+    if ch in _PUNCT_MAP:
+        return True
+    return unicodedata.category(ch)[0] in ("P", "S")
+
+
+def _to_halfwidth(ch: str) -> str:
+    """全角转半角（只覆盖 ASCII 那一档）。"""
+    code = ord(ch)
+    if 0xFF01 <= code <= _FULLWIDTH_ASCII_END:
+        return chr(code - _FULLWIDTH_OFFSET)
+    return _PUNCT_MAP.get(ch, ch)
+
+
+@dataclass(frozen=True)
+class NormalizePolicy:
+    """归一化口径：指纹比较时的四件事做不做。
+
+    默认值就是设计稿 §4.3 的定案（去空白 + 去标点 + 全角转半角 + 小写），
+    但每一个都来自 `limits` 的登记项，`.agent/limits.json` 可以覆盖。
+    """
+
+    casefold: bool
+    collapse_ws: bool
+    strip_punct: bool
+    hash_chars: int
+
+
+def normalize_policy(
+    overrides: dict | None = None,
+) -> NormalizePolicy:
+    """取出当前生效的归一化口径（登记表的默认值 + 工作区覆盖）。"""
+
+    def flag(name: str) -> bool:
+        return bool(int(limits.resolve(name, overrides)[0]))
+
+    return NormalizePolicy(
+        casefold=flag("dedup_casefold"),
+        collapse_ws=flag("dedup_collapse_ws"),
+        strip_punct=flag("dedup_strip_punct"),
+        hash_chars=int(limits.resolve("dedup_hash_chars", overrides)[0]),
+    )
+
+
+def normalize_key(
+    text: str, overrides: dict | None = None, policy: NormalizePolicy | None = None
+) -> str:
+    """把文本压成**比较用**的形状（比较与指纹的唯一定义处）。
+
+    口径（设计稿 §4.3 的原话：去空白、去标点、全角转半角、小写），
+    四件事是否参与由 `NormalizePolicy` 决定，本函数不写死任何一条：
+
+    1. 全角转半角：`（`→`(`、`！`→`!`、全角字母数字同理（这一步总是做，
+       它是标点判定的前置——不做它，全角标点会被分类成符号而不是对标点）；
+    2. 空白：`collapse_ws=1`（默认）时**整体去掉**（含 Tab/换行/全角空格/
+       零宽字符）；`=0` 时折成一个半角空格并去掉首尾（用来区分「a b」与「ab」）；
+    3. 标点：默认去掉（Unicode 分类 P/S 加 CJK 标点映射）；
+    4. 大小写：默认 `casefold`。
+
+    返回的字符串**不落库、不落盘**，只用来算指纹与判等。
+    """
+    if policy is None:
+        policy = normalize_policy(overrides)
+
+    out: list[str] = []
+    for ch in text:
+        half = _to_halfwidth(ch)
+        if _is_whitespace(half):
+            if not policy.collapse_ws:
+                out.append(" ")
+            continue
+        if policy.strip_punct and _is_punctuation(half):
+            continue
+        out.append(half)
+    key = "".join(out)
+    if policy.casefold:
+        key = key.casefold()
+    if not policy.collapse_ws:
+        # 折成空格之后，首尾与连续空白不该影响判等。
+        key = " ".join(key.split())
+    return key
+
+
+def content_hash(
+    text: str, overrides: dict | None = None, policy: NormalizePolicy | None = None
+) -> str:
+    """去重指纹：`sha1(normalize_key(text))` 的前 `dedup_hash_chars` 位。
+
+    位数从登记表取（默认 16 = 64 bit，设计稿 §4.3 定案），不是写死的魔法数。
+    空白串（归一化后为空）返回空指纹——调用方拿它判「这条没有可比内容」，
+    不要让它和一条真的空条目互相去重。
+    """
+    if policy is None:
+        policy = normalize_policy(overrides)
+    key = normalize_key(text, policy=policy)
+    if not key:
+        return ""
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return digest[: policy.hash_chars]
 
 
 def sanitize(text: str) -> tuple[str, list[str]]:

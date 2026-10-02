@@ -8,7 +8,16 @@
 import pytest
 
 from spoolkit import limits
-from spoolkit.memory.gate import RULES, RULES_BY_ID, judge, sanitize
+from spoolkit.memory.gate import (
+    RULES,
+    RULES_BY_ID,
+    NormalizePolicy,
+    content_hash,
+    judge,
+    normalize_key,
+    normalize_policy,
+    sanitize,
+)
 
 # 正例：真正的项目事实，一条都不许被拒。
 ACCEPT_CASES: list[tuple[str, str, str]] = [
@@ -126,3 +135,101 @@ def test_脱敏不吞掉值后面的句子() -> None:
     assert "abcdef123456" not in cleaned
     assert "先放着" in cleaned
     assert "SPOOLKIT_QQ_SECRET" in cleaned
+
+
+# ---- 归一化与去重指纹（设计稿 §4.3 / §5.3 ④ 第 1 级：精确级）----
+#
+# 这一组用例只回答一个问题：**什么算同一条**。口径要写清、可参数化，
+# 所以正例（该等价的都等价）与反例（不该等价的一条都不许撞）都要有。
+
+
+def test_默认归一化口径来自登记表() -> None:
+    """口径不是一个藏在函数体里的常量：四个开关都在 limits 里登记。"""
+    policy = normalize_policy()
+    assert policy.casefold is True
+    assert policy.collapse_ws is True
+    assert policy.strip_punct is True
+    assert policy.hash_chars == int(limits.resolve("dedup_hash_chars")[0])
+    assert policy == NormalizePolicy(
+        casefold=True, collapse_ws=True, strip_punct=True, hash_chars=16
+    )
+
+
+def test_归一化去掉大小写空白与标点() -> None:
+    assert normalize_key(" 测试命令是 pytest -q。 ") == "测试命令是pytestq"
+    assert normalize_key("测试命令是 PYTEST-Q") == "测试命令是pytestq"
+    # 空白怎么算由开关定：默认整体去掉，折成空格时才区分「a b」与「ab」。
+    assert normalize_key("测试命令是 pytest -q") == normalize_key("测试命令是pytest-q")
+    assert normalize_key("a b", {"dedup_collapse_ws": 0}) == "a b"
+    assert normalize_key("  a   b  ", {"dedup_collapse_ws": 0}) == "a b"
+
+
+def test_归一化把全角转成半角() -> None:
+    assert normalize_key("（uv）") == normalize_key("(uv)")
+    assert normalize_key("ＡＢＣ") == normalize_key("abc")
+
+
+def test_归一化去掉零宽与软连字符() -> None:
+    """这些字符肉眼不可见，却会让两条本该相同的文本各走一条。"""
+    assert normalize_key("pytest\u200b-q") == normalize_key("pytest-q")
+    assert normalize_key("pytest\u00ad-q") == normalize_key("pytest-q")
+
+
+def test_归一化不动汉字与假名() -> None:
+    """全角转半角只覆盖 ASCII 那一档：汉字/假名不许被卷进来。"""
+    assert normalize_key("测试命令是 pytest -q") == "测试命令是pytestq"
+    assert normalize_key("ひらがな") == "ひらがな"
+
+
+def test_归一化不改写正文() -> None:
+    """归一化只用于比较：judge 看到的仍是原文（否则判据会被悄悄改掉）。"""
+    assert judge("fact", "你好！我是你的本地编程助手。").ok is False
+
+
+def test_指纹对等价写法相同() -> None:
+    digest = content_hash("测试命令是 pytest -q")
+    assert content_hash(" 测试命令是  pytest -q。 ") == digest
+    assert content_hash("测试命令是 PYTEST-Q") == digest
+
+
+def test_指纹对不同事实不同() -> None:
+    assert content_hash("测试命令是 pytest -q") != content_hash("构建命令是 uv build")
+
+
+def test_指纹长度来自登记表() -> None:
+    assert len(content_hash("测试命令是 pytest -q")) == 16
+    overridden = content_hash("测试命令是 pytest -q", {"dedup_hash_chars": 8})
+    assert len(overridden) == 8
+    assert content_hash("测试命令是 pytest -q").startswith(overridden)
+
+
+def test_空文本指纹为空字符串() -> None:
+    """归一化后为空就没有可比内容：空指纹不许和另一条空条目互相去重。"""
+    assert content_hash("   ") == ""
+    assert content_hash("！！！") == ""
+    assert content_hash("测试命令是 pytest -q") != ""
+
+
+def test_去重口径可被工作区覆盖() -> None:
+    """口径要能按工作区调：调一版去重不该改代码（本仓既有规矩）。"""
+    assert normalize_policy({"dedup_casefold": 0}).casefold is False
+    assert normalize_key("ABC", {"dedup_casefold": 0}) == "ABC"
+    # 关掉去标点：标点参与比较，两条就不再等价。
+    assert normalize_key("测试命令是 pytest -q。") != normalize_key(
+        "测试命令是 pytest -q。", {"dedup_strip_punct": 0}
+    )
+    assert content_hash("a b", {"dedup_collapse_ws": 0}) != content_hash(
+        "ab", {"dedup_collapse_ws": 0}
+    )
+
+
+def test_去重口径登记在标定表里() -> None:
+    for name in ("dedup_casefold", "dedup_collapse_ws", "dedup_strip_punct"):
+        knob = limits.knob(name)
+        assert knob is not None, name
+        assert knob.default == 1
+        assert knob.overridable is True
+    hash_knob = limits.knob("dedup_hash_chars")
+    assert hash_knob is not None
+    assert hash_knob.default == 16
+    assert hash_knob.overridable is True
