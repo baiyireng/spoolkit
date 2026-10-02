@@ -88,8 +88,10 @@ def test_噪声条目被对应判据拒绝(
     assert RULES_BY_ID[rule_id].title in verdict.reason
 
 
-def test_判据表四条都带编号与一句理由() -> None:
-    assert [rule.id for rule in RULES] == ["J1", "J3", "J4", "J5"]
+def test_判据表五条都带编号与一句理由() -> None:
+    # J2 由 P1 的 T7 追加在**最后**：理由的优先级仍是「值不值得记」（J1/J3/J4/J5）
+    # 先于「凭什么可信」（J2），见 gate.RULES 上方的顺序说明。
+    assert [rule.id for rule in RULES] == ["J1", "J3", "J4", "J5", "J2"]
     for rule in RULES:
         assert rule.title.strip()
         assert rule.check is not None
@@ -278,3 +280,87 @@ def test_去重口径登记在标定表里() -> None:
     assert hash_knob is not None
     assert hash_knob.default == 16
     assert hash_knob.overridable is True
+
+
+# ---- J2「可核对」（P1 / T7：设计稿 §5.1 第 2 行） ------------------------------
+#
+# 判据是两段机械检查：非空 + 看得出是可核对的出处（file:line / 工作区内路径 /
+# 命令 / 工具输出摘要）。正反例都要列——P0 的 J4 踩过"规则过宽"的坑，
+# J2 这一侧的风险是"规则过严把真事实拒了"（计划 T7 风险 ①）。
+
+# 正例：真实出处的各种写法，一条都不许被拒。
+J2_ACCEPT: tuple[str, ...] = (
+    "src/spoolkit/memory/store.py:105",
+    "tests/memory/test_gate.py",
+    "docs/superpowers/plans/2026-10-02-memory-p1-plan.md:462",
+    "pyproject.toml",
+    "pytest -q tests/memory",
+    "uv run pytest -q",
+    "$ spool memory migrate --dry-run",
+    "read(src/spoolkit/memory/semantic.py)",
+    "rg(id=\"idx_write_round\", src/)",
+    "git log -1",
+    "semantic:12",
+    "ep#12",
+)
+
+# 反例：无出处的断言、模型的自我描述（设计稿 §5.1 的反例列）。
+J2_DECLINE: tuple[str, ...] = (
+    "",
+    "   ",
+    "我的记忆里好像是这样",
+    "上一轮结论",
+    "模型说可以",
+    "依据（见上）",
+    "要么/或者",
+)
+
+
+@pytest.mark.parametrize("evidence", J2_ACCEPT)
+def test_J2_看得出出处的放行(evidence: str) -> None:
+    verdict = judge("fact", "测试命令是 pytest -q", evidence=evidence)
+    assert verdict.ok is True, verdict.reason
+    assert verdict.reason == ""
+
+
+@pytest.mark.parametrize("evidence", J2_DECLINE)
+def test_J2_缺出处或看不出出处的拒(evidence: str) -> None:
+    verdict = judge("fact", "测试命令是 pytest -q", evidence=evidence)
+    assert verdict.ok is False
+    # 钉要点而不是整句：理由要能读出"是哪条判据、为什么"。
+    assert verdict.reason.startswith("J2")
+    assert RULES_BY_ID["J2"].title in verdict.reason
+    assert "缺出处" in verdict.reason or "看不出可核对" in verdict.reason
+
+
+def test_J2_的理由不回显被拒的evidence() -> None:
+    """理由里只写"要什么形状"，不回显调用方给的那串字：它可能是半截密钥。"""
+    evidence = "我的记忆里好像是这样"
+    verdict = judge("fact", "测试命令是 pytest -q", evidence=evidence)
+    assert evidence not in verdict.reason
+
+
+def test_J2_缺出处的理由点名缺出处() -> None:
+    verdict = judge("fact", "构建命令是 uv build", evidence="")
+    assert verdict.reason.startswith("J2")
+    assert "缺出处" in verdict.reason
+
+
+def test_J2_对没有evidence这一列的路径不参与() -> None:
+    """`evidence=None`（默认）= 这条路径没有这一列（旧 `memory` 表），J2 不判。
+
+    这不是"放行缺出处"：`evidence=""` 才是"有这一列、没给值"，那是拒。
+    P0 的两条既有调用点（`archive.py` 的 promote 循环、`cli/commands/memory.py`
+    的预演）靠这个默认值保持行为不变——它们判的是旧表，没有 `evidence` 列。
+    """
+    assert judge("fact", "测试命令是 pytest -q").ok is True
+    assert judge("lesson", "解析自定义格式先上语法约束", trigger="解析,正则").ok is True
+    # 有这一列但没给值 → 拒。
+    assert judge("fact", "测试命令是 pytest -q", evidence="").ok is False
+
+
+def test_J2_排在最后_值不值得记的理由优先() -> None:
+    """一句寒暄即使没给出处，理由也要落在 J3 上——那是人最能改的那一条。"""
+    verdict = judge("fact", "你好！我是你的本地编程助手。有什么可以帮你的吗？", evidence="")
+    assert verdict.reason.startswith("J3")
+
