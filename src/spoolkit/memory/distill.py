@@ -14,6 +14,12 @@
 把「缩减要求」放在最后是有原因的：它对用户是隐形的遗忘。如果这次任务
 确实有五条值得记的内容，降到一条就等于静默丢掉四条，而没有任何提示。
 分治的代价是多几次调用，换回的是内容完整。
+
+**本模块不判「该不该收」**：那是 `semantic.write_memory` 的五道门禁（设计稿
+§5.3）。它负责的是把**出处**（`evidence`）一并问出来——§5.2 要求蒸馏的 JSON
+schema 里 `evidence` 是**必填**列，§5.1 的 J2「可核对」就长在写入口上。
+给不出出处的条目**不在这里丢**：它照样带出去，由写入口拒、由归档降级为
+`episode` 并把理由留痕——在这里丢就等于"静默遗忘"，正是本模块要避免的那一种失败。
 """
 
 import json
@@ -44,8 +50,11 @@ DISTILL_SCHEMA: dict[str, Any] = {
                     "kind": {"type": "string", "enum": list(KINDS)},
                     "text": {"type": "string"},
                     "trigger": {"type": "string"},
+                    # §5.2：蒸馏的 schema 里 `evidence` 是**必填**列。它是设计稿
+                    # §4.3 点名的"最难作假的一列"，也是 J2「可核对」的输入。
+                    "evidence": {"type": "string"},
                 },
-                "required": ["kind", "text"],
+                "required": ["kind", "text", "evidence"],
             },
         }
     },
@@ -57,9 +66,13 @@ PROMPT = T.DISTILL
 
 @dataclass(frozen=True)
 class DistillResult:
-    """归纳结果，同时说明它是怎么产出的。"""
+    """归纳结果，同时说明它是怎么产出的。
 
-    entries: list[tuple[str, str]]
+    `entries` 的每一项是四元组 `（类型, 内容, 触发词, 出处）`：`出处`（`evidence`）
+    是 T7 接线起加的——它由写入口 `semantic.write_memory` 的 J2 判，**不在本模块判**。
+    """
+
+    entries: list[tuple[str, str, str, str]]
     rounds: int
     split: bool
     truncated: bool
@@ -102,7 +115,15 @@ def _prompt(goal: str, segments: list[tuple[str, str]], limit: int) -> str:
             lines.extend(f"- {item}" for item in items)
         lines.append("")
     body = "\n".join(lines).rstrip()
-    return PROMPT.format(goal=goal, body=body, limit=limit)
+    # 出处要求**不写进 `templates.DISTILL`**（那份模板不在本次改动面上），
+    # 所以在这里追加一句。它**不能以 "- " 开头**：材料正是用 "- " 列表渲染的，
+    # 加一条同形的说明会让"这批材料有几条"（分治的判据）当场失真。
+    evidence_rule = (
+        "出处要求：每条都要给 evidence，指向材料里能回去核对的东西"
+        "（`文件:行` / 跑过的命令 / 工具调用）。给不出出处的条目会被拒收，"
+        "只能降级成事件记录。"
+    )
+    return PROMPT.format(goal=goal, body=body, limit=limit) + "\n" + evidence_rule
 
 
 def _request(
@@ -115,11 +136,16 @@ def _request(
     )
 
 
-def _parse_entries(text: str, limit: int) -> list[tuple[str, str, str]]:
-    """解析归纳结果，返回（类型，内容，触发词）。
+def _parse_entries(text: str, limit: int) -> list[tuple[str, str, str, str]]:
+    """解析归纳结果，返回（类型，内容，触发词，出处）。
 
     触发词只有教训用得上：它决定「什么时候该把这条推到模型面前」。
     没有触发词的教训推不出去，只能靠检索偶然命中——那正是要修的问题。
+
+    `evidence`（T7 起 schema 的必填列）**缺了就取空串，条目照样带出去**：
+    空串在写入口是 J2「缺出处」→ 拒 → 由归档降级为 episode 并把理由留痕。
+    在这里把它丢掉的话，"为什么没记住"就无从回答，"降级"这件事也一起没了
+    （§5.3 ②：判据不过 = 降级，不是丢弃）。
     """
     try:
         payload = json.loads(text)
@@ -128,7 +154,7 @@ def _parse_entries(text: str, limit: int) -> list[tuple[str, str, str]]:
     if not isinstance(payload, dict):
         return []
 
-    entries: list[tuple[str, str, str]] = []
+    entries: list[tuple[str, str, str, str]] = []
     for item in payload.get("entries") or []:
         if not isinstance(item, dict):
             continue
@@ -137,11 +163,13 @@ def _parse_entries(text: str, limit: int) -> list[tuple[str, str, str]]:
         if kind not in KINDS or not isinstance(content, str) or not content.strip():
             continue
         trigger = item.get("trigger")
+        evidence = item.get("evidence")
         entries.append(
             (
                 kind,
                 content.strip(),
                 trigger.strip() if isinstance(trigger, str) else "",
+                evidence.strip() if isinstance(evidence, str) else "",
             )
         )
         if len(entries) >= limit:
@@ -150,18 +178,18 @@ def _parse_entries(text: str, limit: int) -> list[tuple[str, str, str]]:
 
 
 def _merge(
-    groups: list[list[tuple[str, str, str]]], limit: int
-) -> list[tuple[str, str, str]]:
+    groups: list[list[tuple[str, str, str, str]]], limit: int
+) -> list[tuple[str, str, str, str]]:
     """合并多轮结果并去重，保持先出现的顺序。"""
-    merged: list[tuple[str, str, str]] = []
+    merged: list[tuple[str, str, str, str]] = []
     seen: set[str] = set()
     for group in groups:
-        for kind, text, trigger in group:
+        for kind, text, trigger, evidence in group:
             key = text.strip()
             if key in seen:
                 continue
             seen.add(key)
-            merged.append((kind, text, trigger))
+            merged.append((kind, text, trigger, evidence))
             if len(merged) >= limit:
                 return merged
     return merged
@@ -173,7 +201,7 @@ def _run_once(
     segments: list[tuple[str, str]],
     limit: int,
     max_tokens: int,
-) -> tuple[list[tuple[str, str, str]], bool, str]:
+) -> tuple[list[tuple[str, str, str, str]], bool, str]:
     """执行一次提炼，返回（条目，是否被截断，原始输出）。"""
     response = chat_with_escalation(
         gateway, _request(goal, segments, limit, max_tokens)
@@ -189,7 +217,7 @@ def _distill(
     max_tokens: int,
     depth: int,
     stats: dict[str, Any],
-) -> list[tuple[str, str, str]]:
+) -> list[tuple[str, str, str, str]]:
     stats["rounds"] += 1
     entries, truncated, raw = _run_once(gateway, goal, segments, limit, max_tokens)
     if depth == 0:
@@ -237,6 +265,10 @@ def distill(
     （设计稿 §3 缺陷 1）——整段助手答复不是「项目事实」，每轮注入它等于
     用噪声把真事实挤出去。任务结论仍然可查：`archive.archive_task` 会把它
     写进 `episode.summary`，判据不过的候选条目也会降级成 `memory.kind='episode'`。
+
+    每条 entry 都是四元组（含 `evidence`），而**收不收由写入口判**（§5.3 的五道
+    门禁在 `semantic.write_memory` 上）：这里既不预判、也不替它兜底，
+    所以"给不出出处"这件事能一路走到写入口、被拒、被降级、留下理由。
     """
     stats: dict[str, Any] = {
         "rounds": 0,

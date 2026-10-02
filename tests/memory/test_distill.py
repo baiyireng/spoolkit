@@ -21,11 +21,20 @@ def _state() -> TaskState:
 
 
 def _entries(*pairs) -> str:
+    """把（类型, 内容[, 触发词[, 出处]]）拼成模型会返回的那份 JSON。
+
+    `出处`（`evidence`）是 T7 接线起 schema 的**必填**列：这里按"给得出就给、
+    给不出就不写这一列"两种形状生成，好让两条路径都被用例走到。
+    """
     items = []
     for pair in pairs:
         kind, text = pair[0], pair[1]
-        trigger = pair[2] if len(pair) > 2 else ""
-        items.append({"kind": kind, "text": text, "trigger": trigger})
+        item = {"kind": kind, "text": text}
+        if len(pair) > 2:
+            item["trigger"] = pair[2]
+        if len(pair) > 3:
+            item["evidence"] = pair[3]
+        items.append(item)
     return json.dumps({"entries": items}, ensure_ascii=False)
 
 
@@ -82,18 +91,40 @@ def test_解析归纳出的条目() -> None:
     model = _model(
         [
             _entries(
-                ("fact", "测试命令是 pytest -q"),
+                ("fact", "测试命令是 pytest -q", "", "pyproject.toml:1"),
                 ("lesson", "先上约束", "解析,正则"),
             )
         ]
     )
     result = distill(model, _state())
+    # 四元组：出处是 T7 接线起 schema 的必填列，缺了取空串（由写入口的 J2 判）。
     assert result.entries == [
-        ("fact", "测试命令是 pytest -q", ""),
-        ("lesson", "先上约束", "解析,正则"),
+        ("fact", "测试命令是 pytest -q", "", "pyproject.toml:1"),
+        ("lesson", "先上约束", "解析,正则", ""),
     ]
     assert result.split is False
     assert result.truncated is False
+
+
+def test_蒸馏schema把evidence列为必填() -> None:
+    """§5.2：蒸馏的 JSON schema 里 `evidence` 是必填列（J2 的输入）。"""
+    from spoolkit.memory.distill import DISTILL_SCHEMA
+
+    items = DISTILL_SCHEMA["properties"]["entries"]["items"]
+    assert "evidence" in items["required"]
+    assert items["properties"]["evidence"] == {"type": "string"}
+
+
+def test_缺出处的条目照样带出来交给写入口() -> None:
+    """给不出出处**不在这里丢**：条目带空串出去，由写入口拒、由归档降级留痕。"""
+    from spoolkit.memory.distill import _parse_entries
+
+    assert _parse_entries('{"entries":[{"kind":"fact","text":"甲"}]}', 5) == [
+        ("fact", "甲", "", "")
+    ]
+    assert _parse_entries(
+        '{"entries":[{"kind":"fact","text":"甲","evidence":"a.py:1"}]}', 5
+    ) == [("fact", "甲", "", "a.py:1")]
 
 
 def test_非法JSON退化为空列表() -> None:
@@ -172,22 +203,22 @@ def test_分治结果会去重() -> None:
 
     merged = _merge(
         [
-            [("fact", "同一条", ""), ("fact", "左", "")],
-            [("fact", "同一条", ""), ("fact", "右", "")],
+            [("fact", "同一条", "", ""), ("fact", "左", "", "")],
+            [("fact", "同一条", "", ""), ("fact", "右", "", "")],
         ],
         10,
     )
     assert merged == [
-        ("fact", "同一条", ""),
-        ("fact", "左", ""),
-        ("fact", "右", ""),
+        ("fact", "同一条", "", ""),
+        ("fact", "左", "", ""),
+        ("fact", "右", "", ""),
     ]
 
 
 def test_合并结果受上限约束() -> None:
     from spoolkit.memory.distill import _merge
 
-    merged = _merge([[("fact", f"第{i}条", "") for i in range(5)]], 2)
+    merged = _merge([[("fact", f"第{i}条", "", "") for i in range(5)]], 2)
     assert len(merged) == 2
 
 

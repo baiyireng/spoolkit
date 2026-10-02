@@ -95,6 +95,8 @@ def test_超出预算的条目下沉到冷记忆(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     # 两条都在 hot_item_chars=200 以内（所以它们进得了热记忆），但 token 预算装不下：
     # 1200 窗口的热预算 = int(1200×0.85×0.15) = 153，而两条渲染后 190。
+    # **T7 接线起 `doing` 不再是合法的提升类型**（写入口只认 `semantic` 的五个
+    # kind，`doing` 会被判"kind 非法"→ 降级），所以这里用两条 fact 表达同一件事。
     long_entry = "很长的一段记忆内容" * 15
     short_fact = "短" * 80
     result = archive_task(
@@ -104,7 +106,7 @@ def test_超出预算的条目下沉到冷记忆(tmp_path: Path) -> None:
         session_id="s1",
         counter=OfflineTokenCounter(),
         context_window=1200,
-        promote=[("doing", long_entry), ("fact", short_fact)],
+        promote=[("fact", long_entry), ("fact", short_fact)],
     )
     assert result.demoted
     assert any("很长的一段记忆内容" in m.text for m in list_memories(conn, kind="episode"))
