@@ -21,7 +21,7 @@
 import sqlite3
 import time
 
-from spoolkit.memory.store import Memory, to_memory
+from spoolkit.memory.store import Memory, insert_memory, to_memory
 
 KIND = "lesson"
 
@@ -56,16 +56,15 @@ def record_lesson(
     source: str = "",
     confidence: float = INITIAL_CONFIDENCE,
 ) -> Memory:
-    """写入一条教训。trigger 是「什么时候该用它」的关键词。"""
-    cursor = conn.execute(
-        "INSERT INTO memory"
-        "(kind, text, trigger, source, confidence, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (KIND, rule.strip(), trigger.strip(), source, confidence, time.time()),
-    )
-    conn.commit()
-    return Memory(
-        id=cursor.lastrowid,
+    """写入一条教训。trigger 是「什么时候该用它」的关键词。
+
+    写入走 `store.insert_memory`（全仓唯一写入口）：教训与其它记忆一样要进
+    `memory_fts` 的四列（`text/kind/trigger/source`），否则 `recall` 永远
+    查不到教训，触发词也永远只是个存着不用的字符串（设计稿 §3 缺陷 4）。
+    不用 FTS5 触发器的理由（中文逐字拆是 Python 函数）见 `insert_memory`。
+    """
+    return insert_memory(
+        conn,
         kind=KIND,
         text=rule.strip(),
         source=source,
