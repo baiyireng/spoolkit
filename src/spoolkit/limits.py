@@ -319,6 +319,145 @@ KNOBS: tuple[Knob, ...] = (
         SAFETY,
         "**符号项**：永久禁止清单——提权与系统级操作，不提供申请入口",
     ),
+    # ---- P1（记忆架构）新增的 22 个旋钮 -----------------------------------
+    #
+    # **一次登记、分批消费**：P1 计划 Task 1 把它们一次性登记在这里，批次 2–4
+    # 的任务只 `resolve` 不追加（`limits.py` 是这一批的单写点，见计划「并行与
+    # 串行」的单写者清单）。每条 note 的「依据」一律写设计稿章节号或计划任务号
+    # ——不许写死魔法数不留出处（Task 1 要点第 1 条）。
+    #
+    # 计划 Task 1 的旋钮表里还有第 23 行 `retrieval_ratio=0.15`：它就是上面
+    # 既有的那一项（P0 已登记、已被 `context/budget.py` 消费），**不重复登记**
+    # ——重复登记会让 `_BY_NAME` 静默取后者，Task 1 验收 5（无重名）会红。
+    #
+    # 嵌入只留 `w_embed` 一个旋钮、默认 0.0（设计稿 §13.11 / §13.13 第 6 条
+    # 定案：P1 不引嵌入）：它是五维公式里的系数，且 `why` 必须能打出这一维
+    # （§14.4 规矩 1、§6.3）。`embed_candidates_n` / `embed_rerank_k` /
+    # `embed_min_cos` / `embed_timeout_ms` 四个选型旋钮**不登记**（属嵌入第③步，
+    # §14.4 规矩 3 + 计划「范围」右列的「不做」）。
+    Knob(
+        "w_bm25", 1.0, CAPABILITY,
+        "五维公式里 bm25 那一维的系数（设计稿 §14.4 规矩 1："
+        "rel = normalize(w_bm25*bm25_norm + w_embed*embed_cos)）。"
+        "**本计划初值，不是设计稿数值**（设计稿没给这个数）：取 1.0 时"
+        "单信号等价于纯 bm25。消费：T5/T6",
+    ),
+    Knob(
+        "w_embed", 0.0, CAPABILITY,
+        "五维公式里嵌入那一维的系数（设计稿 §14.4 规矩 1）。**默认 0.0 是"
+        "定案**（§13.11 的顺序 + §13.13 第 6 条：先分词口径、再 bm25，嵌入"
+        "推迟）：P1 里这一维只会是「关」，但 `why` / `memory_decision` / "
+        "`--events memory` 三个出口必须**可见地**报出来（§14.4 规矩 6 的"
+        "「不许静默降级」）。消费：T6",
+    ),
+    Knob(
+        "rank_w_relevance", 0.40, CAPABILITY,
+        "五维打分里相关度的权重（设计稿 §6.1 的权重块）。"
+        "五个权重与半衰期全部从登记表取，一个都不许写死在 rank.py 里。消费：T6",
+    ),
+    Knob(
+        "rank_w_recency", 0.20, CAPABILITY,
+        "五维打分里新近度的权重（设计稿 §6.1 的权重块）。消费：T6",
+    ),
+    Knob(
+        "rank_w_importance", 0.25, CAPABILITY,
+        "五维打分里重要度的权重（设计稿 §6.1 的权重块）。消费：T6",
+    ),
+    Knob(
+        "rank_w_usage", 0.10, CAPABILITY,
+        "五维打分里使用次数的权重（设计稿 §6.1 的权重块）。消费：T6",
+    ),
+    Knob(
+        "rank_w_penalty", 0.05, CAPABILITY,
+        "五维打分里惩罚项的权重（设计稿 §6.1：penalty = applied_count / "
+        "(use_count + 1)）。消费：T6",
+    ),
+    Knob(
+        "rank_recency_half_life_days", 30, CAPABILITY,
+        "新近度那一维的半衰期天数（设计稿 §6.1：rec = exp(-age_days / "
+        "half_life_days)）。它是能力标定值：外部 API 的模型不该照搬本机 "
+        "27B 的 30 天。消费：T6",
+    ),
+    Knob(
+        "recall_candidates_n", 50, CAPABILITY,
+        "两阶段检索的**候选池**大小（设计稿 §14.4 规矩 3 的 N；设计稿里的名字"
+        "是 embed_candidates_n，P1 不引嵌入所以按计划「口径裁决 3」改成中性名）。"
+        "候选池只在内存里过一遍、**不渲染进 prompt**（§6.2 表：0 token）。"
+        "消费：T6",
+    ),
+    Knob(
+        "recall_rerank_k", 5, CAPABILITY,
+        "两阶段检索的**重排后取几条**（设计稿 §14.4 规矩 3 的 K；设计稿里的"
+        "名字是 embed_rerank_k，「口径裁决 3」改成中性名）。硬约束："
+        "**K ≤ recall_limit**，且重排只能减少进上下文的条数、不能增加。消费：T6",
+    ),
+    Knob(
+        "recall_limit", 5, CAPABILITY,
+        "recall 一次默认回几条（设计稿 §6.2 表：一次 5 条 × 240 字 ≈ 1200 "
+        "token，与 history_search_limit=5 同一口径）。消费：T2（semantic 检索的"
+        "默认条数）/T6/T11",
+    ),
+    Knob(
+        "recall_entry_chars", 240, CAPABILITY,
+        "recall 每条最多多少字（设计稿 §6.2 表；与既有 history_snippet_chars=240 "
+        "对齐：同一份内容的两种看法，单条截断的口径不该有两套）。消费：T11",
+    ),
+    Knob(
+        "dedupe_similarity", 0.90, CAPABILITY,
+        "近似去重的相似度线（设计稿 §5.3 ④ 第 2 级 + §6.1）。它是写入侧第二级"
+        "去重的判据：精确级由 content_hash 唯一部分索引负责，这一级抓同义改写，"
+        "**抓不到的要如实写在 --explain 里、不假装**（计划「不做」清单）。消费：T7",
+    ),
+    Knob(
+        "remember_min_chars", 8, CAPABILITY,
+        "一条记忆的**最短长度**（设计稿 §4.3 容量上限段定案的 "
+        "remember_min_chars=8）：比它短的条目不是一个可复用事实。与既有 "
+        "remember_max_chars=400 是同一条长度线的两端，所以同样可覆盖。消费：T7",
+    ),
+    Knob(
+        "memory_budget_ratio", 0.30, CAPABILITY,
+        "语义记忆（三层注入里的检索层）占有效预算的比例上限（设计稿 §6.2 表）。"
+        "消费：T12",
+    ),
+    Knob(
+        "event_chain_max_units", 2, CAPABILITY,
+        "一轮最多取几个「实体·属性的有序事件链」单元（设计稿 §6.7 / §6.2 表）。"
+        "链作为**一个单元**参与候选与重排，不是把事件逐条塞进去。消费：T11",
+    ),
+    Knob(
+        "event_chain_render_max_chars", 400, CAPABILITY,
+        "一个事件链单元渲染进上下文的最多字数（设计稿 §6.7 / §6.2 表）。"
+        "消费：T11",
+    ),
+    Knob(
+        "state_direct_inject_min_confidence", 0.8, CAPABILITY,
+        "允许**直接注入** state 行的 confidence 门槛（设计稿 §6.6 + §13.13 第 7 "
+        "条：直注要同时过「重要度达标 + 在时间窗内 + 过冲突检查」三关）。"
+        "设计取值，不是测出来的数。消费：T12",
+    ),
+    Knob(
+        "state_direct_inject_max", 1, CAPABILITY,
+        "一轮最多直接注入几条 state 行（设计稿 §6.6：只开这一道口，"
+        "`semantic` 的普通条目一律不做直接注入）。消费：T12",
+    ),
+    Knob(
+        "state_direct_inject_max_age_days", 30, CAPABILITY,
+        "直接注入的 state 行必须有多新（设计稿 §13.13 第 7 条只写「最近 N 天」，"
+        "**没给 N**）。**本计划初值，不是设计稿数值**：取 30 与 "
+        "rank_recency_half_life_days 同量级。消费：T12",
+    ),
+    Knob(
+        "state_auto_pick", 0, CAPABILITY,
+        "冲突的 state 值要不要自动选一个（设计稿 §15.6 第 3 条：默认 0 = 关，"
+        "**不许静默选一个**；开启时也必须在输出里标明是自动选的）。消费：T9",
+    ),
+    Knob(
+        "event_archive_threshold", 1000, CAPABILITY,
+        "memory_event 超过几条就把最旧的搬进归档表（设计稿 §13.13 第 5 条："
+        "与 episode_archive_threshold=1000 同口径，阈值进登记表可覆盖）。"
+        "**待标定初值**：事件增长速率**无实测**（§13.13 第 5 条点名「本轮没测」；"
+        "§7.1 的 episode 26 条/18 天不能外推到 event）。消费：T3/T9",
+    ),
 )
 
 _BY_NAME = {knob.name: knob for knob in KNOBS}

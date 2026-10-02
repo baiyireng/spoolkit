@@ -96,6 +96,39 @@ def test_热记忆的占比只有一个出处() -> None:
     )
 
 
+# P1（记忆架构）计划 Task 1 一次登记、批次 2–4 分批消费。名单里是**还没接线**
+# 的那 21 个（括号里是计划点名的消费者与任务号）；`recall_limit` 不在这里——
+# 它在本批 T2 的 `memory/semantic.py` 里就接了线。名单是 **T1 的快照**，
+# 不是永久豁免：后续批次把某一项接上线之后，请把它从这里删掉。
+#
+# 用「⊆」（见 `test_表里列的每一项都真的接上了`）而不是「==」，是因为本用例
+# 分辨不了「还没接线」与「接线的那一批还没做」——写成「==」会给批次 2–4 留下
+# 一条必然变红的用例。名单之外任何 capability 项仍然必须接线。
+P1_PENDING_WIRING: tuple[str, ...] = (
+    "w_bm25",  # T5/T6
+    "w_embed",  # T6
+    "rank_w_relevance",  # T6
+    "rank_w_recency",  # T6
+    "rank_w_importance",  # T6
+    "rank_w_usage",  # T6
+    "rank_w_penalty",  # T6
+    "rank_recency_half_life_days",  # T6
+    "recall_candidates_n",  # T6
+    "recall_rerank_k",  # T6
+    "recall_entry_chars",  # T11
+    "dedupe_similarity",  # T7
+    "remember_min_chars",  # T7
+    "memory_budget_ratio",  # T12
+    "event_chain_max_units",  # T11
+    "event_chain_render_max_chars",  # T11
+    "state_direct_inject_min_confidence",  # T12
+    "state_direct_inject_max",  # T12
+    "state_direct_inject_max_age_days",  # T12
+    "state_auto_pick",  # T9
+    "event_archive_threshold",  # T3/T9
+)
+
+
 def test_表里列的每一项都真的接上了() -> None:
     """登记表最怕的是「列了但没接线」——那比不列更糟：它会骗人。
 
@@ -103,6 +136,10 @@ def test_表里列的每一项都真的接上了() -> None:
     而那段批量替换其实没匹配上、却打印了 done，等于登记表在骗人。
     所以这里**穷尽地**检查：每个 capability / mechanical 项都必须在代码里
     被取用一次（安全项是符号项——它们描述的是一条规则，不是一个数值）。
+
+    P1 Task 1 是**一次登记、分批消费**（计划「并行与串行」的单写者清单把
+    `limits.py` 钉成单写点）：那 22 个新旋钮里，`recall_limit` 在本批就接线，
+    其余 21 个要等批次 2–4 的消费者落地，名单见 `P1_PENDING_WIRING`。
     """
     sources = [
         path
@@ -111,11 +148,166 @@ def test_表里列的每一项都真的接上了() -> None:
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in sources)
 
+    # 名单本身不许写错名字（写错了这里先红，而不是在 missing 里被悄悄放行）。
+    assert set(P1_PENDING_WIRING) <= {entry.name for entry in limits.KNOBS}
+
     missing = []
     for entry in limits.KNOBS:
         assert entry.note.strip(), f"{entry.name} 没写它管什么"
         if entry.kind == SAFETY:
             continue  # 符号项：它约束的是行为，不是可调数值
-        if f'"{entry.name}"' not in text:
-            missing.append(entry.name)
+        if f'"{entry.name}"' in text:
+            continue
+        if entry.name in P1_PENDING_WIRING:
+            continue  # P1 已登记、消费者在批次 2–4
+        missing.append(entry.name)
     assert not missing, f"表里列了但代码里没人取用：{missing}"
+
+
+# ---- P1（记忆架构）旋钮一次登记：计划 Task 1 -----------------------------
+#
+# P1 计划 Task 1 把 P1 需要的旋钮**一次性**登记进 `KNOBS`（之后批次 2–4 只
+# 消费不追加，`limits.py` 因此可以从所有人的写范围里摘出去）。这里的清单是
+# 计划里点名的那 22 个新增项，默认值与依据（设计稿章节 / 计划任务号）一并
+# 冻结在这里：**改默认值或漏登记一个都会红**。
+P1_NEW_KNOBS: tuple[tuple[str, float], ...] = (
+    ("w_bm25", 1.0),  # §14.4 规矩 1；本计划初值，不是设计稿数值
+    ("w_embed", 0.0),  # §13.11 / §13.13 第 6 条：P1 不引嵌入
+    ("rank_w_relevance", 0.40),  # §6.1
+    ("rank_w_recency", 0.20),  # §6.1
+    ("rank_w_importance", 0.25),  # §6.1
+    ("rank_w_usage", 0.10),  # §6.1
+    ("rank_w_penalty", 0.05),  # §6.1
+    ("rank_recency_half_life_days", 30),  # §6.1
+    ("recall_candidates_n", 50),  # §14.4 规矩 3（口径裁决 3 改名）
+    ("recall_rerank_k", 5),  # §14.4 规矩 3（硬约束 K ≤ recall_limit）
+    ("recall_limit", 5),  # §6.2 表
+    ("recall_entry_chars", 240),  # §6.2 表（对齐 history_snippet_chars）
+    ("dedupe_similarity", 0.90),  # §5.3 ④ / §6.1
+    ("remember_min_chars", 8),  # §4.3 容量上限段
+    ("memory_budget_ratio", 0.30),  # §6.2 表
+    ("event_chain_max_units", 2),  # §6.7 / §6.2
+    ("event_chain_render_max_chars", 400),  # §6.7 / §6.2
+    ("state_direct_inject_min_confidence", 0.8),  # §6.6 / §13.13 第 7 条
+    ("state_direct_inject_max", 1),  # §6.6
+    ("state_direct_inject_max_age_days", 30),  # §13.13 第 7 条；本计划初值
+    ("state_auto_pick", 0),  # §15.6 第 3 条（默认关）
+    ("event_archive_threshold", 1000),  # §13.13 第 5 条（待标定初值）
+)
+
+# 改造前（P0 收尾时）`KNOBS` 的全部名字，逐字冻结：**一个都不许丢**
+# （Task 1 验收 2）。改造后 = 这 62 个 + 上面 22 个。
+KNOBS_BEFORE_P1: tuple[str, ...] = (
+    "repeat_warn_at",
+    "repeat_block_at",
+    "repeat_intervene_at",
+    "no_edit_limit",
+    "no_edit_intervene_at",
+    "empty_turn_limit",
+    "step_ceiling_factor",
+    "supervisor_max_grant",
+    "name_cycle_window",
+    "name_cycle_at",
+    "oscillation_at",
+    "same_query_at",
+    "done_inline",
+    "max_scopes",
+    "max_targets",
+    "review_limit",
+    "survey_budget",
+    "output_reserve_ratio",
+    "output_reserve_boost_ratio",
+    "soft_trigger_ratio",
+    "hard_trigger_ratio",
+    "hot_memory_ratio",
+    "task_state_ratio",
+    "code_ratio",
+    "retrieval_ratio",
+    "lessons_ratio",
+    "recent_chat_turns",
+    "recent_chat_chars",
+    "history_digest_turns",
+    "history_digest_chars",
+    "history_search_limit",
+    "history_search_max",
+    "history_snippet_chars",
+    "episode_final_chars",
+    "remember_max_chars",
+    "remember_table_lines",
+    "dedup_casefold",
+    "dedup_collapse_ws",
+    "dedup_strip_punct",
+    "dedup_hash_chars",
+    "hot_max_items",
+    "hot_item_chars",
+    "hot_importance_long_step",
+    "system_quota",
+    "fixed_quota_cap",
+    "compact_threshold",
+    "compact_code_boost",
+    "max_index_files",
+    "index_seconds",
+    "max_output_chars",
+    "prefetch_budget",
+    "prefetch_content_budget",
+    "decompose_material_budget",
+    "decompose_output_budget",
+    "research_page_limit",
+    "research_output_budget",
+    "research_steps",
+    "search_result_limit",
+    "command_timeout",
+    "max_command_timeout",
+    "path_confinement",
+    "denied_commands",
+)
+
+
+def test_p1_旋钮全部登记且可覆盖() -> None:
+    """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
+    for name, default in P1_NEW_KNOBS:
+        entry = limits.knob(name)
+        assert entry is not None, f"{name} 没登记"
+        assert entry.kind == CAPABILITY, f"{name} 不是能力标定值"
+        assert entry.overridable is True, f"{name} 不可覆盖"
+        assert entry.default == default, f"{name} 默认值不是 {default}"
+        assert entry.note.strip(), f"{name} 没写依据"
+
+
+def test_p1_点名的第23行是P0既有项而不是重复登记() -> None:
+    """Task 1 的旋钮表共 23 行，第 15 行 `retrieval_ratio=0.15` 是 P0 的既有项。
+
+    它**不重复登记**：`_BY_NAME` 是字典，重名会静默取后者（`limits.py:324`）。
+    这条同时是「22 个新增」这个数目的出处。
+    """
+    assert limits.resolve("retrieval_ratio") == (0.15, "默认")
+    assert "retrieval_ratio" in KNOBS_BEFORE_P1  # 它是既有项，不是新增项
+    assert "retrieval_ratio" not in dict(P1_NEW_KNOBS)
+
+
+def test_既有旋钮一个不少() -> None:
+    """Task 1 验收 2：改造前的名字集合是改造后的子集（集合包含断言）。"""
+    names = {entry.name for entry in limits.KNOBS}
+    assert set(KNOBS_BEFORE_P1) <= names
+    assert set(KNOBS_BEFORE_P1) & set(dict(P1_NEW_KNOBS)) == set()
+
+
+def test_旋钮没有重名() -> None:
+    """Task 1 验收 5：重名会让 `_BY_NAME` 静默取后者。"""
+    assert len(limits.KNOBS) == len(limits._BY_NAME)
+    assert len(limits.KNOBS) == len(KNOBS_BEFORE_P1) + len(P1_NEW_KNOBS)
+
+
+def test_p1旋钮可以按工作区覆盖(tmp_path: Path) -> None:
+    """Task 1 验收 3/4：`.agent/limits.json` 覆盖得动，`w_embed` 默认必须是 0.0。"""
+    limits.save_overrides(tmp_path, {"rank_w_relevance": 0.5, "w_embed": 0.25})
+    overrides = limits.load_overrides(tmp_path)
+
+    assert limits.resolve("rank_w_relevance", overrides) == (0.5, "配置")
+    # 覆盖是逐项的：没被覆盖的仍是默认。
+    assert limits.resolve("rank_w_recency", overrides) == (0.2, "默认")
+    assert "rank_w_relevance" in limits.render(overrides)
+
+    # 定案：嵌入不进 P1，所以 `w_embed` 的**默认**是 0.0（上面那行证明它可覆盖）。
+    assert limits.resolve("w_embed") == (0.0, "默认")
+    assert limits.knob("w_embed").default == 0.0

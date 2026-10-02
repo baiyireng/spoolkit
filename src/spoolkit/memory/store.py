@@ -15,7 +15,9 @@
 - **检索索引由应用层显式写**（`insert_memory`），不用 FTS5 触发器：
   触发器拿不到「中文逐字拆」这个 Python 函数，而那是本仓中文检索的前提。
   `memory_fts` 索引四列 `text/kind/trigger/source`——`kind`、触发词、来源
-  都要能查（设计稿 §2.2 与缺陷 4）。
+  都要能查（设计稿 §2.2 与缺陷 4）。**v3 起的 `semantic` 一族沿同一条口径**
+  （`SEMANTIC_SCHEMA`：`semantic` 上也没有触发器，同步在
+  `semantic.insert_semantic` 一处做）。
 """
 
 import re
@@ -207,10 +209,129 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
     _rebuild_memory_fts(conn)
 
 
+# ---- v3：`semantic` 一族（设计稿 §4.3 第 1、2、4、5、6、7 块）------------
+#
+# DDL **逐字**照设计稿 §4.3，只有两处计划里写明的偏差：
+#
+# ① **`semantic_fts` 不用触发器、也不是 external content**（计划「口径裁决 1」）。
+#    理由与 P0 在 `memory_fts` 上绕过的那条**完全相同**：中文检索依赖写入前把
+#    中文字逐字分开（`normalize_for_fts` 是 Python 函数，**SQL 触发器里没有它**），
+#    而设计稿 §4.3 第 2 块的 `content='semantic'` 与那三个触发器是**一套的**：
+#    去掉触发器之后 external content 就失去了同步机制（写入不会自动进索引），
+#    所以按 P0 的同一形态建成非 external content，同步责任收在**一处 Python
+#    写入口** `semantic.insert_semantic`（形制照 `insert_memory`）。查询侧若需要
+#    触发器，先要有「触发器里能用的中文分词」——那正是本仓还没有的东西。
+# ② `memory_decision` **一次建就带 `embed_status` 列**（计划 Task 2 要点 /
+#    设计稿 §14.4 规矩 6 的出口①：任何一次「实际没用嵌入」都必须能在
+#    `memory_decision` / `--events memory` / `spool memory why` 之一看到）。
+#    §14.4 规矩 6 列的取值是 `ok` / `off:not_installed` / `off:no_model` /
+#    `off:offline` / `off:timeout` / `off:below_threshold`；P1 的形态是
+#    `w_embed=0.0` **明确关闭**，所以默认值用计划「口径裁决 2」点名的
+#    `off:disabled`（P1 不引嵌入的定案见 §13.11 / §13.13 第 6 条）。
+#
+# 去重索引 `idx_semantic_dedupe` **必须是部分唯一索引**（设计稿 §4.3:360-361 的
+# `WHERE status = 'active'`）：写成普通唯一索引的话，`superseded` / `archived`
+# 的旧条目会**永久挡住**同一 `content_hash` 的新条目——而「条目归档后同一内容
+# 可以再次写入」正是 §5.3 ⑤ 冲突链要的反面。
+SEMANTIC_SCHEMA = """
+-- 1) 语义记忆（新表；承载 fact/preference/decision/lesson/skill）
+CREATE TABLE IF NOT EXISTS semantic (
+    id            INTEGER PRIMARY KEY,
+    kind          TEXT NOT NULL,          -- fact|preference|decision|lesson|skill
+    scope         TEXT NOT NULL DEFAULT 'workspace',  -- session|workspace|machine
+    scope_id      TEXT NOT NULL DEFAULT '',           -- session 级时为会话 id，否则 ''
+    text          TEXT NOT NULL,
+    trigger       TEXT NOT NULL DEFAULT '',  -- 逗号分隔关键词（lesson/skill 必填）
+    steps         TEXT NOT NULL DEFAULT '',  -- JSON 数组，仅 skill
+    source        TEXT NOT NULL DEFAULT '',  -- 出处：ep#12 / user / model / import
+    evidence      TEXT NOT NULL DEFAULT '',  -- 可核对的依据：file:line / 命令 / 工具输出摘要
+    confidence    REAL NOT NULL DEFAULT 0.5,
+    importance    REAL NOT NULL DEFAULT 0.5, -- 写入时判定，参与排序
+    content_hash  TEXT NOT NULL,           -- 去重指纹（规范化文本的 sha1 前 16 位）
+    status        TEXT NOT NULL DEFAULT 'active',  -- active|archived|superseded|needs_review
+    superseded_by INTEGER REFERENCES semantic(id),
+    created_at    REAL NOT NULL,
+    last_used_at  REAL,
+    use_count     INTEGER NOT NULL DEFAULT 0,
+    applied_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_semantic_kind    ON semantic(kind, status);
+CREATE INDEX IF NOT EXISTS idx_semantic_scope   ON semantic(scope, scope_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_dedupe
+    ON semantic(content_hash) WHERE status = 'active';  -- ② 结构性去重
+
+-- 2) 全文索引：三列 text + trigger + evidence。**非 external content +
+--    应用层显式写**（见本常量上方的偏差 ①：触发器拿不到中文分词）。
+CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts USING fts5(text, trigger, evidence);
+
+-- 4) 情节 ↔ 语义 的引用（多对多，两条边各带方向）
+CREATE TABLE IF NOT EXISTS memory_link (
+    id         INTEGER PRIMARY KEY,
+    src_kind   TEXT NOT NULL,   -- episode|semantic
+    src_id     INTEGER NOT NULL,
+    dst_kind   TEXT NOT NULL,
+    dst_id     INTEGER NOT NULL,
+    relation   TEXT NOT NULL,   -- derived_from|supersedes|duplicate_of|uses_skill
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_link_src ON memory_link(src_kind, src_id);
+CREATE INDEX IF NOT EXISTS idx_link_dst ON memory_link(dst_kind, dst_id);
+
+-- 5) 写入幂等账本
+CREATE TABLE IF NOT EXISTS memory_write (
+    id         INTEGER PRIMARY KEY,
+    round_key  TEXT NOT NULL,   -- sha1(session_id|task_id|goal|final|step)
+    source     TEXT NOT NULL,   -- distill|tool:remember|user|consolidate|migrate
+    written    INTEGER NOT NULL DEFAULT 0,
+    skipped    TEXT NOT NULL DEFAULT '',  -- duplicate|denied|redacted|conflict
+    detail     TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_write_round ON memory_write(round_key, source);
+
+-- 6) 审计：谁、什么时候、改了什么
+CREATE TABLE IF NOT EXISTS memory_audit (
+    id         INTEGER PRIMARY KEY,
+    at         REAL NOT NULL,
+    actor      TEXT NOT NULL,   -- cli|web|agent|distill|consolidate|system
+    action     TEXT NOT NULL,   -- add|edit|delete|archive|restore|supersede|demote
+    target     TEXT NOT NULL,   -- semantic:12 / episode:8 / hot:fact:3
+    before     TEXT NOT NULL DEFAULT '',
+    after      TEXT NOT NULL DEFAULT '',
+    reason     TEXT NOT NULL DEFAULT ''
+);
+
+-- 7) 读取可解释性：这一轮为什么取了这几条
+CREATE TABLE IF NOT EXISTS memory_decision (
+    id          INTEGER PRIMARY KEY,
+    at          REAL NOT NULL,
+    session_id  TEXT NOT NULL,
+    task_id     TEXT NOT NULL,
+    channel     TEXT NOT NULL,   -- hot|lesson_push|tool:recall|tool:search_history
+    candidates  INTEGER NOT NULL,
+    chosen      TEXT NOT NULL,   -- JSON：[{ref,score,parts,reason}]
+    dropped     TEXT NOT NULL DEFAULT '',  -- JSON：[{ref,score,reason}]
+    embed_status TEXT NOT NULL DEFAULT 'off:disabled'
+);
+"""
+
+
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 → v3：建 `semantic` / `semantic_fts` 与四张账本表。
+
+    `memory` 与 `memory_fts` **一个字节都不动**（决议 7）：这一步只新增表与索引，
+    全部 `IF NOT EXISTS`，所以同一步骤重跑是空操作（幂等）。失败了不记版本号
+    （`_apply_step`），修掉原因后重跑即可。
+    """
+    conn.executescript(SEMANTIC_SCHEMA)
+
+
 # 步骤表：版本号必须严格递增，最后一项就是 `SCHEMA_VERSION`。
 _MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (1, "建基础表并给 episode 加列加索引", _migrate_to_v1),
     (2, "重建 memory_fts 为四列并回填", _migrate_to_v2),
+    (3, "建 semantic 与四张账本表", _migrate_to_v3),
 )
 
 SCHEMA_VERSION = _MIGRATIONS[-1][0]

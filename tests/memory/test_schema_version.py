@@ -220,21 +220,24 @@ def test_升级失败给的是人话而不是裸异常(tmp_path: Path, monkeypat
     def boom(_conn: sqlite3.Connection) -> None:
         raise sqlite3.OperationalError("模拟的磁盘错误")
 
+    # 注入一个**新的版本号**：v3 已经是真的那一步（`store.py:_migrate_to_v3`），
+    # 再挂一个同号步骤会违反「版本号必须严格递增」，测的就不是失败语义了。
+    next_version = SCHEMA_VERSION + 1
     monkeypatch.setattr(
-        store, "_MIGRATIONS", store._MIGRATIONS + ((3, "坏步骤", boom),)
+        store, "_MIGRATIONS", store._MIGRATIONS + ((next_version, "坏步骤", boom),)
     )
-    monkeypatch.setattr(store, "SCHEMA_VERSION", 3)
+    monkeypatch.setattr(store, "SCHEMA_VERSION", next_version)
 
     with pytest.raises(MemorySchemaError) as excinfo:
         init_memory_schema(conn)
 
     message = str(excinfo.value)
     assert "记忆库结构升级失败" in message
-    assert "第 3 步" in message and "坏步骤" in message
+    assert f"第 {next_version} 步" in message and "坏步骤" in message
     assert "模拟的磁盘错误" in message
     assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
     # 失败的那一步不落版本号；前面的步骤已经记上，重跑不会重复加列。
-    assert _user_version(conn) == 2
+    assert _user_version(conn) == SCHEMA_VERSION
     # 库还在、还能读。
     assert _columns(conn, "episode")
     conn.close()
