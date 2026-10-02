@@ -1,0 +1,13 @@
+{"query": "归档", "kind": "group", "relevant": [1, 2, 3, 4], "note": "14.1.3 core"}
+{"query": "归", "kind": "group", "relevant": [1, 2, 3, 4], "note": "14.1.3 core / granularity case"}
+{"query": "存档", "kind": "group", "relevant": [1, 2, 3, 4], "note": "14.1.3 core"}
+{"query": "备份", "kind": "group", "relevant": [1, 2, 3, 4], "note": "14.1.3 core"}
+{"query": "依赖管理", "kind": "group", "relevant": [5, 6, 7, 8], "note": "14.1.3 core"}
+{"query": "uv", "kind": "item", "relevant": [5], "note": "14.1.3 core / FTS5-WINS failure case"}
+{"query": "上下文预算", "kind": "group", "relevant": [9, 10, 11, 12], "note": "14.1.3 core"}
+{"query": "让位", "kind": "item", "relevant": [10], "note": "14.1.3 core"}
+{"query": "全文检索", "kind": "group", "relevant": [13, 14, 15, 16], "note": "14.1.3 core"}
+{"query": "排序", "kind": "item", "relevant": [14], "note": "14.1.3 core"}
+{"query": "清理旧文件", "kind": "group", "relevant": [1, 2, 3, 4], "note": "14.1.3 embed-wins success case"}
+{"query": "窗口快满了怎么办", "kind": "group", "relevant": [9, 10, 11, 12], "note": "14.1.3 embed-wins success case"}
+{"query": "包管理", "kind": "group", "relevant": [5, 6, 7, 8], "note": "14.1.3 embed-loses failure case"}

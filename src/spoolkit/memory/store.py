@@ -100,18 +100,106 @@ class Memory:
 
 
 def normalize_for_fts(text: str) -> str:
-    """把中文字符逐字分开，让 FTS5 默认分词器能切出可检索的中文词。"""
+    """把中文字符逐字分开，让 FTS5 默认分词器能切出可检索的中文词。
+
+    **`memory` / `memory_fts` 侧的逐字口径，本函数一个字不改**（决议 7 的只读
+    精神 + T4 的「不许扩大改动面」）：`semantic` 一族从 T4 起走双字 shingle
+    （见 `normalize_for_fts_bigram`），两套口径**并存而不是替换**。
+    """
     return _CJK.sub(lambda match: f" {match.group(0)} ", text)
 
 
 def _match_query(query: str) -> str:
-    """把查询规范化并转成 FTS5 OR 匹配：任一分词命中即可。"""
+    """把查询规范化并转成 FTS5 OR 匹配：任一分词命中即可（`memory` 侧逐字口径）。"""
     tokens = [t for t in normalize_for_fts(query).split() if len(t) >= 1]
     if not tokens:
         return ""
     if len(tokens) == 1:
         return f'"{tokens[0]}"'
     return " OR ".join(tokens)
+
+
+# ---- T4：`semantic` 侧的双字 shingle 口径（设计稿 §14.8 方案 A）-------------
+#
+# 口径（**索引与查询同一份**，都走 `normalize_for_fts_bigram`）：
+#
+# 1. 先把文本切成**连续同类段**：CJK 段（`[\u3400-\u9fff\uf900-\ufaff]+`）与
+#    字母数字段（`[A-Za-z0-9]+`）。段与段之间的标点、空白、`/`、`-` 等
+#    一律**丢弃**——双字**绝不跨标点/跨空白造**（"档，"、"的任"这类假双字是
+#    §14.8 取舍列点名的噪声源，本实现直接不生成）。
+# 2. 每段取**相邻双字**：`归档旧的任务记录` → `归档 档旧 旧的 的任 任务 务记 记录`
+#    （7 个 token），与设计稿 §14.8 / 计划 T4 验收 1 的字面量逐字一致。
+# 3. **单字段保留为单字 token**（`归档，删除` 里的独立段、`版本 1` 里的 `1`）：
+#    段长 1 时没有相邻对可造，丢掉它等于让单字条目检索不到。
+# 4. 字母数字段按**整段**处理：`uv` / `requirements` / `FTS5` 原样成 token
+#    （不按字符切，否则 `uv` 会碎成 `u`、`v` 两个毫无信息的 token）。
+#
+# **单字查询的回退**（计划 T4 验收 2 / §14.8 点名的「粒度」案例）：长度 < 2 的
+# 查询（如 `归`）切不出任何双字，`semantic_match_query` 给出的 `"归"` 对应不上
+# 任何双字索引行；这时**不静默返回空**，而是走
+# `semantic._semantic_single_char_fallback` 对 `semantic` 的**原文列**做子串
+# 匹配（LIKE）。理由：`归` 要能查到 `归档旧的任务记录`——它是设计稿 §14.8 专门
+# 点出来的粒度案例；把单字查询的召回打到 0 是**回归**，不是"更精确"。
+#
+# `_BIGRAM_RUN` 的分支顺序是**必须**的：`[^\W_]+` 在 Unicode 默认模式下**也吃掉
+# CJK**（"归档" 是 `\w`），所以若用它当"字母数字段"，`用uv管理依赖` 会被整段吞成
+# 一个 token、`归档旧的任务记录` 会被当成一个"词"。第一版写成 `(CJK+|[^\W_]+)`
+# 就踩了这个坑（混合段被吞掉、纯中文段整段成 token）；写成 `(CJK+|[A-Za-z0-9]+)`
+# 并把 CJK 分支放前面，切法才唯一。
+_BIGRAM_CJK_CLASS = "[\u3400-\u9fff\uf900-\ufaff]"
+_BIGRAM_RUN = re.compile(f"({_BIGRAM_CJK_CLASS}+|[A-Za-z0-9]+)")
+
+
+def _bigram_runs(text: str) -> list[str]:
+    """切出连续同类段：CJK 段 / 字母数字段。标点、空白、`/`、`-` 都是段边界。"""
+    return [run for match in _BIGRAM_RUN.finditer(text) for run in match.groups()]
+
+
+def bigram_tokens(text: str) -> list[str]:
+    """把文本切成相邻双字 token（顺序即出现顺序，重复保留）。
+
+    这是 T4 的**口径函数**：索引侧与查询侧都调它，所以不存在「索引按双字、
+    查询按逐字」这种自己跟自己错开的形态。空文本与纯标点文本返回 `[]`。
+    """
+    tokens: list[str] = []
+    for run in _bigram_runs(text):
+        if run[0].isascii():
+            tokens.append(run)  # 字母数字段整段成 token（口径 4）
+            continue
+        if len(run) == 1:
+            tokens.append(run)  # 单字段保留（见上方口径 3）
+            continue
+        tokens.extend(run[i : i + 2] for i in range(len(run) - 1))
+    return tokens
+
+
+def normalize_for_fts_bigram(text: str) -> str:
+    """双字 shingle 规范化：token 之间用一个空格分开（FTS5 默认分词器照用）。
+
+    与 `normalize_for_fts`（逐字拆）**并存**：`memory_fts` 侧仍走逐字，
+    `semantic_fts` 侧从 T4 起走本函数（写入与查询同一份口径）。
+    """
+    return " ".join(bigram_tokens(text))
+
+
+def semantic_match_query(query: str) -> str:
+    """把查询转成 FTS5 MATCH 串（双字口径，OR 连接）。
+
+    单字查询切不出双字，但**切得出一个单字 token**（口径 3 的查询侧对应物），
+    所以这里照常给出 `"归"` 这样的 MATCH 串——它对应不上任何双字索引行，
+    于是命中 0 条。**回退不在这里做**：`semantic.search_semantic` 在 FTS 命中
+    为空时转 `_semantic_single_char_fallback` 的原文子串匹配，这样"命中 0 条"
+    这件事本身（`清理旧文件` 那种跨词边界的查询）**不会被回退掩盖**。
+    """
+    tokens = bigram_tokens(query)
+    if not tokens:
+        return ""
+    return " OR ".join(f'"{token}"' for token in tokens)
+
+
+def _escape_like(needle: str) -> str:
+    """转义 `LIKE` 的通配符，让查询里的 `%` / `_` 只当普通字符。"""
+    return needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 _EPISODE_TOKEN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+|[^\s\u3400-\u9fff\uf900-\ufaff]+")
