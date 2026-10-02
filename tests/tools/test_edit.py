@@ -7,6 +7,8 @@ from spoolkit.tools.edit import (
     replace_text_spec,
     write_file_spec,
 )
+from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.types import ToolCall
 
 
 def _pending(tmp_path: Path) -> PendingChanges:
@@ -301,3 +303,208 @@ def test_小文件减半不拦截(tmp_path: Path) -> None:
         {"path": "small.py", "content": "x = 1\n"}  # 20 → 1
     )
     assert result.ok is True  # 小文件放行
+
+
+# ---- 大重写的声明式通道（「三道墙」之一） ---------------------------------
+
+
+def _two_documents(path: Path) -> str:
+    """造一份「两份文档首尾相接」的样本：同一段内容出现两次。
+
+    形状照抄 dogfood 现场（snake.html 是两份 HTML 拼在一起），只是小一号：
+    合并成单文档时行数会掉一半以上，而丢掉的名字必须能被工具算出来。
+    每份 18 行是为了越过护栏的 30 行线。
+    """
+    block = [
+        "<html>",
+        "<head>",
+        "<style>",
+        ".snake { color: red; }",
+        "#board { margin: 0; }",
+        "body { background: black; }",
+        "</style>",
+        "</head>",
+        "<body>",
+        '<div id="board" onclick="draw()"></div>',
+        "<script>",
+        "const canvas = 1;",
+        "function draw() { return canvas; }",
+        "let score = 0;",
+        "function restart() { score = 0; }",
+        "canvas.addEventListener('keydown', restart);",
+        "</script>",
+        "</body>",
+    ]
+    assert len(block) == 18
+    return "\n".join(block * 2) + "\n"
+
+
+_MERGED = """<html>
+<style>
+.snake { color: red; }
+</style>
+<script>
+const canvas = 1;
+</script>
+</html>
+"""
+
+
+def test_未声明大重写仍被硬拦_要点是减少与改用(tmp_path: Path) -> None:
+    """护栏不许松开：没声明的大重写照旧拦，而且话术要点是「减少」与「改用」。"""
+    (tmp_path / "snake.html").write_text(_two_documents(tmp_path), encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "snake.html", "content": _MERGED}
+    )
+    assert result.ok is False
+    assert "减少" in result.content
+    assert "改用" in result.content
+    assert "消失清单" in result.content
+    assert len(pending) == 0, "被拦下的重写不得进待确认清单"
+
+
+def test_消失清单里必须有丢掉的函数与id(tmp_path: Path) -> None:
+    """钉要点：故意丢掉一个函数与一个 id，这两个名字必须出现在清单里。"""
+    (tmp_path / "snake.html").write_text(_two_documents(tmp_path), encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "snake.html", "content": _MERGED}
+    )
+    assert result.ok is False
+    assert "function draw" in result.content, "丢掉的函数名没进清单"
+    assert "id=board" in result.content, "丢掉的 id 没进清单"
+    assert "onclick=" in result.content, "丢掉的事件处理器没进清单"
+    assert "#board" in result.content, "丢掉的 CSS 选择器没进清单"
+
+
+def test_声明并逐项确认后大重写放行(tmp_path: Path) -> None:
+    """合法大改（合并/去重）走声明通道：给出原因 + 逐项确认清单即可落盘。"""
+    from spoolkit.tools.edit import disappeared_items
+
+    (tmp_path / "snake.html").write_text(_two_documents(tmp_path), encoding="utf-8")
+    pending = _pending(tmp_path)
+    spec = write_file_spec(tmp_path, pending)
+    refused = spec.handler({"path": "snake.html", "content": _MERGED})
+    assert refused.ok is False
+    # 清单从「新旧两份正文」里逐项取出（模型看到的也是这份），全部照抄回去。
+    acked = [item.token for item in disappeared_items(_two_documents(tmp_path), _MERGED)]
+    assert acked, "这份样本应当有消失项"
+    result = spec.handler(
+        {
+            "path": "snake.html",
+            "content": _MERGED,
+            "rewrite_reason": "两份文档首尾相接，合并成单文档并去掉重复声明",
+            "acked_disappeared": acked,
+        }
+    )
+    assert result.ok is True
+    assert len(pending) == 1, "已声明的重写应当进待确认清单"
+    note = pending.items()[0].declared
+    assert "合并成单文档" in note, "待确认清单上没有留下重写理由"
+    assert "消失清单" in note
+
+
+def test_已声明但清单未确认完不放行(tmp_path: Path) -> None:
+    """声明不等于免责：清单里还有没确认的项就不落盘。"""
+    (tmp_path / "snake.html").write_text(_two_documents(tmp_path), encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {
+            "path": "snake.html",
+            "content": _MERGED,
+            "rewrite_reason": "合并两份文档",
+            "acked_disappeared": ["function draw"],  # 只确认了一项
+        }
+    )
+    assert result.ok is False
+    assert len(pending) == 0
+    assert "没有确认" in result.content
+    assert "id=board" in result.content, "未确认的项要被点名"
+
+
+def test_合并类任务的出路是可照做的下一步(tmp_path: Path) -> None:
+    """dogfood 的现场是「两份文档拼在一起」，出路不能只会说「用 replace_lines」。
+
+    必须给出具体行号：删哪一段、怎么删。
+    """
+    from spoolkit.tools.edit import NEXT_STEP_MARKER
+
+    (tmp_path / "snake.html").write_text(_two_documents(tmp_path), encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {"path": "snake.html", "content": _MERGED}
+    )
+    assert result.ok is False
+    assert "逐行相同" in result.content, "没认出「同一段内容出现两次」这个形状"
+    remedies = [
+        line for line in result.content.splitlines() if line.startswith(NEXT_STEP_MARKER)
+    ]
+    assert remedies, "没有给出照做的下一步"
+    assert any("replace_lines(" in line and "start_line=" in line for line in remedies)
+    # 行号必须是真的：第一份 1–18 行，第二份 19–36 行。
+    assert any("start_line=19" in line for line in remedies)
+    assert any("rewrite_reason=" in line for line in remedies), (
+        "没告诉它声明式通道怎么走"
+    )
+
+
+def test_消失清单按标识符判定_改名不算消失(tmp_path: Path) -> None:
+    """`const canvas` 改成 `let canvas` 时报「消失」会逼它确认一件没发生的事。"""
+    from spoolkit.tools.edit import disappeared_items
+
+    old = "const canvas = 1;\nfunction draw() {}\n"
+    new = "let canvas = 2;\n"
+    items = [item.token for item in disappeared_items(old, new)]
+    assert items == ["function draw"]
+
+
+def test_替换工具也能走声明通道(tmp_path: Path) -> None:
+    """出路话术点的是 replace_lines，那它自己就必须能声明，否则是死路。"""
+    (tmp_path / "big.py").write_text(
+        "\n".join(f"line{i}" for i in range(80)) + "\n", encoding="utf-8"
+    )
+    pending = _pending(tmp_path)
+    spec = replace_lines_spec(tmp_path, pending)
+    refused = spec.handler(
+        {"path": "big.py", "start_line": 20, "end_line": 80, "content": ""}
+    )
+    assert refused.ok is False
+    allowed = spec.handler(
+        {
+            "path": "big.py",
+            "start_line": 20,
+            "end_line": 80,
+            "content": "",
+            "rewrite_reason": "删掉重复的那一段",
+        }
+    )
+    assert allowed.ok is True
+    assert "删掉重复的那一段" in pending.items()[0].declared
+
+
+def test_纯HTML工作区只给write_file时出路不提不存在的工具(tmp_path: Path) -> None:
+    """dogfood 复跑实测：`is_small_project` 只看 *.py，所以纯 HTML 项目走的是
+    「只有 write_file」那条路——而旧的拒绝话术让它去用 replace_lines，
+    那是一个在这个工作区里**根本不存在的工具**。出路指到墙外比不给更糟。
+    """
+    from spoolkit.tools.edit import register_edit_tools
+
+    (tmp_path / "snake.html").write_text(_two_documents(tmp_path), encoding="utf-8")
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    register_edit_tools(registry, tmp_path, pending)
+    assert registry.names() == ("write_file",)
+
+    result = registry.invoke(
+        ToolCall("write_file", {"path": "snake.html", "content": _MERGED})
+    )
+    assert result.ok is False
+    # 出路里不得出现一把不存在的工具的**调用**；只允许说清「它没注册」。
+    assert "replace_lines(" not in result.content
+    assert "改成 replace" not in result.content
+    assert "只有 write_file" in result.content
+    assert "都没注册" in result.content
+    # 声明通道仍然要在：这是这个工作区唯一走得通的路。
+    assert "rewrite_reason" in result.content
+    assert "acked_disappeared" in result.content

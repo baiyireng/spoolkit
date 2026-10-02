@@ -36,6 +36,48 @@ def test_有写工具时给出改动方式(tmp_path: Path) -> None:
     assert "不用停下来等确认" in text
 
 
+def test_大重写的声明通道只在有write_file时出现(tmp_path: Path) -> None:
+    """dogfood：合法大改（两份文档合并）被当偷懒截断拦掉，模型只好原样重试。
+
+    提示词必须写清这条路，而且三件事一件不能少：行数砍半会被拦、合法大改
+    用哪两个参数声明、被拦下的调用不许原样重提。
+    """
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path))
+    assert "rewrite_reason" not in build_workflow(registry)
+
+    registry.register(write_file_spec(tmp_path, PendingChanges(tmp_path)))
+    text = build_workflow(registry)
+    assert "rewrite_reason" in text
+    assert "acked_disappeared" in text
+    assert "消失清单" in text
+    assert "不得原样重提" in text
+    # 出路不能只有「用 replace_lines」：合并/去重是合法大改，得走声明通道。
+    assert "合并" in text and "去重" in text
+
+
+def test_write_file描述里写明声明通道的两个参数(tmp_path: Path) -> None:
+    """参数名进索引、含义进 tool_help，两处都要说清它管什么。"""
+    spec = write_file_spec(tmp_path, PendingChanges(tmp_path))
+    assert "rewrite_reason" in spec.parameters["properties"]
+    assert "acked_disappeared" in spec.parameters["properties"]
+    # 语义锚点：不填会被拒绝、合并类任务也走这条路。
+    assert "拒绝" in spec.description
+    assert "合并" in spec.description
+    assert "消失清单" in spec.description
+
+
+def test_重复段落给的是便宜路径(tmp_path: Path) -> None:
+    """dogfood 复跑：模型为了合并去整份重写，300 行产出被输出预算截断两次。
+
+    提示词必须先给便宜路径——删掉重复的那一份，而不是整份重写。
+    """
+    text = build_workflow(_full_registry(tmp_path))
+    assert "同一段内容出现两次" in text
+    assert "输出预算截断" in text or "被输出预算截断" in text
+    assert "replace_lines" in text
+
+
 def test_有索引工具时给出查符号优先规则(tmp_path: Path) -> None:
     from spoolkit.store.db import init_schema
 

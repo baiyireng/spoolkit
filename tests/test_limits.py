@@ -274,9 +274,20 @@ T11_GAP_KNOBS: tuple[tuple[str, float], ...] = (
 )
 
 
+# 「三道墙」那一轮补登的旋钮（大重写声明通道、失败重提硬拦、步数预算随规模放大、
+# 被拦的动作不占预算）。同样单列：它们不属于 P1 的登记批次，混进去会把
+# 「P1 Task 1 登记了 22 项」这个出处弄脏。
+WALL_KNOBS: tuple[tuple[str, float], ...] = (
+    ("failed_repeat_block_at", 2),  # 失败过的调用第一次原样重提即硬拦
+    ("step_lines_per_bonus", 60),  # 每 60 行目标产出给 1 步额外预算
+    ("step_lines_bonus_cap", 12),  # 最多补 12 步
+    ("blocked_refund_limit", 3),  # 被拦的编辑动作最多退还 3 步
+)
+
+
 def test_p1_旋钮全部登记且可覆盖() -> None:
     """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
-    for name, default in P1_NEW_KNOBS + T11_GAP_KNOBS:
+    for name, default in P1_NEW_KNOBS + T11_GAP_KNOBS + WALL_KNOBS:
         entry = limits.knob(name)
         assert entry is not None, f"{name} 没登记"
         assert entry.kind == CAPABILITY, f"{name} 不是能力标定值"
@@ -302,17 +313,50 @@ def test_既有旋钮一个不少() -> None:
     assert set(KNOBS_BEFORE_P1) <= names
     assert set(KNOBS_BEFORE_P1) & set(dict(P1_NEW_KNOBS)) == set()
     assert set(KNOBS_BEFORE_P1) & set(dict(T11_GAP_KNOBS)) == set()
+    assert set(KNOBS_BEFORE_P1) & set(dict(WALL_KNOBS)) == set()
 
 
 def test_旋钮没有重名() -> None:
     """Task 1 验收 5：重名会让 `_BY_NAME` 静默取后者。
 
-    总数 = P0 的 62 + P1 Task 1 的 22 + T11 补缺轮的 2（`T11_GAP_KNOBS`）。
+    总数 = P0 的 62 + P1 Task 1 的 22 + T11 补缺轮的 2（`T11_GAP_KNOBS`）
+    + 「三道墙」那一轮的 4（`WALL_KNOBS`）。
     """
     assert len(limits.KNOBS) == len(limits._BY_NAME)
     assert len(limits.KNOBS) == (
-        len(KNOBS_BEFORE_P1) + len(P1_NEW_KNOBS) + len(T11_GAP_KNOBS)
+        len(KNOBS_BEFORE_P1)
+        + len(P1_NEW_KNOBS)
+        + len(T11_GAP_KNOBS)
+        + len(WALL_KNOBS)
     )
+
+
+def test_步数预算随规模放大且可按工作区覆盖() -> None:
+    """「三道墙」之一：目标产出越大，步数预算给得越多——而且这个口径可覆盖。
+
+    它必须是可覆盖的标定值：60 行/步是按本机 dogfood 的一次实测取的一倍余量，
+    换模型/换窗口就该能动（改 `.agent/limits.json` 即可，不必改代码）。
+    """
+    from spoolkit.agent.loop import scaled_step_bonus
+
+    def budget(lines: int, overrides: dict | None = None) -> int:
+        return scaled_step_bonus(
+            Config(project_root=Path("."), overrides=overrides or {}), lines
+        )
+
+    # 小文件不补：10 行的目标不值得多给预算。
+    assert budget(10) == 0
+    # 规模上去就补，且按 cap 封顶。
+    assert budget(300) == 5
+    assert budget(10_000) == 12
+    # 覆盖改了就变：每 30 行给一步 → 300 行给 10 步（不再按 60 折算）。
+    assert budget(300, {"step_lines_per_bonus": 30}) == 10
+    # 封顶也能覆盖，而且盖得住上面那条。
+    assert (
+        budget(10_000, {"step_lines_per_bonus": 30, "step_lines_bonus_cap": 4}) == 4
+    )
+    # 关掉这条路（0 行/步）就不补——它是排查用的开关。
+    assert budget(300, {"step_lines_per_bonus": 0}) == 0
 
 
 def test_p1旋钮可以按工作区覆盖(tmp_path: Path) -> None:

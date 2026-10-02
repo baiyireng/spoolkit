@@ -11,6 +11,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from spoolkit.agent.monitor import ToolSight, inspect
@@ -34,6 +35,7 @@ from spoolkit.llm.gateway import ModelGateway
 from spoolkit.llm.retry import chat_with_escalation
 from spoolkit.llm.tokenizer import TokenCounter
 from spoolkit.llm.types import ChatRequest, Message
+from spoolkit.tools.edit import NEXT_STEP_MARKER, REFUSAL_MARKER
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import ToolCall, ToolResult
 from spoolkit.tools.verify import ENVIRONMENT_MARKER
@@ -106,6 +108,100 @@ def call_signature(call: ToolCall) -> str:
     return call.name + " " + json.dumps(
         call.arguments, sort_keys=True, ensure_ascii=False
     )
+
+
+# 硬拦（**没有执行**）的标记前缀。
+#
+# 循环靠它把「被护栏拦下、根本没跑」和「跑了但失败」分开：只有前者的这一步
+# 不占步数预算。被拦的动作没有任何产出，也不换来任何新信息——让它白吃一步，
+# 等于用预算给模型的原地打转付费（dogfood：两次被拒的 write_file 白吃 2 步）。
+BLOCKED_PREFIX = "⛔ 未执行："
+
+# 两类被拦的动作：原样重提（本文件判）与大重写被拒（tools/edit.py 判）。
+_BLOCKED_MARKS = (BLOCKED_PREFIX, REFUSAL_MARKER)
+
+# 记住多少个「失败过的调用」。它只是用来打断原样重试，不需要长远记忆；
+# 成功改动过文件之后整张表清零（文件变了，同一个参数可能重新有意义）。
+_FAILED_MEMORY = 16
+
+
+def _is_blocked(result: ToolResult) -> bool:
+    """这次失败是「被拦下没执行」，而不是「执行了但失败」。"""
+    return (not result.ok) and result.content.startswith(_BLOCKED_MARKS)
+
+
+def _retry_block_message(call: ToolCall, failure: str) -> str:
+    """原样重提一个失败过的调用时的话术：**给出能照做的下一步**。
+
+    只说「换一种做法」等于把问题还给模型——dogfood 里它就是这么原样重试
+    到预算耗尽的。失败话术里已经带了「照做的下一步」时原样端回来；
+    没带时给三条具体可选的替代（换参数、换工具、先读原文）。
+    """
+    remedy = [
+        line.strip()
+        for line in failure.splitlines()
+        if line.strip().startswith(NEXT_STEP_MARKER)
+    ]
+    parts = [
+        f"{BLOCKED_PREFIX}这个调用与上一次**完全相同**（工具 {call.name}，"
+        "参数一字未改），而上一次它失败了：失败的原因不会因为再发一遍而改变，"
+        "所以这次没有执行。",
+    ]
+    flat = " ".join(failure.split())
+    if flat:
+        parts.append(f"上一次的结论：{flat[:300]}")
+    if remedy:
+        parts.append("上一次已经给出了能照做的下一步：")
+        parts.extend(dict.fromkeys(remedy))
+    else:
+        parts.append(
+            "换一种做法，三选一：换参数（行号区间、先多带几行上下文）；"
+            "换工具（write_file / replace_lines / replace_text）；"
+            "先 read_file 确认原文再动手。任务确实已经完成时，直接给出结论。"
+        )
+    return "\n".join(parts)
+
+
+def scaled_step_bonus(config: Config, lines: int) -> int:
+    """按目标产出规模算出**额外**的步数预算（不含基础预算）。
+
+    公式写在消费点（这里），两个旋钮在 `limits.py` 登记：这样「现在是多少、
+    从哪来」走的是 `Config.limit()` 那一条路，而不是在登记表里再养一份实现。
+
+    为什么需要它：dogfood 实测，303 行的两份 HTML 合并成单文档，10 步基线
+    用满仍然失败——而这类任务的规模**在第一步就看得见**（文件有多少行是事实），
+    所以预算该按规模给，而不是所有任务一律 10 步。
+    """
+    per = config.limit("step_lines_per_bonus")
+    cap = config.limit("step_lines_bonus_cap")
+    if per <= 0 or lines <= 0:
+        return 0
+    return int(min(lines // per, max(cap, 0)))
+
+
+def _edit_target_lines(config: Config, call: ToolCall) -> int:
+    """这次编辑要面对的产出规模（行数）：原文件行数与新内容行数取大。
+
+    它是「步数预算随规模放大」的输入。用两个数的较大者，是因为两种形状都要盖住：
+    把一个 300 行的文件改对（原文件大），和交出一份 300 行的新内容（新内容大）。
+    """
+    if call.name not in EDIT_TOOLS:
+        return 0
+    path = call.arguments.get("path")
+    if not isinstance(path, str) or not path:
+        return 0
+    target = Path(path)
+    if not target.is_absolute():
+        target = config.project_root / path
+    try:
+        old_lines = len(
+            target.read_text(encoding="utf-8", errors="replace").splitlines()
+        )
+    except OSError:
+        old_lines = 0
+    content = call.arguments.get("content")
+    new_lines = len(content.splitlines()) if isinstance(content, str) else 0
+    return max(old_lines, new_lines)
 
 
 def _parse_feedback(failure: ParseFailure) -> str:
@@ -231,6 +327,9 @@ def build_workflow(
         if "replace_lines" in edits:
             lines.append(T.WORKFLOW_EDIT_LINES)
         lines.append(T.WORKFLOW_WRITE_SAFE)
+        if "write_file" in edits:
+            # 紧跟改动方式：它管的正是「那几条路都被拦下时怎么办」。
+            lines.append(T.WORKFLOW_REWRITE_DECLARE)
 
     if registry.get("recall") is not None:
         lines.append(T.WORKFLOW_RECALL)
@@ -413,6 +512,10 @@ class AgentLoop:
         self.persona = persona
         self.on_event = on_event
         self.from_channel = from_channel
+        # 失败过的调用（指纹 → 次数 / 上次的失败话术）。用来硬拦原样重试，
+        # 并把它失败时看过的「照做的下一步」端回去。每次 run() 开始时清空。
+        self._failed_calls: dict[str, int] = {}
+        self._failed_output: dict[str, str] = {}
         # 预算里的每个比例都是能力标定值：走本次运行的覆盖，而不是各写一份常量。
         self._budget = Budget(
             window=config.context_window, overrides=config.overrides
@@ -568,6 +671,13 @@ class AgentLoop:
         edits_made = 0
         tool_calls_made = 0
         stopped_by = ""
+        # 「步数预算随规模放大」已经补上去几步；只增不减，避免同一个目标
+        # 反复把上限抬来抬去（上限抖动会让督导看到的 limit 说不清）。
+        size_bonus = 0
+        # 被硬拦的动作退还了几步（没有产出，不该白吃预算）。有上限——
+        # 没有上限的话，模型可以靠不断被拦把预算变成无限。
+        refunds_used = 0
+        self._clear_failures()
 
         # 主动推送：进入任务时就把它相关的历史教训放到模型面前，
         # 而不是等它自己去检索——它不会去检索，因为它不知道自己缺什么。
@@ -891,11 +1001,15 @@ class AgentLoop:
                 state.apply(turn.state_delta)
             history.append(Message(role="assistant", content=response.text))
 
+            blocked_all = False
+            edited = False
             if turn.tool_calls:
                 _tools_started = time.time()
                 outputs = []
                 repeated = 0
-                edited = False
+                # 这一步的调用是不是**全部**被硬拦（没有执行）。是的话这一步
+                # 不占步数预算——被拦的动作没有产出，不该白吃预算。
+                blocked_all = True
                 # 这一轮改过哪些文件。自动验证靠它判断「该在哪儿验」——
                 # 一个工作区里有很多件事时，范围跟着改动走才对得上因果。
                 changed: list[str] = []
@@ -910,7 +1024,25 @@ class AgentLoop:
                     # 是假的，上一步明明是别的调用。
                     seen = recent.count(signature)
                     level = max(repeats, seen)
+                    # 步数预算随产出规模放大。放在执行**之前**：被拦下的那次
+                    # 调用同样告诉我们「这个文件有多大」，而预算该在撞上墙之前
+                    # 就长上去——dogfood 那次 10 步用满时已经晚了。
+                    target_lines = _edit_target_lines(self.config, call)
+                    bonus = scaled_step_bonus(self.config, target_lines)
+                    if bonus > size_bonus:
+                        size_bonus = bonus
+                        grown = max(limit, self.config.max_steps + bonus)
+                        if grown > limit:
+                            limit = grown
+                            ceiling = max(ceiling, limit)
+                            trace.append(
+                                f"step{state.step}: 目标产出规模要 {target_lines} 行，"
+                                f"步数预算按规模放大到 {limit}"
+                            )
                     result = self._invoke_guarded(call, repeats, seen)
+                    blocked = _is_blocked(result)
+                    if not blocked:
+                        blocked_all = False
                     sights.append(_tool_sight(call, result.ok))
                     tool_calls_made += 1
                     if result.usage is not None:
@@ -928,10 +1060,14 @@ class AgentLoop:
                         edited = True
                         edits_made += 1
                         edit_fail_streak = 0
+                        # 文件真的变了：失败表清零——旧参数可能重新有意义。
+                        self._clear_failures()
                         path = call.arguments.get("path")
                         if isinstance(path, str) and path:
                             changed.append(path)
-                    elif not result.ok and call.name in EDIT_TOOLS:
+                    elif not result.ok and call.name in EDIT_TOOLS and not blocked:
+                        # 被硬拦的不计进「连续失败」：它没执行，也不是格式错误，
+                        # 而且拦它的话术本身已经给了照做的下一步。
                         edit_fail_streak += 1
                     if level >= self.config.limit("repeat_warn_at"):
                         trace.append(
@@ -1010,7 +1146,13 @@ class AgentLoop:
                     # 再读到自己刚才做的事——因果顺序反了，它接不上。
                     history.append(Message(role="user", content=report))
 
-            if any(call.name in EDIT_TOOLS for call in turn.tool_calls):
+            # 「提出过改动」才结束漫游。被硬拦的编辑调用不算产出——它没有落到
+            # 待确认清单上；把它算成产出会让漫游计数永远归零，督导就看不到
+            # 「它一直在被拦」这个事实。
+            if edited or (
+                not blocked_all
+                and any(call.name in EDIT_TOOLS for call in turn.tool_calls)
+            ):
                 no_edit_steps = 0
                 # 产出过一次，漫游就算结束了。门槛跟着复位，否则下一段漫游
                 # 要等到翻倍后的那个数字才会被看见。
@@ -1028,10 +1170,29 @@ class AgentLoop:
                         "下一轮收窄为只能写"
                     )
 
-            state.step_forward()
-            _state_started = time.time()
-            save_state(state, checkpoint)
-            state_seconds += time.time() - _state_started
+            # 被硬拦的动作**不占步数预算**：它没有产出，也不换来新信息
+            # （dogfood：两次被拒的 write_file 白吃了 2 步）。退还必须有上限，
+            # 否则「不断被拦」就成了无限预算；上限也是可覆盖的标定值。
+            #
+            # 只退还**编辑类**的拦截。查询类的重复被拦是在打转，那正是「该停」
+            # 的信号：给它退预算等于把打转延长（实测：12 条脚本的用例因此被
+            # 多跑一两轮，把假模型的脚本耗尽）。护栏拦编辑是怕丢内容，
+            # 拦查询是怕它原地转圈——两种拦截的后果不一样，处理也不该一样。
+            refund_cap = int(self.config.limit("blocked_refund_limit"))
+            blocked_edits = blocked_all and any(
+                call.name in EDIT_TOOLS for call in turn.tool_calls
+            )
+            if blocked_edits and refunds_used < refund_cap:
+                refunds_used += 1
+                trace.append(
+                    f"step{state.step}: 这一步的调用全部被硬拦（没有执行），"
+                    f"不占步数预算（已退还 {refunds_used}/{refund_cap}）"
+                )
+            else:
+                state.step_forward()
+                _state_started = time.time()
+                save_state(state, checkpoint)
+                state_seconds += time.time() - _state_started
 
             if turn.done:
                 trace.append(f"step{state.step}: 完成")
@@ -1158,18 +1319,37 @@ class AgentLoop:
 
         repeats 是「连续相同的次数」，seen 是「最近几次窗口里出现的次数」。
         后者管交替打转（A、B、A、B…），前者管原地复读。
+
+        **失败过的调用原样重提直接硬拦**（不等重复计数到 REAPEAT_BLOCK_AT）：
+        dogfood 里 write_file 被拒之后，模型中间插了一次 read_file，重复计数
+        归零，于是同一个必然失败的 write_file 又跑了一遍，白吃一步。参数一字
+        未改的失败调用不会因为重发而改变结果，所以第一次重提就拦住，并把
+        上一步的「照做的下一步」端回去。
         """
+        signature = call_signature(call)
+        failures = self._failed_calls.get(signature, 0)
+        block_at = max(int(self.config.limit("failed_repeat_block_at")), 2)
+        if failures and failures >= block_at - 1:
+            return ToolResult(
+                ok=False,
+                content=_retry_block_message(
+                    call, self._failed_output.get(signature, "")
+                ),
+            )
         level = max(repeats, seen)
         if level >= self.config.limit("repeat_block_at"):
             return ToolResult(
                 ok=False,
                 content=(
-                    f"这个调用在最近几步里已经做过 {level - 1} 次，结果不会改变，"
-                    "因此没有执行。换一种做法：换一个工具、换一组参数，"
-                    "或者先查别的地方；任务确实已经完成时，直接给出结论。"
+                    f"{BLOCKED_PREFIX}这个调用在最近几步里已经做过 {level - 1} 次，"
+                    "结果不会改变，因此没有执行。换一种做法：换一个工具、"
+                    "换一组参数，或者先查别的地方；如果上一步的输出已经够了，"
+                    "就基于它往下做（提改动 / 给结论），不要再查一遍。"
                 ),
             )
         result = self.registry.invoke(call)
+        if not result.ok:
+            self._remember_failure(signature, result.content)
         if level >= self.config.limit("repeat_warn_at"):
             if repeats >= self.config.limit("repeat_warn_at"):
                 note = "注意：这一步与上一步完全相同，该调用已经执行过一次，结果不会改变。"
@@ -1180,6 +1360,20 @@ class AgentLoop:
                 content=(note + "如果它没有帮你推进，就换一种做法。\n" + result.content),
             )
         return result
+
+    def _remember_failure(self, signature: str, content: str) -> None:
+        """记下一个失败过的调用（只留最近几个）。"""
+        self._failed_calls[signature] = self._failed_calls.get(signature, 0) + 1
+        self._failed_output[signature] = content
+        while len(self._failed_calls) > _FAILED_MEMORY:
+            oldest = next(iter(self._failed_calls))
+            self._failed_calls.pop(oldest, None)
+            self._failed_output.pop(oldest, None)
+
+    def _clear_failures(self) -> None:
+        """有改动真的落成了，就清空失败表：文件变了，旧参数可能重新有意义。"""
+        self._failed_calls.clear()
+        self._failed_output.clear()
 
     def _run_verification(self, changed: list[str] | None = None) -> tuple[str, bool]:
         """替模型跑一遍项目测试，把结果整理成它看得懂的一段话。
