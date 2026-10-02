@@ -158,6 +158,22 @@ def test_node_check只允许js文件() -> None:
     assert ".js" in validate_command(["node", "--check", "index.html"])
 
 
+def test_node_check的拒绝要指路到verify_file() -> None:
+    """只说不行的拒绝会被撞穿：实测它换个文件名再撞。
+
+    拒绝必须同时给出「那该用什么」，而那个工具必须真的存在——所以这里
+    连工具表一起钉：文案里点名的工具不能在注册表里查不到。
+    """
+    message = validate_command(["node", "--check", "index.html"])
+    assert "verify_file" in message
+    from spoolkit.tools.registry import ToolRegistry
+    from spoolkit.tools.verify import verify_file_spec
+
+    registry = ToolRegistry()
+    registry.register(verify_file_spec(Path(".")))
+    assert registry.get("verify_file") is not None
+
+
 def test_node不带check被拒绝() -> None:
     assert validate_command(["node", "script.js"]) is not None
     assert validate_command(["node"]) is not None

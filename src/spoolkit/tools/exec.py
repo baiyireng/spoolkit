@@ -154,16 +154,21 @@ def validate_command(argv: list[str]) -> str | None:
         return None
 
     # node --check：只允许语法检查，不允许任意脚本执行。
-    # 验证器用它做 HTML 内联 JS 的降级语法检查（dogfood：贪吃蛇写完没有验证）。
+    # 验证器用它做 HTML 内联 JS 的语法检查（dogfood：贪吃蛇写完没有验证）。
     # dogfood 第二轮：agent 直接对 HTML 文件跑 node --check，报 ERR_UNKNOWN_FILE_EXTENSION。
     # 限制文件后缀为 .js——HTML 要先提取 JS 再检查（验证器会自动做）。
     if program == "node" or program.endswith("node.exe"):
         if len(rest) >= 2 and rest[0] == "--check":
             target = rest[1]
             if not target.lower().endswith(".js"):
+                # 这条拒绝必须**指路**。实测模型在这里连撞多次：它只被告知
+                # 「不行」，而正确做法（用 verify_file 验 HTML）它猜不到——
+                # 于是换个文件名再撞。「不行」加「那用什么」才是可行动的。
                 return (
-                    "node --check 只接受 .js 文件。HTML 文件不能直接检查——"
-                    "系统会自动从 HTML 里提取内联 JS 做语法检查，你不需要手动做。"
+                    "node --check 只接受 .js 文件，HTML 不能直接检查。"
+                    "要验 HTML 请用 verify_file（path 指向那个 .html）："
+                    "它会抽出内联 JS 做这个语法检查，并顺带验标签配对、"
+                    "id 引用与本地资源路径；系统自动验证走的也是同一套。"
                 )
             # 目标路径里不许有 shell 元字符。原因很具体：Windows 上 node 常常是
             # `.cmd` 垫片（nvm/volta/pnpm/本机 DSH 都是），`resolve_argv` 得把它包成

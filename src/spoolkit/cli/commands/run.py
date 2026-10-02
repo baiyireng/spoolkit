@@ -423,6 +423,11 @@ def _plain_registry(project_root, pending, read_roots=()):
     # （改动还没落盘），它会以为自己的修复没生效，然后去改一个已经改对的函数。
     # trial_workspace 这个模块存在的全部理由就是这个，别在这一条路径上漏掉。
     registry.register(run_command_spec(project_root, pending))
+    # 与主循环共用同一份按产出类型分派的验证入口，否则会出现「同一个项目里
+    # 主循环验得了 HTML、子智能体验不了」这种分叉。
+    from spoolkit.tools.verify import verify_file_spec
+
+    registry.register(verify_file_spec(project_root, pending, read_roots))
     # 与主循环共用同一套判定，否则会出现「同一个项目里子智能体有一把
     # 主循环没有的工具」这种分叉，而它只会在跑偏时才暴露。
     register_edit_tools(registry, project_root, pending)

@@ -54,7 +54,7 @@ from spoolkit.tools.websearch import web_search_spec
 from spoolkit.tools.grant import Grants
 from spoolkit.tools.help import tool_help_spec
 from spoolkit.tools.registry import ToolRegistry
-from spoolkit.tools.verify import make_verifier
+from spoolkit.tools.verify import make_verifier, verify_file_spec
 from spoolkit.tools.search import search_code_spec
 from spoolkit.tools.stats import dir_stats_spec
 from spoolkit.tools.survey import survey_spec
@@ -443,6 +443,17 @@ def assemble_loop(
     )
     if parts.pending is not None:
         register_edit_tools(registry, project_root, parts.pending)
+    # 按产出类型验一个文件。放在 run_command 后面：它是「改完怎么确认」这条
+    # 线上的另一把工具，而在此之前模型手里没有任何「验一个文件」的入口——
+    # 写 HTML 时只能自己拼 node --check，撞的是 node 的原始报错。
+    registry.register(
+        verify_file_spec(
+            project_root,
+            parts.pending,
+            parts.read_roots,
+            timeout=int(limits.resolve("command_timeout", settings.overrides)[0]),
+        )
+    )
     if parts.memory is not None:
         # 主循环用的注册表在这里构造，所以 recall 也必须在这里注册，
         # 否则提示词会提到一个只有派发路径才有的工具。

@@ -242,6 +242,11 @@ def build_workflow(
 
     if registry.get("run_command") is not None:
         lines.append(T.WORKFLOW_RUN)
+        if registry.get("verify_file") is not None:
+            # 紧跟「怎么验证」：上一句说系统会自动验，这一段说按什么类型验、
+            # 用哪个工具——两句话是同一件事的两半。没注册这个工具时不写，
+            # 免得给模型一条它做不到的指令。
+            lines.append(T.WORKFLOW_VERIFY)
         # 紧跟「怎么验证」：它是"验证命令本身写错"那一类失败的补丁
         # （实测模型自己发明导入路径，一路验证失败还以为是代码错了）。
         lines.append(T.WORKFLOW_CONVENTIONS)
