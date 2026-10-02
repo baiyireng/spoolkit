@@ -100,7 +100,7 @@
 | `src/spoolkit/cli/commands/memory.py` | 改（**单写者，串行**） | `why`/`list`/`search`/`show`；`state`/`event`/`attr`/`alias`；旧库迁移与回放 | T13 → T14 → T15 |
 | `src/spoolkit/cli/app.py` | 改（**同上一行**） | `_add_memory_command` 的子命令与参数扩展；**保持不定义 `provider`** | T13 → T14 → T15 |
 | `benchmarks/memory/corpus.jsonl`、`queries.jsonl` | 新增 | M2' 的 16 条语料（G1–G4）+ 13 条查询与相关 id，从 `.tmp/embed-bench/bench_common.py` **逐字固化** | T4 |
-| `scripts/memory_relevance.py` | 新增 | M2' 三臂仪器（`store-char` / `bigram` / `bigram+bm25`），指标 `p@5`/`r@5`/`top1` | T4 |
+| `scripts/memory_relevance.py` | 新增 | M2' 三臂仪器（`store-char` / `bigram` / `char+bm25`；另有 `char+bigram-rerank` / `char+bm25+bigram` 两条信号臂），指标 `p@5`/`r@5`/`top1` | T4 |
 | `scripts/memory_bench_twowheel.py` | 新增 | M1 两轮编排与读数（**不起服务、不重启服务**） | T16 |
 | `benchmarks/tasks/temporal/` | 新增 | M4-T6 的跨天多轮任务脚本 + 伪造时钟 | T16 |
 | `src/spoolkit/bench.py` | 改（最小） | 只加"两轮同会话"的开关，**默认仍 `--no-memory`** | T16 |
@@ -341,7 +341,7 @@
 - Modify: `src/spoolkit/memory/store.py`（新增 bigram 规范化函数；`semantic_fts` 的写入与查询走 bigram；**`memory_fts` 的逐字口径本任务不动**）
 - Create: `benchmarks/memory/corpus.jsonl`（16 条语料 + 分组 G1–G4，**逐字照抄** `.tmp/embed-bench/bench_common.py:15-32`）
 - Create: `benchmarks/memory/queries.jsonl`（13 条查询 + 相关 id 集合 + note，**逐字照抄** `bench_common.py:46-61`）
-- Create: `scripts/memory_relevance.py`（三臂：`store-char`（现状逐字）/ `bigram`（本任务）/ `bigram+bm25`（T5 才有读数）；指标 `p@5`/`r@5`/`top1`，定义照 `bench_common.py:70-91`）
+- Create: `scripts/memory_relevance.py`（三臂：`store-char`（现状逐字）/ `bigram`（本任务）/ `char+bm25`（T5 才有读数；T5 之后又加了 `char+bigram-rerank` / `char+bm25+bigram` 两条信号臂））；指标 `p@5`/`r@5`/`top1`，定义照 `bench_common.py:70-91`）
 - Test: Create `tests/memory/test_bigram.py`、`tests/memory/test_relevance_harness.py`
 
 **要点：**
@@ -385,24 +385,25 @@
 **改动面：**
 
 - Modify: `src/spoolkit/memory/store.py`（`search_semantic` 的 SQL 加 `ORDER BY bm25(semantic_fts)`；返回 `(row, bm25_raw)`）
-- Modify: `scripts/memory_relevance.py`（启用 `--arm bigram+bm25` 臂）
+- Modify: `scripts/memory_relevance.py`（启用 `--arm char+bm25` 臂）
 - Test: Create `tests/memory/test_semantic_search.py`
 
 **要点：**
 
+- **回填（T5 定案口径，原文写的臂名是 `bigram+bm25`）**：**实际采用口径 = 逐字召回 + `bm25()` 排序**；双字信号（`store.bigram_coverage` / `bigram_tokens`）**降级为重排候选信号**——既不在召回路径上，也不在生产排序路径上（仪器里的臂名因此回填为 `char+bm25`，见 `scripts/memory_relevance.py` 的臂表）。T4 的双字召回按裁决回退，**召回回到逐字**。
 - **`bm25()` 的符号约定必须先实测确认，本计划不假设**：SQLite 的 `bm25()` 返回值**越小越相关**（通常是负数），而 §6.1 写的是 `rel = 1 - exp(-bm25)`（`§6.1:638`）。Task 的第一步是写一条**把原始值与排序方向钉住**的用例（先红后绿），据此定义 `bm25_norm`——**取 `-bm25()` 还是 `bm25()` 由这条用例决定，不许照抄公式猜符号**。
-- **只改排序、不改分词**（第①步已在 T4 做完）；判据是 §14.8 第②步的实测形状：**top1 上升、P@5/R@5 不变**——用 T4 的仪器跑 `--arm bigram+bm25` 并贴读数。
+- **只改排序、不改分词**（第①步已在 T4 做完，且 T5 定案后**召回口径回到逐字**）；判据是 §14.8 第②步的实测形状：**top1 上升、P@5/R@5 不变**——用 T4 的仪器跑 `--arm char+bm25` 并贴读数。
 - `memory` 表的 `_rank`（`store.py:394-404`）与 `FREQUENCY_WEIGHT`/`RECENCY_WEIGHT`（`store.py:390-391`）**本任务一个字节不动**：旧表旧口径照旧（决议 7 的只读精神 + 不扩大改动面）。新旧两套在同一文件里并存，**不是**替换。
-- 旧行为可分辨的锚（**逐字口径下的既有实测**，可核对）：查 `"存档"` → 现状逐字臂排 `[1,2]`、bm25 臂排 `[2,1]`；查 `"依赖管理"` → 现状 `top1=0`、bm25 `top1=1`；13 条查询的 `top1_accuracy` 从 `0.7692307692307693` 升到 `1.0`（`.tmp/embed-bench/results_fts5_store.json` vs `results_fts5_bm25.json`）。⚠️ **这两份是"逐字口径"下的读数**；**bigram 口径下的 bm25 读数本轮没有**——T5 的 `--arm bigram+bm25` 是**新读数**，不许把它写成"复现了 §14.3.4"。
+- 旧行为可分辨的锚（**逐字口径下的既有实测**，可核对）：查 `"存档"` → 现状逐字臂排 `[1,2]`、bm25 臂排 `[2,1]`；查 `"依赖管理"` → 现状 `top1=0`、bm25 `top1=1`；13 条查询的 `top1_accuracy` 从 `0.7692307692307693` 升到 `1.0`（`.tmp/embed-bench/results_fts5_store.json` vs `results_fts5_bm25.json`）。⚠️ **这两份是"逐字口径"下的读数**；**bigram 口径下的 bm25 读数本轮没有**——T5 的 `--arm char+bm25` 是**新读数**，不许把它写成"复现了 §14.3.4"。
 
 **验收标准（可证伪）：**
 
 1. `bm25()` 原始值与方向用例（先红后绿）：同两份语料 + 一个只出现在其中一条里的词 → 该条排第一，且打印出的原始值与断言的大小关系一致（把符号搞反 → 红）。
-2. `--arm bigram+bm25` 的 **P@5/R@5 与 `--arm bigram` 逐位相同**（§14.8 第②步"只动排序不动召回"），且 top1 不下降。
+2. `--arm char+bm25` 的 **P@5/R@5 与 `--arm store-char`（逐字基线）逐位相同**（§14.8 第②步"只动排序不动召回"），且 top1 由 `0.7692307692307693` 升到 `1.0`。⚠️ **回填**：本条原文写的是"与 `--arm bigram` 逐位相同"——那是 T4 的召回口径**还没回退**时的假设；T5 定案后召回已回到逐字，所以对照臂只能是 `store-char`（实测 `bigram` 臂 P@5/R@5 为 `0.23076923076923078` / `0.46153846153846156`，与逐字基线**不同**）。
 3. 旧路径不回归：`tests/memory/test_recall_ranking.py` 全绿，`FREQUENCY_WEIGHT`/`RECENCY_WEIGHT` 仍在且值不变。
 4. `search_semantic` 返回的每行都带 `bm25_raw`（用一个非空断言 + 一个"两条不同相关度 → 两个不同原始值"的断言钉住）。
 
-**证据要求：** `pytest tests/memory/test_semantic_search.py tests/memory/test_recall_ranking.py -q`；贴出 `--arm bigram` 与 `--arm bigram+bm25` 两份读数；贴出 `bm25()` 原始值的符号实测输出。
+**证据要求：** `pytest tests/memory/test_semantic_search.py tests/memory/test_recall_ranking.py -q`；贴出 `--arm bigram` 与 `--arm char+bm25` 两份读数；贴出 `bm25()` 原始值的符号实测输出。
 
 **依赖：** Task 4。**T6 依赖它。**
 
@@ -950,7 +951,7 @@
 | 编号 | 落在哪个任务 | 需要什么夹具 / 脚本 | 怎么跑 | 当前状态 |
 |---|---|---|---|---|
 | **M1**（主判据：第 2 轮输入 token 降 ≥15%，通过率不降） | **T16** 出仪器；被测对象是 T12/T13 的注入与决策 | 50 道题（`benchmarks/tasks/`，`bench.py:45`）前 N 道铺进一个工作区 + **同一条会话两轮**；**服务端** token 计数 | `scripts/memory_bench_twowheel.py`（本计划命名，T16 定稿）；⚠️ **两次跑都要冷启动 llama-server、时机由使用者决定**；本批**不重启 8080**（pid 43096） | **没跑**（器械都还不存在）；`Δ` 的期望值 `≈0` 是 §10.2 的推断，**不是实测** |
-| **M2'**（16 条固定语料 P@5/R@5 不低于纯 FTS5 基线） | **T4** 出仪器与基线臂；**T5** 出 `bigram+bm25` 臂 | `benchmarks/memory/corpus.jsonl`（16 条，G1–G4）+ `queries.jsonl`（13 条查询 + 相关 id）——**必须从 `.tmp/embed-bench/bench_common.py:15-61` 逐字固化**（`.gitignore:22` 忽略了 `.tmp/`，不固化就会丢）；基线读数固化自 `.tmp/embed-bench/results_fts5_store.json` | `python scripts/memory_relevance.py --arm {store-char,bigram,bigram+bm25}`；指标 `p@5`/`r@5`/`top1`（定义照 `bench_common.py:70-91`） | **仪器要新建（T4）**；**基线已有实测读数**（P@5 `0.3384615384615385` / R@5 `0.5961538461538461` / top1 `0.7692307692307693`，见 `results_fts5_store.json` 的 `summary`）；**bigram 臂的读数没跑** |
+| **M2'**（16 条固定语料 P@5/R@5 不低于纯 FTS5 基线） | **T4** 出仪器与基线臂；**T5** 出 `char+bm25` 臂（回填：原文写 `bigram+bm25`） | `benchmarks/memory/corpus.jsonl`（16 条，G1–G4）+ `queries.jsonl`（13 条查询 + 相关 id）——**必须从 `.tmp/embed-bench/bench_common.py:15-61` 逐字固化**（`.gitignore:22` 忽略了 `.tmp/`，不固化就会丢）；基线读数固化自 `.tmp/embed-bench/results_fts5_store.json` | `python scripts/memory_relevance.py --arm {store-char,bigram,char+bm25}`（另有两臂 `char+bigram-rerank` / `char+bm25+bigram`）；指标 `p@5`/`r@5`/`top1`（定义照 `bench_common.py:70-91`） | **仪器已新建（T4）**；**基线已有实测读数**（P@5 `0.3384615384615385` / R@5 `0.5961538461538461` / top1 `0.7692307692307693`，见 `results_fts5_store.json` 的 `summary`）；**三条臂的读数都已有**（T5 实测，见 §14.8 的回填） |
 | **M4-T1**（100 → 花 20 → 赚 50 **应得 130**，断言"由事件链推出"） | **T9** | 3 条 event + `FakeClock`；**纯归约器单测，不要模型、不要 8080** | `pytest tests/memory/test_timeline_reduce.py -k M4_T1` | **没跑** |
 | **M4-T2**（相对时间解析） | **T8** | 相对词表 + 两个 `FakeClock` 日期 | `pytest tests/memory/test_timeline_parse.py -k M4_T2` | **没跑** |
 | **M4-T3**（取代链不是删除） | **T9** | 同键两条 `set` + 一条晚到的 event（取代 = 关旧行 → 插新行 → 旧行指向新行，同一事务） | `pytest tests/memory/test_timeline_reduce.py -k M4_T3` | **没跑** |
