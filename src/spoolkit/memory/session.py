@@ -17,6 +17,10 @@
 - **长链不加分**：链长不进任何分量——`rel` 取链内最高（**不是 Σ**，见
   `rank._chain_rel_part`），`imp` 取链内最高 × 时序完整度，`rec` 用**链内最新事件**，
   链上没有 `use_count`/负反馈数据源所以 `use`/`penalty` 如实为 0；
+- **链的 `rel` 有真数据源**（T11 补缺轮）：`memory_event_fts`（`store.py` 的 v5 步）
+  给出每条事件的 `bm25()` 原值，本模块在 `_build_chain` 里按**问句**取好、一条条填进
+  `chain_members[].bm25_raw`。所以链在生产路径上真的参与相关性排序（T11 交回来时
+  链的 `rel` 恒为 0——那是缺口，不是口径）；
 - **链含已被取代的旧行**（§15.4：取代不是删除）：`memory_state` 的全部历史行与全部
   `memory_event`（含 `status='retracted'`）都在链上，`rank` 也因此**不过滤**链单元的
   `superseded`；
@@ -29,7 +33,7 @@
 """
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -47,6 +51,7 @@ from spoolkit.memory.rank import (
 )
 from spoolkit.memory.store import (
     Memory,
+    event_bm25_raws,
     normalize_for_fts,
     search_episodes,
     search_memories,
@@ -93,7 +98,12 @@ TIME_ADVERB_MARKERS: tuple[str, ...] = (
 # 几乎每句话里都有——只命中一个字就建链会把链单元灌满候选池。两个字符的命中
 # （例如事件「还剩 80」命中 `还`+`剩`）才有区分度。
 # **这是候选选择判据，不是打分**：打分只有 `rank.py` 的五维一条路。
-MIN_MATCHED_TOKENS = 2
+# **值本身不在本模块**（T11 补缺轮）：它是可覆盖旋钮
+# `event_chain_min_matched_tokens`（登记在 `limits.py`，依据写在那一项的 note 里），
+# 这里读默认值只为给读代码的人一个入口；真正生效的值由
+# `_keys_recalled_by_events` 每次 `limits.resolve` 出来（所以 `.agent/limits.json`
+# 能改它）。T11 之前它是写死的 `2`——阈值不许写死，所以补登。
+MIN_MATCHED_TOKENS = int(limits.resolve("event_chain_min_matched_tokens")[0])
 
 
 def _hits_any(query: str, markers: Sequence[str]) -> bool:
@@ -138,7 +148,12 @@ class ChainSelection:
         return "可变数量类问题：链单元 " + ", ".join(self.refs)
 
 
-def select_chains(conn: sqlite3.Connection, query: str) -> ChainSelection:
+def select_chains(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    overrides: Mapping[str, float] | None = None,
+) -> ChainSelection:
     """选出要造链的**已注册键**，并给出判据读数（设计稿 §6.7 / §15.2）。
 
     两步，都只看"能不能把键和问句对上"，**不打分**：
@@ -147,8 +162,9 @@ def select_chains(conn: sqlite3.Connection, query: str) -> ChainSelection:
        都出现在问句里，或者问句里就有 `entity.attribute` 这个点号写法。
        命中就直接用这一批——问句点名了键，就不该再把别的键塞进候选。
     2. 否则按**逐字召回**看哪个键的**事件**被问句带回来了（`memory_event` 上的
-       逐字 LIKE，与 `search_episodes` 在事件表上用 LIKE 是同一处置：表小、
-       中文子串匹配天然可用）。
+       逐字匹配，与 `search_episodes` 在事件表上用 LIKE 是同一处置：表小、
+       中文子串匹配天然可用）。命中门槛是可覆盖旋钮
+       `event_chain_min_matched_tokens`（`overrides` 透传给 `limits.resolve`）。
     """
     keys = _registered_keys(conn)
     if not keys:
@@ -156,7 +172,7 @@ def select_chains(conn: sqlite3.Connection, query: str) -> ChainSelection:
     # 别名表读一次就够（每个键都去查一遍会把同一张表读 N 次）。
     aliases = _aliases(conn)
     named = tuple(key for key in keys if _key_named(conn, key, query, aliases))
-    selected = named or _keys_recalled_by_events(conn, query, keys)
+    selected = named or _keys_recalled_by_events(conn, query, keys, overrides)
     return ChainSelection(selected, is_variable_quantity(query, selected))
 
 
@@ -167,11 +183,11 @@ def build_event_chains(
     overrides: Mapping[str, float] | None = None,
 ) -> tuple["EventChain", ...]:
     """把 `select_chains` 选中的键各造成**一个**链单元（§6.7：1 个候选，不是 N 个）。"""
-    selection = select_chains(conn, query)
+    selection = select_chains(conn, query, overrides=overrides)
     if not selection.variable_quantity:
         return ()
     return tuple(
-        _build_chain(conn, entity, attribute, overrides=overrides)
+        _build_chain(conn, entity, attribute, query=query, overrides=overrides)
         for entity, attribute in selection.keys
     )
 
@@ -187,6 +203,9 @@ class EventChain:
     - `complete` / `incomplete_reason` 是**时序完整度**：`derived_from` 是否覆盖写链、
       有没有当前值、状态是否未定（§6.7 表 / §15.6）。缺基准时**扣分并标记**，
       绝不假装完整。
+    - `bm25_raws` 是**事件侧的 `bm25()` 原值**（`event_id → raw`，只含命中问句的
+      事件；T11 补缺轮）：`chain_members[].bm25_raw` 与 `Candidate.bm25_raw`
+      都由它来。没命中的事件**没有原值**（缺席，不是 0），聚合时只对有的取最高。
     - `render` 是**整链**的渲染文本（已按 `event_chain_render_max_chars` 截断并标注）。
     """
 
@@ -201,6 +220,7 @@ class EventChain:
     conflict_event_ids: tuple[int, ...]
     render: str
     truncated: bool
+    bm25_raws: Mapping[int, float] = field(default_factory=dict)
 
     @property
     def key(self) -> str:
@@ -233,27 +253,36 @@ class EventChain:
     def to_candidate(self) -> Candidate:
         """变成 `rank` 认的候选：**一个**链单元，链上事件清单挂在 `chain_members` 上。
 
-        三处刻意的取值：
+        四处刻意的取值：
 
-        - `bm25_raw=None`：P1 的 `memory_event` 没有 FTS 索引（schema 由 T3/T5 冻结、
-          本任务不许加），事件侧打不出 `bm25()` 原值——`rank` 会如实把 `rel` 记为 0
-          并在 reason 里说明，**不编一个数**；
+        - `chain_members[].bm25_raw` = 该事件在**本次问句**下的 `bm25()` 原值
+          （来自 `memory_event_fts`，见 `bm25_raws`）；没命中的那条如实为 `None`。
+          `rank._chain_rel_part` 只对**有原值**的成员取最高——链的 `rel` 因此
+          在生产路径上不再是 0（T11 补缺轮之前恒为 0，那是缺口）；
+        - `bm25_raw` = **链内最高**那条的原值（`None` = 一条都没命中）。它同时是
+          第①阶段序（`rank.order_by_bm25`）的输入：链现在真的按相关度参与候选池排序，
+          而不是永远排在"没有原值"的那一档；
         - `verified=False`：链单元**不领** `IMPORTANCE_VERIFIED_BONUS`。链越长越容易
           "取代过别人"，那 `+0.1` 就是变相的长度加分（§6.7：长链不加分）；
         - `created_at=latest_at` + `recency_note`：`rec` 用链内**最新事件**，并把
           这件事写进 reason（不是 `created_at` 这种看不出是链的默认说法）。
         """
         members = tuple(
-            ChainMember(event_id=event.id, bm25_raw=None, at_abs=event.at_abs)
+            ChainMember(
+                event_id=event.id,
+                bm25_raw=self.bm25_raws.get(event.id),
+                at_abs=event.at_abs,
+            )
             for event in self.events
         )
+        best_raw = min(self.bm25_raws.values()) if self.bm25_raws else None
         return Candidate(
             ref=self.ref,
             # 进上下文的就是这段渲染文本：**整链**（超长时带截断标注）。
             text=self.render,
             kind="event_chain",
             unit=chain_unit_label(self.size),
-            bm25_raw=None,
+            bm25_raw=best_raw,
             importance=self.importance,
             verified=False,
             created_at=self.latest_at,
@@ -405,10 +434,16 @@ class MemorySession:
             overrides["recall_limit"] = int(limit)
 
         pairs: list[tuple[Candidate, str]] = list(self._single_candidates(query, effective))
-        selection = select_chains(self._conn, query)
+        selection = select_chains(self._conn, query, overrides=self._overrides)
         chains = (
             tuple(
-                _build_chain(self._conn, entity, attribute, overrides=self._overrides)
+                _build_chain(
+                    self._conn,
+                    entity,
+                    attribute,
+                    query=query,
+                    overrides=self._overrides,
+                )
                 for entity, attribute in selection.keys
             )
             if selection.variable_quantity
@@ -604,16 +639,25 @@ def _query_tokens(query: str) -> tuple[str, ...]:
 
 
 def _keys_recalled_by_events(
-    conn: sqlite3.Connection, query: str, keys: Sequence[tuple[str, str]]
+    conn: sqlite3.Connection,
+    query: str,
+    keys: Sequence[tuple[str, str]],
+    overrides: Mapping[str, float] | None = None,
 ) -> tuple[tuple[str, str], ...]:
     """哪些键的**事件**被问句逐字召回了（候选选择判据，见 `MIN_MATCHED_TOKENS`）。
 
     只看 `status='active'` 的事件：被软撤销的那条不该把一个键拉进候选
     （但它仍然在链上——链一旦建起来就含全部事件，§15.4）。
+
+    命中门槛每次从 `limits` 取（旋钮 `event_chain_min_matched_tokens`），
+    所以 `.agent/limits.json` 能改"链要多难才建得起来"；T11 之前这个数写死在本模块。
     """
     tokens = _query_tokens(query)
     if not tokens:
         return ()
+    threshold = int(
+        limits.resolve("event_chain_min_matched_tokens", overrides)[0]
+    )
     selected: list[tuple[str, str]] = []
     for entity, attribute in keys:
         rows = conn.execute(
@@ -625,7 +669,7 @@ def _keys_recalled_by_events(
             text = " ".join(
                 (row["raw_text"], row["value"], row["entity"], row["attribute"])
             ).casefold()
-            if len({token for token in tokens if token in text}) >= MIN_MATCHED_TOKENS:
+            if len({token for token in tokens if token in text}) >= threshold:
                 selected.append((entity, attribute))
                 break
     return tuple(selected)
@@ -647,9 +691,17 @@ def _build_chain(
     entity: str,
     attribute: str,
     *,
+    query: str = "",
     overrides: Mapping[str, float] | None = None,
 ) -> EventChain:
-    """造一个链单元：取全事件 + 全 state 行 + 当前行，判完整度、算重要度、渲染。"""
+    """造一个链单元：取全事件 + 全 state 行 + 当前行，判完整度、算重要度、渲染。
+
+    顺手做**事件侧的相关度取值**（T11 补缺轮）：把 `query` 交给
+    `store.event_bm25_raws`，一次拿回链上**命中问句**那些事件的 `bm25()` 原值，
+    填进 `EventChain.bm25_raws`（`rank` 的链内取最高就靠它）。
+    `query` 为空串（例如只想拿链做别的用途）时 `memory_event_fts` 也匹配不出东西，
+    `bm25_raws` 因此为空、链的 `rel` 如实为 0——**不编一个数**。
+    """
     events = tuple(sorted(fetch_events(conn, entity, attribute), key=_event_order))
     state_rows = fetch_state_rows(conn, entity, attribute)
     current = fetch_current_state(conn, entity, attribute)
@@ -661,6 +713,7 @@ def _build_chain(
     reduction = reduce_events(events, reducer)
     conflict_ids = tuple(int(event_id) for event_id in reduction.conflict_events)
     complete, incomplete_reason = _completeness(events, current)
+    bm25_raws = event_bm25_raws(conn, query, tuple(event.id for event in events))
 
     # 链单元的"重要度" = **链内最高** confidence（`memory_event` 没有 importance 列，
     # 本实现按 confidence 的最大值读——见 `rank._chain_imp_part` 的 reason）。
@@ -692,6 +745,7 @@ def _build_chain(
         conflict_event_ids=conflict_ids,
         render=render,
         truncated=truncated,
+        bm25_raws=bm25_raws,
     )
 
 
@@ -701,7 +755,7 @@ def _completeness(
     """**时序完整度**：链的当前值是不是真由这条链推出来的（§6.7 表 / §15.6）。
 
     四条一起看，缺一条就**扣分并给出原因**（`rank` 用 `complete=False` 把链单元的
-    重要度乘 `CHAIN_INCOMPLETE_FACTOR`）：① 链上有事件；② 有当前 state 行；
+    重要度乘旋钮 `event_chain_incomplete_factor`）：① 链上有事件；② 有当前 state 行；
     ③ 当前行 `status='active'` 且 `value` 非空（缺基准时 `value` 是空的，
     **不给猜的数**）；④ `derived_from` 覆盖写链（有事件没进证据链 = 归约没跑全）。
     """

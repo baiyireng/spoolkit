@@ -25,6 +25,12 @@
    就 skip；**只读复制到 tmp，原库一个字节都不写**）；
 6. **幂等**：连跑两次结构与行数不变、版本号被退回时不重复建表；
 7. **不建触发器**、前向兼容、失败给人话且不记版本号。
+
+**后续版本**：T11 补缺轮往 `_MIGRATIONS` **追加**了 v5（`memory_event_fts`，见
+`tests/memory/test_schema_event_fts.py`）。本文件因此分成两种断言：**v4 那一步**
+的行为（用 `store._MIGRATIONS[:4]` 单独跑，逐字钉住"v4 恰好新增六表五索引"）
+与**版本号相关**的断言（一律用 `SCHEMA_VERSION`，不写死 4）——追加版本不该让
+"v4 做对了什么"变得不可验证。
 """
 
 import hashlib
@@ -336,8 +342,8 @@ def test_空库升级到v4六张表与索引就位(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "memory.db")
     init_memory_schema(conn)
 
-    assert SCHEMA_VERSION == 4
-    assert _user_version(conn) == 4
+    assert SCHEMA_VERSION >= 4  # v5 是后来追加的（见 test_schema_event_fts.py）
+    assert _user_version(conn) == SCHEMA_VERSION
     assert set(V4_TABLES) <= _names(conn, "table")
     assert set(V4_INDEXES) <= _names(conn, "index")
     # 归档表与 `memory_event` 同形（超限搬最旧时 event id 不变）。
@@ -345,12 +351,13 @@ def test_空库升级到v4六张表与索引就位(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_版本号严格递增且最新一步是v4() -> None:
+def test_版本号严格递增且第4步是v4() -> None:
     versions = [version for version, _, _ in store._MIGRATIONS]
-    assert versions == sorted(versions) == [1, 2, 3, 4]
-    assert SCHEMA_VERSION == store._MIGRATIONS[-1][0] == 4
-    assert store._MIGRATIONS[-1][1] == "建状态与时序六表"
-    assert store._MIGRATIONS[-1][2] is store._migrate_to_v4
+    assert versions == sorted(versions)
+    assert versions[:4] == [1, 2, 3, 4]
+    assert SCHEMA_VERSION == store._MIGRATIONS[-1][0]
+    assert store._MIGRATIONS[3][1] == "建状态与时序六表"
+    assert store._MIGRATIONS[3][2] is store._migrate_to_v4
 
 
 @pytest.mark.parametrize("table", sorted(FIELD_SPECS))
@@ -765,12 +772,17 @@ def test_既有表逐字不变_schema片段(tmp_path: Path) -> None:
 
 
 def test_既有对象逐字不变_升级前后DDL指纹(tmp_path: Path) -> None:
-    """④ 升级前后的 DDL 指纹：既有对象全部逐字一致，新增的**恰好**是六表五索引。"""
+    """④ 升级前后的 DDL 指纹：既有对象全部逐字一致，新增的**恰好**是六表五索引。
+
+    只跑 **v4 那一步**（`store._MIGRATIONS[3]`）：v5 之后 `init_memory_schema` 会
+    再追加 `memory_event_fts`，那会让"v4 恰好新增了什么"这个断言失焦——v5 的
+    同一份断言在 `test_schema_event_fts.py` 里。
+    """
     conn = _v3_db_with_data(tmp_path)
     before = _ddl_fingerprint(conn)
     before_counts = _row_counts(conn)
 
-    init_memory_schema(conn)
+    store._apply_step(conn, *store._MIGRATIONS[3])
 
     after = _ddl_fingerprint(conn)
     assert {name: after[name] for name in before} == before
@@ -806,7 +818,8 @@ def test_真库副本从user_version0升到v4既有对象逐行不变(tmp_path: 
     before_counts = _row_counts(conn_a)
 
     conn_b = open_db(copy_b)
-    init_memory_schema(conn_b)
+    for version, name, apply in store._MIGRATIONS[:4]:  # 只跑到 v4（v5 见另一个文件）
+        store._apply_step(conn_b, version, name, apply)
 
     assert _user_version(conn_b) == 4
     after = _ddl_fingerprint(conn_b)
@@ -849,7 +862,12 @@ def test_幂等_连跑两次表索引版本号与行数都不变(tmp_path: Path)
 
 
 def test_版本被人为退回3时v4重跑也不重复建表(tmp_path: Path) -> None:
-    """模拟「v4 建完表但版本号没记上」（`_apply_step` 的失败语义）→ 重跑不报错。"""
+    """模拟「v4 建完表但版本号没记上」（`_apply_step` 的失败语义）→ 重跑不报错。
+
+    版本号被退到 3 之后 `init_memory_schema` 会把 v4 与后来追加的 v5 一起补上，
+    所以这里断言的是 `SCHEMA_VERSION`（v4 那一层的幂等在
+    `test_schema_event_fts.py::test_版本被人为退回4时v5重跑也不重复插` 里单独钉）。
+    """
     conn = _v3_db_with_data(tmp_path)
     init_memory_schema(conn)
     before_counts = _row_counts(conn)
@@ -858,7 +876,7 @@ def test_版本被人为退回3时v4重跑也不重复建表(tmp_path: Path) -> 
 
     init_memory_schema(conn)
 
-    assert _user_version(conn) == 4
+    assert _user_version(conn) == SCHEMA_VERSION
     assert set(V4_TABLES) <= _names(conn, "table")
     assert _row_counts(conn) == before_counts
     conn.close()
@@ -917,6 +935,6 @@ def test_升级失败给的是人话且v4不记版本号(tmp_path: Path, monkeyp
     # 修掉原因后重跑就补上（这一步是幂等的）。
     monkeypatch.undo()
     init_memory_schema(conn)
-    assert _user_version(conn) == 4
+    assert _user_version(conn) == SCHEMA_VERSION
     assert set(V4_TABLES) <= _names(conn, "table")
     conn.close()

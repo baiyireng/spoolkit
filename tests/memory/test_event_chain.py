@@ -395,11 +395,17 @@ def test_长链不加分_rank层_3条与12条读数完全相同() -> None:
 
 
 def test_长链不加分_会话层_12条链不因条数排前(tmp_path: Path) -> None:
-    """真库里造两条链（3 条事件 / 12 条事件），其余条件相同 → 读数相同。
+    """真库里造两条链（3 条事件 / 12 条事件）：**长度**不进任何分量。
 
     对齐的三件事：链内最高 `confidence`（0.9）、链内最新事件时刻（`LATEST`）、
-    以及链上没有 `use_count`（事件的 `use_count` 恒为 0）。所以两条链的五个分量
-    必须逐位相同——长度若成了加分，`imp`/`rel`/`rec`/`use` 任一处都会露出来。
+    以及链上没有 `use_count`（事件的 `use_count` 恒为 0）。
+
+    **`rel` 是例外，而且必须是例外**（T11 补缺轮）：v5 起事件侧有了
+    `memory_event_fts`，链的 `rel` 由"链内最高 `bm25` 原值"决定——两条链的**事件
+    文本不同**，所以它们的 `rel` 本来就该不同（那是内容相关度，不是长度加分）。
+    长度不进公式这件事由两处独立钉住：① 这里的另外四个分量逐位相同；
+    ② 同一文件的 `test_长链不加分_rank层`（链内每条都给原值，3 条与 12 条的
+    `rel`/`score` **逐位相同**——那才是"长度不敏感"的直接证据）。
     """
     conn = _db(tmp_path)
     _balance(conn)  # 3 条
@@ -411,13 +417,26 @@ def test_长链不加分_会话层_12条链不因条数排前(tmp_path: Path) ->
     assert set(by_ref) == {"event_chain:wallet.balance", "event_chain:ledger.spent"}
     short, long = by_ref["event_chain:wallet.balance"], by_ref["event_chain:ledger.spent"]
     assert short.candidate.chain_size == 3 and long.candidate.chain_size == 12
-    for part in short.parts:
+    # 长度不进 imp / rec / use / penalty：这四项逐位相同。
+    for part in ("rec", "imp", "use", "penalty"):
         assert short.parts[part] == pytest.approx(long.parts[part], abs=1e-12, rel=0), part
-    assert short.score == pytest.approx(long.score, abs=1e-12, rel=0)
-    # 长链不在短链前面（同分时回到第①阶段序；这里断言"没有因为 12 条而变大"）
-    assert long.score <= short.score + 1e-12
+    # `rel` 现在有真原值：两条链各自 > 0，口径仍是"链内最高 + 不求和 + 长度不进公式"，
+    # 且原值确实来自事件侧（不是构造方塞的常数）。
+    for item in (short, long):
+        assert item.parts["rel"] > 0.0
+        assert item.candidate.bm25_raw is not None
+        assert any(
+            member.bm25_raw is not None for member in item.candidate.chain_members
+        )
+        assert "链内最高" in item.reasons["rel"]
+        assert "不求和" in item.reasons["rel"]
+        assert "长度不进公式" in item.reasons["rel"]
+    # 长链不在短链前面（同分时回到第①阶段序；这里断言"没有因为 12 条而变大"）。
+    assert long.parts["imp"] <= short.parts["imp"] + 1e-12
     print("会话层 3 条:", short.parts, short.score)
     print("会话层 12 条:", long.parts, long.score)
+    print("3 条链的 rel 依据:", short.reasons["rel"])
+    print("12 条链的 rel 依据:", long.reasons["rel"])
 
 
 def test_链内最高_取的是最相关的那个成员不是第一条() -> None:

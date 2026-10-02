@@ -22,12 +22,17 @@
   不建触发器**，而且金额与数量列一律用 `TEXT`（整数最小单位或 `Decimal`
   序列化串）——浮点累加会让账不平，而账不平不报错、只是数不对
   （设计稿 §15.3 第 4 条）。
+- **v5 的 `memory_event_fts` 也沿这条口径**（只索引 `raw_text`、不用触发器、
+  同步收在 `timeline/db.py:insert_event` 一处）。它补的是 T11 如实报出的缺口：
+  链单元的 `rel` 在生产路径上恒为 0——事件侧没有 FTS 就取不到 `bm25()` 原值，
+  于是"这个问题与这条链有多相关"这一维在链上根本不存在。完整理由见
+  `_migrate_to_v5` 上方的注释。
 """
 
 import re
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -701,12 +706,135 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
     conn.executescript(TIMELINE_SCHEMA)
 
 
+# ---- v5：`memory_event_fts`（补 T11 报出的缺口：链的 rel 在生产路径上恒为 0）----
+#
+# **缺的是什么**：T11 把 `(entity, attribute)` 的有序事件链做成一个整体单元，这条
+# 口径没错；但 `memory_event` 当时没有 FTS 索引，事件侧打不出 `bm25()` 原值，
+# 于是 `rank._chain_rel_part` 只能**如实**把链的 `rel` 记成 0——链因此只剩新近度
+# 与重要度两个分量在起作用，"这个问题更相关"在链上等于不存在。这是功能缺口，
+# 不是可选项：不补，长链、短链、与问句毫无关系的链在 `rel` 上完全同分。
+#
+# **列口径：只索引 `raw_text`**，理由三条：
+# ① 问句是人话，事件侧唯一带**原始措辞**的列就是 `raw_text`（§15.1：原始那句
+#    不许改写）——别的列都不是"用户会怎么问"的样子；
+# ② `entity` / `attribute` 是归一化后的英文标识符（`wallet` / `balance`），而
+#    "问句命中键"**已经是 `session.select_chains` 的选链判据**：再把它算进 `rel`
+#    等于同一件事记两次分——凡是问句点名了键，链就会凭空多一份相关度，而那与
+#    "这条链的内容更相关"是两回事；
+# ③ `value` / `unit` 是数值与单位，`bm25` 的词权重对它们没有意义（`100` 这种短
+#    token 的 IDF 会把原值推向负——T5 在真库上记录过这个边界）。
+#
+# **重复跑不重复插**：索引能从 `memory_event` 重算，所以这一步是"先 DROP、再建、
+# 再全表回填"（照 v2 的 `_rebuild_memory_fts`）。回填按 `memory_event.id` 一对一
+# 写 rowid，所以重跑得到**同一份**索引，不会出现一条事件两个 rowid。
+#
+# **不加触发器 / 不是 external content**：理由与 P0 在 `memory_fts`、P1 在
+# `semantic_fts` 上完全相同——中文检索依赖写入前把中文字逐字分开
+# （`normalize_for_fts` 是 Python 函数，**SQL 触发器里没有它**）。同步责任因此收在
+# **一处 Python 写入口** `timeline/db.py:insert_event`（形制照 `insert_memory`：
+# 「调用方约定」已经失败过一次——缺陷 4 的教训不进 FTS 就是那种下场）。
+#
+# **归档表 `memory_event_archive` 不进索引**：归档逻辑是 T9，而"检索默认不含已
+# 归档"（§15.7）——归档表里的事件本来就不该被召回。索引的底账只有 `memory_event`。
+MEMORY_EVENT_FTS_COLUMNS: tuple[str, ...] = ("raw_text",)
+
+
+def _rebuild_memory_event_fts(conn: sqlite3.Connection) -> None:
+    """按 `MEMORY_EVENT_FTS_COLUMNS` 重建 `memory_event_fts`，并从事件表全表回填。
+
+    回填必须在 **Python 侧**做：中文要逐字拆（`normalize_for_fts` 是 Python 函数），
+    这是"不用触发器"的另一面。已存在的事件全部回填（不是只补增量），所以
+    「v5 之前写进去的事件检索不到」这件事在升级那一刻就被消掉。
+    """
+    conn.execute("DROP TABLE IF EXISTS memory_event_fts")
+    conn.execute(
+        "CREATE VIRTUAL TABLE memory_event_fts USING fts5("
+        + ", ".join(MEMORY_EVENT_FTS_COLUMNS)
+        + ")"
+    )
+    rows = conn.execute("SELECT id, raw_text FROM memory_event").fetchall()
+    for row in rows:
+        insert_event_fts(conn, int(row["id"]), row["raw_text"])
+
+
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    """v4 → v5：建 `memory_event_fts` 并回填已有事件（`user_version` 4 → 5）。
+
+    **只新增一张 FTS 表**（连带上 FTS5 自己的影子表，那是 SQLite 的内部实现）：
+    `memory` / `memory_fts` / `semantic` / `semantic_fts` / `semantic` 一族 /
+    `episode` / 四张账本表 / `memory_state` / `memory_event` 等既有表
+    **一个字节都不动**（决议 7）。DDL 用 `CREATE VIRTUAL TABLE ... fts5(...)`，
+    不带 `IF NOT EXISTS`——重建由 `_rebuild_memory_event_fts` 开头那次 `DROP` 负责。
+
+    为什么"重建"而不是"建完就完"：Python 的 `sqlite3` 在 legacy 事务模式下
+    **DDL 会先落地**（`DROP`/`CREATE` 不在那个被 `rollback()` 撤掉的事务里），
+    所以上一次在回填中途炸掉时，库里可能留着一张半满的表。重跑的第一步就是
+    `DROP TABLE IF EXISTS`，于是"重跑"必然得到一份**完整**的索引，不会出现
+    "表在、事件缺一半"这种看不见的坏状态（版本号也没记，所以重跑一定会发生）。
+
+    重跑是空操作（索引 = `memory_event` 的函数，重算出同一份）。失败不记版本号
+    （`_apply_step`），修掉原因再跑即可。
+    """
+    _rebuild_memory_event_fts(conn)
+
+
+def insert_event_fts(conn: sqlite3.Connection, event_id: int, raw_text: str) -> None:
+    """把一条事件写进 `memory_event_fts`——**全仓唯一的事件索引写入口**。
+
+    为什么是应用层显式写索引，而不是 FTS5 触发器：触发器只能拿到 `new.raw_text`
+    的原样值，而本仓检索依赖写入前把中文逐字拆开（`normalize_for_fts`）——那是
+    Python 函数，SQL 触发器里没有它（与 `insert_memory` / `insert_semantic` 同一条
+    口径）。调用点只有 `timeline/db.py:insert_event` 一处，所以不会有"某个调用点
+    忘了写索引"。
+
+    本函数**不提交**：它必须和 `memory_event` 的那次 INSERT 在同一个事务里
+    （`timeline/db.py:transaction` 是那个事务的边界）。
+    """
+    conn.execute(
+        "INSERT INTO memory_event_fts(rowid, raw_text) VALUES (?, ?)",
+        (int(event_id), normalize_for_fts(raw_text)),
+    )
+
+
+def event_bm25_raws(
+    conn: sqlite3.Connection, query: str, event_ids: Sequence[int]
+) -> dict[int, float]:
+    """事件侧 `bm25()` **原值**：`event_id → raw`，**只含命中问句的事件**。
+
+    为什么不做成"没命中就给 0"：0 在 `bm25()` 的量纲里是"这个词的 IDF 恰好为零"，
+    与"这条事件根本没匹配上"是两件事。缺席就是缺席——`rank._chain_rel_part` 的
+    聚合只对**有原值**的事件取最高，并把没命中的 `event:id` 如实列进 reason。
+
+    口径与 `semantic_fts` 完全一致：同一份 `_match_query`（逐字规范化 + OR），
+    同一条 `bm25()`（原值越小越相关，T5 实测钉住符号，见 `bm25_score`）。
+    原值原样返回、不在这里归一化——归一化是 `rank` 的事。
+    """
+    ids = [int(event_id) for event_id in event_ids]
+    match = _match_query(query)
+    if not ids or not match:
+        return {}
+    placeholders = ", ".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            "SELECT f.rowid AS event_id, bm25(memory_event_fts) AS raw"
+            " FROM memory_event_fts f"
+            f" WHERE memory_event_fts MATCH ? AND f.rowid IN ({placeholders})",
+            (match, *ids),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # 索引不在（例如库还停在 v5 之前、或有人手工 DROP 了它）：如实返回"没有
+        # 原值"，而不是编一个 0 出来让链看起来"有相关度数据"。
+        return {}
+    return {int(row["event_id"]): float(row["raw"]) for row in rows}
+
+
 # 步骤表：版本号必须严格递增，最后一项就是 `SCHEMA_VERSION`。
 _MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (1, "建基础表并给 episode 加列加索引", _migrate_to_v1),
     (2, "重建 memory_fts 为四列并回填", _migrate_to_v2),
     (3, "建 semantic 与四张账本表", _migrate_to_v3),
     (4, "建状态与时序六表", _migrate_to_v4),
+    (5, "建 memory_event_fts 并回填事件", _migrate_to_v5),
 )
 
 SCHEMA_VERSION = _MIGRATIONS[-1][0]

@@ -31,8 +31,8 @@
 
 | 项 | 口径（本模块是唯一的执行处） |
 |---|---|
-| `rel` | **取链内最高** `bm25`（`_chain_rel_part`）。**绝不求和**：Σ 等于"谁的事件多谁赢"，长链会天然靠前，而那与"这个问题更相关"无关。取最高是**长度不敏感**的聚合——把第 N+1 条加进来，只要它不比现有最高更相关，`rel` 一点不变 |
-| `imp` | **链内最高**重要度（构造方算好放进 `Candidate.importance`；`memory_event` 没有 `importance` 列，按链内 `confidence` 最大值读——本实现口径，reason 里写明"不求和"）× **时序完整度**（`Candidate.complete=False` 时乘 `CHAIN_INCOMPLETE_FACTOR` 并在 reason 里点名，§6.7 表 / §15.6：缺基准值不假装完整） |
+| `rel` | **取链内最高** `bm25`（`_chain_rel_part`）。**绝不求和**：Σ 等于"谁的事件多谁赢"，长链会天然靠前，而那与"这个问题更相关"无关。取最高是**长度不敏感**的聚合——把第 N+1 条加进来，只要它不比现有最高更相关，`rel` 一点不变。**原值来自事件侧**：`memory_event_fts`（`store.py` 的 v5 步）+ `session._build_chain` 按问句取好填进 `chain_members[].bm25_raw`，所以生产路径上链的 `rel` **不是 0**（T11 补缺轮之前是 0，那是缺口） |
+| `imp` | **链内最高**重要度（构造方算好放进 `Candidate.importance`；`memory_event` 没有 `importance` 列，按链内 `confidence` 最大值读——本实现口径，reason 里写明"不求和"）× **时序完整度**（`Candidate.complete=False` 时乘旋钮 `event_chain_incomplete_factor` 并在 reason 里点名，§6.7 表 / §15.6：缺基准值不假装完整） |
 | `rec` | 链内**最新**事件（构造方把 `created_at` 设成链上最大 `at_abs`，并用 `recency_note` 说明），**不是**条数 |
 | `use` / `penalty` | 与单条同一条路（链上没有 `use_count` / 负反馈数据源，如实为 0）——**长度不进这两个分量** |
 | 不过滤 | 链单元**不**被 `superseded` 过滤（链天然含被取代的旧 `state` 行，§15.4）；`Candidate.is_chain` 是那个开关 |
@@ -150,9 +150,12 @@ CHAIN_UNIT_PREFIX = "event_chain"
 
 # 链的**时序完整度**扣分系数：`derived_from` 没覆盖写链 / 缺基准值 / 状态未定时，
 # 链单元的重要度乘上它。**设计稿只说"缺基准值时扣分"、没给数**（§6.7 表），
-# 所以 0.5 是**本实现的裁决**，不是设计稿数值：它要能"看得见地扣"，又不能把
-# 一条信息量仍然很大的链打到与"没有这条"等价。
-CHAIN_INCOMPLETE_FACTOR = 0.5
+# 所以取值本身是本实现的裁决——但**裁决不是写死的理由**：「阈值不许写死、必须
+# 进登记表可覆盖」是本仓的规矩（设计文档 2.7 的判据 + P1 计划 Task 1 的
+# 「一次登记」）。旋钮因此登记为 `event_chain_incomplete_factor`（默认 0.5 =
+# T11 的原始裁决；1.0 = 不扣，用于排查），在这里由 `_resolve_settings` 解析，
+# **本模块不再保存这个数**（T11 补缺轮）。
+CHAIN_INCOMPLETE_KNOB = "event_chain_incomplete_factor"
 
 
 def chain_unit_label(size: int) -> str:
@@ -186,7 +189,7 @@ class Candidate:
 
     - `rel`：链取**链内最高** `bm25`（`chain_members` 里最高的那条），不求和；
     - `imp`：链取**链内最高**重要度（构造方算好放进 `importance`），并在
-      `complete=False` 时乘 `CHAIN_INCOMPLETE_FACTOR`；
+      `complete=False` 时乘旋钮 `event_chain_incomplete_factor`；
     - **不过滤** `superseded`：链天然含被取代的旧 `state` 行（§15.4），把链内部的
       行按单条口径过滤掉会让链缺环。
 
@@ -313,6 +316,12 @@ class Scored:
         链单元在分解行之后**附上链上每条的 `event:id`**（§6.3 的 `unit` 一栏 +
         "由哪几条事件组成"）：链是一个单元，读者要能看出这个单元里装了什么，
         否则"整链进"就成了一句不可核对的话。
+
+        链单元还要附上**相关度的依据**（`reasons["rel"]` 逐字，T11 补缺轮）：
+        链的 `rel` 是"链内最高"聚合出来的，只报一个加权后的数说不清"它凭什么"——
+        依据里带着链上每条的 `bm25()` **原值**与"哪条被取中"（§6.3 要求把原值与
+        归一化分量两个都打）。单条候选不附（它的原值就在 `reasons["rel"]` 里，
+        一行行铺开会让分解行读不动）。
         """
         contributions = [
             (part, self.weights[part] * self.parts[part]) for part in PART_ORDER
@@ -335,6 +344,7 @@ class Scored:
                 f"｜unit={self.candidate.unit} 链内 {self.candidate.chain_size} 条事件"
                 f"（整链进/出）：{listed}"
             )
+            line += f"｜相关度依据：{self.reasons['rel']}"
         return line
 
 
@@ -396,6 +406,7 @@ class _Settings:
     rerank_k: int
     limit: int
     chain_max_units: int
+    incomplete_factor: float
     sources: dict[str, str]
 
 
@@ -648,6 +659,17 @@ def _resolve_settings(overrides: Mapping[str, float] | None) -> _Settings:
             f"event_chain_max_units 不能为负（{chain_units!r}）：0 = 一个链单元都不进上下文"
         )
 
+    incomplete_factor, source = limits.resolve(CHAIN_INCOMPLETE_KNOB, overrides)
+    sources[CHAIN_INCOMPLETE_KNOB] = source
+    if not 0.0 <= incomplete_factor <= 1.0:
+        # 它乘在链单元的重要度上：>1 是"不完整反而加分"（与 §6.7 的表相反），
+        # <0 会把重要度变成负数。两种都是配置写错，要吵（与别的旋钮同一处置）。
+        raise ValueError(
+            f"{CHAIN_INCOMPLETE_KNOB} 必须落在 [0, 1]（{incomplete_factor!r}）："
+            "它是「时序完整度不足」时乘在链单元重要度上的**扣分**系数，"
+            "1.0 = 不扣、越接近 0 扣得越狠"
+        )
+
     return _Settings(
         weights=weights,
         w_bm25=w_bm25,
@@ -656,6 +678,7 @@ def _resolve_settings(overrides: Mapping[str, float] | None) -> _Settings:
         rerank_k=min(int(rerank_k), int(limit)),  # 硬约束 K ≤ recall_limit
         limit=int(limit),
         chain_max_units=int(chain_units),
+        incomplete_factor=float(incomplete_factor),
         sources=sources,
     )
 
@@ -699,26 +722,39 @@ def _chain_rel_part(candidate: Candidate, settings: _Settings) -> tuple[float, s
     而那与"这个问题更相关"毫无关系。取最高是**长度不敏感**的聚合：往链里再加
     一条不比现有最高更相关的事件，`rel` 一位都不变（"长链不加分"就是这么落实的）。
 
-    数据缺口要如实说：P1 的 `memory_event` **没有 FTS 索引**（schema 由 T3/T5
-    冻结、T11 不许加），所以事件侧没有 `bm25()` 原值可打。构造方给不出原值时
-    这里**如实为 0**，不编一个数——与 `bm25_raw is None`（LIKE 回退）同一处置。
-    聚合规则本身已经在此钉住：数据源一到（事件侧建了 FTS 或给了别的原值），
-    只要填进 `chain_members[].bm25_raw`，口径立刻按 §6.7 生效。
+    **原值从哪来（T11 补缺轮）**：事件侧 `memory_event_fts`（`store.py` 的 v5 步）
+    给出每条事件的 `bm25()` 原值，`session._build_chain` 按问句取好、填进
+    `chain_members[].bm25_raw`。所以生产路径上链的 `rel` **不再是 0**。
+    没命中问句的事件**没有原值**（缺席，不是 0）：这里只对**有原值**的成员取最高，
+    并把缺席的 `event:id` 如实列进 reason——`bm25() 原值 = 0` 在量纲上是
+    "该词的 IDF 恰好为零"，与"没匹配上"是两件事，不许混。
+    **链内一条都没命中**时 `rel` 如实为 0（构造方也没给 `bm25_raw` 的话），
+    不编一个数——与 `bm25_raw is None`（LIKE 回退）同一处置。
     """
+    members = candidate.chain_members
     scored = [
         (member.event_id, member.bm25_raw)
-        for member in candidate.chain_members
+        for member in members
         if member.bm25_raw is not None
     ]
     size = candidate.chain_size
+    gap_note = ""
     if not scored:
         if candidate.bm25_raw is None:
             return 0.0, (
-                f"链内没有 bm25 原值（链上 {size} 条；P1 的 `memory_event` 没有 FTS "
-                "索引，事件侧打不出 `bm25()`）：链单元的 rel 如实为 0，不编一个值；"
+                f"链内没有 bm25 原值（链上 {size} 条没有一条命中问句，"
+                "或事件侧 memory_event_fts 不可用）：链单元的 rel 如实为 0，不编一个值；"
                 "**链的长度不进 rel**（聚合口径 = 取链内最高，不是 Σ）"
             )
         scored = [(-1, candidate.bm25_raw)]
+    else:
+        unmatched = [member.event_id for member in members if member.bm25_raw is None]
+        if unmatched:
+            listed_unmatched = " ".join(f"event:{event_id}" for event_id in unmatched)
+            gap_note = (
+                f"；链上另有 {len(unmatched)} 条**没有** bm25 原值（没命中问句）："
+                f"{listed_unmatched}——缺席就是缺席，不填 0"
+            )
 
     # 原值越小越相关（T5 实测），所以"最高"= 原值最小的那条。
     best_id, best_raw = min(scored, key=lambda pair: pair[1])
@@ -733,7 +769,7 @@ def _chain_rel_part(candidate: Candidate, settings: _Settings) -> tuple[float, s
         f"链内最高（**不求和**）：链上 {size} 条的 bm25 原值 [{listed}] → "
         f"取最高 event:{best_id}（原值 {best_raw!r}，原值越小越相关）→ "
         f"bm25_score {score!r} → 1−exp(−w_bm25({settings.w_bm25})·{score!r}) = {value!r}"
-        f"{note}；长度不进公式（Σ 累加会让长链天然靠前，§6.7 明确禁止）"
+        f"{note}{gap_note}；长度不进公式（Σ 累加会让长链天然靠前，§6.7 明确禁止）"
     )
 
 
@@ -767,14 +803,14 @@ def _rec_part(candidate: Candidate, now: float, settings: _Settings) -> tuple[fl
     )
 
 
-def _imp_part(candidate: Candidate) -> tuple[float, str]:
+def _imp_part(candidate: Candidate, settings: _Settings) -> tuple[float, str]:
     """kind 基线（或判定值）+「通过验证 / 成功取代过别人」的 +0.1；用户改过的标 `(user)`。
 
     链单元走另一条口径（`_chain_imp_part`）：**链内最高**重要度 × 时序完整度，
     而且**不领** `IMPORTANCE_VERIFIED_BONUS`（理由见该函数）。
     """
     if candidate.is_chain:
-        return _chain_imp_part(candidate)
+        return _chain_imp_part(candidate, settings)
     if candidate.importance is None:
         base = IMPORTANCE_BASELINE.get(candidate.kind)
         if base is None:
@@ -800,7 +836,7 @@ def _imp_part(candidate: Candidate) -> tuple[float, str]:
     return base + bonus, f"重要度 {origin}"
 
 
-def _chain_imp_part(candidate: Candidate) -> tuple[float, str]:
+def _chain_imp_part(candidate: Candidate, settings: _Settings) -> tuple[float, str]:
     """链单元的 `imp` = **链内最高**重要度 × **时序完整度**（§6.7 表）。
 
     两条口径都要说出来：
@@ -809,8 +845,9 @@ def _chain_imp_part(candidate: Candidate) -> tuple[float, str]:
       `confidence` 最大值读（构造方已把最大值放进 `Candidate.importance`）——本实现
       口径，设计稿未给。取最大是长度不敏感的；Σ 会让长链天然更"重要"。
     - **时序完整度**：`derived_from` 没覆盖写链 / 缺基准值 / 状态未定时乘
-      `CHAIN_INCOMPLETE_FACTOR` 并点名原因（§6.7：**不假装完整**，§15.6 的
-      `needs_review` 就是这件事的标记）。
+      `event_chain_incomplete_factor` 并点名原因（§6.7：**不假装完整**，§15.6 的
+      `needs_review` 就是这件事的标记）。系数是**旋钮**、不是本模块的常数
+      （T11 补缺轮：它是实现裁决，但裁决也要能按工作区覆盖）。
 
     链单元**不领** `IMPORTANCE_VERIFIED_BONUS`：构造方留 `verified=False`。
     "成功取代过别人"在链上几乎恒真（链越长越容易有取代），那 `+0.1` 就是变相的
@@ -828,10 +865,13 @@ def _chain_imp_part(candidate: Candidate) -> tuple[float, str]:
     if candidate.importance_user_set:
         origin += "(user)"
     if not candidate.complete:
-        base *= CHAIN_INCOMPLETE_FACTOR
+        factor = settings.incomplete_factor
+        base *= factor
         origin += (
-            f" × 时序完整度 {CHAIN_INCOMPLETE_FACTOR}（{candidate.incomplete_reason or '未给出原因'}）"
+            f" × 时序完整度 {factor}（{candidate.incomplete_reason or '未给出原因'}）"
             "：缺基准/证据链不覆盖时扣分并标 needs_review，不假装完整（§6.7 / §15.6）"
+            f"——系数来自旋钮 {CHAIN_INCOMPLETE_KNOB}（来源 "
+            f"{settings.sources.get(CHAIN_INCOMPLETE_KNOB, '默认')}）"
         )
     return base, f"重要度 {origin}"
 
@@ -871,7 +911,7 @@ def _parts(
     pairs = {
         "rel": _rel_part(candidate, settings),
         "rec": _rec_part(candidate, now, settings),
-        "imp": _imp_part(candidate),
+        "imp": _imp_part(candidate, settings),
         "use": _use_part(candidate, max_use),
         "penalty": _penalty_part(candidate),
     }

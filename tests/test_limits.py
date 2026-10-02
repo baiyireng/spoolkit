@@ -263,9 +263,20 @@ KNOBS_BEFORE_P1: tuple[str, ...] = (
 )
 
 
+# T11 补缺轮补登的两个旋钮：T11 交回来时把「时序完整度系数 0.5」与「事件侧逐字
+# 召回门槛 2」写成了裸常数——两条都是**本实现的裁决**（设计稿 §6.7 表只说"缺基准
+# 要扣分"、判据②只说"逐字召回要把键带回来"，都没给数），但裁决不等于可以写死：
+# 本仓的规矩是阈值必须进登记表可覆盖。名单与 `P1_NEW_KNOBS` 分开列，是因为它们
+# 不属于 P1 Task 1 那一次登记（那是 22 项的快照，改它会把"22"这个出处弄脏）。
+T11_GAP_KNOBS: tuple[tuple[str, float], ...] = (
+    ("event_chain_incomplete_factor", 0.5),  # §6.7 表 / §15.6；T11 的实现裁决
+    ("event_chain_min_matched_tokens", 2),  # §6.7 判据②；T11 的实现裁决
+)
+
+
 def test_p1_旋钮全部登记且可覆盖() -> None:
     """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
-    for name, default in P1_NEW_KNOBS:
+    for name, default in P1_NEW_KNOBS + T11_GAP_KNOBS:
         entry = limits.knob(name)
         assert entry is not None, f"{name} 没登记"
         assert entry.kind == CAPABILITY, f"{name} 不是能力标定值"
@@ -290,12 +301,18 @@ def test_既有旋钮一个不少() -> None:
     names = {entry.name for entry in limits.KNOBS}
     assert set(KNOBS_BEFORE_P1) <= names
     assert set(KNOBS_BEFORE_P1) & set(dict(P1_NEW_KNOBS)) == set()
+    assert set(KNOBS_BEFORE_P1) & set(dict(T11_GAP_KNOBS)) == set()
 
 
 def test_旋钮没有重名() -> None:
-    """Task 1 验收 5：重名会让 `_BY_NAME` 静默取后者。"""
+    """Task 1 验收 5：重名会让 `_BY_NAME` 静默取后者。
+
+    总数 = P0 的 62 + P1 Task 1 的 22 + T11 补缺轮的 2（`T11_GAP_KNOBS`）。
+    """
     assert len(limits.KNOBS) == len(limits._BY_NAME)
-    assert len(limits.KNOBS) == len(KNOBS_BEFORE_P1) + len(P1_NEW_KNOBS)
+    assert len(limits.KNOBS) == (
+        len(KNOBS_BEFORE_P1) + len(P1_NEW_KNOBS) + len(T11_GAP_KNOBS)
+    )
 
 
 def test_p1旋钮可以按工作区覆盖(tmp_path: Path) -> None:

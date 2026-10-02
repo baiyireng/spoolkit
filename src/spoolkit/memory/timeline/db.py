@@ -1,8 +1,14 @@
 """时序六表的读写薄层：**只读 `store.py` 的建表入口，一个字节都不改 schema**。
 
 设计稿 §15.7 说清了接法：六张表进**同一个库**（`<工作区>/.agent/memory.db`）、
-**同一条迁移路径**（`store.py` 的 `_MIGRATIONS`，v4 已建好），本任务的改动面只有
-`timeline/` 包内的代码——**DDL / `_MIGRATIONS` / FTS 一个字都不动**。
+**同一条迁移路径**（`store.py` 的 `_MIGRATIONS`），本任务的改动面只有
+`timeline/` 包内的代码——**DDL / `_MIGRATIONS` 一个字都不动**。
+
+**一处例外（T11 补缺轮）**：`insert_event` 现在会**显式**同步 `memory_event_fts`
+——那张 FTS 表由 `store.py` 的 v5 步建（DDL 仍然只写在 `store.py`，本模块只
+调用 `store.insert_event_fts`，不复制一行 DDL）。补的是 T11 如实报出的缺口：
+`memory_event` 没有 FTS 时事件侧取不到 `bm25()` 原值，链单元的 `rel` 恒为 0。
+理由（不用触发器等）写在 `store.py:MEMORY_EVENT_FTS_COLUMNS` 上方。
 
 这里放的是"怎么读写那六张表"的机械部分（列清单、行 → dataclass、事务边界、audit），
 归约与注册表的**判断**不在这里：
@@ -21,7 +27,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from spoolkit.memory.store import init_memory_schema
+from spoolkit.memory.store import init_memory_schema, insert_event_fts
 from spoolkit.memory.timeline.models import AttributeSpec, Event, StateRow
 from spoolkit.store.db import open_db
 
@@ -67,7 +73,7 @@ _ALIAS_TABLES = {"entity": "entity_alias", "attribute": "attribute_alias"}
 
 
 def open_timeline(path: Path) -> sqlite3.Connection:
-    """打开（必要时建库）并按 `store.py` 的迁移路径升到 v4。**只调用，不复制 DDL。**"""
+    """打开（必要时建库）并按 `store.py` 的迁移路径升到最新（现在 = v5）。**只调用，不复制 DDL。**"""
     conn = open_db(path)
     init_memory_schema(conn)
     return conn
@@ -95,14 +101,24 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
 
 def insert_event(conn: sqlite3.Connection, values: dict) -> int:
-    """插一条事件（append-only，本表**没有** DELETE 路径，§15.4）。返回新 id。"""
+    """插一条事件（append-only，本表**没有** DELETE 路径，§15.4）。返回新 id。
+
+    **同一事务里同步 `memory_event_fts`**（T11 补缺轮）：`memory_event` 的插入点
+    全仓只有这里（唯一调用者是 `reduce.append_event`），所以"忘了写索引"这种
+    调用方约定在这里没有生存空间。同步用应用层显式写（`store.insert_event_fts`），
+    不用触发器——中文要逐字拆，而那是 Python 函数（理由见 `store.py`）。
+
+    FTS 的行 id 就是 `memory_event.id`：链单元按 `event:id` 取原值时靠它对齐。
+    """
     columns = ", ".join(EVENT_COLUMNS)
     placeholders = ", ".join("?" for _ in EVENT_COLUMNS)
     cursor = conn.execute(
         f"INSERT INTO memory_event({columns}) VALUES ({placeholders})",
         tuple(values[name] for name in EVENT_COLUMNS),
     )
-    return int(cursor.lastrowid or 0)
+    event_id = int(cursor.lastrowid or 0)
+    insert_event_fts(conn, event_id, values["raw_text"])
+    return event_id
 
 
 def find_event_by_hash(
