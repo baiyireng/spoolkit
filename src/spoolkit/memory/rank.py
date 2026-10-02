@@ -24,6 +24,25 @@
 | `use` | `log1p(use_count) / log1p(max_use)`，`max_use` = **进重排的候选集内**最大 `use_count` | 归一化分母取"这一批候选里用得最多的那条"，所以 `max_use` 那条恰好是 1.0。`max_use == 0`（全都没用过）→ 分母为 0 → 全体 `use` 如实为 0，**不做除法**。`use_count` 为负按 0 夹取 |
 | `penalty` | `applied_count / (use_count + 1)`，**仅当负反馈数据源存在** | **P1 没有负反馈数据源**（没有写入者，`applied_count` 恒为 0，采信它就是拿一个恒 0 的列冒充"反馈"）→ 由数据驱动地贡献 **0**，reason 里写明「无负反馈数据」。**不静默塞一个猜的值**：数据源一出现（`NEGATIVE_FEEDBACK_SOURCE`），公式立刻按 §6.1 生效 |
 
+**链单元（T11 / §6.7：可变数量类问题）**：
+
+一个 `(entity, attribute)` 的**有序事件链**在候选池与重排里是**一个整体单元**
+（`unit='event_chain(N)'`，N = 链上事件数），**不是 N 个互不相关的片段**：
+
+| 项 | 口径（本模块是唯一的执行处） |
+|---|---|
+| `rel` | **取链内最高** `bm25`（`_chain_rel_part`）。**绝不求和**：Σ 等于"谁的事件多谁赢"，长链会天然靠前，而那与"这个问题更相关"无关。取最高是**长度不敏感**的聚合——把第 N+1 条加进来，只要它不比现有最高更相关，`rel` 一点不变 |
+| `imp` | **链内最高**重要度（构造方算好放进 `Candidate.importance`；`memory_event` 没有 `importance` 列，按链内 `confidence` 最大值读——本实现口径，reason 里写明"不求和"）× **时序完整度**（`Candidate.complete=False` 时乘 `CHAIN_INCOMPLETE_FACTOR` 并在 reason 里点名，§6.7 表 / §15.6：缺基准值不假装完整） |
+| `rec` | 链内**最新**事件（构造方把 `created_at` 设成链上最大 `at_abs`，并用 `recency_note` 说明），**不是**条数 |
+| `use` / `penalty` | 与单条同一条路（链上没有 `use_count` / 负反馈数据源，如实为 0）——**长度不进这两个分量** |
+| 不过滤 | 链单元**不**被 `superseded` 过滤（链天然含被取代的旧 `state` 行，§15.4）；`Candidate.is_chain` 是那个开关 |
+| 条数上界 | `event_chain_max_units`（§6.7）：超出的链**整条不进**（不是"少进几条事件"），`dropped.reason='over_budget'` 并写明 |
+| 可解释 | `explain()` 在分值分解之后附上链上每条的 `event:id`（§6.3 的 `unit='event_chain(N)'`） |
+
+**链单元不领** `IMPORTANCE_VERIFIED_BONUS`：构造方把它留成 `verified=False`。
+"成功取代过别人"在链上几乎恒真（链越长越容易有取代），给这 `+0.1` 就是变相的
+长度加分——与"长链不加分"直接冲突。
+
 **两阶段（§14.4 规矩 3）**：
 
 1. 第①阶段（**候选池**）：逐字 FTS5 + `bm25()` 排序（`semantic.search_semantic`
@@ -43,9 +62,9 @@
 用户点名的 `deduped`）。`demoted` / `conflict` 在 P1 **没有数据源**（见
 `REASONS_WITHOUT_SOURCE_IN_P1`），本模块**不编造**它们。
 
-**本任务不实现**（别在这里找）：事件链单元的链内逻辑（T11；本模块只带一个中性的
-`Candidate.unit` 字段）、token 预算与让位（T12）、`memory_decision` 落库与 `why`
-渲染（T13）、`recall` / 会话的接线（T11/T13）。
+**本任务不实现**（别在这里找）：token 预算与让位（T12）、`memory_decision` 落库与
+`why` 渲染（T13）、链的**构造**（读库、选键、排序事件、渲染——那是 T11 的
+`session.py`；本模块只认"这是一个链单元"这件事与它的分量口径）。
 """
 
 from __future__ import annotations
@@ -122,18 +141,57 @@ NO_NEGATIVE_FEEDBACK = (
     "无负反馈数据（P1 没有 applied_count 的写入者，该列恒为 0，不采信）：penalty 如实为 0"
 )
 
+# ---- 链单元（T11 / §6.7）-----------------------------------------------------
+
+# `Candidate.unit` 的链前缀。链单元的完整形态是 `event_chain(N)`（§6.7：`why` 里
+# 渲染成 `event_chain(N)`），所以**前缀**才是判定依据——只用整串相等会把
+# `event_chain(3)` 当成"不是链"。
+CHAIN_UNIT_PREFIX = "event_chain"
+
+# 链的**时序完整度**扣分系数：`derived_from` 没覆盖写链 / 缺基准值 / 状态未定时，
+# 链单元的重要度乘上它。**设计稿只说"缺基准值时扣分"、没给数**（§6.7 表），
+# 所以 0.5 是**本实现的裁决**，不是设计稿数值：它要能"看得见地扣"，又不能把
+# 一条信息量仍然很大的链打到与"没有这条"等价。
+CHAIN_INCOMPLETE_FACTOR = 0.5
+
+
+def chain_unit_label(size: int) -> str:
+    """链单元的 `unit` 字面量：`event_chain(N)`（N = 链上事件数，§6.7）。"""
+    return f"{CHAIN_UNIT_PREFIX}({int(size)})"
+
+
+@dataclass(frozen=True)
+class ChainMember:
+    """链上一条事件的**解释快照**（rank.py 不读库；字段由构造方填）。
+
+    只需要三样：`event_id`（`why` 要列出"由哪几条事件组成"）、`bm25_raw`（链内
+    聚合的输入）、`at_abs`（读者要看时刻）。别的列（`op` / `value` / `raw_text` /
+    `speaker`）在链的**渲染**里（`Candidate.text`），不重复搬一份。
+    """
+
+    event_id: int
+    bm25_raw: float | None = None
+    at_abs: float | None = None
+
 
 @dataclass(frozen=True)
 class Candidate:
     """一条参与排序的候选（单条记忆，或 T11 的一个事件链单元）。
 
-    `ref` 是稳定的外部引用（`semantic:<id>` 之类），`why` 与 `dropped` 都用它
-    指认"说的是哪一条"——不靠文本，也不靠列表下标。
+    `ref` 是稳定的外部引用（`semantic:<id>` / `event_chain:<entity>.<attribute>`
+    之类），`why` 与 `dropped` 都用它指认"说的是哪一条"——不靠文本，也不靠列表下标。
 
-    `unit` 在 P1 只有 `"single"` 一种；T11 会传 `"event_chain"`，并按 §6.7 把
-    **链内最高 `bm25`** 作为 `bm25_raw` 传进来（链是一个单元，不能把 N 条的分数
-    加起来，那是 T11 的规矩）。本模块**不实现**链内逻辑，只认这一个字段：
-    链单元**不过滤** `superseded`（链天然含被取代的旧 state 行，§15.4）。
+    **单条**（`unit="single"`）与**链单元**（`unit="event_chain(N)"`，见
+    `is_chain`）走同一条五维公式，差别只有三处，全部由本模块执行：
+
+    - `rel`：链取**链内最高** `bm25`（`chain_members` 里最高的那条），不求和；
+    - `imp`：链取**链内最高**重要度（构造方算好放进 `importance`），并在
+      `complete=False` 时乘 `CHAIN_INCOMPLETE_FACTOR`；
+    - **不过滤** `superseded`：链天然含被取代的旧 `state` 行（§15.4），把链内部的
+      行按单条口径过滤掉会让链缺环。
+
+    `recency_note` 是 `rec` 的"用的是哪一天"的说明（链单元填"链内最新事件
+    `at_abs`"；留空 = 沿用 `last_used_at` / `created_at` 的默认说法）。
 
     `dedupe_key` 为空时按 `content_hash`、再退到 `text.strip()` 推算去重键
     （见 `dedupe_signature`）；`dedupe_similarity` 那个近似阈值**不属于 T6**
@@ -157,6 +215,31 @@ class Candidate:
     superseded_by: int | None = None
     content_hash: str = ""
     dedupe_key: str = ""
+    # 链单元专用（单条候选留默认值）：
+    chain_members: tuple[ChainMember, ...] = ()
+    complete: bool = True
+    incomplete_reason: str = ""
+    recency_note: str = ""
+
+    @property
+    def is_chain(self) -> bool:
+        """这条候选是不是一个事件链单元（`unit` 以 `event_chain` 开头）。"""
+        return self.unit.startswith(CHAIN_UNIT_PREFIX)
+
+    @property
+    def chain_size(self) -> int:
+        """链上事件数：优先数 `chain_members`；只有 `unit` 串时从 `event_chain(N)` 里读 N。
+
+        两者都没有（例如用例只给 `unit="event_chain"`）时如实为 0——**不猜**。
+        """
+        if self.chain_members:
+            return len(self.chain_members)
+        suffix = self.unit[len(CHAIN_UNIT_PREFIX) :]
+        if suffix.startswith("(") and suffix.endswith(")"):
+            digits = suffix[1:-1]
+            if digits.isdigit():
+                return int(digits)
+        return 0
 
     @property
     def dedupe_signature(self) -> str:
@@ -226,6 +309,10 @@ class Scored:
 
         打的是**加权后的贡献**（`w·part`），不是裸分量——读者问的是"这条为什么
         排在这"，加权贡献才直接对得上总分。`penalty` 是减项，渲染成 `− 反馈 x`。
+
+        链单元在分解行之后**附上链上每条的 `event:id`**（§6.3 的 `unit` 一栏 +
+        "由哪几条事件组成"）：链是一个单元，读者要能看出这个单元里装了什么，
+        否则"整链进"就成了一句不可核对的话。
         """
         contributions = [
             (part, self.weights[part] * self.parts[part]) for part in PART_ORDER
@@ -236,7 +323,19 @@ class Scored:
             if part != "penalty"
         )
         tail = f"− {PART_LABELS['penalty']} {abs(dict(contributions)['penalty']):.2f}"
-        return f"分 {self.score:.2f} = {head} {tail}"
+        line = f"分 {self.score:.2f} = {head} {tail}"
+        if self.candidate.is_chain:
+            members = self.candidate.chain_members
+            listed = (
+                " ".join(f"event:{member.event_id}" for member in members)
+                if members
+                else "（未带链上事件清单）"
+            )
+            line += (
+                f"｜unit={self.candidate.unit} 链内 {self.candidate.chain_size} 条事件"
+                f"（整链进/出）：{listed}"
+            )
+        return line
 
 
 @dataclass(frozen=True)
@@ -270,6 +369,8 @@ class RankedResult:
     k: int
     limit: int
     k_note: str
+    chain_max_units: int = 0
+    chain_chosen: int = 0
 
     @property
     def chosen_refs(self) -> tuple[str, ...]:
@@ -294,6 +395,7 @@ class _Settings:
     candidates_n: int
     rerank_k: int
     limit: int
+    chain_max_units: int
     sources: dict[str, str]
 
 
@@ -341,7 +443,9 @@ def rank(
     live: list[Candidate] = []
     seen: dict[str, Candidate] = {}
     for candidate in ordered:
-        if candidate.unit == "single" and candidate.superseded:
+        # 链单元**不过滤** `superseded`：链天然含被取代的旧 `state` 行（§15.4），
+        # 按单条口径过滤会把链拆出缺口。挡的是"单条旧行"这一种候选。
+        if not candidate.is_chain and candidate.superseded:
             dropped.append(
                 Dropped(
                     candidate=candidate,
@@ -408,8 +512,23 @@ def rank(
     # 稳定排序：总分相同 → 回到第①阶段序（`order`），也就是更相关/更靠前的先取。
     scored.sort(key=lambda item: (-item.score, item.order))
 
-    chosen = tuple(scored[: settings.rerank_k])
-    for rank_index, item in enumerate(scored[settings.rerank_k :], start=settings.rerank_k + 1):
+    # ④b 链单元的**条数上界**（`event_chain_max_units`，§6.7）：**整链进 / 整链出**。
+    # 超出的链不是"少进几条事件"（那等于把链拆了），而是**整条不进**、并在
+    # `dropped` 里给出理由。上界在 K 截断**之前**施加：一条进不了上下文的链
+    # 不该白占一个 `recall_limit` 名额，后面的单条候选因此仍有机会进。
+    accepted: list[Scored] = []
+    over_cap: list[tuple[int, Scored]] = []
+    chains_taken = 0
+    for position, item in enumerate(scored, start=1):
+        if item.candidate.is_chain:
+            if chains_taken >= settings.chain_max_units:
+                over_cap.append((position, item))
+                continue
+            chains_taken += 1
+        accepted.append(item)
+
+    chosen = tuple(accepted[: settings.rerank_k])
+    for rank_index, item in enumerate(accepted[settings.rerank_k :], start=settings.rerank_k + 1):
         dropped.append(
             Dropped(
                 candidate=item.candidate,
@@ -418,6 +537,20 @@ def rank(
                     f"五维分 {item.score!r} 排在第 {rank_index} 名，"
                     f"K=recall_rerank_k={settings.rerank_k}"
                     f"（recall_limit={settings.limit}）：没进上下文"
+                ),
+                score=item.score,
+                parts=dict(item.parts),
+            )
+        )
+    for position, item in over_cap:
+        dropped.append(
+            Dropped(
+                candidate=item.candidate,
+                reason="over_budget",
+                detail=(
+                    f"链单元上界 event_chain_max_units={settings.chain_max_units} 已被"
+                    f"排在前面的链占满（它在五维分里排第 {position} 名）：**整链不进**"
+                    "——链不拆成 N 条，所以超出的链连同链上全部事件一起被淘汰"
                 ),
                 score=item.score,
                 parts=dict(item.parts),
@@ -444,6 +577,8 @@ def rank(
         k=settings.rerank_k,
         limit=settings.limit,
         k_note=k_note,
+        chain_max_units=settings.chain_max_units,
+        chain_chosen=sum(1 for item in chosen if item.candidate.is_chain),
     )
 
 
@@ -506,6 +641,13 @@ def _resolve_settings(overrides: Mapping[str, float] | None) -> _Settings:
     if int(limit) < 0:
         raise ValueError(f"recall_limit 不能为负（{limit!r}）")
 
+    chain_units, source = limits.resolve("event_chain_max_units", overrides)
+    sources["event_chain_max_units"] = source
+    if int(chain_units) < 0:
+        raise ValueError(
+            f"event_chain_max_units 不能为负（{chain_units!r}）：0 = 一个链单元都不进上下文"
+        )
+
     return _Settings(
         weights=weights,
         w_bm25=w_bm25,
@@ -513,6 +655,7 @@ def _resolve_settings(overrides: Mapping[str, float] | None) -> _Settings:
         candidates_n=int(candidates_n),
         rerank_k=min(int(rerank_k), int(limit)),  # 硬约束 K ≤ recall_limit
         limit=int(limit),
+        chain_max_units=int(chain_units),
         sources=sources,
     )
 
@@ -523,7 +666,12 @@ def _clean_use_count(candidate: Candidate) -> int:
 
 
 def _rel_part(candidate: Candidate, settings: _Settings) -> tuple[float, str]:
-    """`rel = 1 − exp(−w_bm25·bm25_score)`，**不在这里再做归一化**（T5 已定死符号与量纲）。"""
+    """`rel`：单条 `1 − exp(−w_bm25·bm25_score)`；链单元取**链内最高**（见下）。
+
+    **不在这里再做归一化**（T5 已定死符号与量纲）。
+    """
+    if candidate.is_chain:
+        return _chain_rel_part(candidate, settings)
     raw = candidate.bm25_raw
     if raw is None:
         return 0.0, "无 bm25 原值（走 LIKE 回退路径，没碰 FTS）：rel 如实为 0"
@@ -543,12 +691,65 @@ def _rel_part(candidate: Candidate, settings: _Settings) -> tuple[float, str]:
     )
 
 
+def _chain_rel_part(candidate: Candidate, settings: _Settings) -> tuple[float, str]:
+    """链单元的 `rel` = **链内最高** `bm25`（§6.7）——**绝不求和**。
+
+    为什么取最高而不是 Σ：`rel` 是"相关度"不是"相关度总量"。N 条分数相加等于
+    "谁的事件多谁赢"——余额链天然比"今天改了什么"长，长链就会永远排在前面，
+    而那与"这个问题更相关"毫无关系。取最高是**长度不敏感**的聚合：往链里再加
+    一条不比现有最高更相关的事件，`rel` 一位都不变（"长链不加分"就是这么落实的）。
+
+    数据缺口要如实说：P1 的 `memory_event` **没有 FTS 索引**（schema 由 T3/T5
+    冻结、T11 不许加），所以事件侧没有 `bm25()` 原值可打。构造方给不出原值时
+    这里**如实为 0**，不编一个数——与 `bm25_raw is None`（LIKE 回退）同一处置。
+    聚合规则本身已经在此钉住：数据源一到（事件侧建了 FTS 或给了别的原值），
+    只要填进 `chain_members[].bm25_raw`，口径立刻按 §6.7 生效。
+    """
+    scored = [
+        (member.event_id, member.bm25_raw)
+        for member in candidate.chain_members
+        if member.bm25_raw is not None
+    ]
+    size = candidate.chain_size
+    if not scored:
+        if candidate.bm25_raw is None:
+            return 0.0, (
+                f"链内没有 bm25 原值（链上 {size} 条；P1 的 `memory_event` 没有 FTS "
+                "索引，事件侧打不出 `bm25()`）：链单元的 rel 如实为 0，不编一个值；"
+                "**链的长度不进 rel**（聚合口径 = 取链内最高，不是 Σ）"
+            )
+        scored = [(-1, candidate.bm25_raw)]
+
+    # 原值越小越相关（T5 实测），所以"最高"= 原值最小的那条。
+    best_id, best_raw = min(scored, key=lambda pair: pair[1])
+    score = bm25_score(best_raw)
+    value = 1.0 - math.exp(-settings.w_bm25 * score)
+    note = ""
+    if value < 0.0:
+        value = 0.0
+        note = f"；bm25_score {score!r} 为负（该词的 IDF 为负）→ 夹取到 0"
+    listed = " ".join(f"event:{event_id}={raw!r}" for event_id, raw in scored)
+    return value, (
+        f"链内最高（**不求和**）：链上 {size} 条的 bm25 原值 [{listed}] → "
+        f"取最高 event:{best_id}（原值 {best_raw!r}，原值越小越相关）→ "
+        f"bm25_score {score!r} → 1−exp(−w_bm25({settings.w_bm25})·{score!r}) = {value!r}"
+        f"{note}；长度不进公式（Σ 累加会让长链天然靠前，§6.7 明确禁止）"
+    )
+
+
 def _rec_part(candidate: Candidate, now: float, settings: _Settings) -> tuple[float, str]:
-    """`rec = exp(−age_days / half_life_days)`；**用哪一天**必须写在 reason 里。"""
+    """`rec = exp(−age_days / half_life_days)`；**用哪一天**必须写在 reason 里。
+
+    链单元的"哪一天"是**链内最新事件**（构造方把 `created_at` 设成链上最大
+    `at_abs` 并用 `recency_note` 说明）：新近度看的是"这个键最近被更新过没有"，
+    **不是链上攒了多少条**——所以长度不进这个分量。
+    """
     if candidate.last_used_at:
         reference, which = float(candidate.last_used_at), "last_used_at"
     else:
         reference, which = float(candidate.created_at), "created_at"
+    if candidate.recency_note:
+        which = candidate.recency_note
     if reference <= 0:
         return 0.0, (
             "没有 last_used_at / created_at（无时间戳可算 age_days）：rec 如实为 0"
@@ -567,7 +768,13 @@ def _rec_part(candidate: Candidate, now: float, settings: _Settings) -> tuple[fl
 
 
 def _imp_part(candidate: Candidate) -> tuple[float, str]:
-    """kind 基线（或判定值）+「通过验证 / 成功取代过别人」的 +0.1；用户改过的标 `(user)`。"""
+    """kind 基线（或判定值）+「通过验证 / 成功取代过别人」的 +0.1；用户改过的标 `(user)`。
+
+    链单元走另一条口径（`_chain_imp_part`）：**链内最高**重要度 × 时序完整度，
+    而且**不领** `IMPORTANCE_VERIFIED_BONUS`（理由见该函数）。
+    """
+    if candidate.is_chain:
+        return _chain_imp_part(candidate)
     if candidate.importance is None:
         base = IMPORTANCE_BASELINE.get(candidate.kind)
         if base is None:
@@ -591,6 +798,42 @@ def _imp_part(candidate: Candidate) -> tuple[float, str]:
             why.append("成功取代过别人")
         origin += f" + {IMPORTANCE_VERIFIED_BONUS}（{'/'.join(why)}）"
     return base + bonus, f"重要度 {origin}"
+
+
+def _chain_imp_part(candidate: Candidate) -> tuple[float, str]:
+    """链单元的 `imp` = **链内最高**重要度 × **时序完整度**（§6.7 表）。
+
+    两条口径都要说出来：
+
+    - **取最高、不求和**：`memory_event` 没有 `importance` 列，链的重要度按链内各条的
+      `confidence` 最大值读（构造方已把最大值放进 `Candidate.importance`）——本实现
+      口径，设计稿未给。取最大是长度不敏感的；Σ 会让长链天然更"重要"。
+    - **时序完整度**：`derived_from` 没覆盖写链 / 缺基准值 / 状态未定时乘
+      `CHAIN_INCOMPLETE_FACTOR` 并点名原因（§6.7：**不假装完整**，§15.6 的
+      `needs_review` 就是这件事的标记）。
+
+    链单元**不领** `IMPORTANCE_VERIFIED_BONUS`：构造方留 `verified=False`。
+    "成功取代过别人"在链上几乎恒真（链越长越容易有取代），那 `+0.1` 就是变相的
+    长度加分——与 §6.7 的"长链不加分"直接冲突，所以链上不给。
+    """
+    if candidate.importance is None:
+        base = IMPORTANCE_BASELINE_FALLBACK
+        origin = f"链内没有判定值（链上各条都没给重要度）→ 中性基线 {base}"
+    else:
+        base = float(candidate.importance)
+        origin = (
+            f"链内最高重要度 {base!r}（链上各条取**最大**、不求和；"
+            "`memory_event` 没有 importance 列，按链内 confidence 最大值读——本实现口径）"
+        )
+    if candidate.importance_user_set:
+        origin += "(user)"
+    if not candidate.complete:
+        base *= CHAIN_INCOMPLETE_FACTOR
+        origin += (
+            f" × 时序完整度 {CHAIN_INCOMPLETE_FACTOR}（{candidate.incomplete_reason or '未给出原因'}）"
+            "：缺基准/证据链不覆盖时扣分并标 needs_review，不假装完整（§6.7 / §15.6）"
+        )
+    return base, f"重要度 {origin}"
 
 
 def _use_part(candidate: Candidate, max_use: int) -> tuple[float, str]:
