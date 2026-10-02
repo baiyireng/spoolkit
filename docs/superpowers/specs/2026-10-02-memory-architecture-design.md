@@ -1100,7 +1100,7 @@ A 工作区的记忆自动出现在 B 工作区，等于让一个临时任务顺
 |---|---|---|---|
 | **M4-T1** | **跨天增量归约**（上面这个情景 = 3 条 event） | ① `state('wallet.balance').value == 130`；② **这个值必须由事件链推出**——同一份 event 链在**不调用任何模型**的条件下重算出 130（归约器是确定性的，§15.3）；③ `derived_from` 恰好覆盖 3 条 event id，且每条都能回溯到 `raw_text`（**证据链可追溯**）；④ 两种问法都对：「我当时说的（第 1 天那一刻）」→ **100**（那条 `op='set'` 的值）、「第 1 天结束时是多少」→ **80**（当日重算）、「现在是多少」→ **130**（§15.4） | **离线可跑**（纯归约器单测：不要模型、不要 8080）；**本轮没跑** |
 | **M4-T2** | **相对时间解析** | 「昨天 / 今天 / 刚才」解析后 `event.at_abs` 是**绝对时间戳（含 `tz_offset_min`）**，`at_source='relative'`；解析失败或歧义 → `time_precision='unknown'`，**不猜**，且该 event 不参与需要精确时刻的断言（§15.5） | 离线可跑；**本轮没跑** |
-| **M4-T3** | **取代链不是删除** | 同键新值到来后：旧 `state` 行 `valid_to` 非空 + `superseded_by` 指向新行，旧行**仍可查**；`event` 一条不少（append-only，§15.4） | 离线可跑；**本轮没跑** |
+| **M4-T3** | **取代链不是删除** | 同键新值到来后：旧 `state` 行 `valid_to` 置为**生效时刻**（新行的 `valid_from`）、`superseded_by` 指向**新行 id**，旧行**仍可查**；`event` 一条不少（append-only）；且**任一时刻至多一行 `valid_to IS NULL`**（部分唯一索引 `idx_state_current` 保证，§15.4） | 离线可跑；**本轮没跑** |
 | **M4-T4** | **冲突不静默选一个** | 构造两条互斥 `op='set'`：`state.status == 'conflict'`，**两条 event 都在**，`why` 能说出"为什么判冲突"，注入时带"未定"标签（§15.6） | 离线可跑；**本轮没跑** |
 | **M4-T5** | **事件链整体检索** | 问「现在还剩多少」时候选里出现 **1 个 `unit='event_chain(3)'`**，而**不是**"最相似的 1 条"；`why` 同时给出 `channel` / `bm25` / `importance` / `age_days`（§6.7、§6.3） | 需要 §6.7 的检索改动；**本轮没跑** |
 | **M4-T6** | **端到端：模型会不会自己猜** | 跨天多轮会话里问「现在还剩多少」：唯一可接受的答案来源是**注入的 state / 事件链**；若模型绕过它自行算术，记一次失败（"不许凭记忆猜"的行为面） | **需要一份跨天多轮任务脚本**；**本轮没跑** |
@@ -2172,11 +2172,42 @@ embed-light = ["model2vec>=0.9", "numpy>=1.26"]      # 方案 D
 | `confidence` | ✅ | 写入时判定；**时间 `unknown` 的观察默认低** |
 | `content_hash` | ✅ | 去重指纹（与 §4.3 同一算法），防同一轮重跑写两遍 |
 
-**`memory_state` 的字段**：`entity` + `attribute`（**联合主键**）、`value`、`unit`、
-`derived_from`（**有序** event id 列表）、`reducer`、`valid_from`、`valid_to`（NULL = 至今有效）、
-`superseded_by`、`confidence`、`status`（`active` / `conflict` / `needs_review`）、
-`reason`（`missing_base` / `unit_mismatch` / `same_instant` / `no_reducer` / `time_unknown`，§15.6）、
-`computed_at`、`is_derived`（**DDL 默认 1，恒为真**）。
+**`memory_state` 的字段（逐条）**——**双时态行 + 当前行唯一**：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `id` | ✅ | **自增主键**：取代链 `superseded_by` 的引用目标（§15.4）。**没有它，`superseded_by` 就没有可 `REFERENCES` 的对象** |
+| `entity` | ✅ | **归一化**实体名（§15.2） |
+| `attribute` | ✅ | **归一化**属性名（§15.2） |
+| `value` | ⭕ | 推导值（整数最小单位或 `Decimal` 串，**不用 `REAL`**，§15.3 第 4 条）；**缺基准时留空，不给一个猜的数**（§15.6 第 1 条） |
+| `unit` | ⭕ | 全程只有一个 `unit` 才允许相加（§15.6 第 2 条） |
+| `derived_from` | ✅ | **有序** event id 列表（证据链）；必须能回答"你是从哪几条推的" |
+| `reducer` | ✅ | `sum_delta` / `latest` / `set` / `max` / `min` / `none`（§15.3） |
+| `valid_from` | ✅ | **NOT NULL**：半开区间 `[from, to)` 的起点。没有"不知道从哪生效"的行 |
+| `valid_to` | ⭕ | **可空**；`NULL` = **至今有效**（当前行）。是新旧两行并存的那一半 |
+| `superseded_by` | ⭕ | **自引用外键** `REFERENCES memory_state(id)`：旧 → 新，单向可追（§15.4） |
+| `confidence` | ✅ | 写入时判定 |
+| `status` | ✅ | `active` / `conflict` / `needs_review`（§15.6） |
+| `reason` | ✅ | `missing_base` / `unit_mismatch` / `same_instant` / `no_reducer` / `time_unknown`（§15.6） |
+| `computed_at` | ✅ | 最近一次重算的时刻 |
+| `is_derived` | ✅ | **DDL 默认 1，恒为真**（见下） |
+
+**三条结构性约束（一次性写死，§15.4 的两种问法都靠它们）**：
+
+1. **`UNIQUE(entity, attribute, valid_from)`**——同键**同生效时刻**只有一行；
+2. **部分唯一索引** `CREATE UNIQUE INDEX idx_state_current ON memory_state(entity, attribute) WHERE valid_to IS NULL;`
+   ——**每个键至多一行当前值**，同时**允许历史行共存**。
+   **为什么必须是部分唯一索引**：写成普通唯一索引（或把 `(entity, attribute)` 做成主键）
+   就会把历史行挡死，§15.4 的"我当时说的"那种问法在库里就没有行可读了
+   ——这与 §4.3 的 `idx_semantic_dedupe` 是同一套路；
+3. **自引用外键** `superseded_by INTEGER REFERENCES memory_state(id)`——**真的**外键，
+   不是"一个普通 `INTEGER` 列"：指向不存在的 id 由数据库拒绝（写入顺序见 §15.4）。
+
+> **修订记录（v4 发布前就地改正，不加 v5）**：本节原先写的是 `entity` + `attribute`
+> **联合主键**。那与 §15.4"新值到来 → 旧行 `valid_to` 非空 + `superseded_by` 指向新行 +
+> **旧行仍可查**"**不能同时成立**（同键只允许一行），而本节又没给 `id`，
+> `superseded_by` 无从 `REFERENCES`。两处一次改对：**双时态行 + 当前行唯一**。
+> 依据是 §15.4 的"两种问法**都**必须能答"。
 
 `is_derived` 不是装饰：它让"**这是推导值**"这句话**在数据里可查**——
 
@@ -2259,17 +2290,25 @@ wallet.balance = 130 CNY   （推导值 reducer=sum_delta；由 3 条事件重�
 
 | 概念 | 规则 |
 |---|---|
-| **有效期** | `valid_from` / `valid_to` 是**半开区间** `[from, to)`；`valid_to IS NULL` 表示**至今有效** |
+| **有效期** | `valid_from` / `valid_to` 是**半开区间** `[from, to)`；`valid_to IS NULL` 表示**至今有效**（当前行）。`valid_from` **NOT NULL** |
 | **取代** | 新值到来 → 旧 `state` 行 `valid_to = 新行.valid_from`，`superseded_by = 新行 id`；**旧行不删、不改值** |
-| **两种问法（都必须能答）** | ① "**现在是多少**" → `status='active' AND valid_to IS NULL` 那一行（= 由全链重算，§15.3）；② "**我当时说的**" → `spool memory state show wallet.balance --at 2026-10-02`，取 `at_abs` 落在 `[valid_from, valid_to)` 的历史行 |
+| **当前行唯一 + 历史行共存** | 库层三条一起管（§15.1）：`UNIQUE(entity, attribute, valid_from)`（同键同刻一行）+ **部分唯一索引** `idx_state_current ON memory_state(entity, attribute) WHERE valid_to IS NULL`（每个键**至多一行当前值**，历史行照旧共存）+ **自引用外键** `superseded_by REFERENCES memory_state(id)`。**普通唯一索引做不到这件事**：它会把历史行一并挡死 |
+| **写入顺序（三步、同一事务）** | ① 旧行 `valid_to = 新行.valid_from`（此刻该键没有当前行）→ ② 插新行、取回 `id` → ③ 旧行 `superseded_by = 新行 id`。这是**硬要求**：`superseded_by` 是真外键，③ 不能提到 ② 之前；① 与 ② 必须在同一事务里做完，否则中间态会短暂出现"零行当前值" |
+| **两种问法（都必须能答）** | ① "**现在是多少**" → `SELECT value FROM memory_state WHERE entity=? AND attribute=? AND status='active' AND valid_to IS NULL`——**部分唯一索引保证这一行至多一条**，`--at` 不需要；② "**我当时说的**" → `spool memory state show wallet.balance --at 2026-10-02`，即 `... WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)`，取 `at_abs` 落在 `[valid_from, valid_to)` 的那行**历史行**（它**没有被删、也没有被改值**） |
 | **事件永不删除** | `op='set'` 只是在链上**记一个新值**，它**不改写历史**；`event` 表没有 DELETE 路径（与 §12 第 3 条"不做自动物理删除"同口径） |
 | **纠错只有一条路** | `spool memory event retract <id>`：**软撤销**（`status='retracted'`，不进归约，**保留、可恢复**）→ 触发重算。真要物理删除需要 `--purge` 且写明后果 |
-| **取代链可查** | `superseded_by` 单向可追（旧 → 新）；反向（新 → 旧）由 `memory_link(relation='supersedes')` 补 |
+| **取代链可查** | `superseded_by` 单向可追（旧 → 新，且它是指向 `memory_state(id)` 的**外键**）；反向（新 → 旧）由 `memory_link(relation='supersedes')` 补 |
 
 **为什么更新必须走"关闭 + 取代"而不是直接改值**：
 用户在意**时序性**，他**两种问法都会问**——"我当时说的"和"现在是多少"。
 直接改值就把第一种问法**永久删掉**了；而且"我第 3 天说 130、第 5 天被改成 120"
 这件事会**没有任何痕迹**。
+
+**代价照实说**：`memory_state` **不再是一键一行**——同键的每一次更新都会**多留一行**
+历史行（旧行只被关闭、不被删也不被改值）。这是"两种问法都能答"必须付的钱，
+所以 §15.7 的容量口径要分成**当前行**与**历史行**两笔算（当前行有上界，历史行没有）。
+"关闭 + 取代"的写入顺序由**真外键 + 部分唯一索引**在库层强制（见上表），
+`spool memory state verify` 的全量重算比对（§15.3 硬规矩 2）是这道记账的兜底。
 
 **不这么定会怎样**：只剩"最新值"一个答案，一旦它错了就**无法回溯是怎么错的**；
 更糟的是数据不可回放（§5.4 的可回放基线依赖"每条记录都在"）。
@@ -2338,15 +2377,15 @@ wallet.balance = 130 CNY   （推导值 reducer=sum_delta；由 3 条事件重�
 | 接口 | 怎么接 |
 |---|---|
 | **写入门禁** | `event` 走**同一条门禁**（§5.3）：① 脱敏 `redact_secrets`；② 判据——`event` **只查"是原始观察"**，**不做 J1–J5 的跨任务复用判断**（原始观察的价值不在复用，在**可重算**，§15.3）；③ 幂等 `round_key = sha1(session_id\|turn\|raw_text)`，防同一轮重跑写两遍；④ 去重按 `content_hash`（命中只 `touch`，不新增）；⑤ 冲突**改成 §15.6 的六类** |
-| **表与迁移** | `memory_event` / `memory_state` / `entity_alias` / `attribute_alias` / `entity_attribute` 五张表，**与 §4.3 的六张表同库**（`<工作区>/.agent/memory.db`）、**同迁移路径**（§9.3：`ALTER TABLE` 加列 + `PRAGMA user_version` 逐步升级 + 幂等 `memory_write`） |
+| **表与迁移** | §15 一共**六张表**：`memory_event`（原始观察）/ `memory_state`（推导值，双时态）/ `entity_attribute`（键注册表）/ `entity_alias` / `attribute_alias`（两张别名表）/ `memory_event_archive`（事件归档表，§13.13 第 5 条）。**与 §4.3 的六张表同库**（`<工作区>/.agent/memory.db`）、**同迁移路径**（§9.3：`ALTER TABLE` 加列 + `PRAGMA user_version` 逐步升级 + 幂等 `memory_write`）——建成 v4 一步（`user_version` 3 → 4） |
 | **读取** | 检索时 `event` 链作为**一个整体单元**参与候选与重排，见 §6.7；`why` 的必备字段见 §6.3 |
 | **注入** | `state` **不进 `memory.md`**（决议 6：热记忆是人类可读 Markdown，且**[实测]** 已占 **1011/1044 = 96.8%**，§1）。需要"每轮知道某个量"的场合由 §6.6 的 `task_state` 通道与 **state 直接注入**（`confidence ≥ 0.8`，上界 1 条）承担 |
 | **热记忆淘汰** | 不变（§7.1 按重要度，不再 FIFO）；`state` 不参与 `hot_budget` 竞争 |
-| **生命周期** | `state` 行数上界 = 不同 `(entity, attribute)` 的对数（**小**，与 kind 上限同量级）；`event` 行数**随对话线性增长** → **已定案做参数化上限 + 归档表**（`event_archive_threshold`，**阈值本身仍是待标定初值**；**本轮没测增长速率**，见 §13.13 第 5 条） |
+| **生命周期** | `state` **当前行**数上界 = 不同 `(entity, attribute)` 的对数（**小**，与 kind 上限同量级）；`state` **历史行**随"该键被更新过几次"增长（取代 = 插新行 + 关旧行，§15.4），所以它与 `event` 一样要进 `state_verify` 的全量比对；`event` 行数**随对话线性增长** → **已定案做参数化上限 + 归档表**（`event_archive_threshold`，**阈值本身仍是待标定初值**；**本轮没测增长速率**，见 §13.13 第 5 条） |
 | **评测** | §10.4 的 M4-T1..T6；M4-T1..T4 **离线可跑**（纯归约器单测，不要模型、不要 8080） |
 
 **为什么接法要"最小"**：本章**不新开一层存储、不新开一条写入路径、不新增一个上下文通道**——
-五张表进同一个库、门禁复用同一条、渲染复用 `recall` 的通道预算（§6.2）。
+**六张表**进同一个库、门禁复用同一条、渲染复用 `recall` 的通道预算（§6.2）。
 **不这么定会怎样**：时序能力一旦自带一套存储与通道，就会同时带上"第二套默认值、
 第二套审计、第二套预算"——§5.3 已经证明过"约定式同步"必然漏（`record_lesson` 漏写 FTS 就是先例）。
 

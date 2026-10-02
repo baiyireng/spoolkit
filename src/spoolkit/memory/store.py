@@ -17,7 +17,11 @@
   `memory_fts` 索引四列 `text/kind/trigger/source`——`kind`、触发词、来源
   都要能查（设计稿 §2.2 与缺陷 4）。**v3 起的 `semantic` 一族沿同一条口径**
   （`SEMANTIC_SCHEMA`：`semantic` 上也没有触发器，同步在
-  `semantic.insert_semantic` 一处做）。
+  `semantic.insert_semantic` 一处做）。**v4 起的时序六表（`TIMELINE_SCHEMA`：
+  `memory_event` / `memory_state` / 两张别名表 / 注册表 / 事件归档表）同样
+  不建触发器**，而且金额与数量列一律用 `TEXT`（整数最小单位或 `Decimal`
+  序列化串）——浮点累加会让账不平，而账不平不报错、只是数不对
+  （设计稿 §15.3 第 4 条）。
 """
 
 import re
@@ -327,11 +331,204 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     conn.executescript(SEMANTIC_SCHEMA)
 
 
+# ---- v4：状态与时序六表（设计稿 §15.1 / §15.2 / §15.4 / §15.5 / §15.7 + 计划 T3）----
+#
+# DDL 的字段名**逐条**照 §15.1 的字段表（`memory_event` 14 项 + `status`、
+# `memory_state` 14 项 + `id`）、§15.2 的两张别名表（`alias` / `canonical` / `lang` /
+# `scope` / `created_at` / `source`），并补上 §15.5 硬约束 3 要求的
+# `tz_offset_min`（必填）与 `tz_name`（可空）；归档表与 `memory_event` 同形
+# （§13.13 第 5 条：「超限把最旧者搬进归档表」，`id` 保持原值，`derived_from`
+# 里的 event id 搬过去仍解析得到）。**本任务不写归档逻辑**（那是 T9）。
+#
+# 三处按计划 T3 的硬约束写死：
+#
+# ① **`memory_state` 是双时态行 + 当前行唯一**（原设计写的是
+#    `(entity, attribute)` 联合主键，**已就地改掉**，理由见下）。
+# ② **`is_derived` 的 `DEFAULT 1`**（§15.1 原话「DDL 默认 1，恒为真」）：它让
+#    「这是推导值」这句话在数据里可查，不是装饰。
+# ③ **金额/数量列不许 `REAL`**（§15.3 第 4 条）：`memory_event.value` 与
+#    `memory_state.value` 都是 `TEXT`（整数分或 `Decimal` 串），比较用精确相等、
+#    输出带 `unit`。
+#
+# ①的历史（写在这里，免得后人再走一遍）：v4 第一版把 `(entity, attribute)` 做成
+# 联合主键，**那与 §15.4 直接冲突**——§15.4 要求同键新旧两行并存（旧行
+# `valid_to` 非空 + `superseded_by` 指向新行 + 旧行仍可查），而联合主键规定同键
+# 只能有一行：§15.4 的「我当时说的」这种问法就只剩 replay 事件链一条路。同时
+# §15.1 没给 `id`，`superseded_by` 无从 `REFERENCES`。裁决是**双时态行 + 当前行
+# 唯一**，一次把两个问题都消掉：
+#
+#   · `id INTEGER PRIMARY KEY` —— 给 `superseded_by` 一个可引用的目标；
+#   · `UNIQUE(entity, attribute, valid_from)` —— 同键**同生效时刻**只有一行；
+#   · 部分唯一索引 `idx_state_current ... WHERE valid_to IS NULL` —— 每个键
+#     **至多一行当前值**，同时**允许历史行共存**（与 `semantic` 的
+#     `idx_semantic_dedupe` 是同一套路：写成普通唯一索引就会把历史行挡死）；
+#   · `superseded_by INTEGER REFERENCES memory_state(id)` —— **真的**自引用外键。
+#
+# 改 v4 而不是加 v5：v4 **从未发布**（还没提交；真实工作区 `user_version=0`，
+# 只有测试副本跑过它），所以原地改对、保持版本阶梯 0→1→2→3→4 干净——
+# 「迁移是发布契约」，发布出去的版本才需要补丁版本。
+#
+# **不建触发器**：理由与 P0 在 `memory_fts`、P1 在 `semantic_fts` 上完全相同——
+# 中文检索依赖写入前把中文字逐字分开（`normalize_for_fts` 是 Python 函数，
+# **SQL 触发器里没有它**）；而这里的结构性约束（同键同刻唯一、每个键至多一行
+# 当前值、别名唯一）由唯一索引在数据库层挡住，本来也不需要触发器。同步责任归
+# 写入侧一处（T9 的归约器）。
+TIMELINE_SCHEMA = """
+-- 1) 事件：原始观察，append-only（§15.1）。「在某个时刻，我观察到某人说了/发生了某事」。
+--    · `value` 用 TEXT：金额存整数最小单位、或 Decimal 序列化串，**不建 REAL 列**
+--      （§15.3 第 4 条：0.1+0.2 那类误差会变成账不平）。
+--    · `at_abs` 可空：相对时间解析失败时落 NULL（§15.5 第 4 行：不猜，
+--      原始观察照样入库）；`at_source`/`time_precision` 相应为 unknown。
+--    · `tz_offset_min` 必填且**不给默认值**：默认 0 等于悄悄按 UTC 算日界线
+--      （§15.5 硬约束 3：日界线按 tz_offset_min 算，不许按 UTC 算）。
+--    · `status` 只有 active / retracted：纠错走软撤销，**本表没有 DELETE 路径**（§15.4）。
+CREATE TABLE IF NOT EXISTS memory_event (
+    id             INTEGER PRIMARY KEY,        -- 引用名 event:<id>
+    entity         TEXT NOT NULL,             -- 归一化实体名（§15.2），如 wallet
+    attribute      TEXT NOT NULL,             -- 归一化属性名，如 balance
+    op             TEXT NOT NULL,             -- delta|set|observe
+    value          TEXT NOT NULL,             -- 带符号增量或新值：整数最小单位/Decimal 串
+    unit           TEXT NOT NULL DEFAULT '',  -- CNY|次|分钟|''；不同 unit 不许相加
+    at_abs         REAL,                      -- 绝对时刻（epoch 秒）；解析失败为 NULL
+    tz_offset_min  INTEGER NOT NULL,          -- 必填：日界线按它算
+    tz_name        TEXT,                      -- 可空
+    at_source      TEXT NOT NULL,             -- explicit|relative|turn|unknown
+    time_precision TEXT NOT NULL,             -- exact|minute|day|turn|unknown
+    source_ref     TEXT NOT NULL,             -- session:<id>#turn:<n> / transcript:<id> / tool:<name>
+    raw_text       TEXT NOT NULL,             -- 原始那句，不许改写
+    speaker        TEXT NOT NULL DEFAULT '',  -- user|agent|tool（来源优先级的一半）
+    confidence     REAL NOT NULL DEFAULT 0.5, -- 写入时判定；时间 unknown 的默认低
+    content_hash   TEXT NOT NULL,             -- 去重指纹（与 §4.3 同一算法）
+    status         TEXT NOT NULL DEFAULT 'active'  -- active|retracted
+);
+CREATE INDEX IF NOT EXISTS idx_event_key_at     ON memory_event(entity, attribute, at_abs);
+CREATE INDEX IF NOT EXISTS idx_event_key_status ON memory_event(entity, attribute, status);
+CREATE INDEX IF NOT EXISTS idx_event_hash       ON memory_event(content_hash);
+CREATE INDEX IF NOT EXISTS idx_event_at         ON memory_event(at_abs);
+
+-- 2) 推导出的当前值：由确定性归约器写，模型不许直接写（§15.1）。
+--    **双时态行 + 当前行唯一**（本常量上方的 ①）：新值到来时插一行新行、把旧行
+--    的 `valid_to` 置为生效时刻、`superseded_by` 指向新行 id —— **旧行不删不改值**，
+--    所以「现在是多少」与「我当时说的」两种问法各自都答得出来（§15.4）。
+--    · `valid_from` / `valid_to` 是半开区间 [from, to)，`valid_to IS NULL` = 至今有效。
+--    · `UNIQUE(entity, attribute, valid_from)`：同键同生效时刻只许一行。
+--    · `idx_state_current` **必须是部分唯一索引**：只约束当前行，历史行照旧共存。
+--    · `value` 可空：缺基准时**留空，不给一个猜的数**（§15.6 第 1 条）。
+CREATE TABLE IF NOT EXISTS memory_state (
+    id            INTEGER PRIMARY KEY,        -- 自增主键：superseded_by 的引用目标（§15.4）
+    entity        TEXT NOT NULL,             -- 归一化实体名
+    attribute     TEXT NOT NULL,             -- 归一化属性名
+    value         TEXT,                      -- 推导值：整数最小单位/Decimal 串；缺基准时空
+    unit          TEXT NOT NULL DEFAULT '',  -- 全程只有一个 unit 才允许相加（§15.6 第 2 条）
+    derived_from  TEXT NOT NULL DEFAULT '',  -- 证据链：有序 event id 列表（JSON 数组）
+    reducer       TEXT NOT NULL DEFAULT 'none',  -- sum_delta|latest|set|max|min|none
+    valid_from    REAL NOT NULL,             -- 半开区间起点（NOT NULL：没有「不知道从哪生效」的行）
+    valid_to      REAL,                      -- NULL = 至今有效
+    superseded_by INTEGER REFERENCES memory_state(id),  -- 取代链：旧 → 新（§15.4）
+    confidence    REAL NOT NULL DEFAULT 0.5,
+    status        TEXT NOT NULL DEFAULT 'active',  -- active|conflict|needs_review
+    reason        TEXT NOT NULL DEFAULT '',  -- missing_base|unit_mismatch|same_instant|no_reducer|time_unknown
+    computed_at   REAL NOT NULL,             -- 最近一次重算的时刻
+    is_derived    INTEGER NOT NULL DEFAULT 1,  -- DDL 默认 1，恒为真（§15.1）
+    UNIQUE (entity, attribute, valid_from)   -- 同键同生效时刻只有一行
+);
+-- 每个键**至多一行当前值**，历史行共存（部分唯一索引；写成普通唯一索引会把
+-- 历史行挡死，取代链就没法走了）。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_state_current
+    ON memory_state(entity, attribute) WHERE valid_to IS NULL;
+
+-- 3) 键注册表（§15.2 / §15.6 第 5 条）：键怎么定与用哪个算子都落在这里。
+--    `type` 可空：没有 type 与没有这一行等价——都走 needs_review + no_reducer，
+--    **不许默认套 sum_delta**。`reducer` 可空：不给就按 type 推（§15.3 的对照表）。
+CREATE TABLE IF NOT EXISTS entity_attribute (
+    entity    TEXT NOT NULL,   -- 归一化实体名（单数名词）
+    attribute TEXT NOT NULL,   -- 归一化属性名（名词）
+    type      TEXT,            -- monetary|count|duration|text|enum|status|tags|files|best_score
+    reducer   TEXT,            -- sum_delta|latest|set|max|min|none
+    PRIMARY KEY (entity, attribute)
+);
+
+-- 4) 实体别名映射（§15.2）：用户说「余额」「钱」「现金」，系统都指 wallet.balance。
+--    `alias` 是**唯一主键** = 「一个 alias 只能指一个 canonical」的机制；
+--    想让它指另一个 canonical 只能走 `alias move --force` 且写 audit（T9/T14）。
+--    来源只有两条：用户显式、人确认过的候选（P1 不收自动生成的）。
+CREATE TABLE IF NOT EXISTS entity_alias (
+    alias      TEXT NOT NULL PRIMARY KEY,    -- 别名（唯一；NULL 别名在这里没有意义）
+    canonical  TEXT NOT NULL,                -- 归一化实体名
+    lang       TEXT NOT NULL DEFAULT '',
+    scope      TEXT NOT NULL DEFAULT 'workspace',
+    created_at REAL NOT NULL,
+    source     TEXT NOT NULL DEFAULT ''      -- user|confirmed
+);
+
+-- 5) 属性别名映射（§15.2）：与 entity_alias 同形，canonical 是属性段。
+CREATE TABLE IF NOT EXISTS attribute_alias (
+    alias      TEXT NOT NULL PRIMARY KEY,
+    canonical  TEXT NOT NULL,                -- 归一化属性名
+    lang       TEXT NOT NULL DEFAULT '',
+    scope      TEXT NOT NULL DEFAULT 'workspace',
+    created_at REAL NOT NULL,
+    source     TEXT NOT NULL DEFAULT ''
+);
+
+-- 6) 事件归档表（§13.13 第 5 条 / §15.7 生命周期）：与 memory_event 同形，
+--    `id` 保持原值——`derived_from` 里引用的 event id 搬过来仍解析得到。
+--    本任务只建表；「超限把最旧者搬进来、检索默认不含已归档」是 T9。
+CREATE TABLE IF NOT EXISTS memory_event_archive (
+    id             INTEGER PRIMARY KEY,
+    entity         TEXT NOT NULL,
+    attribute      TEXT NOT NULL,
+    op             TEXT NOT NULL,
+    value          TEXT NOT NULL,
+    unit           TEXT NOT NULL DEFAULT '',
+    at_abs         REAL,
+    tz_offset_min  INTEGER NOT NULL,
+    tz_name        TEXT,
+    at_source      TEXT NOT NULL,
+    time_precision TEXT NOT NULL,
+    source_ref     TEXT NOT NULL,
+    raw_text       TEXT NOT NULL,
+    speaker        TEXT NOT NULL DEFAULT '',
+    confidence     REAL NOT NULL DEFAULT 0.5,
+    content_hash   TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'active'
+);
+"""
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """v3 → v4：建状态与时序六表（`user_version` 3 → 4）。
+
+    六张表：`memory_event`（原始观察，append-only）、`memory_state`（推导值，
+    **双时态行 + 当前行唯一**）、`entity_attribute`（键注册表）、
+    `entity_alias` / `attribute_alias`（别名映射，`alias` 唯一主键）、
+    `memory_event_archive`（事件归档表，本步不写归档逻辑）。
+
+    **`memory_state` 的一处就地修订（v4 从未发布，所以改 v4、不加 v5）**：
+    本步的第一版按 §15.1 的字面写 `(entity, attribute)` 联合主键，那与 §15.4
+    「新值到来 → 旧行 `valid_to` 非空 + `superseded_by` 指向新行、**旧行仍可查**」
+    不能同时成立（同键只允许一行，「我当时说的」那种问法就答不了），而 §15.1
+    又没给 `id`，`superseded_by` 无从 `REFERENCES`。裁决后的形态是：
+    `id INTEGER PRIMARY KEY` + `UNIQUE(entity, attribute, valid_from)` +
+    部分唯一索引 `idx_state_current ... WHERE valid_to IS NULL`（每个键至多一行
+    当前值、历史行共存）+ `superseded_by INTEGER REFERENCES memory_state(id)`
+    （真的自引用外键）+ `valid_from NOT NULL` / `valid_to` 可空。理由与完整历史
+    写在 `TIMELINE_SCHEMA` 上方的注释里。
+
+    与前两步同一条纪律：**只新增**表与索引，全部 `IF NOT EXISTS`，所以同一步骤
+    重跑是空操作；`memory` / `memory_fts` / `semantic` / `semantic_fts` / `episode`
+    与四张账本表**一个字节都不动**（决议 7）。**不建触发器**（理由见
+    `TIMELINE_SCHEMA` 上方的注释）。失败不记版本号（`_apply_step`）。
+    """
+    conn.executescript(TIMELINE_SCHEMA)
+
+
 # 步骤表：版本号必须严格递增，最后一项就是 `SCHEMA_VERSION`。
 _MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (1, "建基础表并给 episode 加列加索引", _migrate_to_v1),
     (2, "重建 memory_fts 为四列并回填", _migrate_to_v2),
     (3, "建 semantic 与四张账本表", _migrate_to_v3),
+    (4, "建状态与时序六表", _migrate_to_v4),
 )
 
 SCHEMA_VERSION = _MIGRATIONS[-1][0]

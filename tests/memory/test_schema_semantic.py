@@ -3,7 +3,8 @@
 设计稿 §4.3 第 1、2、4、5、6、7 块 + §9.3（旧库怎么迁）+ 计划 Task 2。这里钉的
 是六件事：
 
-1. **六张表与全部索引就位**、`user_version=3`；
+1. **六张表与全部索引就位**、`user_version` 至少到 3（T3 加了 v4 之后就是
+   `SCHEMA_VERSION`——这条用例钉的是「v3 建出来的东西」，不是「库停在 3」）；
 2. **`memory` 表 DDL 逐字不变**（决议 7 的老规矩）：沿用 P0 在
    `tests/memory/test_schema_version.py` 里的四种钉法——冻结建表文本、列清单
    元组、`MEMORY_SCHEMA` 片段、升级前后 DDL 指纹（真库副本那一份是 Task 2 的
@@ -171,15 +172,16 @@ def _p0_db(tmp_path: Path) -> sqlite3.Connection:
     return conn
 
 
-# ---- 验收 1：六张表与索引就位、user_version=3 ---------------------------------
+# ---- 验收 1：六张表与索引就位、v3 这一步建出来的东西都在 ----------------------
 
 
 def test_空库升级到v3六张表与索引就位(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "memory.db")
     init_memory_schema(conn)
 
-    assert SCHEMA_VERSION == 3
-    assert _user_version(conn) == 3
+    # v3 是步骤表里的第 3 步（版本号严格递增：T3 往后还会追加 v4）。
+    assert store._MIGRATIONS[2][0] == 3
+    assert _user_version(conn) == SCHEMA_VERSION
     assert set(V3_TABLES) <= _names(conn, "table")
     assert set(V3_INDEXES) <= _names(conn, "index")
     # 列清单逐字照 §4.3（加列、改名、删列都会在这里红）。
@@ -228,7 +230,7 @@ def test_旧库升级后memory表DDL逐字不变且行数不变(tmp_path: Path) 
 
     init_memory_schema(conn)
 
-    assert _user_version(conn) == 3
+    assert _user_version(conn) == SCHEMA_VERSION
     # ① 冻结建表文本（落库后的样子）。
     after_sql = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory'"
@@ -300,7 +302,7 @@ def test_版本被人为退回时v3重跑也不重复建表(tmp_path: Path) -> N
 
     init_memory_schema(conn)
 
-    assert _user_version(conn) == 3
+    assert _user_version(conn) == SCHEMA_VERSION
     assert _columns(conn, "semantic") == SEMANTIC_COLUMNS
     conn.close()
 

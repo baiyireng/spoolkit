@@ -289,7 +289,7 @@
 
 ### Task 3: schema v4 —— 状态与时序六表（`user_version` 3→4）
 
-**目标：** 按 §15.1 / §15.2 / §15.7 / §13.13 第 5 条建六张表：`memory_event`（§15.1 字段逐条）、`memory_state`（`(entity, attribute)` 联合主键 + `derived_from` / `reducer` / `valid_from` / `valid_to` / `superseded_by` / `status` / `reason` / `computed_at` / `is_derived`）、`entity_attribute`（注册表）、`entity_alias`、`attribute_alias`、`memory_event_archive`（归档表）。**五张新表与 §4.3 的六张同库、同迁移路径**（§15.7「表与迁移」）。
+**目标：** 按 §15.1 / §15.2 / §15.7 / §13.13 第 5 条建六张表：`memory_event`（§15.1 字段逐条）、`memory_state`（**双时态行 + 当前行唯一**：`id` 自增主键 + `entity` + `attribute` + `derived_from` / `reducer` / `valid_from`（NOT NULL）/ `valid_to`（可空）/ `superseded_by`（自引用外键）/ `status` / `reason` / `computed_at` / `is_derived`）、`entity_attribute`（注册表）、`entity_alias`、`attribute_alias`、`memory_event_archive`（归档表）。**六张新表与 §4.3 的六张同库、同迁移路径**（§15.7「表与迁移」）。
 
 **改动面：**
 
@@ -299,22 +299,24 @@
 
 **要点：**
 
-- `memory_state` 主键是 **`(entity, attribute)` 联合主键**（§15.1）；`is_derived` **DDL 默认 1**（§15.1 原话："DDL 默认 1，恒为真"）——它不是装饰：让"这是推导值"**在数据里可查**。
+- `memory_state` 是**双时态行 + 当前行唯一**（§15.1 / §15.4）：`id INTEGER PRIMARY KEY`（给 `superseded_by` 一个可引用的目标）+ `UNIQUE(entity, attribute, valid_from)`（同键同生效时刻只有一行）+ **部分唯一索引** `CREATE UNIQUE INDEX idx_state_current ON memory_state(entity, attribute) WHERE valid_to IS NULL;`（**每个键至多一行当前值**，同时允许历史行共存）+ `superseded_by INTEGER REFERENCES memory_state(id)`（**真的**自引用外键）+ `valid_from NOT NULL` / `valid_to` 可空。`is_derived` **DDL 默认 1**（§15.1 原话："DDL 默认 1，恒为真"）——它不是装饰：让"这是推导值"**在数据里可查**。
+  - **为什么不是 `(entity, attribute)` 联合主键**（原设计的写法）：那与 §15.4"新值到来 → 旧行 `valid_to` 非空 + `superseded_by` 指向新行 + **旧行仍可查**"**不能同时成立**（同键只允许一行，"我当时说的"那种问法只剩 replay 事件链一条路），而 §15.1 又没给 `id`，`superseded_by` 无从 `REFERENCES`。**改 v4、不加 v5**：v4 **从未发布**（还没提交；真实工作区 `user_version=0`，只有测试副本跑过它），原地改对才能保持版本阶梯 0→1→2→3→4 干净——"迁移是发布契约"，发布出去的版本才需要补丁版本。
 - **金额不许浮点**（§15.3 第 4 条）：`value` 用 `TEXT`（整数分或 `Decimal` 序列化字符串），**不建 REAL 列**；比较用精确相等，输出带 `unit`。
 - `memory_event` 的必带字段按 §15.1 表逐条：`id`/`entity`/`attribute`/`op`/`value`/`unit`/`at_abs`/`at_source`/`time_precision`/`source_ref`/`raw_text`/`speaker`/`confidence`/`content_hash`/`status`；外加 §15.5 硬约束 3 要求的 **`tz_offset_min`（必填）** 与 `tz_name`（可空）。
 - `memory_event` **没有 DELETE 路径**（§15.4）：`status` 只允许 `active` / `retracted`。
 - **`memory_state` 不设 `scope` 列**（「口径裁决 6」/§13.13 第 8 条）。
-- 索引至少：`(entity, attribute, at_abs)`、`(entity, attribute, status)`、`content_hash`、`at_abs`、`alias`（在两张别名表上是**唯一**索引）。
+- 索引至少：`(entity, attribute, at_abs)`、`(entity, attribute, status)`、`content_hash`、`at_abs`、**`idx_state_current`（部分唯一，`WHERE valid_to IS NULL`）**、`alias`（在两张别名表上是**唯一**索引）。
 - 归档表与 `event_archive_threshold`（T1 已登记）同批就位，**本任务不写归档逻辑**（写的是 T9 的"超限搬最旧"）。
 
 **验收标准（可证伪）：**
 
-1. 升级后 `PRAGMA user_version == 4`；六张表在 `sqlite_master` 里；`PRAGMA table_info(memory_state)` 的列清单与 `FIELD_SPECS` 逐字一致，且 `is_derived` 的默认值是 1。
+1. 升级后 `PRAGMA user_version == 4`；六张表在 `sqlite_master` 里；`PRAGMA table_info(memory_state)` 的列清单与 `FIELD_SPECS` 逐字一致（含 `id`），且 `is_derived` 的默认值是 1。
 2. 幂等：连跑两次结构与行数不变。
 3. `memory_event.status` 的合法取值只有 `active`/`retracted`（`models.py` 的枚举常量 + 用例断言两者相等）。
-4. **前三步的表一字未动**：`memory` / `semantic` / `episode` 的建表 SQL 与升级前逐字一致。
-5. 联合主键生效：插两条同 `(entity, attribute)` 的 `memory_state` → 第二条 `IntegrityError`（取代链走"插新行 + 改旧行 `valid_to`"，不是插第二行同键）。
+4. **前三步的表一字未动**：`memory` / `semantic` / `episode` 的建表 SQL 与升级前逐字一致；升级后**新增的恰好是六表五索引**（不许顺手多建一个对象或触发器）；真库副本（`user_version=0`）上也跑同一份比对。
+5. **同键两行不同 `valid_from` 可以共存，而两行同时 `valid_to IS NULL` 必须被数据库挡住**（部分唯一索引）；同键同 `valid_from` 也被 `UNIQUE` 挡住；`superseded_by` 能引用到 `memory_state(id)`（插一个不存在的 id 报 `IntegrityError`）。
 6. 前向兼容：`user_version=5` → 不执行、不报错。
+
 
 **证据要求：** `pytest tests/memory/test_schema_timeline.py tests/memory/test_schema_semantic.py -q`；在**副本**上打印 `table_info(memory_event)` / `table_info(memory_state)` 与 `user_version`。
 
@@ -322,11 +324,11 @@
 
 **风险：** ① `at_abs` 用 `REAL` 还是 `INTEGER`（epoch 秒）必须先定死：本计划用 **`REAL` 存 epoch 秒 + `INTEGER tz_offset_min`**，顺序与精度判定都按 `at_abs` 升序；② 别名表的唯一索引是 §15.2「一个 alias 只能指一个 canonical」的**机制**，写成普通索引等于没实现；③ 六张表里有五张在 P1 只被 CLI 与归约器用，**不许提前写 P2 的归档/衰减列**。
 
-**怎么证伪：** 把 `is_derived` 的 `DEFAULT 1` 去掉 → 验收 1 红；把别名表的唯一索引改成普通索引 → 验收里那条"同一 alias 指两个 canonical 报错"红；删掉 `tz_offset_min` → 验收 1 的列清单红。
+**怎么证伪：** 把 `is_derived` 的 `DEFAULT 1` 去掉 → 验收 1 红；把别名表的唯一索引改成普通索引 → 验收里那条"同一 alias 指两个 canonical 报错"红；删掉 `tz_offset_min` → 验收 1 的列清单红；**把部分唯一索引 `idx_state_current` 删掉（或去掉 `WHERE valid_to IS NULL`）→ 验收 5 的"两行当前值"红**；**把 `superseded_by` 的 `REFERENCES memory_state(id)` 删掉 → 验收 5 的"外键"红**；**把 `valid_from` 改成可空、或把 `id` 主键去掉 → `::test_state_columns` 红**。
 
-- [ ] 先写"六表就位 / 幂等 / 联合主键 / 别名唯一 / 前三步不动"五条用例（红）
+- [ ] 先写"六表就位 / 幂等 / 双时态（历史行共存 + 当前行唯一 + 自引用外键）/ 别名唯一 / 前三步不动"五条用例（红）
 - [ ] 实现 `_migrate_to_v4` 与 `timeline/models.py`
-- [ ] 跑局部测试转绿，在副本上复验
+- [ ] 跑局部测试转绿，在真库副本上复验
 
 ---
 
@@ -560,6 +562,8 @@
 - `sum_delta` 算法逐字照 §15.3：① 取该 `(entity, attribute)` 全部 event，按 `at_abs` 升序（同刻按 id 升序）→ ② 过滤 `status='retracted'` 的（**软撤销不进归约，但保留在证据链里**）→ ③ `base` = 最后一条 `op='set'` 的值（**若没有 `set` → 缺基准**）→ ④ `value = base + Σ(base 之后（含同刻）的 `delta`)` → ⑤ 只有一个 `unit` 才允许相加 → ⑥ 输出 `derived_from = [参与的全部 event id，升序]`。
 - **四条硬规矩**（§15.3）：值必须能由事件链重算（`state` 里不许存不能重算的东西）；重算优先于缓存（每次写新 event **只重算受影响的 `(entity, attribute)`**，不是全库）；**重算与缓存不一致 → 以重算值为准** + `memory_audit(action='recompute_mismatch', before=缓存, after=重算)` + 标 `needs_review` **直到有人看过**（**不许静默盖掉**）；**不许浮点累加金额**（整数分或 `Decimal`，比较用精确相等）。
 - **有效期与取代**（§15.4）：`valid_from` / `valid_to` 是**半开区间** `[from, to)`，`valid_to IS NULL` = 至今有效；新值到来 → 旧行 `valid_to = 新行.valid_from`、`superseded_by = 新行 id`、**旧行不删不改值**；`op='set'` 只在链上**记一个新值**，不改写历史；`event` 表**没有 DELETE 路径**；纠错唯一路径是 `retract`（软撤销，保留可恢复）。
+  - **写入顺序是硬要求（三步、同一事务）**：① 旧行 `valid_to = 新行.valid_from` → ② 插新行、取回 `id` → ③ 旧行 `superseded_by = 新行 id`。`superseded_by` 是**真外键**（`REFERENCES memory_state(id)`，T3 建的就位），所以 ③ 不能提到 ② 之前；部分唯一索引 `idx_state_current`（`WHERE valid_to IS NULL`）要求 ① 与 ② 在同一事务里做完，否则中间态会短暂出现"该键零行当前值"。
+  - **每个键任一时刻至多一行 `valid_to IS NULL`**：这条由数据库（部分唯一索引）保证，不许靠调用方自觉；CURRENT 行就是"现在是多少"的答案，历史行是"我当时说的"的答案（`--at` 走 `valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)`）。
 - **六类不确定**（§15.6 表）逐条实现：`missing_base`（`value` **留空**，不给猜的数）、`unit_mismatch`（拒绝相加）、`same_instant`（**两条都留**；`speaker` 优先级 `user > tool > agent` **只用来给建议**，除非显式打开 `state_auto_pick`（默认关）**不许用来删除**）、事件晚到（**重算整条链** + `memory_audit(action='recompute_backfill')`）、`no_reducer`（**不许默认套 `sum_delta`**）、`time_unknown`（**不假装它在链首或链尾**）。
 - **三条出口缺一不可**（§15.6）：`state.status` + `reason`；`memory_audit`（含参与判定的 event id）；`spool memory why <entity.attribute>`（T14 的 CLI）。
 - **`state` 只能由归约器写**（§15.1）：把写函数做成"只被 `reduce` 调用"（模块私有或 `_write_state`），并用例钉住。
@@ -570,7 +574,7 @@
 
 1. **M4-T1（余额例子）**：3 条 event（`set 100` / `delta -20` / `delta +50`，跨两天，`FakeClock`）→ ① `state('wallet.balance').value == 130`；② **同一份 event 链在完全不调用模型的条件下重算出 130**；③ `derived_from` 恰好是那 3 条 event id、升序、**每条都能回溯 `raw_text`**；④ 三种问法都对：`100`（第 1 天那一刻的那条 `set`）/ `80`（第 1 天结束当日重算）/ `130`（现在）。
 2. **M4-T2**：`昨天`/`今天`/`刚才` 解析后 `at_abs` 是绝对时间戳（含 `tz_offset_min`）、`at_source='relative'`；失败 → `time_precision='unknown'`、**不猜**、不参与需要精确时刻的断言。
-3. **M4-T3**：同键新值到来后旧 `state` 行 `valid_to` 非空 + `superseded_by` 指向新行、**旧行仍可查**、`event` 一条不少（append-only）。`retract` 后：`status='retracted'` 的行**仍在库里**、`event` 总数不变、值被重算。
+3. **M4-T3**：同键新值到来后，旧 `state` 行 `valid_to` 置为**生效时刻**（= 新行 `valid_from`）、`superseded_by` 指向**新行 id**，**旧行仍可查**（`valid_from <= t < valid_to` 查得到旧值）、`event` 一条不少（append-only）；**且任一时刻至多一行 `valid_to IS NULL`**（部分唯一索引保证——插第二行当前值必须报 `IntegrityError`）。`retract` 后：`status='retracted'` 的行**仍在库里**、`event` 总数不变、值被重算。
 4. **M4-T4**：两条互斥 `op='set'` → `state.status == 'conflict'`、**两条 event 都在**、`reason='same_instant'`、`why` 能说出"为什么判冲突"、注入时带"未定"标签（渲染在 T11）。
 5. 另三条：缺基准 → `value` 留空 + `reason='missing_base'`；单位不一致 → `reason='unit_mismatch'`；未注册键 → `reason='no_reducer'` 且**不许默认 `sum_delta`**。
 6. 金额不浮点：`Decimal("0.1") + Decimal("0.2")` 的用例断言精确等于 `0.30`；把实现改成 `float` → 该用例红。
@@ -583,7 +587,7 @@
 
 **风险：** ① `same_instant` 的"同一精度窗口"定义（`exact` vs `minute` vs `day`）**设计稿没有给死数值** → 本计划按"同精度窗口相等"实现并在任务报告里标注实现口径，请用户在 T14 的 `why` 输出上复核；② 事件晚到走"整链重算"，链长会随对话线性增长（`event_archive_threshold` 是待标定初值）；③ `time_precision='unknown'` 的 event **不参与同刻冲突判定**，但**仍进 `derived_from`** —— 这条组合要在用例里钉住（否则"不确定"会悄悄变成"确定"）。
 
-**怎么证伪：** 把 `sum_delta` 改成"取最新一条 `set`"（丢掉 delta 累加）→ 验收 1 的 130 变 100 → 红；把取代改成"直接 UPDATE 旧行" → 验收 3 红；把 `same_instant` 改成"按 `speaker` 选一个" → 验收 4 红；把 `no_reducer` 改成默认 `sum_delta` → 验收 5 红；把金额改成 `float` → 验收 6 红。
+**怎么证伪：** 把 `sum_delta` 改成"取最新一条 `set`"（丢掉 delta 累加）→ 验收 1 的 130 变 100 → 红；把取代改成"直接 UPDATE 旧行"→ 验收 3 红（旧值查不到了）；**取代时漏掉 `superseded_by`（或指向一个不存在的 id）→ 验收 3 红**；**把"关旧行"和"插新行"拆到两个事务里 → 验收 3 的"任一时刻至多一行 `valid_to IS NULL`"出现零行空窗**；把 `same_instant` 改成"按 `speaker` 选一个" → 验收 4 红；把 `no_reducer` 改成默认 `sum_delta` → 验收 5 红；把金额改成 `float` → 验收 6 红。
 
 - [ ] 先写 M4-T1..T4 与另三条的用例（红）
 - [ ] 实现 `registry.py` 与 `reduce.py`
@@ -903,13 +907,13 @@
 |---|---|
 | T1 旋钮登记 | `w_embed` 默认改成非 0 → `test_p1_旋钮全部登记且可覆盖` 红；删 `rank_w_penalty` → 同用例红 |
 | T2 schema v3 | `_migrate_to_v3` 从 `_MIGRATIONS` 删掉 → `test_schema_semantic.py::test_six_tables_present` 红；`idx_semantic_dedupe` 去掉 `WHERE status='active'` → `::test_dedupe_index_is_partial` 红；给 `semantic` 加 FTS 触发器 → `::test_semantic_fts_不用触发器` 红 |
-| T3 schema v4 | `is_derived` 去掉 `DEFAULT 1` → `test_schema_timeline.py::test_state_columns` 红；别名表唯一索引改普通 → `::test_alias_unique` 红 |
+| T3 schema v4 | `is_derived` 去掉 `DEFAULT 1` → `test_schema_timeline.py::test_state_columns` 红；别名表唯一索引改普通 → `::test_alias_unique` 红；**删掉部分唯一索引 `idx_state_current`（或去掉 `WHERE valid_to IS NULL`）→ `::test_双时态_历史行共存而当前行至多一行` 红**；**删掉 `superseded_by` 的 `REFERENCES` → `::test_superseded_by外键真的生效` 红**；**`valid_from` 改可空 / 去掉 `id` 主键 → `::test_state_columns` 红**；v4 顺手多建一个对象 → `::test_既有对象逐字不变_升级前后DDL指纹` 红 |
 | T4 ① shingle + M2' | 语义路径的 `_match_query` 改回逐字 OR → `test_bigram.py::test_双字切分` 红 + `python scripts/memory_relevance.py --arm bigram` 与 `--arm store-char` 读数完全相同（判据行报"未跑出差异"）；删单字回退 → `::test_单字查询不回归` 红 |
 | T5 ② bm25 | 删 `ORDER BY bm25(...)` → `test_semantic_search.py::test_排序由bm25决定` 红（锚：查 `存档` 的 top1 会变）；把 `-bm25()` 与 `bm25()` 对调 → `::test_bm25_符号与方向` 红 |
 | T6 五维 + 两阶段 | `use` 改回 `use_count * 0.6` → `test_rank.py::test_一次使用不吃掉全部权重` 红；去掉 `K ≤ recall_limit` 夹取 → `::test_rerank_k_硬约束` 红 |
 | T7 五道门禁 | `RULES` 删 J2 → `test_writer.py::test_缺证据被拒` 红；幂等改"先查后写" → `::test_幂等由唯一索引挡` 红；冲突改静默留新 → `::test_冲突不静默选一个` 红；`write_memory` 顺手写旧表 → `::test_单写semantic` 红 |
 | T8 时钟 + 时间解析 | `parse_time` 内部 `datetime.now()` → `test_timeline_clock.py::test_同一文本两个时钟两个结果` 红；删歧义分支 → `test_timeline_parse.py::test_歧义不猜` 红；日界按 UTC → `::test_日界随时区` 红 |
-| T9 归约器 + 取代链 | `sum_delta` 改成取最新 `set` → `test_timeline_reduce.py::test_M4_T1_余额130` 红（130 → 100）；取代改 `UPDATE` 旧行 → `::test_M4_T3_取代链不是删除` 红；`same_instant` 改按 `speaker` 选 → `::test_M4_T4_冲突不静默` 红；金额改 `float` → `::test_金额不浮点` 红 |
+| T9 归约器 + 取代链 | `sum_delta` 改成取最新 `set` → `test_timeline_reduce.py::test_M4_T1_余额130` 红（130 → 100）；取代改 `UPDATE` 旧行 → `::test_M4_T3_取代链不是删除` 红（旧行查不到 + 至多一行 `valid_to IS NULL` 那条也红）；取代漏写 `superseded_by` → 同用例红；`same_instant` 改按 `speaker` 选 → `::test_M4_T4_冲突不静默` 红；金额改 `float` → `::test_金额不浮点` 红 |
 | T10 `remember` 工具 | 直接 `insert_semantic` 绕过 `write_memory` → `test_remember_tool.py::test_缺证据被拒` 红；注册挪到派发路径 → `::test_注册在装配处` 红 |
 | T11 事件链单元 | `rel` 改成链内求和 → `test_event_chain.py::test_长链不加分` 红；把链拆成 N 个候选 → `::test_M4_T5_一个链单元` 红 |
 | T12 三层注入 | 让位顺序改"先砍热记忆" → `test_injection_policy.py::test_让位顺序` 红；`task_state` 放进让位序列 → 同用例红；直注只判 `confidence` → `::test_直注三关` 红 |
@@ -949,7 +953,7 @@
 | **M2'**（16 条固定语料 P@5/R@5 不低于纯 FTS5 基线） | **T4** 出仪器与基线臂；**T5** 出 `bigram+bm25` 臂 | `benchmarks/memory/corpus.jsonl`（16 条，G1–G4）+ `queries.jsonl`（13 条查询 + 相关 id）——**必须从 `.tmp/embed-bench/bench_common.py:15-61` 逐字固化**（`.gitignore:22` 忽略了 `.tmp/`，不固化就会丢）；基线读数固化自 `.tmp/embed-bench/results_fts5_store.json` | `python scripts/memory_relevance.py --arm {store-char,bigram,bigram+bm25}`；指标 `p@5`/`r@5`/`top1`（定义照 `bench_common.py:70-91`） | **仪器要新建（T4）**；**基线已有实测读数**（P@5 `0.3384615384615385` / R@5 `0.5961538461538461` / top1 `0.7692307692307693`，见 `results_fts5_store.json` 的 `summary`）；**bigram 臂的读数没跑** |
 | **M4-T1**（100 → 花 20 → 赚 50 **应得 130**，断言"由事件链推出"） | **T9** | 3 条 event + `FakeClock`；**纯归约器单测，不要模型、不要 8080** | `pytest tests/memory/test_timeline_reduce.py -k M4_T1` | **没跑** |
 | **M4-T2**（相对时间解析） | **T8** | 相对词表 + 两个 `FakeClock` 日期 | `pytest tests/memory/test_timeline_parse.py -k M4_T2` | **没跑** |
-| **M4-T3**（取代链不是删除） | **T9** | 同键两条 `set` + 一条晚到的 event | `pytest tests/memory/test_timeline_reduce.py -k M4_T3` | **没跑** |
+| **M4-T3**（取代链不是删除） | **T9** | 同键两条 `set` + 一条晚到的 event（取代 = 关旧行 → 插新行 → 旧行指向新行，同一事务） | `pytest tests/memory/test_timeline_reduce.py -k M4_T3` | **没跑** |
 | **M4-T4**（冲突不静默选一个） | **T9** | 两条互斥 `set` | `pytest tests/memory/test_timeline_reduce.py -k M4_T4` | **没跑** |
 | **M4-T5**（事件链整体检索） | **T11** | 余额 event 链 + 检索；需要 T6 的重排 | `pytest tests/memory/test_event_chain.py -k M4_T5` | **没跑** |
 | **M4-T6**（端到端：模型会不会自己猜） | **T16** | `benchmarks/tasks/temporal/` 跨天多轮脚本 + **伪造时钟** + 一条能跨轮保留的会话 + 服务端 | 需 8080 服务（**不重启**）；判据："唯一可接受的答案来源是注入的 state / 事件链" | **没跑**；**夹具与脚本都还不存在** |
