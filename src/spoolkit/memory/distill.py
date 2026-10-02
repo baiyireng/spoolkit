@@ -21,7 +21,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from spoolkit import limits
 from spoolkit.agent.state import TaskState
 from spoolkit.context import templates as T
 from spoolkit.llm.gateway import ModelGateway
@@ -220,14 +219,6 @@ def _distill(
     return []
 
 
-def _clip_final(text: str, max_chars: int) -> str:
-    """把任务结论裁到事件摘要允许的篇幅。"""
-    flat = " ".join(text.split())
-    if len(flat) > max_chars:
-        flat = flat[:max_chars] + "…"
-    return flat
-
-
 def distill(
     gateway: ModelGateway,
     state: TaskState,
@@ -240,6 +231,12 @@ def distill(
     max_tokens 给得比直觉大：推理类模型的思考 token 也从输出预算里扣，
     预算太小会让结构化输出被拦腰截断，而截断后的 JSON 必然解析失败，
     表现为「什么都提炼不出来」这种没有报错的静默失败。
+
+    **提炼不出条目时就是空**：这里以前有一条兜底，把整段 `final` 直接标成
+    `kind="fact"`。那是实测里 `memory.md` 三条寒暄与四段交付答复的来源
+    （设计稿 §3 缺陷 1）——整段助手答复不是「项目事实」，每轮注入它等于
+    用噪声把真事实挤出去。任务结论仍然可查：`archive.archive_task` 会把它
+    写进 `episode.summary`，判据不过的候选条目也会降级成 `memory.kind='episode'`。
     """
     stats: dict[str, Any] = {
         "rounds": 0,
@@ -256,11 +253,6 @@ def distill(
         0,
         stats,
     )
-    clipped_final = final.strip()
-    if not entries and clipped_final:
-        knob_entry = limits.knob("episode_final_chars")
-        max_chars = int(knob_entry.default) if knob_entry else 400
-        entries = [("fact", _clip_final(clipped_final, max_chars), "")]
     return DistillResult(
         entries=entries,
         rounds=stats["rounds"],

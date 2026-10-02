@@ -186,6 +186,19 @@ KNOBS: tuple[Knob, ...] = (
         "episode_final_chars", 400, CAPABILITY,
         "事件摘要里任务结论最多留多少字（按本机 27B / 8K 标定）",
     ),
+    Knob(
+        "remember_max_chars", 400, CAPABILITY,
+        "进热记忆的一条最多多少字（设计稿 §4.3 定案的 remember_max_chars）。"
+        "它是 J4「非一次性产物」的长度线：设计稿 §1 记录的真实工作区里，"
+        "12 城市天气表与三段交付答复都长于它，而可复用的真事实都在一句话量级。"
+        "超线的条目不进热记忆、降级为 episode（由写入门禁判，见 memory/gate.py）",
+    ),
+    Knob(
+        "remember_table_lines", 3, CAPABILITY,
+        "一条记忆里出现几行「同构表格」（每行至少两个 `|`）就不算一句话事实"
+        "（设计稿 §5.1 的 J4：≥3 行同构表格判为一次性产物）。与 remember_max_chars"
+        "同属形态判据，所以同样可覆盖——按工作区调一版判据不该改代码",
+    ),
     Knob("system_quota", 900, CAPABILITY, "系统提示的固定配额（token）"),
     Knob(
         "fixed_quota_cap", 0.20, CAPABILITY,

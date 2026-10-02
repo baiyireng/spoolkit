@@ -208,14 +208,17 @@ def test_切分深度有上限() -> None:
     assert len(model.requests) <= 16
 
 
-def test_空条目且有结论时兜底一条fact() -> None:
+def test_空条目且有结论时不再兜底成fact() -> None:
+    """停噪声（设计稿 §3 缺陷 1）：提炼不出条目时就返回空。
+
+    旧代码（`distill.py:259-263`）在这里把整段 `final` 标成 `kind="fact"`，
+    实测里 `memory.md` 的三条寒暄与四段交付答复就是这么进去的。
+    任务结论仍然可查——它由 `episode.summary` 兜住，那是 archive 的职责。
+    """
     model = _model([_entries()])
     final = "得分规则是每吃一个 +10"
     result = distill(model, _state(), final=final)
-    assert len(result.entries) == 1
-    assert result.entries[0][0] == "fact"
-    assert "+10" in result.entries[0][1]
-    assert result.entries[0][2] == ""
+    assert result.entries == []
     assert result.raw == _entries()
 
 

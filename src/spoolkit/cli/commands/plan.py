@@ -57,6 +57,7 @@ from spoolkit.cli.settle import settle
 from spoolkit.kernel.target import resolve_target
 from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.grant import Grants
+from spoolkit.memory.gate import sanitize
 from spoolkit.memory.lessons import record_lesson
 
 
@@ -640,9 +641,12 @@ def _keep_lessons(lessons, memory) -> int:
     if not lessons or memory is None:
         return 0
     for rule, trigger in lessons:
+        # 这是 `archive_task` 之外的第二个直接写库点，同样要过写入侧脱敏：
+        # 密钥不能因为「从复盘来的」就落进记忆库（设计稿 §5.3 ①）。
+        clean_rule, _ = sanitize(rule)
         record_lesson(
             memory._conn,
-            rule,
+            clean_rule,
             trigger,
             source="分批推进的回头看",
         )

@@ -270,15 +270,22 @@ class MessageHit:
 # 明显的密钥形状。检索结果会**回灌进模型上下文**，密钥跟着进去等于把
 # `.env` 抄进了对话记录（还可能是别人的屏幕）。所以片段一律先过这一层：
 # 只盖掉值、留下键名与前缀，"这里原本有个密钥"仍然可辨认。
-_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+# 每条 = （形状名, 正则, 替换）。形状名是给**理由**用的：写入侧要能说出
+# 「命中了哪一类形状」而不回显值（设计稿 §5.3 ①）。
+_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # 常见供应商的密钥前缀：`sk-…` / `ghp_…` / `xoxb-…`。
-    (re.compile(r"(?i)\b(sk|ghp|gho|xox[baprs])[-_][A-Za-z0-9_-]{8,}"), r"\1-***"),
+    (
+        "供应商密钥前缀（sk-/ghp_/xox…）",
+        re.compile(r"(?i)\b(sk|ghp|gho|xox[baprs])[-_][A-Za-z0-9_-]{8,}"),
+        r"\1-***",
+    ),
     # Google 的 `AIza…`：没有分隔符，只能按前缀加长度认。
-    (re.compile(r"AIza[0-9A-Za-z_-]{20,}"), "AIza***"),
+    ("Google API 密钥（AIza…）", re.compile(r"AIza[0-9A-Za-z_-]{20,}"), "AIza***"),
     # 任意 `名字里有 KEY/SECRET/TOKEN/PASSWORD 的键 = 值`：值一律盖掉。
     # 值的边界要认中文标点：`\S+` 会把「KEY=值，下一句话」整段并进值里，
     # 那就不只是盖密钥了，而是把上下文也一起删掉。
     (
+        "键值对里的密钥值（KEY=/SECRET:）",
         re.compile(
             r"(?i)\b([A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|APPID)"
             r"[A-Z0-9_]*)(\s*[=:]\s*)([^\s,;，；。、)）]+)"
@@ -286,15 +293,27 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         r"\1\2***",
     ),
     # `Authorization: Bearer …`
-    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._-]{10,}"), "Bearer ***"),
+    ("Bearer 令牌", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._-]{10,}"), "Bearer ***"),
 )
+
+
+def redact_secrets_report(text: str) -> tuple[str, list[str]]:
+    """脱敏并说出命中了哪几类形状（**不回显值**）。
+
+    写入侧（`memory/gate.sanitize`）用它把「这里原本有个密钥」记进理由：
+    只写形状名，值本身一个字符都不留。
+    """
+    shapes: list[str] = []
+    for shape, pattern, replacement in _SECRET_PATTERNS:
+        text, hits = pattern.subn(replacement, text)
+        if hits and shape not in shapes:
+            shapes.append(shape)
+    return text, shapes
 
 
 def redact_secrets(text: str) -> str:
     """把片段里明显的密钥值盖掉，只留键名与前缀。"""
-    for pattern, replacement in _SECRET_PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
+    return redact_secrets_report(text)[0]
 
 
 def parse_moment(raw: str, *, label: str) -> float:
