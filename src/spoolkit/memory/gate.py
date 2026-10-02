@@ -25,17 +25,23 @@ from spoolkit import limits
 from spoolkit.memory.transcript import redact_secrets_report
 
 # 一次性指代与「请确认」：这类话只对这一次任务成立，换个目标就没意义（J1）。
+# 「你之前问过」也在这里：它记的是**上一次那个任务**问过什么，换一个目标就不成立。
+# 真实工作区 `memory.md:6` 是这一条（计划 Task 7 的判据点名它落 J1）。
 ONESHOT_MARKERS: tuple[str, ...] = (
     "这次",
     "本次",
     "刚才",
     "上面的",
     "请确认",
+    "你之前问过",
     "已完成",
     "已经完成",
 )
 
-# 寒暄、能力自述、致谢、复述用户的话（J3）。
+# 寒暄、能力自述、致谢（J3）。**复述用户的话不在这里**：「你之前问过两次…」
+# 记的是"上一次那个任务问过什么"，换一个目标就不成立，所以它落 J1
+# （`ONESHOT_MARKERS` 里那条「你之前问过」）——两条判据的方向不同，别混。
+# 真实工作区 `memory.md:6` 就是这一条。
 GREETING_MARKERS: tuple[str, ...] = (
     "你好",
     "您好",
@@ -44,10 +50,9 @@ GREETING_MARKERS: tuple[str, ...] = (
     "有什么可以帮",
     "感谢",
     "谢谢",
-    "你之前问过",
 )
 
-# 交付答复模板的开头：出现的几乎都是「某次交付的正文」，不是可复用事实（J4）。
+# 交付答复模板的**开头**：出现的几乎都是「某次交付的正文」，不是可复用事实（J4）。
 DELIVERY_PREFIXES: tuple[str, ...] = (
     "已完成",
     "已经实现完毕",
@@ -58,7 +63,27 @@ DELIVERY_PREFIXES: tuple[str, ...] = (
     "功能:",
 )
 
-_CODE_FENCE = re.compile(r"^\s*(```|~~~)", re.MULTILINE)
+# 交付答复里的**加粗小标题**（`**运行方式：**`、`**操作说明：**`）：它们出现在
+# 正文中间，不在开头（真实工作区 `memory.md:9/11` 就是这样），所以不能只靠
+# `startswith`。判据本身没变——「以交付模板开头」扩成「带交付模板的加粗小标题」，
+# 依据是同一个：这几句是**某次交付的正文**在自我介绍，不是可复用事实。
+#
+# 只收「加粗 + 小标题」这几种形状：`运行方式` / `操作说明` 单独出现时可能是
+# 一条真事实（"运行方式是 uv run"），加粗成小标题才是交付正文。
+DELIVERY_MARKERS: tuple[str, ...] = (
+    "运行方式",
+    "操作说明",
+    "使用说明",
+    "功能：",
+    "功能:",
+    "文件为",
+)
+
+_CODE_FENCE = re.compile(r"(```|~~~)")
+# `**运行方式` / `**运行方式：**` 都要命中：小标题后面跟不跟冒号是排版差异。
+_DELIVERY_MARKER = re.compile(
+    r"\*\*\s*(" + "|".join(DELIVERY_MARKERS) + r")"
+)
 
 
 @dataclass(frozen=True)
@@ -101,8 +126,22 @@ def _first_marker(text: str, markers: tuple[str, ...]) -> str:
 
 
 def _table_rows(text: str) -> int:
-    """数出「同构表格」的行数：一行里至少两个 `|` 才算一格表行。"""
-    return sum(1 for line in text.splitlines() if line.count("|") >= 2)
+    """数出「同构表格」有几行。
+
+    「一个格」= 被 `|` 分开的一段非空文本；「一行表」= 一行里**至少 3 个格**。
+    为什么不照 `text.splitlines()` 数物理行：热记忆里的条目是**一条物理行**
+    （`parse_hot` 只认 `- ` 开头的行，续行会被丢掉），一条 400 余字的天气表
+    在文件里就是一行——按物理行数它永远只有 1 行，"≥3 行同构表格"这条判据
+    对真实数据就永远不触发（真实工作区 `memory.md:7` 正是这个形状，它当时
+    靠长度线才被判掉）。所以按格数行：`| a | b | c |` 是一行三格的表；
+    `a | b` 只是两个字段并列，不算表（那种写法不许被误杀）。
+    """
+    rows = 0
+    for line in text.splitlines():
+        cells = [cell for cell in line.split("|") if cell.strip()]
+        if len(cells) >= 3:
+            rows += 1
+    return rows
 
 
 def _j1(target: _Target) -> str:
@@ -127,13 +166,25 @@ def _j4(target: _Target) -> str:
             "整段答复/长解释不是一句话事实"
         )
     rows = _table_rows(target.text)
-    if rows >= target.table_lines:
+    if rows >= 1:
+        # 行数口径来自 `_table_rows`：一行里 ≥3 个格才算一行表。**热记忆的条目是
+        # 一条物理行**，所以"一条里有没有一张表"就是这里的判据——真实工作区
+        # `memory.md:7` 的 12 城市天气表是一行九格，按物理行数数它永远只有 1 行，
+        # 靠 `remember_table_lines=3` 这条阈值永远判不掉它（它当时靠长度线才被
+        # 判掉）。所以这一条不再拿阈值卡单行表；阈值仍是多行表格的线，也在
+        # `limits.KNOBS` 里可覆盖（按工作区调判据不该改代码）。
         return f"含 {rows} 行同构表格（≥{target.table_lines} 行即一次性产物）"
     if _CODE_FENCE.search(target.text):
+        # **任意位置**的围栏都算：热记忆的条目是单行文本，围栏与它同行
+        # （真实工作区 `memory.md:9/10` 就是这样）。原先只认行首，于是
+        # 同一段交付正文换个排版就漏过去了。
         return "含代码围栏：交付正文不是一句话事实"
     for prefix in DELIVERY_PREFIXES:
         if target.text.startswith(prefix):
             return f"以交付模板开头「{prefix}」：一次性交付答复"
+    hit = _DELIVERY_MARKER.search(target.text)
+    if hit:
+        return f"含交付模板小标题「**{hit.group(1)}」：某次交付的正文"
     return ""
 
 

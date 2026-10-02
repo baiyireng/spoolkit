@@ -30,6 +30,7 @@ from spoolkit.cli.commands.diagnose import diagnose_command
 from spoolkit.cli.commands.session import session_command
 from spoolkit.cli.commands.ws import ws_command
 from spoolkit.cli.commands.limits import limits_command
+from spoolkit.cli.commands.memory import migrate as memory_command
 from spoolkit.cli.commands.config import config_command
 from spoolkit.cli.commands.env import env_command
 from spoolkit.cli.commands.chat import chat_command
@@ -1032,6 +1033,47 @@ def _add_approve_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=approve_entry, optional_root=True)
 
 
+def _add_memory_command(sub: argparse._SubParsersAction) -> None:
+    """`spool memory`：记忆的迁移与体检。**P0 只有 `migrate` 一条。**
+
+    两个刻意的口子：
+
+    1. **只有 `--root`，没有 `provider`/`model`/`--no-setup`**：`main()` 里
+       "缺供应商就弹向导 + `settings.describe_missing()` + 读 `.env` 密钥"
+       那一整段（`app.py` 的 `hasattr(args, "provider")`）因此整段跳过——
+       迁移旧 `memory.md` 与模型供应商无关，而"顺手读一下 `.env`"是这条
+       离线路径唯一可能踩到的真实密钥。用例
+       `test_migrate_不解析工作区env` 用真实调用路径钉住这一点。
+    2. **`--dry-run` 是默认行为**：不给 `--yes` 就是预演；`--yes` 才动文件。
+    """
+    parser = sub.add_parser(
+        "memory",
+        help="记忆管理：migrate 把旧 memory.md 迁到判据下（默认 --dry-run）",
+    )
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="migrate",
+        choices=["migrate"],
+        help="P0 只有 migrate",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="只解析并打印报告，不写文件、不改库（**默认**）",
+    )
+    group.add_argument(
+        "--yes",
+        dest="yes",
+        action="store_true",
+        help="真的执行：先把 memory.md 改名为 memory.md.bak-<日期>，再写新文件",
+    )
+    parser.set_defaults(func=memory_command)
+
+
 def configure_stdio() -> None:
     """把标准输出/错误固定成 UTF-8，且**永不因为一个字符崩掉整个运行**。
 
@@ -1101,6 +1143,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_qq_command(sub)
     _add_diagnose_command(sub)
     _add_limits_command(sub)
+    _add_memory_command(sub)
     _add_config_command(sub)
     _add_env_command(sub)
     _add_chat_command(sub)

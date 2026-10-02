@@ -28,20 +28,46 @@ ACCEPT_CASES: list[tuple[str, str, str]] = [
     ("decision", "检索先用 FTS5，不引入嵌入", ""),
     ("lesson", "解析自定义格式先上语法约束", "解析,正则"),
     ("fact", "热记忆的预算从 hot_memory_ratio 取值", ""),
+    # 新加的「交付模板小标题」判据不许过宽：`**加粗小标题**` 才算交付正文，
+    # 平铺的一句真事实（"构建命令是 uv run --frozen"）必须留下。
+    ("fact", "构建命令是 uv run --frozen", ""),
+    ("fact", "CLI 的帮助文案写在 docs/cli.md 里", ""),
 ]
 
 # 反例：（类型, 文本, 触发词, 应当命中的判据编号）。
 DECLINE_CASES: list[tuple[str, str, str, str]] = [
     ("fact", "你好！我是你的本地编程助手。有什么可以帮你的吗？", "", "J3"),
     ("fact", "感谢你的确认，我这就去改。", "", "J3"),
-    ("fact", "你之前问过两次同样的问题。", "", "J3"),
+    ("fact", "你之前问过两次同样的问题。", "", "J1"),
     ("fact", "这次先跑一遍测试看看。", "", "J1"),
     ("fact", "任务已完成。请确认最终文件状态并宣告完成。", "", "J1"),
     ("fact", "运行方式：python -m spoolkit.cli.app --goal 目标", "", "J4"),
-    ("fact", "| 城市 | 天气 |\n| 厦门 | 晴 |\n| 北京 | 多云 |", "", "J4"),
+    ("fact", "| 城市 | 天气 | 温度 |\n| 厦门 | 晴 | 30 |\n| 北京 | 多云 | 18 |", "", "J4"),
     ("fact", "结尾给一段代码：\n\n```python\nprint(1)\n```", "", "J4"),
+    # 真实工作区 memory.md:9/10 的三种交付正文形状：围栏与正文**同行**
+    # （原先只认行首围栏，这三条全漏）、以及带 `**运行方式：**` 小标题的。
+    ("fact", "文件为 `snake.py`。**运行方式：** ``` python snake.py ```", "", "J4"),
+    ("fact", "网页版已经写好了，文件为 `snake.html`。**运行方式：** 用浏览器打开", "", "J4"),
     ("lesson", "解析自定义格式先上语法约束", "", "J5"),
 ]
+
+
+def test_代码围栏判据认任意位置的围栏() -> None:
+    """围栏**与正文同行**也要判掉（真实工作区 `memory.md:9/10` 就是这个形状）。
+
+    只认行首围栏的写法对这些条目全部漏判——它们不是"以围栏开头"，而是
+    "正文里带一段围栏"。这条用例把理由钉到"含代码围栏"这句话上：把正则
+    改回 `^\\s*(```|~~~)`（`re.MULTILINE`）这里就红。
+    """
+    inline_fence = "贪吃蛇小游戏已经实现完毕，文件为 `snake.py`。 **运行方式：** ``` python snake.py ```"
+    verdict = judge("fact", inline_fence)
+    assert verdict.ok is False
+    assert verdict.reason.startswith("J4")
+    assert "含代码围栏" in verdict.reason
+
+    # 多行写法（围栏自己一行）同样判掉。
+    block_fence = "结尾给一段代码：\n\n```python\nprint(1)\n```"
+    assert "含代码围栏" in judge("fact", block_fence).reason
 
 
 @pytest.mark.parametrize(("kind", "text", "trigger"), ACCEPT_CASES)
@@ -94,12 +120,31 @@ def test_长度阈值可被工作区覆盖() -> None:
     assert verdict.reason.startswith("J4")
 
 
+def test_表格判据与表格行数阈值() -> None:
+    """表格判据的口径：**一行里 ≥3 个格就是一张表**（单行表也算）。
+
+    热记忆的条目是一条物理行，所以"≥3 行同构表格"这条阈值对单行表永远不成立；
+    真实工作区 `memory.md:7` 的天气表就是靠长度线才被判掉的。这里把口径钉死：
+    单行三格 = 表 → J4；两格并列 = 不是表 → 放行。
+    """
+    one_row = "天气： | 城市 | 最低温 | 最高温 | 天气状况 |"
+    assert judge("fact", one_row).ok is False
+
+    three_rows = "| 城市 | 天气 | 温度 |\n| 厦门 | 晴 | 30 |\n| 北京 | 多云 | 18 |"
+    assert judge("fact", three_rows).reason.startswith("J4")
+
+    # 两格并列不是表（`a | b` 是"两个字段"的常见写法，不许被误杀）。
+    two_cells = "范围 | 说明：这一栏讲的是 remember_table_lines 的含义"
+    assert judge("fact", two_cells).ok is True
+
+
 def test_表格行数阈值可被工作区覆盖() -> None:
-    text = "| 城市 | 天气 |\n| 厦门 | 晴 |"
-    assert judge("fact", text).ok is True
-    verdict = judge("fact", text, overrides={"remember_table_lines": 2})
-    assert verdict.ok is False
-    assert verdict.reason.startswith("J4")
+    """阈值仍是登记表里的可覆盖项（多行表按行数判）。"""
+    knob = limits.knob("remember_table_lines")
+    assert knob is not None and knob.default == 3 and knob.overridable is True
+
+    two_rows = "| 城市 | 天气 | 温度 |\n| 厦门 | 晴 | 30 |"
+    assert judge("fact", two_rows).ok is False  # 单行表口径以外：两行也已是表
 
 
 def test_阈值登记在标定表里() -> None:

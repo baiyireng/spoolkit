@@ -257,6 +257,27 @@ def init_memory_schema(conn: sqlite3.Connection) -> None:
         _apply_step(conn, version, name, apply)
 
 
+def open_db_readonly(path: Path) -> sqlite3.Connection | None:
+    """**只读**打开记忆库；库不存在返回 `None`（不创建、不建目录）。
+
+    为什么不能直接用 `store/db.py:open_db`：那个函数的第一件事是
+    `path.parent.mkdir`，接着 `sqlite3.connect(str(path))` —— **看一眼就把库
+    动了一遍**（库不存在时创建空库、库在时按可写打开）。迁移预演的命令必须
+    "不写文件、不改库"（设计稿 §9.2 第 1 步），所以走 SQLite 的只读 URI：
+    `file:<路径>?mode=ro`。库里若已有 `-wal`，只读打开不会生成 `-shm`
+    （读不到就按只读回退）；库不存在时 SQLite 直接报"无法打开"，所以先
+    `exists()` 判一次，返回 `None` 让调用方如实写报告。
+    """
+    if not path.exists():
+        return None
+    # 用 `as_uri()` 而不是手拼：路径里的空格、`#`、`?` 需要百分号编码，
+    # 手拼会在这些目录名上悄悄连到另一个路径（或直接连不上）。
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def insert_memory(
     conn: sqlite3.Connection,
     kind: str,
