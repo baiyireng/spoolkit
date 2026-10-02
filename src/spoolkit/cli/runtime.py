@@ -29,7 +29,7 @@ from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.lessons import match_lessons, prune_lessons, record_outcome
 from spoolkit.memory.session import MemorySession
 from spoolkit.memory.store import check_binding, init_memory_schema, record_session
-from spoolkit.memory.tools import recall_spec, search_history_spec
+from spoolkit.memory.tools import recall_spec, remember_spec, search_history_spec
 from spoolkit.memory.transcript import (
     conversational_prompt,
     deictic_reminder,
@@ -458,6 +458,11 @@ def assemble_loop(
         # 主循环用的注册表在这里构造，所以 recall 也必须在这里注册，
         # 否则提示词会提到一个只有派发路径才有的工具。
         registry.register(recall_spec(parts.memory))
+        # 反方向的入口：任务**中途**记下一条跨任务仍有用的事实（设计稿 §5.2）。
+        # 与 recall 同一处注册（都在这个 `if` 里），否则提示词会提到一个只有派发
+        # 路径才有的工具。它走的是同一套门禁（`semantic.write_memory`），被拒时
+        # 把写入口的理由交回给模型——工具层没有第二份判据。
+        registry.register(remember_spec(parts.memory, overrides=settings.overrides))
         # 历史消息的检索入口。历史本身不进上下文，这条路是模型**主动**去取
         # 「这个问题是从哪来的」。三个数字都从标定表来：它们直接决定回灌多少
         # 字，写死在工具里就等于绕过了「预算可调、来源可查」这条规矩。
