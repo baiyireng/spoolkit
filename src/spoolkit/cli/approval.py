@@ -28,6 +28,7 @@ def review_and_apply(
         return False, []
 
     for change in changes:
+        _show_declared(change)
         print(change.diff)
     print(f"共 {len(changes)} 处修改待确认。")
 
@@ -54,9 +55,21 @@ def apply_with_audit(
         return []
 
     for change in changes:
+        _show_declared(change)
         print(change.diff)
     if baseline_path is not None:
         save_baseline(baseline_path, pending.baseline())
     written = pending.apply()
     print(f"已自动应用 {len(written)} 处修改（计划级授权，可用 revert 回滚）。")
     return written
+
+
+def _show_declared(change) -> None:
+    """把「这处改动是怎么来的」打在 diff 前面。
+
+    声明式重写的留档（为什么大改、哪些项确认保留、**哪些项被有意丢弃及理由**）
+    原先只在模型的工具输出里出现过：用户看到的 diff 一模一样，看不出哪一项是
+    被有意丢掉的。留痕不被读到，就不叫留痕。
+    """
+    if getattr(change, "declared", ""):
+        print(f"# {change.path}：{change.declared}")

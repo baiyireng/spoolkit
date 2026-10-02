@@ -285,9 +285,22 @@ WALL_KNOBS: tuple[tuple[str, float], ...] = (
 )
 
 
+# 「确认清单拆成独立小回合」那一轮补登的旋钮：暂存正文的**上界**（条数 / 单份
+# 字符 / 总字符 / 时效）。单列的理由同上：它们是暂存区的容量口径，不是 P1 批次。
+CONFIRM_KNOBS: tuple[tuple[str, float], ...] = (
+    ("rewrite_stage_limit", 3),  # 同时最多暂存 3 份未确认的重写正文
+    ("rewrite_stage_chars", 400000),  # 单份正文最多 40 万字符
+    ("rewrite_stage_total_chars", 800000),  # 全部暂存正文合计最多 80 万字符
+    ("rewrite_stage_ttl_seconds", 1800),  # 令牌 30 分钟时效
+    ("output_boost_min_lines", 120),  # 目标产出 ≥120 行就先把输出预算抬到 boost 档
+)
+
+
 def test_p1_旋钮全部登记且可覆盖() -> None:
     """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
-    for name, default in P1_NEW_KNOBS + T11_GAP_KNOBS + WALL_KNOBS:
+    for name, default in (
+        P1_NEW_KNOBS + T11_GAP_KNOBS + WALL_KNOBS + CONFIRM_KNOBS
+    ):
         entry = limits.knob(name)
         assert entry is not None, f"{name} 没登记"
         assert entry.kind == CAPABILITY, f"{name} 不是能力标定值"
@@ -314,13 +327,16 @@ def test_既有旋钮一个不少() -> None:
     assert set(KNOBS_BEFORE_P1) & set(dict(P1_NEW_KNOBS)) == set()
     assert set(KNOBS_BEFORE_P1) & set(dict(T11_GAP_KNOBS)) == set()
     assert set(KNOBS_BEFORE_P1) & set(dict(WALL_KNOBS)) == set()
+    assert set(KNOBS_BEFORE_P1) & set(dict(CONFIRM_KNOBS)) == set()
+    assert set(dict(WALL_KNOBS)) & set(dict(CONFIRM_KNOBS)) == set()
 
 
 def test_旋钮没有重名() -> None:
     """Task 1 验收 5：重名会让 `_BY_NAME` 静默取后者。
 
     总数 = P0 的 62 + P1 Task 1 的 22 + T11 补缺轮的 2（`T11_GAP_KNOBS`）
-    + 「三道墙」那一轮的 4（`WALL_KNOBS`）。
+    + 「三道墙」那一轮的 4（`WALL_KNOBS`）
+    + 「确认清单拆成独立小回合」那一轮的 5（`CONFIRM_KNOBS`）。
     """
     assert len(limits.KNOBS) == len(limits._BY_NAME)
     assert len(limits.KNOBS) == (
@@ -328,6 +344,7 @@ def test_旋钮没有重名() -> None:
         + len(P1_NEW_KNOBS)
         + len(T11_GAP_KNOBS)
         + len(WALL_KNOBS)
+        + len(CONFIRM_KNOBS)
     )
 
 

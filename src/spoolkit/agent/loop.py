@@ -35,7 +35,7 @@ from spoolkit.llm.gateway import ModelGateway
 from spoolkit.llm.retry import chat_with_escalation
 from spoolkit.llm.tokenizer import TokenCounter
 from spoolkit.llm.types import ChatRequest, Message
-from spoolkit.tools.edit import NEXT_STEP_MARKER, REFUSAL_MARKER
+from spoolkit.tools.edit import CONFIRM_TOOL, NEXT_STEP_MARKER, REFUSAL_MARKER, STAGE_MARKER
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import ToolCall, ToolResult
 from spoolkit.tools.verify import ENVIRONMENT_MARKER
@@ -45,6 +45,15 @@ SYSTEM_PROMPT = T.SYSTEM
 
 LOOKUP_TOOLS = ("find_symbol", "file_symbols", "find_callers")
 EDIT_TOOLS = ("replace_lines", "replace_text", "write_file")
+
+# 「把改动推进下去」的工具：写工具 + 确认入口。
+#
+# 与 EDIT_TOOLS 分开的理由是它们各自回答不同的问题：EDIT_TOOLS 是**交内容**
+# 的那几把（步数预算按它的产出规模放大、验证按它改过的路径分派），而确认入口
+# 不交内容、只是一个很小的举证回合。但有一处它必须算进去：漫游太久时循环会把
+# 采样空间收窄成「只能写」——收窄之后如果确认入口被语法拿掉，模型就再也
+# 确认不了那份暂存的正文了。
+COMMIT_TOOLS = EDIT_TOOLS + (CONFIRM_TOOL,)
 
 # 同一个调用连续重复到第几次时加提醒（仍然执行），到第几次时不再执行。
 #
@@ -136,24 +145,39 @@ def _retry_block_message(call: ToolCall, failure: str) -> str:
     只说「换一种做法」等于把问题还给模型——dogfood 里它就是这么原样重试
     到预算耗尽的。失败话术里已经带了「照做的下一步」时原样端回来；
     没带时给三条具体可选的替代（换参数、换工具、先读原文）。
+
+    暂存那一种要分开说：它**不是失败**（正文收下了），但把同一份正文再发
+    一遍是这次运行里最贵的一种浪费——输出预算正是卡在这里的。
     """
     remedy = [
         line.strip()
         for line in failure.splitlines()
         if line.strip().startswith(NEXT_STEP_MARKER)
     ]
-    parts = [
-        f"{BLOCKED_PREFIX}这个调用与上一次**完全相同**（工具 {call.name}，"
-        "参数一字未改），而上一次它失败了：失败的原因不会因为再发一遍而改变，"
-        "所以这次没有执行。",
-    ]
-    flat = " ".join(failure.split())
-    if flat:
-        parts.append(f"上一次的结论：{flat[:300]}")
-    if remedy:
-        parts.append("上一次已经给出了能照做的下一步：")
-        parts.extend(dict.fromkeys(remedy))
+    staged = failure.lstrip().startswith(STAGE_MARKER)
+    if staged:
+        parts = [
+            f"{BLOCKED_PREFIX}这个调用与上一次**完全相同**（工具 {call.name}，"
+            "参数一字未改），而上一次的正文**已经收下并暂存**："
+            "同样的正文再发一遍不会改变任何事，只会再花一次输出预算，"
+            "所以这次没有执行。",
+            "要推进下去，只缺「把消失清单逐项交代」这一步——"
+            "确认时**只发项 id，不要重发正文**。",
+        ]
     else:
+        parts = [
+            f"{BLOCKED_PREFIX}这个调用与上一次**完全相同**（工具 {call.name}，"
+            "参数一字未改），而上一次它失败了：失败的原因不会因为再发一遍而改变，"
+            "所以这次没有执行。",
+            f"上一次的结论：{' '.join(failure.split())[:300]}",
+        ]
+    if remedy:
+        parts.append(
+            "上一次已经给出了能照做的下一步：" if not staged
+            else "照做的下一步是这几条（正文已经收下）："
+        )
+        parts.extend(dict.fromkeys(remedy))
+    elif not staged:
         parts.append(
             "换一种做法，三选一：换参数（行号区间、先多带几行上下文）；"
             "换工具（write_file / replace_lines / replace_text）；"
@@ -521,9 +545,10 @@ class AgentLoop:
             window=config.context_window, overrides=config.overrides
         )
         self._schema = build_turn_schema(registry)
-        # 强制收敛用的收窄 schema：只留写工具。没有写工具（只读角色）
-        # 就没有这回事，None 表示这条路不适用。
-        edits = [name for name in EDIT_TOOLS if registry.get(name) is not None]
+        # 强制收敛用的收窄 schema：只留写工具（以及确认入口——见 COMMIT_TOOLS
+        # 的注释：收窄把确认入口拿掉的话，暂存的正文就没人能确认了）。
+        # 没有写工具（只读角色）就没有这回事，None 表示这条路不适用。
+        edits = [name for name in COMMIT_TOOLS if registry.get(name) is not None]
         self._commit_schema = build_turn_schema(registry, only=edits) if edits else None
 
     def _assemble(
@@ -1028,6 +1053,23 @@ class AgentLoop:
                     # 调用同样告诉我们「这个文件有多大」，而预算该在撞上墙之前
                     # 就长上去——dogfood 那次 10 步用满时已经晚了。
                     target_lines = _edit_target_lines(self.config, call)
+                    # 输出预算也随规模放大，而且是**在生成之前**抬。
+                    #
+                    # 原来只在「被截断之后」才抬。dogfood 实测：一份 120 行的整份
+                    # 产出在 0.15 档（本机 8K 窗口 = 1225 token）就是不够——那一次
+                    # 被截断，重试才拿到 2455（两次 r3 复跑都是这个形状）。截断要付
+                    # 两次钱：这一轮的生成白烧；而且模型收到「把活拆小」的反馈后可能
+                    # 把 rewrite_reason 一起丢掉（r3 第一次跑就是这么卡在护栏外面的）。
+                    # 「这次要交多长」在第一步就看得见（文件行数），与步数预算同一个判据。
+                    boost_at = int(self.config.limit("output_boost_min_lines"))
+                    if boost_at > 0 and target_lines >= boost_at:
+                        before = self._budget.output_reserve()
+                        after = self._budget.boost_output()
+                        if after > before:
+                            trace.append(
+                                f"step{state.step}: 目标产出要 {target_lines} 行，"
+                                f"输出预算按规模放大 {before} → {after} token"
+                            )
                     bonus = scaled_step_bonus(self.config, target_lines)
                     if bonus > size_bonus:
                         size_bonus = bonus
@@ -1056,7 +1098,14 @@ class AgentLoop:
                         self.sources.add(result.content, result.facts)
                     self._note_progress(state, call, result)
                     self._write_progress(state)
-                    if result.ok and call.name in EDIT_TOOLS:
+                    if (
+                        result.ok
+                        and call.name in COMMIT_TOOLS
+                        and not result.content.startswith(STAGE_MARKER)
+                    ):
+                        # 暂存**不算产出**：正文收下了，但文件还没落盘。把它算成
+                        # 产出的话，循环会去「验证这次改动」——而没有待确认的改动，
+                        # 验证只能报「没有需要验证的改动」，那是一句假通过。
                         edited = True
                         edits_made += 1
                         edit_fail_streak = 0
@@ -1065,7 +1114,7 @@ class AgentLoop:
                         path = call.arguments.get("path")
                         if isinstance(path, str) and path:
                             changed.append(path)
-                    elif not result.ok and call.name in EDIT_TOOLS and not blocked:
+                    elif not result.ok and call.name in COMMIT_TOOLS and not blocked:
                         # 被硬拦的不计进「连续失败」：它没执行，也不是格式错误，
                         # 而且拦它的话术本身已经给了照做的下一步。
                         edit_fail_streak += 1
@@ -1148,7 +1197,8 @@ class AgentLoop:
 
             # 「提出过改动」才结束漫游。被硬拦的编辑调用不算产出——它没有落到
             # 待确认清单上；把它算成产出会让漫游计数永远归零，督导就看不到
-            # 「它一直在被拦」这个事实。
+            # 「它一直在被拦」这个事实。暂存的正文同理：还没落盘就不算产出，
+            # 否则督导看不到「它卡在确认那一步」。
             if edited or (
                 not blocked_all
                 and any(call.name in EDIT_TOOLS for call in turn.tool_calls)
@@ -1349,6 +1399,11 @@ class AgentLoop:
             )
         result = self.registry.invoke(call)
         if not result.ok:
+            self._remember_failure(signature, result.content)
+        elif result.content.startswith(STAGE_MARKER):
+            # 正文已暂存：这一次**不是失败**，但「同一份正文再发一遍」是这次
+            # 运行里最贵的一种浪费（输出预算就是卡在这里的）。所以也记进失败表：
+            # 原样重提会被硬拦，拦下的话术里带着 confirm_rewrite 的调用形状。
             self._remember_failure(signature, result.content)
         if level >= self.config.limit("repeat_warn_at"):
             if repeats >= self.config.limit("repeat_warn_at"):

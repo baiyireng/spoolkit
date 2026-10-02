@@ -29,7 +29,29 @@ def settle(
     ask: Callable[[str], str] = input,
     non_interactive: bool = False,
 ) -> tuple[str, list[str]]:
-    """按策略处理待落盘改动，返回（结果动作，已写入路径）。"""
+    """按策略处理待落盘改动，返回（结果动作，已写入路径）。
+
+    「没确认完的暂存重写」在任何清理**之前**取一次读数，最后统一说一句：
+    deny 会把暂存一起清掉，那一句如果放到后面就永远打不出来——而它正是
+    「没有静默丢弃」这条要求的落点。
+    """
+    note = unconfirmed_note(pending)
+    outcome, written = _settle(
+        pending, policy, scope, baseline_path, ask, non_interactive
+    )
+    if note:
+        print(note)
+    return outcome, written
+
+
+def _settle(
+    pending: PendingChanges,
+    policy: str,
+    scope: Sequence[str],
+    baseline_path: Path | None = None,
+    ask: Callable[[str], str] = input,
+    non_interactive: bool = False,
+) -> tuple[str, list[str]]:
     if len(pending) == 0:
         return NONE, []
 
@@ -77,4 +99,23 @@ def settle(
 
 def _show(pending: PendingChanges) -> None:
     for change in pending.items():
+        if change.declared:
+            print(f"# {change.path}：{change.declared}")
         print(change.diff)
+
+
+def unconfirmed_note(pending: PendingChanges) -> str:
+    """还有没确认完的暂存重写时，收尾要说的一句话（没有就返回空串）。
+
+    为什么必须有：那些正文是模型真的交出来的东西，只是清单没交代完所以没落盘。
+    进程一结束它们就没了——不吭声就是**静默丢弃**。
+    """
+    live = pending.staged_items()
+    if not live:
+        return ""
+    held = "、".join(f"{record.path}（{record.lines} 行，令牌 {record.token}）" for record in live)
+    return (
+        f"还有 {len(live)} 份已声明的大重写没有确认完，因此没有落盘：{held}。"
+        "消失清单没逐项交代（确认保留或声明有意丢弃）之前不会写入——"
+        "这是有意挡住，不是失败；下次重新发起时会拿到新令牌。"
+    )

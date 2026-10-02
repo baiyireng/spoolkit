@@ -530,7 +530,9 @@ def _report_numbers(loop, result, writer: EventWriter | None = None) -> None:
 
 
 def _settle_pending(args, project_root, pending) -> None:
-    if not len(pending):
+    # 只有整份改动都落完、暂存也空了才真的没话说：暂存里那几份正文同样需要
+    # 一句交代（`settle` 会替它说话），否则进程一退出就是静默丢弃。
+    if not len(pending) and not pending.staged_count():
         return
     print("---")
     settle(

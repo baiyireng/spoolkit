@@ -2,6 +2,7 @@ from pathlib import Path
 
 from spoolkit.tools.edit import (
     PendingChanges,
+    confirm_rewrite_spec,
     make_diff,
     replace_lines_spec,
     replace_text_spec,
@@ -405,22 +406,38 @@ def test_声明并逐项确认后大重写放行(tmp_path: Path) -> None:
     assert "消失清单" in note
 
 
-def test_已声明但清单未确认完不放行(tmp_path: Path) -> None:
-    """声明不等于免责：清单里还有没确认的项就不落盘。"""
+def test_已声明但清单未交代完不落盘且点名(tmp_path: Path) -> None:
+    """声明不等于免责：清单里还有没交代的项就不落盘，而且要**点名**。
+
+    与上一版的差别（这一轮改的）：原先「没凑齐」直接拒收整份正文，模型只能
+    把 120 行正文再发一遍——输出预算就是这么爆的。现在正文被**收下暂存**
+    （文件仍未落盘），返回一个短令牌，缺的只是清单。
+    """
     (tmp_path / "snake.html").write_text(_two_documents(tmp_path), encoding="utf-8")
     pending = _pending(tmp_path)
+    original = (tmp_path / "snake.html").read_text(encoding="utf-8")
     result = write_file_spec(tmp_path, pending).handler(
         {
             "path": "snake.html",
             "content": _MERGED,
             "rewrite_reason": "合并两份文档",
-            "acked_disappeared": ["function draw"],  # 只确认了一项
+            "acked_disappeared": ["function draw"],  # 只交代了一项
         }
     )
-    assert result.ok is False
-    assert len(pending) == 0
-    assert "没有确认" in result.content
-    assert "id=board" in result.content, "未确认的项要被点名"
+    assert result.ok is True, "正文要收下（拒收正文=逼它重发正文）"
+    assert len(pending) == 0, "清单没交代完之前，文件不得进待确认清单"
+    assert (tmp_path / "snake.html").read_text(encoding="utf-8") == original, (
+        "文件必须尚未落盘"
+    )
+    assert "尚未落盘" in result.content
+    assert "暂存" in result.content
+    assert "id=board" in result.content, "没交代的项要被点名"
+    assert "d" in result.content, "清单要带稳定项 id"
+    # 令牌确实拿到了，而且只在暂存里（没有落盘）。
+    assert len(pending.staged_items()) == 1
+    token = pending.staged_items()[0].token
+    assert token in result.content
+
 
 
 def test_合并类任务的出路是可照做的下一步(tmp_path: Path) -> None:
@@ -494,7 +511,8 @@ def test_纯HTML工作区只给write_file时出路不提不存在的工具(tmp_p
     pending = PendingChanges(tmp_path)
     registry = ToolRegistry()
     register_edit_tools(registry, tmp_path, pending)
-    assert registry.names() == ("write_file",)
+    # 确认入口跟着 write_file 一起注册：少了它，暂存下去的正文没人能确认。
+    assert registry.names() == ("confirm_rewrite", "write_file")
 
     result = registry.invoke(
         ToolCall("write_file", {"path": "snake.html", "content": _MERGED})
@@ -508,3 +526,262 @@ def test_纯HTML工作区只给write_file时出路不提不存在的工具(tmp_p
     # 声明通道仍然要在：这是这个工作区唯一走得通的路。
     assert "rewrite_reason" in result.content
     assert "acked_disappeared" in result.content
+
+
+# ---- 「确认清单拆成独立小回合」这一轮的验收 ---------------------------------
+#
+# 现场（dogfood r4）：11 步 / 15 次调用 / 315.9s / fail / 文件零改动。
+# 卡点不是护栏松不松，而是**输出预算夹击**：清单必须一次凑齐 → 第一次调用
+# 必然被拒（清单是工具算出来的）→ 120 行正文发第二遍 → 2457 token 装不下。
+# 下面这几条把新形状钉死，其中「确认那次调用没有携带正文」是核心。
+
+
+def _declared_rewrite(tmp_path: Path):
+    """把两份文档合并成一份：返回（pending, token, 清单项 id 列表）。"""
+    (tmp_path / "snake.html").write_text(_two_documents(tmp_path), encoding="utf-8")
+    pending = _pending(tmp_path)
+    result = write_file_spec(tmp_path, pending).handler(
+        {
+            "path": "snake.html",
+            "content": _MERGED,
+            "rewrite_reason": "两份文档首尾相接，合并成单文档并去掉重复声明",
+        }
+    )
+    assert result.ok is True
+    record = pending.staged_items()[0]
+    return pending, record.token, list(record.ids()), result
+
+
+def test_第一次重写返回清单与令牌且文件尚未落盘(tmp_path: Path) -> None:
+    """第一条：带 rewrite_reason 的第一次重写 → 收下正文、给清单+令牌、不落盘。"""
+    (tmp_path / "snake.html").write_text(_two_documents(tmp_path), encoding="utf-8")
+    original = (tmp_path / "snake.html").read_text(encoding="utf-8")
+    pending = _pending(tmp_path)
+
+    result = write_file_spec(tmp_path, pending).handler(
+        {
+            "path": "snake.html",
+            "content": _MERGED,
+            "rewrite_reason": "合并两份文档",
+        }
+    )
+
+    assert result.ok is True
+    assert len(pending) == 0, "还没确认，不得进待确认清单"
+    assert pending.staged_count() == 1
+    assert (tmp_path / "snake.html").read_text(encoding="utf-8") == original, (
+        "文件尚未落盘"
+    )
+    record = pending.staged_items()[0]
+    assert record.token in result.content, "返回里必须带令牌"
+    assert "尚未落盘" in result.content
+    assert "function draw" in result.content and "id=board" in result.content
+    # 项 id 就在返回里，模型才能只发 id。
+    assert all(one in result.content for one in record.ids())
+    assert "不要把正文再发一遍" in result.content, "关键指令必须在返回里"
+
+
+def test_只发项id的确认能落盘且确认那次没有正文(tmp_path: Path) -> None:
+    """核心用例：确认入口**只吃项 id**——那次调用里一个正文字符都没有。
+
+    断言分两半，缺一不可：
+    ① 确认调用的参数里没有 content（也没有任何长正文）；
+    ② 确认之后落成待确认改动，`apply()` 真的把合并后的正文写进文件。
+    """
+    pending, token, ids, staged_result = _declared_rewrite(tmp_path)
+    confirm = confirm_rewrite_spec(tmp_path, pending)
+
+    args = {"token": token, "acked": ids}
+    result = confirm.handler(args)
+
+    # ① 确认那次调用没有携带正文：参数只有项 id，长度远小于正文。
+    assert "content" not in args
+    assert sum(len(str(value)) for value in args.values()) < 100
+    assert len(_MERGED) > 60  # 正文确实不小，不然这条断言没有意义
+    assert result.ok is True
+
+    # ② 落成待确认改动 → 落盘写的是合并后的正文。
+    assert len(pending) == 1
+    assert pending.staged_count() == 0
+    assert pending.apply() == ["snake.html"]
+    written = (tmp_path / "snake.html").read_text(encoding="utf-8")
+    assert written == _MERGED
+    assert written.count("<html") == 1, "产出必须是单文档"
+
+
+def test_未交代的项仍在时不落盘并点名(tmp_path: Path) -> None:
+    """硬要求不松：两者都没给的项只要还在，就不落盘，而且要点名是哪几项。"""
+    pending, token, ids, _ = _declared_rewrite(tmp_path)
+    confirm = confirm_rewrite_spec(tmp_path, pending)
+    original = (tmp_path / "snake.html").read_text(encoding="utf-8")
+
+    result = confirm.handler({"token": token, "acked": ids[:-1]})
+
+    assert result.ok is False
+    assert len(pending) == 0, "未交代完不得进待确认清单"
+    assert pending.staged_count() == 1, "暂存的正文不许因为一次失败就被丢掉"
+    assert (tmp_path / "snake.html").read_text(encoding="utf-8") == original
+    missing_id = ids[-1]
+    assert missing_id in result.content, "要点名具体是哪一项"
+    assert "不用重发正文" in result.content, "失败话术也要说清正文不用重发"
+    assert token in result.content, "令牌仍有效，要说出来"
+
+
+def test_有意丢弃带理由可落盘且留痕可见(tmp_path: Path) -> None:
+    """第二种选择：声明有意丢弃（带理由）→ 可以落盘，而且报告里看得出是哪一项。"""
+    pending, token, ids, _ = _declared_rewrite(tmp_path)
+    confirm = confirm_rewrite_spec(tmp_path, pending)
+    dropped_id = ids[-1]
+
+    result = confirm.handler(
+        {
+            "token": token,
+            "acked": ids[:-1],
+            "dropped": [f"{dropped_id}：第二份文档整段是重复脚本，确实不要了"],
+        }
+    )
+
+    assert result.ok is True
+    assert len(pending) == 1
+    declared = pending.items()[0].declared
+    # 留痕要能看出「哪一项被有意丢掉」+「为什么」——两者都要在。
+    assert "消失清单" in declared
+    assert "有意丢弃" in declared
+    assert "第二份文档整段是重复脚本" in declared
+    assert "确认保留" in declared
+    # 模型这一侧也要看得到（报告里那份 diff 预览带着 declared）。
+    assert "有意丢弃" in result.content
+    assert "第二份文档整段是重复脚本" in result.content
+    # 落盘之后产出是单文档。
+    pending.apply()
+    assert (tmp_path / "snake.html").read_text(encoding="utf-8") == _MERGED
+
+
+def test_丢弃不写理由不放行(tmp_path: Path) -> None:
+    """没有理由的「丢弃」与「漏了没交代」是同一件事，放行等于把硬要求掏空。"""
+    pending, token, ids, _ = _declared_rewrite(tmp_path)
+    confirm = confirm_rewrite_spec(tmp_path, pending)
+
+    for entry in (ids[-1], f"{ids[-1]}：", f"{ids[-1]}："):
+        result = confirm.handler(
+            {"token": token, "acked": ids[:-1], "dropped": [entry]}
+        )
+        assert result.ok is False, entry
+        assert "没写理由" in result.content
+    assert len(pending) == 0
+    assert pending.staged_count() == 1
+
+
+def test_令牌无效或过期给人话且不落盘(tmp_path: Path) -> None:
+    """令牌失效两条路：没见过 / 过期。两种都要给人话，都不许静默当成功。"""
+    import spoolkit.tools.edit as edit
+
+    pending, token, ids, _ = _declared_rewrite(tmp_path)
+    confirm = confirm_rewrite_spec(tmp_path, pending)
+
+    unknown = confirm.handler({"token": "rw-000000", "acked": ids})
+    assert unknown.ok is False
+    assert "没有这个令牌" in unknown.content
+    assert "重新发起" in unknown.content, "要说清怎么重新发起"
+    assert token in unknown.content, "还有效的那份要说出来（不静默丢弃）"
+    assert pending.staged_count() == 1
+
+    # 时效：把时钟推过去（monkeypatch，不 sleep）。
+    now = edit._now()
+    original_now = edit._now
+    try:
+        edit._now = lambda: now + edit.limits.resolve("rewrite_stage_ttl_seconds")[0] + 1
+        expired = confirm.handler({"token": token, "acked": ids})
+    finally:
+        edit._now = original_now
+
+    assert expired.ok is False
+    assert "已过期" in expired.content
+    assert "重新发起" in expired.content
+    assert len(pending) == 0, "过期的确认不得落盘"
+    assert pending.staged_count() == 0, "过期即按时效清理（上界的一部分）"
+
+
+def test_多给一个不在清单里的项id要说不认识(tmp_path: Path) -> None:
+    """模型抄错 id 时不能装作没事：认不出就要说，而它不会让任何一项被交代掉。"""
+    pending, token, ids, _ = _declared_rewrite(tmp_path)
+    confirm = confirm_rewrite_spec(tmp_path, pending)
+
+    result = confirm.handler({"token": token, "acked": ids + ["d99"]})
+    # d99 认不出，但清单本身交代齐了 → 落盘，同时在返回里说明 d99 被忽略。
+    assert result.ok is True
+    assert "d99" in result.content
+    assert "不在这次的清单里" in result.content
+
+
+def test_暂存有上界_条数与单份字符(tmp_path: Path) -> None:
+    """上界是**可覆盖旋钮**，而且是硬闸：不是静默丢，是说清为什么没收下。"""
+    from spoolkit.tools.edit import StageLimitError
+
+    (tmp_path / ".agent").mkdir()
+    (tmp_path / ".agent" / "limits.json").write_text(
+        '{"rewrite_stage_limit": 1, "rewrite_stage_chars": 100000}',
+        encoding="utf-8",
+    )
+    pending = _pending(tmp_path)  # 不传 overrides：走工作区保存的那一份
+    assert pending._knob("rewrite_stage_limit") == 1.0
+
+    for name in ("a.html", "b.html"):
+        (tmp_path / name).write_text(_two_documents(tmp_path), encoding="utf-8")
+    spec = write_file_spec(tmp_path, pending)
+    first = spec.handler(
+        {"path": "a.html", "content": _MERGED, "rewrite_reason": "合并两份文档"}
+    )
+    assert first.ok is True
+    second = spec.handler(
+        {"path": "b.html", "content": _MERGED, "rewrite_reason": "合并两份文档"}
+    )
+    assert second.ok is False
+    assert "最多暂存" in second.content, "上界要说出是哪个旋钮、现在是几"
+    assert "rewrite_stage_limit" in second.content
+    assert pending.staged_count() == 1
+    # 单份字符上界：直接调 stage 判（工具路径上要先过「行数砍半」，绕不开）。
+    from spoolkit.tools.edit import PendingChange
+
+    try:
+        pending.stage(
+            PendingChange(path="c.html", old_text="x\n", new_text="y" * 200001),
+            (),
+            "超长",
+            True,
+        )
+    except StageLimitError as exc:
+        assert "rewrite_stage_chars" in str(exc)
+    else:  # pragma: no cover - 上界失效时这条会红
+        raise AssertionError("单份字符上界没有生效")
+
+
+def test_同一路径再提一次会取代旧暂存并说出来(tmp_path: Path) -> None:
+    """同一路径上更晚的正文取代更早的暂存：取代这件事必须被说出来。"""
+    (tmp_path / "snake.html").write_text(_two_documents(tmp_path), encoding="utf-8")
+    pending = _pending(tmp_path)
+    spec = write_file_spec(tmp_path, pending)
+    spec.handler(
+        {"path": "snake.html", "content": _MERGED, "rewrite_reason": "合并两份文档"}
+    )
+    old_token = pending.staged_items()[0].token
+
+    second = spec.handler(
+        {
+            "path": "snake.html",
+            "content": _MERGED.replace("const canvas = 1;", "const canvas = 2;"),
+            "rewrite_reason": "合并两份文档（第二次）",
+        }
+    )
+    assert second.ok is True
+    assert pending.staged_count() == 1, "同一路径只留一份"
+    assert old_token in second.content, "旧令牌被取代要说出来，不许静默丢"
+    assert "已被这次取代" in second.content
+
+    # 旧令牌现在取不到了：话术要说清它被取代，而不是「没见过」。
+    confirm = confirm_rewrite_spec(tmp_path, pending)
+    stale = confirm.handler({"token": old_token, "acked": []})
+    assert stale.ok is False
+    assert "没有这个令牌" in stale.content
+    assert pending.staged_items()[0].token in stale.content, "还有效的那份要报出来"
+

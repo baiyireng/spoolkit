@@ -70,6 +70,9 @@ IMPLEMENTER = Role(
         "run_command",
         "write_file",
         "replace_lines",
+        # 确认入口跟着写工具：声明式大重写会把正文先暂存，少了这一把，
+        # 实现者就永远确认不了自己刚交出去的那份正文（暂存等于白存）。
+        "confirm_rewrite",
     ),
     can_write=True,
 )

@@ -229,6 +229,32 @@ def _all_row_counts(conn: sqlite3.Connection) -> dict[str, int]:
     }
 
 
+# 「升级前后逐行不变」的表名单：既有 10 张 + `semantic_fts` + v4 的三张。
+# 真库副本走 `_counts_if_present`（来源版本由外部决定，只数库里真有的表）；
+# 合成夹具走 `_all_row_counts`（名字写死没问题：那些表一定是它自己建的）。
+PRESERVED_TABLES = (
+    "semantic_fts",
+    "memory_event",
+    "memory_state",
+    "memory_event_archive",
+)
+
+
+def _counts_if_present(conn: sqlite3.Connection) -> dict[str, int]:
+    """只数**库里真有**的那些表（真库副本的来源版本不由测试决定）。
+
+    写死名单去 `count(*)` 在 v0 库上会直接报「no such table」——那与迁移对不对
+    无关，只是夹具在假设来源版本。
+    """
+    present = _names(conn, "table")
+    tables = tuple(_row_counts(conn)) + PRESERVED_TABLES
+    return {
+        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        for table in tables
+        if table in present
+    }
+
+
 def _event_match(conn: sqlite3.Connection, query: str) -> tuple[int, ...]:
     """按**生产口径**（`store._match_query`：逐字规范化 + OR）查事件表，返回 rowid。
 
@@ -381,51 +407,81 @@ def test_既有对象逐字不变_升级前后DDL指纹(tmp_path: Path) -> None:
     conn.close()
 
 
-@pytest.mark.skipif(not REAL_DB.exists(), reason=f"真实记忆库不在：{REAL_DB}")
-def test_真库副本从user_version0升到v5既有对象逐行不变(tmp_path: Path) -> None:
-    """真库副本（`user_version=0`）→ v5：既有对象 DDL 与行数逐行不变，新增恰好一张 FTS 表。
+@pytest.mark.skipif(
+    not REAL_DB.exists(),
+    reason=f"真实记忆库不在（这不是通过，是测不了）：{REAL_DB}",
+)
+def test_真库副本迁移幂等且版本单调不回退(tmp_path: Path) -> None:
+    """真库副本：**与来源版本无关**的性质（原先钉的是「它恰好是 v0」）。
 
-    **只读复制**：`shutil.copy2` 把真库搬到 pytest 的 tmp 目录，原库一个字节都不写
-    （跑完再 sha256 复核）。两份副本：A 只跑到 v4、B 一路跑到 v5——都从同一个
-    `user_version=0` 的真库副本出发，所以「既有对象」的比较不受 v1..v4 的影响。
+    为什么改（本条是另一条稳定红）：断言 `_user_version(真库副本) == 0` 把
+    「用户工作区里的库还没迁过」当成了夹具性质；而任何在自己工作区跑起来的
+    `spool` 会话都会自动迁移，现在那个库是 5 → 必红。**错在测试**（耦合了
+    由外部决定的真实路径状态），不是库错了。绝不为让测试过而去改用户的库。
+
+    现在钉住的性质与来源版本无关，而且都是**真库才能给的证据**：
+    ① 只读复制（原库 sha256 不变）；② 既有对象逐行不变（事件一行都不丢）；
+    ③ 版本单调不回退；④ 幂等（连跑两次指纹逐位相同）；
+    ⑤ v5 这一步的对象就位、且回填与既有 `memory_event` 行数一对一。
+
+    「真库 v0 → v4 的指纹等于全新 v4 库」这条强证据需要 v0 来源，改由合成夹具
+    承担：`test_既有表逐字不变_整库DDL指纹哈希`（全新 v4 库 → 冻结哈希）。
     """
     source_digest = hashlib.sha256(REAL_DB.read_bytes()).hexdigest()
-    copy_a = tmp_path / "to-v4.db"
-    copy_b = tmp_path / "to-v5.db"
-    shutil.copy2(REAL_DB, copy_a)
+    copy_b = tmp_path / "real-migrated.db"
     shutil.copy2(REAL_DB, copy_b)
 
-    conn_a = open_db(copy_a)
-    assert _user_version(conn_a) == 0  # 真库还没在本地迁过（P0 的迁移命令是 opt-in）
-    _to_v4(conn_a)
-    before = _ddl_fingerprint(conn_a)
-    before_counts = _row_counts(conn_a)
-    # A 这一份同时是"真库上的 v4 指纹"——与全新 v4 库的读数**逐位相同**。
-    assert (
-        hashlib.sha256(_canonical(_existing_fingerprint(conn_a)).encode("utf-8")).hexdigest()
-        == FROZEN_V4_SCHEMA_SHA256
-    )
+    conn = open_db(copy_b)
+    source_version = _user_version(conn)
+    before = _ddl_fingerprint(conn)
+    before_counts = _counts_if_present(conn)
 
-    conn_b = open_db(copy_b)
-    init_memory_schema(conn_b)
+    init_memory_schema(conn)
 
-    assert _user_version(conn_b) == 5
-    after = _ddl_fingerprint(conn_b)
-    assert {name: after[name] for name in before} == before
-    new_names = set(after) - set(before)
-    assert {name for name in new_names if not name.startswith("memory_event_fts")} == set()
-    assert "memory_event_fts" in new_names
-    assert _row_counts(conn_b) == before_counts
-    # 升级是纯追加：既有表的行数一行都没少（真库里的记忆与事件是底账）。
-    assert sum(before_counts.values()) == sum(_row_counts(conn_b).values())
-    # 真库的 `memory_event` 是空的，所以这一步的回填在**这份数据上**是空操作
-    # （如实报：回填的证据在 `test_回填...` 与合成 v4 库上，不靠真库）。
-    assert conn_b.execute("SELECT count(*) FROM memory_event").fetchone()[0] == 0
-    assert conn_b.execute("SELECT count(*) FROM memory_event_fts").fetchone()[0] == 0
-    conn_a.close()
-    conn_b.close()
-    # 原库没被碰过。
+    after = _ddl_fingerprint(conn)
+    after_counts = _counts_if_present(conn)
+
+    # ① 原库一个字节都没写。
     assert hashlib.sha256(REAL_DB.read_bytes()).hexdigest() == source_digest
+    # ② 既有对象逐行不变（含 memory_event：升级不许丢事件）。
+    assert set(after) >= set(before)
+    assert {name: after[name] for name in before} == before
+    assert after_counts == before_counts
+    assert (
+        conn.execute("SELECT count(*) FROM memory_event").fetchone()[0]
+        == before_counts["memory_event"]
+    )
+    # ③ 版本单调不回退，且到得了 max(来源版本, SCHEMA_VERSION)。
+    assert _user_version(conn) == max(source_version, SCHEMA_VERSION)
+    assert _user_version(conn) >= source_version
+    # ⑤ v5 这一步的对象就位；回填与既有事件行数一对一（与来源版本无关）。
+    assert "memory_event_fts" in _names(conn, "table")
+    assert (
+        conn.execute("SELECT count(*) FROM memory_event_fts").fetchone()[0]
+        == conn.execute("SELECT count(*) FROM memory_event").fetchone()[0]
+    )
+    added = set(after) - set(before)
+    if source_version >= SCHEMA_VERSION:
+        assert added == set(), "库已经是最新时，这次迁移必须是空操作"
+    else:
+        assert all(name.startswith("memory_event_fts") for name in added), added
+
+    # ④ 幂等：连跑两次，DDL 指纹、行数、版本号、索引行逐位相同。
+    first = (
+        after,
+        after_counts,
+        _user_version(conn),
+        _fts_rows(conn) if "memory_event_fts" in _names(conn, "table") else (),
+    )
+    init_memory_schema(conn)
+    init_memory_schema(conn)
+    assert (
+        _ddl_fingerprint(conn),
+        _counts_if_present(conn),
+        _user_version(conn),
+        _fts_rows(conn),
+    ) == first
+    conn.close()
 
 
 # ---- 验收 3：回填（v5 之前写进去的事件，升级后可检索）------------------------

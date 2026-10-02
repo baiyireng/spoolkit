@@ -14,9 +14,10 @@ from typing import Any, TextIO
 
 from spoolkit.agents.plan import out_of_scope
 from spoolkit.cli.approval import apply_with_audit
+from spoolkit.cli.settle import unconfirmed_note
 from spoolkit.policy import AUTO
 from spoolkit.tools.edit import PendingChanges, save_baseline
-from spoolkit.web.protocol import AWAIT, CONFIRM, DIFF, Event
+from spoolkit.web.protocol import AWAIT, CONFIRM, DIFF, Event, NOTE
 
 
 class EventWriter:
@@ -51,9 +52,16 @@ def settle_with_events(
     """
     changes = pending.items()
     if not changes:
+        # 没有待确认改动，但可能还有「清单没交代完、因此没落盘」的暂存重写。
+        # 那句必须发出去：不吭声就是静默丢弃模型真交出来的正文。
+        note = unconfirmed_note(pending)
+        if note:
+            writer.emit(NOTE, text=note, ok=False)
         return "none"
 
     for change in changes:
+        if change.declared:
+            writer.emit(NOTE, text=f"{change.path}：{change.declared}", ok=True)
         writer.emit(DIFF, path=change.path, text=change.diff)
 
     if policy == AUTO and not out_of_scope([c.path for c in changes], scope):

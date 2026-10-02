@@ -10,12 +10,15 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import re
+import time
 from typing import Any, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from spoolkit import limits
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable
 from spoolkit.tools.types import ToolResult, ToolSpec
@@ -41,6 +44,33 @@ WHOLE_FILE_LINE_LIMIT = 150
 # 清单没确认完同样不放行。
 REWRITE_REASON_PARAM = "rewrite_reason"
 ACK_PARAM = "acked_disappeared"
+
+# ---- 确认清单拆成独立小回合：正文只发一次、确认只发项 id --------------------
+#
+# dogfood 复跑（r4：11 步 / 15 次调用 / 315.9s / fail / 文件零改动）暴露的真实形状：
+# 声明式通道要求「第一次调用就把清单凑齐」，而清单是**工具算出来的**——模型在
+# 发出第一次调用之前看不到它。于是那次调用必然被拒，模型只好把 120 行正文再发
+# 一遍（这回带上了确认项）。输出预算 2457 token 下，一份 300 行正文都装不下
+# （r1–r3 死在输出截断，`write_file` 连 `path` 都没发出来），两份就是稳死。
+#
+# 所以把「正文」与「举证」拆成两个回合：
+#   ① 第一次带 rewrite_reason 的写调用 → 正文**暂存**，返回消失清单（每项一个
+#      稳定项 id）+ 一个短令牌；文件尚未落盘。
+#   ② confirm_rewrite(token, acked=[id...], dropped=["id：理由"...]) → **只发项 id**，
+#      绝不重发正文。清单里每一项二选一：确认保留（acked）或声明有意丢弃
+#      （dropped + 理由）。两者都没给的项仍在 → 这次重写不落盘（硬要求不松）。
+CONFIRM_TOOL = "confirm_rewrite"
+TOKEN_PARAM = "token"
+ACKED_PARAM = "acked"
+DROPPED_PARAM = "dropped"
+
+# 暂存结果的内容前缀。循环靠它认两件事：这次调用没有落盘（别当产出），以及
+# 「同一份正文再发一遍」是纯浪费（进失败表，原样重提会被硬拦）。
+STAGE_MARKER = "⏸ 已暂存待确认的重写"
+
+# 丢弃理由的分隔符。`dropped` 每一项写成「项 id：理由」——理由不许省，
+# 省了就不算「有意丢弃」，只是「没交代」。
+DROP_REASON_SEPARATOR = "："
 
 # 拒绝整文件重写的判据（两条硬判据原来的数值没变，只是给了名字）。
 REWRITE_MIN_OLD_LINES = 30
@@ -221,6 +251,62 @@ def duplicate_span(
     return (i + 1, i + run, j + 1, j + run)
 
 
+def item_id(index: int) -> str:
+    """消失清单里第 index 项的**稳定项 id**（0 起）。
+
+    为什么要有它：确认回合只能发项 id，否则模型就得把「function draw」这类
+    条目原文再抄一遍——那就又回到了「重发正文」的老路。id 只由清单内的位置
+    决定，同一次暂存里永远指向同一项。
+    """
+    return f"d{index + 1}"
+
+
+def _item_aliases(items: Sequence[Disappeared], index: int) -> set[str]:
+    """一项可以被认出来的全部写法：项 id、序号、条目原文、标识符。
+
+    宽容是有意的：这些写法**都指向同一项**，认错的可能性为零；而少认一种，
+    模型就要白花一轮。它省下的每一轮都是输出预算。
+    """
+    item = items[index]
+    return {
+        item_id(index).casefold(),
+        str(index + 1),
+        " ".join(item.token.split()).casefold(),
+        item.key.casefold(),
+    }
+
+
+def _match_items(items: Sequence[Disappeared], raw: Any) -> set[int]:
+    """把模型给的项清单（acked / dropped 的左边）换算成清单下标。"""
+    if not isinstance(raw, (list, tuple)):
+        return set()
+    matched: set[int] = set()
+    for entry in raw:
+        text = " ".join(str(entry).split()).casefold()
+        if not text:
+            continue
+        for index in range(len(items)):
+            if text in _item_aliases(items, index):
+                matched.add(index)
+    return matched
+
+
+def _render_items(items: Sequence[Disappeared]) -> str:
+    """消失清单的渲染。每项都带**稳定项 id**——确认回合只发 id，不发正文。"""
+    return "、".join(f"{item_id(i)} {item.kind} {item.token}" for i, item in enumerate(items))
+
+
+def _ids_of(items: Sequence[Disappeared], subset: Sequence[Disappeared]) -> list[str]:
+    """`subset` 里各项在**完整清单**里的项 id（i 是完整清单里的位置）。"""
+    found: list[str] = []
+    for item in subset:
+        try:
+            found.append(item_id(list(items).index(item)))
+        except ValueError:  # pragma: no cover - subset 必然来自 items
+            continue
+    return found
+
+
 def _declaration(args: dict) -> tuple[str, list[str]]:
     """取出模型显式给出的重写声明：(原因, 已确认的消失清单条目)。"""
     reason = args.get(REWRITE_REASON_PARAM)
@@ -231,39 +317,133 @@ def _declaration(args: dict) -> tuple[str, list[str]]:
 
 
 def _declaration_note(
-    reason: str, items: Sequence[Disappeared], shrink: bool
+    reason: str,
+    acked: Sequence[Disappeared],
+    shrink: bool,
+    dropped: Sequence[tuple[Disappeared, str]] = (),
 ) -> str:
-    """声明式重写留在待确认清单上的那一行痕迹。"""
+    """声明式重写留在待确认清单上的那一行痕迹。
+
+    「确认保留」与「有意丢弃」都要留痕，而且是**分开写**的：报告里得看得出
+    哪一项是被有意丢掉的、理由是什么。只写「已确认 N 项」会把两种选择混成
+    一件事——而它们对读报告的人意义完全不同。
+    """
     if not reason:
         return ""
     parts = [f"声明重写——{reason}"]
     if shrink:
         parts.append(f"行数减少超过一半（{REWRITE_SHRINK_RATIO:.0%} 线），走声明通道")
-    if items:
+    if acked:
         parts.append(
-            f"已逐项确认消失清单 {len(items)} 项："
-            + "、".join(item.token for item in items)
+            f"消失清单逐项交代：确认保留 {len(acked)} 项："
+            + "、".join(item.token for item in acked)
         )
-    else:
+    if dropped:
+        parts.append(
+            f"消失清单里**有意丢弃** {len(dropped)} 项（逐项写明理由）："
+            + "；".join(f"{item.token} ← {why}" for item, why in dropped)
+        )
+    if not acked and not dropped:
         parts.append("消失清单为空")
     return "；".join(parts)
 
 
-def _ack_missing(
-    items: Sequence[Disappeared], acked: Sequence[str]
+def _unaccounted(
+    items: Sequence[Disappeared],
+    acked: Sequence[str],
+    dropped: Sequence[str],
 ) -> list[Disappeared]:
-    """清单里还没被确认的条目。确认口径：条目本身，或它的标识符。"""
-    confirmed = {" ".join(entry.split()).casefold() for entry in acked}
+    """清单里既没确认保留、也没声明有意丢弃的项。
+
+    这就是那条**不许松**的硬要求：两者都没给的项只要还在，这次重写就不落盘。
+    """
+    covered = _match_items(items, acked) | _match_items(items, dropped)
+    return [item for index, item in enumerate(items) if index not in covered]
+
+
+def _split_dropped(raw: Any) -> tuple[list[tuple[str, str]], str]:
+    """把 `dropped` 拆成 [(项, 理由)]；形状/理由不合法时返回人话错误。
+
+    两种写法都收：`"d3：这条重复脚本整段删掉"`（提示词里给的形状）与
+    `{"id": "d3", "reason": "..."}`。理由缺失一律拒——没有理由的「丢弃」
+    与「漏了没交代」是同一件事，放行等于把硬要求掏空。
+    """
+    if raw in (None, ""):
+        return [], ""
+    if not isinstance(raw, (list, tuple)):
+        return [], (
+            f"{DROPPED_PARAM} 必须是数组，每项写成「项id{DROP_REASON_SEPARATOR}为什么可以丢」，"
+            '例如 ["d3：这段重复脚本整段删掉"]'
+        )
+    pairs: list[tuple[str, str]] = []
+    for entry in raw:
+        if isinstance(entry, dict):
+            target = str(entry.get("id") or entry.get("item") or "").strip()
+            why = str(entry.get("reason") or entry.get("why") or "").strip()
+        else:
+            text = str(entry).strip()
+            cut = -1
+            for mark in (DROP_REASON_SEPARATOR, ":"):
+                found = text.find(mark)
+                if found >= 0 and (cut < 0 or found < cut):
+                    cut = found
+            if cut < 0:
+                target, why = text, ""
+            else:
+                target, why = text[:cut].strip(), text[cut + 1 :].strip()
+        if not target:
+            return [], f"{DROPPED_PARAM} 里有一项没写项 id，例如 d2"
+        if not why:
+            return [], (
+                f"{DROPPED_PARAM} 里的 {target} 没写理由。"
+                "「有意丢弃」必须逐项说明为什么可以丢——"
+                f'写法是 ["{target}{DROP_REASON_SEPARATOR}为什么这一项可以不要"]；'
+                "没有理由就按「还没交代」处理，这次重写不落盘"
+            )
+        pairs.append((target, why))
+    return pairs, ""
+
+
+def _unknown_entries(items: Sequence[Disappeared], raw: Any) -> list[str]:
+    """`raw` 里认不出对应清单项的写法（模型抄错 id 时要说出来）。
+
+    不说出来的后果很具体：模型以为自己交代了 d9，于是对「还有一项没交代」
+    百思不得其解，接着重发同一份清单。
+    """
+    if not isinstance(raw, (list, tuple)):
+        return []
     return [
-        item
-        for item in items
-        if item.token.casefold() not in confirmed and item.key.casefold() not in confirmed
+        str(entry)
+        for entry in raw
+        if str(entry).strip() and not _match_items(items, [entry])
     ]
+
+
+def _dropped_targets(
+    items: Sequence[Disappeared], pairs: Sequence[tuple[str, str]]
+) -> tuple[list[tuple[Disappeared, str]], list[str]]:
+    """把 [(项写法, 理由)] 换算成 ([(清单项, 理由)], 认不出的写法)。
+
+    认不出的项**不影响判定**：它没有让任何一项被交代掉，所以那些项仍然
+    unaccounted、仍然拦着落盘（fail-safe）。但要把它们说出来——「你写的 d9
+    清单里没有」比「还有一项没交代」更容易照做。
+    """
+    matched: list[tuple[Disappeared, str]] = []
+    unknown: list[str] = []
+    for target, why in pairs:
+        found = _match_items(items, [target])
+        if not found:
+            unknown.append(target)
+            continue
+        for index in sorted(found):
+            matched.append((items[index], why))
+    return matched, unknown
 
 
 def _remedy_lines(
     stored: str,
     old_text: str,
+    items: Sequence[Disappeared],
     missing: Sequence[Disappeared],
     alternatives: Sequence[str],
 ) -> list[str]:
@@ -271,6 +451,11 @@ def _remedy_lines(
 
     只点这个工作区真的注册过的工具——点一把没有的工具，模型照着做只会得到
     「未知工具」，比不给下一步更浪费。
+
+    **这里不给 `confirm_rewrite` 的调用形状**：这一条话术是「这次重写被拦下、
+    正文没有被暂存」时用的，那时根本不存在令牌。dogfood r3 实测：模型在
+    `confirm_rewrite` 出现在工具索引里之后，自己编了一个令牌去确认一份不存在的
+    暂存，连撞三次把运行撞停。所以「没有令牌」这件事必须说在明处。
     """
     lines: list[str] = []
     span = duplicate_span(old_text)
@@ -280,49 +465,21 @@ def _remedy_lines(
             f'replace_lines(path="{stored}", start_line={c}, end_line={d}, content="")'
             f"  # 删掉第 {c}–{d} 行那份重复内容（它与第 {a}–{b} 行逐行相同）"
         )
-    ack = ", ".join(f'"{item.token}"' for item in missing)
+    ids = _ids_of(items, missing)
+    ack = ", ".join(f'"{one}"' for one in ids)
     lines.append(
         f'write_file(path="{stored}", content=<你要交的完整内容>, '
         f'{REWRITE_REASON_PARAM}="为什么这是一次合法大改（合并/去重/搬运）"'
-        + (f", {ACK_PARAM}=[{ack}]" if missing else "")
+        + (f", {ACK_PARAM}=[{ack}]" if ids else "")
         + ")"
     )
-    return lines
-
-
-def _rewrite_refusal(
-    stored: str,
-    old_text: str,
-    old_lines: int,
-    new_lines: int,
-    items: Sequence[Disappeared],
-    reason: str,
-    acked: Sequence[str],
-    *,
-    shrink: bool,
-    alternatives: Sequence[str] = ("replace_lines",),
-) -> str | None:
-    """该不该拦这次重写：拦就返回话术，放行返回 None。
-
-    两条规则，顺序不能反：
-    - **未声明的大重写**照旧硬拦（护栏不松）；
-    - **声明了但清单还有未确认项**也不放行（逐项确认是对「我没丢内容」的举证）。
-    """
-    missing = _ack_missing(items, acked)
-    if not shrink:
-        # 行数没砍掉一半以上：只有「声明了却漏确认」这一种情况要拦。
-        if reason and missing:
-            return _refusal_text(
-                stored, old_text, old_lines, new_lines, items, reason, missing,
-                shrink=False, alternatives=alternatives,
-            )
-        return None
-    if not reason or missing:
-        return _refusal_text(
-            stored, old_text, old_lines, new_lines, items, reason, missing,
-            shrink=True, alternatives=alternatives,
+    if ids:
+        lines.append(
+            "# 带上 rewrite_reason 之后正文会被收下并返回令牌 token；"
+            f"清单没凑齐时再用 {CONFIRM_TOOL}(token=..., {ACKED_PARAM}=[...]) 补，"
+            "只发项 id、不要重发正文（现在没有令牌，别调它）"
         )
-    return None
+    return lines
 
 
 def _refusal_text(
@@ -345,8 +502,8 @@ def _refusal_text(
     if reason:
         parts.append(
             f"你已经声明了这次重写（{reason}），但消失清单里还有 "
-            f"{len(missing)} 项没有确认："
-            + "、".join(item.token for item in missing)
+            f"{len(missing)} 项没有交代："
+            + "、".join(f"{one} {item.token}" for one, item in zip(_ids_of(items, missing), missing))
             + "。\n"
         )
     else:
@@ -356,9 +513,8 @@ def _refusal_text(
         )
     if items:
         parts.append(
-            f"消失清单（旧内容里有、新内容里没有，共 {len(items)} 项）："
-            + "、".join(item.token for item in items)
-            + "。\n"
+            f"消失清单（旧内容里有、新内容里没有，共 {len(items)} 项，"
+            "每项前面是项 id）：" + _render_items(items) + "。\n"
         )
     else:
         parts.append(
@@ -373,30 +529,41 @@ def _refusal_text(
             "像是同一份内容出现了两次——合并类任务就是这种形状。\n"
         )
     if missing:
-        keys = "、".join(item.key for item in missing)
+        ids = "、".join(_ids_of(items, missing))
         if reason:
             parts.append(
-                f"清单必须**逐项确认**才放行：把每一项填进 {ACK_PARAM}"
-                f"（逐字照抄，或只写标识符，如 {keys}）；"
-                "确认不了就说明这次重写确实丢了内容，不要落盘。\n"
+                f"清单必须**逐项交代**才放行：给每一项填进 {ACK_PARAM}"
+                f"（项 id，如 {ids}），或用 {DROPPED_PARAM} 声明有意丢弃并写明理由；"
+                "两者都没给的项，这次重写不会落盘。\n"
             )
         else:
             parts.append(
-                f"清单还没有确认：先带上 {REWRITE_REASON_PARAM} 说明这次大改做了什么，"
-                f"再把每一项填进 {ACK_PARAM}（逐字照抄，或只写标识符，如 {keys}）；"
-                "确认不了就说明这次重写确实丢了内容，不要落盘。\n"
+                f"清单还没有交代：先带上 {REWRITE_REASON_PARAM} 说明这次大改做了什么——"
+                "正文会先收下并给你一个令牌，再逐项交代（只发项 id，不用重发正文）；"
+                "交代不了就说明这次重写确实丢了内容，不要落盘。\n"
             )
     else:
         if items:
             parts.append(
                 f"要合并／去重：带上 {REWRITE_REASON_PARAM} 说明这次大改做了什么，"
-                f"并把上面消失的每一样填进 {ACK_PARAM}，再重提一次。\n"
+                f"再把上面消失的每一样填进 {ACK_PARAM} 或声明丢弃，再重提一次。\n"
             )
         else:
             parts.append(
                 f"要合并／去重：带上 {REWRITE_REASON_PARAM} 说明这次大改做了什么，"
                 "再重提一次——这次没有识别出消失项，声明本身就是全部举证。\n"
             )
+    if not reason:
+        # 这次**没有暂存**，所以没有令牌——必须说在明处。
+        #
+        # dogfood r3 实测：`confirm_rewrite` 出现在工具索引里之后，模型在这一次
+        # 拒绝之后自己编了个令牌 `rw-000001` 去确认一份不存在的暂存，连撞三次被
+        # 机械层判成打转、整轮收手（7 步 / 134.7s / 文件零改动）。「没有令牌」
+        # 不是模型能从上下文推出来的事，得直说。
+        parts.append(
+            f"这次**没有暂存正文，也没有令牌**：不要调用 {CONFIRM_TOOL}"
+            "（它只认上一次写调用返回的令牌）。照做的是下面这一条。\n"
+        )
     if precise:
         parts.append(
             f"要保住内容：改用 {'、'.join(alternatives)} 做局部修改——"
@@ -412,19 +579,74 @@ def _refusal_text(
         # 是一条做不到的指令——dogfood 复跑就是这么卡的。
         parts.append(
             "这个工作区只有 write_file——replace_lines / replace_text 都没注册，"
-            "别去找它们：要删掉一半以上内容，只能先声明、再把消失清单逐项确认后"
-            "整份交出。\n"
+            "别去找它们：要删掉一半以上内容，只能先声明（正文会被收下并给令牌）、"
+            "再把消失清单逐项交代后落盘。\n"
         )
         parts.append(
             "整份重写时输出一旦被预算截断，写出去的会是半份坏文件——"
-            "确认不了清单就别落盘，先 read_file 确认要删的到底是哪一段。\n"
+            "交代不了清单就别落盘，先 read_file 确认要删的到底是哪一段。\n"
         )
     parts.append(
         "不得原样重提同一个调用：失败过的参数原样重提会被硬拦，"
         "也不会因此多得一步预算。\n"
     )
-    for line in _remedy_lines(stored, old_text, missing, alternatives):
+    for line in _remedy_lines(stored, old_text, items, missing, alternatives):
         parts.append(f"{NEXT_STEP_MARKER}{line}\n")
+    return "".join(parts)
+
+
+def _stage_text(
+    record: StagedRewrite,
+    missing: Sequence[Disappeared],
+    alternatives: Sequence[str] = ("replace_lines",),
+) -> str:
+    """暂存回执：**正文收下了**，清单还没交代完。
+
+    这一段是这一轮改动对模型的主要出口，所以三件事必须写得能照抄：
+    ① 文件尚未落盘 + 令牌是什么；② 清单（每项带稳定项 id）；③ 确认时
+    **只发项 id、绝不重发正文**。第三句是整件事的关键——不写清楚，模型
+    会照老习惯把 120 行正文再发一遍，输出预算就又爆了。
+    """
+    ids = _ids_of(record.items, missing)
+    token = record.token
+    ack_list = ", ".join(f'"{one}"' for one in ids)
+    parts = [
+        f"{STAGE_MARKER}：{record.path} 的正文已收下（{record.lines} 行），"
+        f"但消失清单还有 {len(missing)} 项没交代，所以**文件尚未落盘**。\n",
+        f"令牌 {TOKEN_PARAM}={token}（只在本次运行内有效）。\n",
+    ]
+    if record.replaced:
+        parts.append(
+            "同一路径上更早的那次暂存已被这次取代（旧令牌 "
+            + "、".join(record.replaced)
+            + " 不再可用）。\n"
+        )
+    if record.items:
+        parts.append(
+            f"消失清单（旧内容里有、新内容里没有，共 {len(record.items)} 项；"
+            "前面是项 id）：" + _render_items(record.items) + "。\n"
+        )
+    else:
+        parts.append("这次没有识别出消失项。\n")
+    if ids:
+        parts.append(
+            "清单里每一项二选一，**确认时只发项 id，不要把正文再发一遍**：\n"
+            "  · 确认保留（这一项在新内容里确实没有了，而且这样是对的）：\n"
+            f'      {CONFIRM_TOOL}({TOKEN_PARAM}="{token}", {ACKED_PARAM}=[{ack_list}])\n'
+            "  · 有意丢弃（你主动决定不要它，必须写理由）：\n"
+            f'      {CONFIRM_TOOL}({TOKEN_PARAM}="{token}", '
+            f'{DROPPED_PARAM}=["{ids[0]}{DROP_REASON_SEPARATOR}为什么这一项可以不要"])\n'
+            "两种可以混在同一次调用里。\n"
+            "两者都没给的项只要还在，这次重写就不会落盘（硬要求，不会松）。\n"
+        )
+    if "replace_lines" in alternatives:
+        parts.append(
+            f"要保住内容也可以改用 {'、'.join(alternatives)} 只动该动的那一段。\n"
+        )
+    parts.append(
+        f"{NEXT_STEP_MARKER}{CONFIRM_TOOL}({TOKEN_PARAM}=\"{token}\", "
+        f"{ACKED_PARAM}=[{ack_list}])  # 只发项 id，正文已经收下，不用再发一遍\n"
+    )
     return "".join(parts)
 
 
@@ -444,14 +666,213 @@ def register_edit_tools(registry: Any, root: Path, pending: PendingChanges) -> N
     注册结果还要**告诉写工具**（`alternatives`）：拒绝话术里点到一把模型没有
     的工具，就等于把出路指到墙外。dogfood 复跑实测——纯 HTML 工作区里
     `replace_lines` 根本没注册，而那正是旧话术让模型去做的事。
+
+    **确认入口跟着 write_file 一起注册**：它管的是「正文已经暂存、清单还没
+    交代完」那一回合。少了它，暂存下去的正文就没人能确认——那比不暂存更糟。
     """
     small = is_small_project(root)
     alternatives = () if small else ("replace_lines",)
     registry.register(write_file_spec(root, pending, alternatives=alternatives))
+    registry.register(confirm_rewrite_spec(root, pending))
     if not small:
         registry.register(
             replace_lines_spec(root, pending, alternatives=alternatives)
         )
+
+
+def confirm_rewrite_spec(root: Path, pending: PendingChanges) -> ToolSpec:
+    """确认入口：**只吃清单项，不吃正文**。
+
+    这是这一轮改的核心。原先「清单必须一次凑齐」把举证与正文绑在同一回合里，
+    而清单是工具算出来的——模型第一次调用必然凑不齐，于是正文被发两遍，
+    输出预算在 2457 token 上直接崩（dogfood r1–r3 连 `path` 都没发出来）。
+
+    现在正文在提出时就被收下了（`write_file` 带 rewrite_reason 那次），
+    确认回合只给项 id：`acked` 是确认保留，`dropped` 是声明有意丢弃（必须带
+    理由）。两者都没给的项还在 → 不落盘并点名。
+    """
+
+    def handler(args: dict) -> ToolResult:
+        token = str(args.get(TOKEN_PARAM) or "").strip()
+        if not token:
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"{REFUSAL_MARKER}：{CONFIRM_TOOL} 需要 {TOKEN_PARAM}。"
+                    "令牌是上一次带 rewrite_reason 的写调用返回的那一个"
+                    "（形如 rw-1a2b3c）；找不到就重新发起一次 write_file 拿新的。"
+                ),
+            )
+        record, why = pending.lookup_staged(token)
+        if record is None:
+            return ToolResult(
+                ok=False, content=_stale_token_text(pending, token, why)
+            )
+
+        acked = args.get(ACKED_PARAM)
+        acked_list = [str(item) for item in acked] if isinstance(acked, list) else []
+        pairs, why_bad = _split_dropped(args.get(DROPPED_PARAM))
+        if why_bad:
+            return ToolResult(ok=False, content=f"{REFUSAL_MARKER}：{why_bad}。\n")
+        dropped, unknown_dropped = _dropped_targets(record.items, pairs)
+        unknown_ids = _unknown_entries(record.items, acked_list) + unknown_dropped
+
+        missing = _unaccounted(
+            record.items, acked_list, [target for target, _ in pairs]
+        )
+        if missing:
+            # **硬要求**：没交代的项只要还在，就不落盘，而且要点名是哪几项。
+            names = "、".join(
+                f"{one} {item.token}"
+                for one, item in zip(_ids_of(record.items, missing), missing)
+            )
+            hint = ""
+            if unknown_ids:
+                hint = (
+                    "另外，" + "、".join(unknown_ids) + " 不在这次的清单里"
+                    "（清单项 id 见上一次的返回）。\n"
+                )
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"{REFUSAL_MARKER}：{record.path} 还有 {len(missing)} 项没交代，"
+                    f"这次没有落盘：{names}。\n"
+                    + hint
+                    + "每一项二选一：确认保留就填进 "
+                    f"{ACKED_PARAM}（项 id），有意丢弃就填进 {DROPPED_PARAM}"
+                    f'（形如 ["d1{DROP_REASON_SEPARATOR}为什么可以丢"]）。\n'
+                    f"**不用重发正文**：正文（{record.lines} 行）还在暂存里，"
+                    f"令牌 {token} 仍然有效。\n"
+                ),
+            )
+
+        declared = _declaration_note(
+            record.reason,
+            _acked_items(record.items, acked_list),
+            record.shrink,
+            dropped,
+        )
+        change = pending.take_staged(token, declared)
+        if change is None:  # pragma: no cover - 取出与搬入之间没有别处会动它
+            return ToolResult(
+                ok=False, content=_stale_token_text(pending, token, "unknown")
+            )
+
+        parts = [
+            f"已按你的交代落成待确认改动：{change.path}"
+            f"（{_count_lines(change.new_text)} 行，尚未写入磁盘，等用户确认）。\n",
+            f"留档：{declared}\n",
+        ]
+        if dropped:
+            parts.append(
+                "有意丢弃（已逐项记进留档，报告里看得到）：\n"
+                + "".join(
+                    f"  - {item_id(record.items.index(item))} {item.token}"
+                    f" ← {why}\n"
+                    for item, why in dropped
+                )
+            )
+            parts.append(
+                "注意：丢弃是**你的声明**，不是系统替你判断的。"
+                "落盘后这一项就没有了。\n"
+            )
+        if unknown_ids:
+            parts.append(
+                "（" + "、".join(unknown_ids) + " 不在这次的清单里，已忽略。）\n"
+            )
+        parts.append(f"\n{change.diff}")
+        return ToolResult(ok=True, content="".join(parts))
+
+    return ToolSpec(
+        name=CONFIRM_TOOL,
+        description=(
+            "给已暂存的大重写逐项交代消失清单：acked 是确认保留，"
+            "dropped 是声明有意丢弃（每项都要写理由）。"
+            "只发项 id 与理由，**不要重发正文**——正文在你带 rewrite_reason "
+            "的那次写调用里已经收下了。两者都没给的项只要还在，就不会落盘。"
+            "**只在写调用返回过令牌之后用它**：没有令牌（比如那次大重写没带 "
+            "rewrite_reason、被拒了）时这里没有暂存可确认，"
+            "该做的是带 rewrite_reason 重提一次。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                TOKEN_PARAM: {
+                    "type": "string",
+                    "description": "写调用返回的暂存令牌（形如 rw-1a2b3c）",
+                },
+                ACKED_PARAM: {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "确认保留的清单项 id（如 [\"d1\",\"d2\"]）",
+                },
+                DROPPED_PARAM: {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "有意丢弃的项，每项写成「项id：为什么可以丢」，"
+                        "例如 [\"d3：这段重复脚本整段删掉\"]；理由不许省"
+                    ),
+                },
+            },
+            "required": [TOKEN_PARAM],
+            "additionalProperties": False,
+        },
+        handler=handler,
+        brief="逐项交代暂存的重写（只发项 id）",
+        group="改",
+    )
+
+
+def _acked_items(
+    items: Sequence[Disappeared], acked: Sequence[str]
+) -> list[Disappeared]:
+    """`acked` 里真正对上清单的那几项（顺序按清单）。"""
+    matched = _match_items(items, acked)
+    return [item for index, item in enumerate(items) if index in matched]
+
+
+def _stale_token_text(pending: PendingChanges, token: str, why: str) -> str:
+    """令牌不可用时的人话：说清没执行、内容去哪了、怎么重新发起。
+
+    两条硬要求在这里落地：**不许静默当成功**（所以 ok=False 且带拒绝标记，
+    循环据此认定这次调用没有执行），**不许静默丢弃暂存内容**（所以要说清
+    还有几份暂存、以及重新发起一次写调用就能拿新令牌）。
+    """
+    if why == "expired":
+        head = (
+            f"{REFUSAL_MARKER}：令牌 {token} 已过期"
+            f"（时效 rewrite_stage_ttl_seconds），这次确认没有执行。"
+            "按上界规则，过期的那份暂存正文已被清理——它没有落盘，"
+            "也没有被悄悄写进文件。\n"
+        )
+    else:
+        head = (
+            f"{REFUSAL_MARKER}：没有这个令牌 {token}"
+            "（可能抄错了，也可能来自上一次运行——令牌只在提出它的那次运行里有效）。"
+            "这次确认没有执行，也没有改动任何文件。\n"
+        )
+    live = pending.staged_items()
+    if live:
+        held = "、".join(
+            f"{record.path}（{TOKEN_PARAM}={record.token}）" for record in live
+        )
+        tail = (
+            f"现在还暂存着：{held}。"
+            "这些正文还在，用它们各自的令牌就能确认。\n"
+        )
+    else:
+        tail = (
+            "现在没有暂存的重写——**不要再拿这个令牌重试**，重试多少次都不会有"
+            "东西可确认。\n"
+        )
+    return (
+        head
+        + tail
+        + "要重新发起：再调用一次 write_file(path=..., content=<完整内容>, "
+        f"{REWRITE_REASON_PARAM}=...)，正文会被收下并返回一个新令牌，"
+        "然后只需补确认（不用反复交正文）。\n"
+    )
 
 
 def replace_text_spec(root: Path, pending: PendingChanges) -> ToolSpec:
@@ -550,13 +971,94 @@ class PendingChange:
         return make_diff(self.path, self.old_text, self.new_text)
 
 
+class StageLimitError(RuntimeError):
+    """暂存上界挡下了一次重写。
+
+    话术由调用方给（它知道这次是在哪条路径上被挡的、模型该怎么做），
+    这里只负责把「为什么挡」说清楚。
+    """
+
+
+@dataclass
+class StagedRewrite:
+    """一份已声明、但消失清单还没交代完的重写正文。
+
+    **沿用 `PendingChange`**：同一份 dataclass、同一套留痕字段，只是暂时不放进
+    `_changes`——确认之前它既不在待确认清单里，也不会被 `apply()` 写到磁盘。
+    """
+
+    token: str
+    change: PendingChange
+    items: tuple[Disappeared, ...]
+    reason: str
+    shrink: bool
+    created_at: float
+    # 同一路径上被这次取代的旧令牌（说出来，不静默丢）
+    replaced: tuple[str, ...] = ()
+
+    @property
+    def path(self) -> str:
+        return self.change.path
+
+    @property
+    def lines(self) -> int:
+        return _count_lines(self.change.new_text)
+
+    def ids(self) -> tuple[str, ...]:
+        return tuple(item_id(index) for index in range(len(self.items)))
+
+    def expired(self, now: float, ttl: float) -> bool:
+        """时效过没过。ttl <= 0 表示不设时效（可覆盖旋钮调到 0 的语义）。"""
+        return ttl > 0 and now - self.created_at > ttl
+
+
+def _now() -> float:
+    """暂存时效用的时钟。
+
+    单独一个函数是为了让测试能**真的把时间推过去**（monkeypatch 它），
+    而不是靠 sleep 等 30 分钟。
+    """
+    return time.monotonic()
+
+
+def _new_token(path: str, seq: int) -> str:
+    """短令牌：`rw-` + 6 位十六进制。
+
+    短是刻意的：它每一轮都要出现在模型的上下文里（以及模型回填的参数里），
+    长令牌是每次都付的税。够用就行——它只需要在**本次运行**里唯一。
+    """
+    digest = hashlib.sha1(f"{path}|{seq}|{_now()}".encode("utf-8")).hexdigest()[:6]
+    return f"rw-{digest}"
+
+
 class PendingChanges:
     """本次运行中提出、尚未落盘的修改集合。"""
 
-    def __init__(self, root: Path, extra_roots: Sequence[Path] = ()) -> None:
+    def __init__(
+        self,
+        root: Path,
+        extra_roots: Sequence[Path] = (),
+        overrides: dict | None = None,
+    ) -> None:
         self._root = root.resolve()
         self._extra_roots = tuple(Path(item).resolve() for item in extra_roots)
         self._changes: dict[str, PendingChange] = {}
+        # 已声明、清单还没交代完的重写：token → 暂存记录。
+        #
+        # 与 `_changes` 分开的理由是**语义**，不是洁癖：`_changes` 里的东西
+        # 「确认了就会落盘」，而暂存里的东西「确认清单没交代完，落盘是不允许的」。
+        # 混在一起的话，`--policy auto` 会在收尾时把没交代完的重写直接写进
+        # 用户的工作区——那正是这道墙要拦的事。
+        self._staged: dict[str, StagedRewrite] = {}
+        self._stage_seq = 0
+        # 上界旋钮走标定表，可按工作区覆盖；不显式传就用工作区保存的那一份。
+        self._overrides = (
+            dict(overrides) if overrides is not None else limits.load_overrides(self._root)
+        )
+
+    def _knob(self, name: str) -> float:
+        value, _ = limits.resolve(name, self._overrides)
+        return value
 
     def __len__(self) -> int:
         return len(self._changes)
@@ -598,6 +1100,140 @@ class PendingChanges:
             path=path, old_text=old_text, new_text=new_text, declared=declared
         )
         self._changes[path] = change
+        # 同一路径上有更早的暂存时，这一份更晚的直接提交取代它：`_changes` 的
+        # 既有口径就是「同一路径以最后一次为准」，暂存跟着走才不会有两条互相
+        # 打架的记录。取代这件事会在下次取旧令牌时如实说出来（不是静默丢）。
+        for token, record in list(self._staged.items()):
+            if record.path == path:
+                self._staged.pop(token, None)
+        return change
+
+    # ---- 已声明重写的暂存区 -------------------------------------------------
+
+    def staged_count(self) -> int:
+        """还有几份暂存的重写没被交代完（收尾报告用它说话）。"""
+        return len(self._staged)
+
+    def staged_items(self) -> list[StagedRewrite]:
+        return list(self._staged.values())
+
+    def _purge_expired(self) -> list[str]:
+        """清掉过期的暂存，返回被清掉的令牌。
+
+        过期**就是**上界的一部分（时效到了不留），但清掉这件事必须能被说出来
+        ——所以返回名单，由调用方决定怎么告诉模型。
+        """
+        ttl = self._knob("rewrite_stage_ttl_seconds")
+        now = _now()
+        gone = [
+            token
+            for token, record in self._staged.items()
+            if record.expired(now, ttl)
+        ]
+        for token in gone:
+            self._staged.pop(token, None)
+        return gone
+
+    def stage(
+        self,
+        change: PendingChange,
+        items: Sequence[Disappeared],
+        reason: str,
+        shrink: bool,
+    ) -> StagedRewrite:
+        """暂存一份重写正文，返回带令牌的记录。**上界先判再存**。
+
+        三道闸（条数 / 单份字符 / 合计字符）任一超了就抛 `StageLimitError`，
+        并把「现在是多少、上界是多少」写进话术——模型与人都要能回答
+        「为什么这次没被收下」。
+        """
+        self._purge_expired()
+        size = len(change.new_text)
+        cap = int(self._knob("rewrite_stage_chars"))
+        if cap > 0 and size > cap:
+            raise StageLimitError(
+                f"这份正文 {size} 字符，超过单份暂存上界 {cap} 字符"
+                f"（rewrite_stage_chars）。这么大的重写不适合整份交出："
+                "拆成几次局部修改（replace_lines / replace_text），"
+                "或者先把文件缩小到能一次交完。"
+            )
+        total_cap = int(self._knob("rewrite_stage_total_chars"))
+        held = sum(len(record.change.new_text) for record in self._staged.values())
+        limit = int(self._knob("rewrite_stage_limit"))
+
+        # 同一路径上已有的暂存由这一份取代：先摘掉，再判条数——否则
+        # 「反复提同一个文件」会把自己的位置占满，而那是假的上界。
+        replaced = tuple(
+            token for token, record in self._staged.items() if record.path == change.path
+        )
+        for token in replaced:
+            self._staged.pop(token, None)
+
+        if limit > 0 and len(self._staged) >= limit:
+            held_paths = "、".join(record.path for record in self._staged.values())
+            raise StageLimitError(
+                f"同时最多暂存 {limit} 份未交代完的重写（rewrite_stage_limit），"
+                f"现在占着的是：{held_paths}。"
+                "先把它们交代完（或声明有意丢弃）——那些正文还在，不会因此丢；"
+                "实在不要了就等令牌过期，或把这一份并进上一次的重写里。"
+            )
+        if total_cap > 0 and held + size > total_cap:
+            raise StageLimitError(
+                f"暂存正文合计会到 {held + size} 字符，超过上界 {total_cap} "
+                f"（rewrite_stage_total_chars）。先交代完已有的暂存再提这一份。"
+            )
+
+        self._stage_seq += 1
+        token = _new_token(change.path, self._stage_seq)
+        record = StagedRewrite(
+            token=token,
+            change=change,
+            items=tuple(items),
+            reason=reason,
+            shrink=shrink,
+            created_at=_now(),
+            replaced=replaced,
+        )
+        self._staged[token] = record
+        return record
+
+    def lookup_staged(self, token: str) -> tuple[StagedRewrite | None, str]:
+        """按令牌取暂存：返回（记录, 失效原因）。
+
+        失效原因分两种，话术不同——「这个令牌我没见过」（多半是抄错了，或
+        来自另一次运行）与「这个令牌过期了」（内容已按时效清理）。两种都不许
+        静默当成功，也不许静默丢弃：调用方必须把原因说给人听。
+        """
+        record = self._staged.get(token)
+        if record is None:
+            expired = self._purge_expired()
+            if token in expired:  # pragma: no cover - 取时已清，见下一条分支
+                return None, "expired"
+            return None, "unknown"
+        ttl = self._knob("rewrite_stage_ttl_seconds")
+        if record.expired(_now(), ttl):
+            # 过期即清理：时效是上界的一部分。清掉之前把「它确实存在过、
+            # 里面有多少行」记下来，好让话术说清楚丢的是什么。
+            self._staged.pop(token, None)
+            return None, "expired"
+        return record, ""
+
+    def take_staged(self, token: str, declared: str) -> PendingChange | None:
+        """把暂存的那份改动**搬进待确认清单**——这一步之后它才可能落盘。
+
+        `declared` 是确认回合补齐的留痕（确认保留哪些、有意丢弃哪些及理由）：
+        留在待确认清单上，用户确认的那一刻看得到。
+        """
+        record = self._staged.pop(token, None)
+        if record is None:
+            return None
+        change = PendingChange(
+            path=record.change.path,
+            old_text=record.change.old_text,
+            new_text=record.change.new_text,
+            declared=declared,
+        )
+        self._changes[change.path] = change
         return change
 
     def apply(self) -> list[str]:
@@ -629,6 +1265,9 @@ class PendingChanges:
 
     def discard(self) -> None:
         self._changes.clear()
+        # 暂存也一起清：`discard` 的语义是「这一批不要了」。留着一份没人能
+        # 确认的正文只会占着上界，而它的正文本来就在模型那边的上下文里。
+        self._staged.clear()
 
     def drop(self, paths: Sequence[str]) -> list[str]:
         """丢掉指定的几处改动，返回真正被丢掉的路径。
@@ -744,8 +1383,10 @@ def _propose(
 
     # 整文件重写已有文件时的两道闸（都在登记之前判，拦下的不进待确认清单）：
     # 行数大幅减少时提醒它检查有没有丢内容；超过一半时拒绝，逼它走
-    # 「声明 + 逐项确认消失清单」或者做局部修改。
+    # 「声明 + 逐项交代消失清单」或者做局部修改。
     reason, acked = _declaration(args)
+    dropped_pairs, dropped_error = _split_dropped(args.get(DROPPED_PARAM))
+    dropped_raw = [target for target, _ in dropped_pairs]
     old_lines = _count_lines(old_text)
     new_lines = _count_lines(new_text)
     items = disappeared_items(old_text, new_text) if target.exists() else []
@@ -754,16 +1395,49 @@ def _propose(
         and new_lines < old_lines * REWRITE_SHRINK_RATIO
     )
     if target.exists():
-        refusal = _rewrite_refusal(
-            stored, old_text, old_lines, new_lines, items, reason, acked,
-            shrink=shrink, alternatives=alternatives,
-        )
-        if refusal is not None:
-            return ToolResult(ok=False, content=refusal)
+        if dropped_error and (reason or shrink):
+            # 丢弃声明写坏了（多半是漏了理由）：不放行，也不暂存——正文这一轮
+            # 已经在上下文里了，先把声明补成合法形状再说。
+            return ToolResult(ok=False, content=f"{REFUSAL_MARKER}：{dropped_error}。\n")
+        missing = _unaccounted(items, acked, dropped_raw)
+        if shrink and not reason:
+            # **未声明的大重写照旧硬拦**：这条护栏一个字都没松。
+            return ToolResult(
+                ok=False,
+                content=_refusal_text(
+                    stored, old_text, old_lines, new_lines, items, reason, missing,
+                    shrink=True, alternatives=alternatives,
+                ),
+            )
+        if reason and missing:
+            # 声明了但清单还没交代完：**不再要求一次凑齐**。正文暂存下来、
+            # 给一个短令牌，确认回合只发项 id —— 这是这一轮改的东西。
+            staged_change = PendingChange(
+                path=stored, old_text=old_text, new_text=new_text
+            )
+            try:
+                record = pending.stage(staged_change, items, reason, shrink)
+            except StageLimitError as exc:
+                return ToolResult(
+                    ok=False,
+                    content=(
+                        f"{REFUSAL_MARKER}：{stored} 的重写正文没有被收下——{exc}\n"
+                        "这次没有落盘，正文也没有被暂存（本轮上下文里的正文不受影响）。\n"
+                    ),
+                )
+            return ToolResult(
+                ok=True, content=_stage_text(record, missing, alternatives)
+            )
+    elif dropped_error:
+        return ToolResult(ok=False, content=f"{REFUSAL_MARKER}：{dropped_error}。\n")
 
-    change = pending.propose(stored, new_text, declared=_declaration_note(
-        reason, items, shrink
-    ))
+    declared = _declaration_note(
+        reason,
+        [item for index, item in enumerate(items) if index in _match_items(items, acked)],
+        shrink,
+        _dropped_targets(items, dropped_pairs)[0],
+    )
+    change = pending.propose(stored, new_text, declared=declared)
     verb = "新建" if change.is_new_file else "修改"
     body = f"已生成{verb}预览（尚未写入，需用户确认）："
     if change.declared:
@@ -786,7 +1460,7 @@ def _propose(
         if items:
             body = (
                 "消失清单（旧内容里有、新内容里没有）："
-                + "、".join(item.token for item in items)
+                + _render_items(items)
                 + "。确认这些确实该消失。\n" + body
             )
 
@@ -833,8 +1507,11 @@ def write_file_spec(
             "（实测：重写时 CSS 单位 100vh→100%、400px→400 全丢了），"
             "而且内容要经过 JSON 转义，出错面更大。"
             "整份重写让行数减少一半以上时必须说明原因（rewrite_reason），"
-            "并把工具列出的消失清单逐项填进 acked_disappeared，"
-            "否则这次写入会被拒绝（合并、去重、搬运这类合法大改同样走这条路）"
+            "否则会被拒绝（合并、去重、搬运这类合法大改同样走这条路）。"
+            "带上 rewrite_reason 之后正文会被收下并返回一个令牌，"
+            "外加一份要逐项交代的「消失清单」：清单还没交代完也不要紧，"
+            "用 confirm_rewrite 补项 id 即可，**正文不用再发一遍**"
+            "（在这一次调用里就把 acked_disappeared 给全的话，一步落盘）"
         ),
         parameters={
             "type": "object",
@@ -848,7 +1525,10 @@ def write_file_spec(
                 ACK_PARAM: {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "逐项确认消失清单：把清单条目照抄进来（可只写标识符）",
+                    "description": (
+                        "逐项确认消失清单（可只写项 id，如 [\"d1\",\"d2\"]）；"
+                        "没凑齐也不丢正文，改用 confirm_rewrite 补"
+                    ),
                 },
             },
             "required": ["path", "content"],
@@ -890,8 +1570,8 @@ def replace_lines_spec(
         description=(
             "替换文件的指定行区间；只生成 diff，需用户确认后才写入。"
             "只用于大文件或只动一两行的情况。"
-            "这次替换让行数减少一半以上时，同样要给出 rewrite_reason "
-            "并逐项确认消失清单（acked_disappeared），否则会被拒绝"
+            "这次替换让行数减少一半以上时，同样要给出 rewrite_reason，"
+            "否则会被拒绝；正文会被收下并返回令牌，清单用 confirm_rewrite 按项 id 补"
         ),
         parameters={
             "type": "object",
@@ -907,7 +1587,10 @@ def replace_lines_spec(
                 ACK_PARAM: {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "逐项确认消失清单：把清单条目照抄进来（可只写标识符）",
+                    "description": (
+                        "逐项确认消失清单（可只写项 id）；没凑齐也不丢正文，"
+                        "改用 confirm_rewrite 补"
+                    ),
                 },
             },
             "required": ["path", "start_line", "end_line", "content"],

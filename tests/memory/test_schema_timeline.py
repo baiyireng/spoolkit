@@ -39,6 +39,7 @@ import re
 import shutil
 import sqlite3
 from pathlib import Path
+from typing import Sequence
 
 import pytest
 
@@ -237,6 +238,23 @@ def _row_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return {
         table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
         for table in EXISTING_TABLES
+    }
+
+
+def _counts_if_present(
+    conn: sqlite3.Connection, tables: Sequence[str]
+) -> dict[str, int]:
+    """只数**库里真有**的那几张表。
+
+    为什么需要它：真库的真实版本由外部决定（见 `test_真库副本...`）。库停在
+    v0 时 v3 才建的表还不存在，写死名单去 `count(*)` 会直接报「no such table」，
+    而那与迁移对不对无关——那是夹具在假设来源版本。
+    """
+    present = _names(conn, "table")
+    return {
+        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        for table in tables
+        if table in present
     }
 
 
@@ -793,45 +811,75 @@ def test_既有对象逐字不变_升级前后DDL指纹(tmp_path: Path) -> None:
     conn.close()
 
 
-@pytest.mark.skipif(not REAL_DB.exists(), reason=f"真实记忆库不在：{REAL_DB}")
-def test_真库副本从user_version0升到v4既有对象逐行不变(tmp_path: Path) -> None:
-    """真库副本（`user_version=0`）→ v4：既有对象 DDL 与行数逐行不变，新增恰好六表五索引。
+@pytest.mark.skipif(
+    not REAL_DB.exists(),
+    reason=f"真实记忆库不在（这不是通过，是测不了）：{REAL_DB}",
+)
+def test_真库副本迁移幂等且版本单调不回退(tmp_path: Path) -> None:
+    """真库副本：**与来源版本无关**的三条性质（原先钉的是「它恰好是 v0」）。
 
-    **只读复制**：`shutil.copy2` 把真库搬到 pytest 的 tmp 目录，原库一个字节都不写
-    （跑完后面再 sha256 复核一次）。这份取证是 T2 那一份的口径照搬——在真库上跑
-    `init_memory_schema` 是禁止的。
+    为什么改（本条原本是 2 条稳定红之一）：断言 `_user_version(真库副本) == 0`
+    把「用户工作区里的库还没迁过」当成了夹具性质。而任何在自己工作区跑起来的
+    `spool` 会话都会自动迁移——现在那个库是 5，于是断言必红。**错在测试**：
+    它耦合了一个由外部决定的真实路径状态。绝不为让测试过而去改用户的库。
 
-    两份副本：A 只跑到 v3（真数据 + v4 之前的结构），B 一路跑到 v4——两边都从同一个
-    `user_version=0` 的真库副本出发，所以「既有对象」的比较不受 v1 加列的影响。
+    现在断言的是一条**真实且与版本无关**的性质：迁移不破坏既有对象，而且
+    幂等、版本单调不回退。真库停在 v0 时，原来那条「v0 一路升到 v4」的路径
+    也一并钉住（强证据，可遇不可求）。
+
+    「v3 → v4 恰好新增六表五索引」的强证据在合成夹具上
+    （`test_既有对象逐行不变_升级前后DDL指纹`），不依赖真库。
     """
     source_digest = hashlib.sha256(REAL_DB.read_bytes()).hexdigest()
-    copy_a = tmp_path / "to-v3.db"
-    copy_b = tmp_path / "to-v4.db"
+    copy_a = tmp_path / "real-source.db"
+    copy_b = tmp_path / "real-migrated.db"
     shutil.copy2(REAL_DB, copy_a)
     shutil.copy2(REAL_DB, copy_b)
 
     conn_a = open_db(copy_a)
-    assert _user_version(conn_a) == 0  # 真库还没在本地迁过（P0 的迁移命令是 opt-in）
-    for version, name, apply in store._MIGRATIONS[:3]:
-        store._apply_step(conn_a, version, name, apply)
+    source_version = _user_version(conn_a)
     before = _ddl_fingerprint(conn_a)
-    before_counts = _row_counts(conn_a)
+    before_counts = _counts_if_present(conn_a, EXISTING_TABLES)
 
     conn_b = open_db(copy_b)
-    for version, name, apply in store._MIGRATIONS[:4]:  # 只跑到 v4（v5 见另一个文件）
-        store._apply_step(conn_b, version, name, apply)
+    init_memory_schema(conn_b)
 
-    assert _user_version(conn_b) == 4
     after = _ddl_fingerprint(conn_b)
+    after_counts = _counts_if_present(conn_b, EXISTING_TABLES)
+
+    # ① 只读复制：原库一个字节都没写（改法不许碰用户的工作区）。
+    assert hashlib.sha256(REAL_DB.read_bytes()).hexdigest() == source_digest
+    # ② 既有对象逐行不变：同名对象的 DDL 与行数逐字一致，且对象只增不减。
+    assert set(after) >= set(before)
     assert {name: after[name] for name in before} == before
-    assert set(after) - set(before) == set(V4_TABLES) | set(V4_INDEXES)
-    assert _row_counts(conn_b) == before_counts
-    # 升级是纯追加：既有表的行数一行都没少（真库里的记忆是底账）。
-    assert sum(before_counts.values()) == sum(_row_counts(conn_b).values())
+    assert after_counts == before_counts
+    # ③ 版本单调不回退，并且升到 max(来源版本, SCHEMA_VERSION)。
+    assert _user_version(conn_b) == max(source_version, SCHEMA_VERSION)
+    assert _user_version(conn_b) >= source_version
+    # v4 这一层的六表五索引必须就位（本文件管的就是这一层）。
+    assert set(V4_TABLES) | set(V4_INDEXES) <= set(after)
+    added = set(after) - set(before)
+    if source_version >= SCHEMA_VERSION:
+        # 库已经是最新：这次迁移必须是**空操作**（对象与版本号都不许动）。
+        assert added == set()
+    if source_version < 4:
+        assert set(V4_TABLES) | set(V4_INDEXES) <= added
+    if source_version == 0:
+        # 真库恰好还在 v0：原来那条强证据（v0 → 最新）照样钉住。
+        assert set(V4_TABLES) <= _names(conn_b, "table")
+
+    # ④ 幂等：再跑两次，DDL 指纹、行数、版本号逐位相同。
+    first = (after, after_counts, _user_version(conn_b))
+    init_memory_schema(conn_b)
+    init_memory_schema(conn_b)
+    assert (
+        _ddl_fingerprint(conn_b),
+        _counts_if_present(conn_b, EXISTING_TABLES),
+        _user_version(conn_b),
+    ) == first
+
     conn_a.close()
     conn_b.close()
-    # 原库没被碰过。
-    assert hashlib.sha256(REAL_DB.read_bytes()).hexdigest() == source_digest
 
 
 # ---- 验收 2：幂等 -----------------------------------------------------------
