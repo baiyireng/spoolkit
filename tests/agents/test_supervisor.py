@@ -252,13 +252,14 @@ def test_它说正常探索却收手时走的是它写的理由() -> None:
         {"action": STOP, "reason": "当前处于正常探索阶段，尚未提出改动"},
         ensure_ascii=False,
     )
-    verdict = supervise(
+    verdict, conflicts = supervise(
         FakeModel(script=[answer], tokenizer=OfflineTokenCounter()),
         _evidence(
             step=3, limit=3, ceiling=83,
             asking="这一轮的步数预算用完了，任务还没结束",
         ),
     )
+    assert conflicts == ()
     assert verdict is not None
     assert verdict.action == EXTEND, "回填没做：它写的理由没进证据"
 

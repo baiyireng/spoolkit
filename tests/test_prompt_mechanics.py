@@ -66,6 +66,20 @@ KEPT_ANCHORS = {
     "EMPTY_TURN_FEEDBACK": ["done"],
 }
 
+# 用户第 3 条质疑（意图要含「想拿什么 + 接下来怎么做」）与第 5 条发现
+# （replace_lines 的行号锚点）落在提示词里的那几处。丢了就是行为变了。
+INTENT_ANCHORS = {
+    "SYSTEM": [
+        "想拿到什么",
+        "拿到之后接下来怎么做",
+        "不算意图",
+    ],
+    "WORKFLOW_EDIT_LINES": [
+        "expect",
+        "锚点对不上就会被拒绝",
+    ],
+}
+
 
 def _placeholders(name: str) -> list[str]:
     text = getattr(T, name)
@@ -89,6 +103,19 @@ def test_旧锚点一条不缺() -> None:
         text = getattr(T, name)
         missing = [one for one in anchors if one not in text]
         assert not missing, f"{name} 缺: {missing}"
+
+
+def test_意图口径与行号锚点一条不缺() -> None:
+    """改了提示词就必须有的第二组机械核对（占位符核对见上）。
+
+    这一组是「意图要含想拿什么 + 接下来怎么做」与「replace_lines 必须带
+    expect」这两条要求的落点：它们只写在提示词里，没有别的地方会提醒。
+    """
+    missing: list[str] = []
+    for name, anchors in INTENT_ANCHORS.items():
+        text = getattr(T, name)
+        missing += [f"{name}:{one}" for one in anchors if one not in text]
+    assert not missing, f"语义锚点缺: {missing}"
 
 
 def test_版本号与改动记录同步() -> None:

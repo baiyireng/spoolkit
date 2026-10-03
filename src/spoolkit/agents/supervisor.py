@@ -174,6 +174,168 @@ class Verdict:
         return 0
 
 
+# ---- 事实性断言必须能被机械核对 -------------------------------------------
+#
+# 用户点名的第 4 条发现：督导会说出与记录相反的话——「尝试使用不存在的
+# confirm_rewrite 工具」（那个工具就在注册表里）、「自动验证通过（0 处改动）」
+# （记录里明明有改动）。前一句直接把它引到错方向，后一句把一次真实的落盘
+# 说成没发生。
+#
+# 这类句子有一个共同点：**它们是可以被记录的**。工具在不在注册表里、
+# 有没有改动落成、哪些文件被改过——主循环手上有全部原料。所以判据不是
+# 「让督导说话小心点」（那推不动），而是注入之前逐句核对：
+#   与记录冲突的断言 → 丢弃；该结论仍然有用（换个做法/收手）→ 保留行动，
+#   但换成**记录里的事实**重述一遍，并标明「与记录不符」。
+#
+# 为什么不是直接丢掉整条结论：一条错话夹在一条正确建议里时，丢掉整条比
+# 留一条被改写过的更亏——它下一轮还会给出同样的建议，而这一轮什么都没发生。
+# 标出来至少让下一步不建立在假事实上。
+
+_PLAIN = "与记录不符（已按运行记录改写）"
+
+# 断言「某把工具不存在 / 没注册 / 用不了」。核对方式：注册表。
+_TOOL_MISSING = (
+    "不存在的工具",
+    "工具不存在",
+    "没有这个工具",
+    "不存在的 confirm",
+    "不存在的工具名",
+    "未注册的工具",
+    "工具未注册",
+    "没有注册",
+)
+# 断言「一处改动都没有 / 文件没被改」。核对方式：本次运行的实际改动记录。
+_NO_EDIT_CLAIMS = (
+    "0 处改动",
+    "零处改动",
+    "0处改动",
+    "没有任何改动",
+    "没有实际修改",
+    "文件零改动",
+    "未做任何修改",
+    "没有做任何修改",
+    "未产生任何改动",
+    # 中文里更常见的说法。漏了它，假事实照样端出去。
+    "一处改动都没有",
+    "一处改动也没有",
+    "没有落成任何改动",
+)
+
+
+@dataclass(frozen=True)
+class RunFacts:
+    """核对督导断言用的**运行记录**。
+
+    每一条都是机械可查的：工具名来自注册表，改动与文件来自循环自己的账
+    （不是模型的叙述，也不是 trace 里的字）。
+    """
+
+    #: 这次运行真正注册过的工具名。
+    tools: frozenset[str] = frozenset()
+    #: 真正落成（进了待确认清单）的改动次数。
+    edits: int = 0
+    #: 被改动过的路径。
+    changed: frozenset[str] = frozenset()
+
+
+def _claims_tool_missing(text: str) -> bool:
+    # 一律按小写匹配：工具名在句子里的大小写不固定（`confirm_rewrite` 与
+    # `Confirm_Rewrite` 是同一把工具），而漏判等于让假事实端给模型。
+    probe = text.lower()
+    return any(one in probe for one in _TOOL_MISSING)
+
+
+def _claims_no_edit(text: str) -> bool:
+    return any(one in text for one in _NO_EDIT_CLAIMS)
+
+
+@dataclass(frozen=True)
+class FactConflict:
+    """一条与记录冲突的断言，以及据记录该怎么说。"""
+
+    claim: str
+    truth: str
+
+
+def fact_conflicts(text: str, facts: RunFacts) -> list[FactConflict]:
+    """这段文字里有没有与运行记录冲突的事实性断言。
+
+    返回**入参不是结论**：判据只看记录。宁可漏判（那句话照旧送出去），
+    也不要误判——误判会把一条对的建议改写成一句莫名其妙的话。
+    所以只认「明确否定且记录与之相反」这两种形状。
+    """
+    if not text:
+        return []
+    found: list[FactConflict] = []
+    if _claims_tool_missing(text):
+        # 记录里说不存在的那把工具：先从文字里找出它点了哪个名字。
+        probe = text.lower()
+        named = [name for name in facts.tools if name.lower() in probe]
+        if named:
+            found.append(
+                FactConflict(
+                    claim=f"声称工具不存在：{'、'.join(sorted(named))}",
+                    truth=(
+                        f"记录：{'、'.join(sorted(named))} 在本次运行的工具里，"
+                        "调用失败的原因不是「工具不存在」"
+                    ),
+                )
+            )
+    if facts.edits > 0 and _claims_no_edit(text):
+        where = "、".join(sorted(facts.changed)) or "（未记到路径）"
+        found.append(
+            FactConflict(
+                claim="声称这次运行 0 处改动",
+                truth=(
+                    f"记录：本次运行有 {facts.edits} 处改动落成（{where}），"
+                    "自动验证不是「0 处改动」"
+                ),
+            )
+        )
+    return found
+
+
+def _rewrite(text: str, conflicts: list[FactConflict]) -> str:
+    """把与记录冲突的断言改写成「记录里的说法」。"""
+    body = text.rstrip()
+    lines = [f"{body}"] if body else []
+    for one in conflicts:
+        lines.append(f"[{_PLAIN}] {one.truth}。")
+    return "\n".join(lines)
+
+
+def sanitize_verdict(
+    verdict: Verdict, facts: RunFacts | None
+) -> tuple[Verdict, tuple[FactConflict, ...]]:
+    """注入之前核对一遍督导的结论。
+
+    核对的字段是**要给人看、要发给模型**的那两个：`reason`（原样显示给
+    用户）与 `message`（原样发给模型）。`action` 与 `steps` 不动——它们是
+    判断，不是事实断言；核对不该顺手改掉一次续期或收手。
+
+    `facts` 为 None（调用方拿不到记录）时**照旧返回**：核对是加强，不是
+    新的必经环节；拿不到记录就不能假装核对过了。
+    """
+    if facts is None:
+        return verdict, ()
+    conflicts: list[FactConflict] = []
+    reason = verdict.reason
+    message = verdict.message
+    for field in ("reason", "message"):
+        text = reason if field == "reason" else message
+        found = fact_conflicts(text, facts)
+        if not found:
+            continue
+        conflicts.extend(found)
+        if field == "reason":
+            reason = _rewrite(reason, found)
+        else:
+            message = _rewrite(message, found)
+    if not conflicts:
+        return verdict, ()
+    return replace(verdict, reason=reason, message=message), tuple(conflicts)
+
+
 def parse_verdict(
     text: str,
     evidence: Evidence,
@@ -290,11 +452,15 @@ def supervise(
     evidence: Evidence,
     max_tokens: int = 512,
     max_grant: int = MAX_GRANT,
-) -> Verdict | None:
+    facts: RunFacts | None = None,
+) -> tuple[Verdict | None, tuple[FactConflict, ...]]:
     """问一次督导。
 
-    调用失败或结论不合格式都返回 None。**不抛异常**：督导是增强，
+    调用失败或结论不合格式都返回 `(None, ())`。**不抛异常**：督导是增强，
     它坏了不该让整个任务跟着坏。
+
+    第二项是与运行记录冲突的断言（可能被改写）。调用方要把它记下来——
+    「督导说错话被拦下了」这件事本身是这块唯一能被看见的信号。
     """
     try:
         response = gateway.chat(
@@ -310,7 +476,7 @@ def supervise(
             )
         )
     except Exception:
-        return None
+        return None, ()
     # 它这一次写的理由要回填进证据：兜底的判据只看它（外加我们给它的提问），
     # 不看 trace——trace 里是工具输出与报错，那些字不是它的判断。
     reason = _reason_of(response.text)
@@ -318,9 +484,14 @@ def supervise(
         response.text, replace(evidence, reason=reason), max_grant
     )
     if verdict is None:
-        return None
-    return replace(
-        verdict,
-        prompt_tokens=response.prompt_tokens,
-        completion_tokens=response.completion_tokens,
+        return None, ()
+    # 注入之前机械核对一遍：与运行记录冲突的事实性断言在这一步被改写。
+    verdict, conflicts = sanitize_verdict(verdict, facts)
+    return (
+        replace(
+            verdict,
+            prompt_tokens=response.prompt_tokens,
+            completion_tokens=response.completion_tokens,
+        ),
+        conflicts,
     )

@@ -12,6 +12,10 @@ from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import ToolCall
 
 
+# 用例里那份 80 行文件的第 20–80 行原文（replace_lines 现在要求带锚点）。
+EXPECT_80 = "\n".join(f"line{i}" for i in range(19, 80))
+
+
 def _pending(tmp_path: Path) -> PendingChanges:
     return PendingChanges(tmp_path)
 
@@ -76,7 +80,14 @@ def test_按行替换只改动指定区间(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("l1\nl2\nl3\nl4\n", encoding="utf-8")
     pending = _pending(tmp_path)
     result = replace_lines_spec(tmp_path, pending).handler(
-        {"path": "a.py", "start_line": 2, "end_line": 3, "content": "新行\n"}
+        {
+            "path": "a.py",
+            "start_line": 2,
+            "end_line": 3,
+            "content": "新行\n",
+            # 锚点：被替换区间原来的内容（用户点名的第 5 条发现）。
+            "expect": "l2\nl3",
+        }
     )
     assert result.ok is True
     pending.apply()
@@ -87,7 +98,8 @@ def test_按行替换保留原有换行风格(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("l1\nl2", encoding="utf-8")
     pending = _pending(tmp_path)
     replace_lines_spec(tmp_path, pending).handler(
-        {"path": "a.py", "start_line": 2, "end_line": 2, "content": "x"}
+        {"path": "a.py", "start_line": 2, "end_line": 2, "content": "x",
+         "expect": "l2"}
     )
     pending.apply()
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "l1\nx"
@@ -97,7 +109,8 @@ def test_行号越界时拒绝(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("l1\nl2\n", encoding="utf-8")
     pending = _pending(tmp_path)
     result = replace_lines_spec(tmp_path, pending).handler(
-        {"path": "a.py", "start_line": 5, "end_line": 9, "content": "x"}
+        {"path": "a.py", "start_line": 5, "end_line": 9, "content": "x",
+         "expect": "l2"}
     )
     assert result.ok is False
     assert "行号区间非法" in result.content
@@ -484,7 +497,8 @@ def test_替换工具也能走声明通道(tmp_path: Path) -> None:
     pending = _pending(tmp_path)
     spec = replace_lines_spec(tmp_path, pending)
     refused = spec.handler(
-        {"path": "big.py", "start_line": 20, "end_line": 80, "content": ""}
+        {"path": "big.py", "start_line": 20, "end_line": 80, "content": "",
+         "expect": EXPECT_80}
     )
     assert refused.ok is False
     allowed = spec.handler(
@@ -493,6 +507,7 @@ def test_替换工具也能走声明通道(tmp_path: Path) -> None:
             "start_line": 20,
             "end_line": 80,
             "content": "",
+            "expect": EXPECT_80,
             "rewrite_reason": "删掉重复的那一段",
         }
     )

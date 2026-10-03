@@ -109,6 +109,7 @@ def test_达到步数上限会停止(tmp_path: Path) -> None:
     result = loop.run("没完没了")
     assert result.finished is False
     assert result.steps == 3
+    # 一处改动都没有时不加那段状态：判词原样（只读运行不该拖一句噪声）。
     assert result.final == "已达步数上限，任务未完成"
 
 

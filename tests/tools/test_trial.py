@@ -32,7 +32,8 @@ def test_副本里已应用未落盘的改动(tmp_path: Path) -> None:
     _project(tmp_path)
     pending = PendingChanges(tmp_path)
     replace_lines_spec(tmp_path, pending).handler(
-        {"path": "calc.py", "start_line": 2, "end_line": 2, "content": "    return a + b\n"}
+        {"path": "calc.py", "start_line": 2, "end_line": 2,
+         "content": "    return a + b\n", "expect": "    return a - b"}
     )
     with trial_workspace(tmp_path, pending.items()) as work:
         assert "a + b" in (work / "calc.py").read_text(encoding="utf-8")
@@ -51,7 +52,8 @@ def test_有未落盘改动时测试跑在副本上(tmp_path: Path) -> None:
     _project(tmp_path)
     pending = PendingChanges(tmp_path)
     replace_lines_spec(tmp_path, pending).handler(
-        {"path": "calc.py", "start_line": 2, "end_line": 2, "content": "    return a + b\n"}
+        {"path": "calc.py", "start_line": 2, "end_line": 2,
+         "content": "    return a + b\n", "expect": "    return a - b"}
     )
     result = run_command_spec(tmp_path, pending).handler(
         {"command": ["python", "-m", "pytest", "-q"], "timeout": 120}
@@ -65,7 +67,8 @@ def test_真实文件在试跑后仍是旧内容(tmp_path: Path) -> None:
     _project(tmp_path)
     pending = PendingChanges(tmp_path)
     replace_lines_spec(tmp_path, pending).handler(
-        {"path": "calc.py", "start_line": 2, "end_line": 2, "content": "    return a + b\n"}
+        {"path": "calc.py", "start_line": 2, "end_line": 2,
+         "content": "    return a + b\n", "expect": "    return a - b"}
     )
     run_command_spec(tmp_path, pending).handler(
         {"command": ["python", "-m", "pytest", "-q"], "timeout": 120}

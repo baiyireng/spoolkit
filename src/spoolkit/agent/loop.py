@@ -12,7 +12,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
@@ -23,6 +23,8 @@ from spoolkit.agents.supervisor import (
     FINISH,
     STOP,
     Evidence,
+    FactConflict,
+    RunFacts,
     Verdict,
     supervise,
 )
@@ -31,15 +33,17 @@ from spoolkit.context.assembler import Assembler
 from spoolkit.context.budget import Budget
 from spoolkit.context.sections import Section
 from spoolkit.context import templates as T
+from spoolkit.errors import ContextOverflowError, PathOutsideProjectError
 from spoolkit.llm.gateway import ModelGateway
 from spoolkit.llm.retry import chat_with_escalation
 from spoolkit.llm.tokenizer import TokenCounter
 from spoolkit.llm.types import ChatRequest, Message
+from spoolkit.paths import resolve_readable
 from spoolkit.tools.edit import CONFIRM_TOOL, NEXT_STEP_MARKER, REFUSAL_MARKER, STAGE_MARKER
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import ToolCall, ToolResult
 from spoolkit.tools.verify import ENVIRONMENT_MARKER
-from spoolkit.errors import ContextOverflowError
+from spoolkit.tools.view import WorkspaceView
 
 SYSTEM_PROMPT = T.SYSTEM
 
@@ -170,6 +174,32 @@ _BLOCKED_MARKS = (BLOCKED_PREFIX, REFUSAL_MARKER)
 # 成功改动过文件之后整张表清零（文件变了，同一个参数可能重新有意义）。
 _FAILED_MEMORY = 16
 
+# 「刷新读取」话术的前缀。
+#
+# 这一轮的核心修法是：重复调用**不再只看签名**，还要看两件事实——上一份结果
+# 是不是还在上下文里、文件是不是变过。两者任一不成立时就必须能再取一次；
+# 取的时候用这个前缀说明「为什么这次允许重复」，让调度日志里看得见。
+# 它**不是**被拦：调用照常执行，只是把「上一次的内容已经不在了」这个事实
+# 写进 trace 与事件流。没有这一行，一个合规的重复读在日志里和原地打转
+# 长得一模一样，调这块时只能靠猜。
+GUARD_REFRESH_PREFIX = "⟳ 刷新读取："
+
+# 允许「结果已被压掉」之后重新读，是为了不让模型被护栏饿死。但**不能无限**：
+# 没有上限的话，它只要每一步都触发一次硬拦（硬拦还退还步数预算），就能把
+# 预算变成无限。上限与 blocked_refund_limit 同一口径，只放行前几次。
+_REFRESH_LIMIT = 3
+
+
+def _content_fingerprint(text: str) -> str:
+    """一段内容的指纹：sha1 前 12 位 + 行数。
+
+    行数不参与哈希，是要让它**同时**回答两个问题：内容变没变、行号漂没漂。
+    只给哈希的话，「文件变了 3 行」这件事在读回里看不见，而它正是
+    replace_lines 出错的原因。
+    """
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    return f"{digest}/{len(text.splitlines())}行"
+
 
 def _is_blocked(result: ToolResult) -> bool:
     """这次失败是「被拦下没执行」，而不是「执行了但失败」。"""
@@ -199,10 +229,17 @@ def _intent_clause(call: ToolCall) -> str:
     （比如「这个文件在哪儿」）的模型会把那句话判成「不适用于我」，然后原样
     重试——dogfood 里 survey 一个文件连撞两次就是这么来的。回应了意图之后，
     它能从「哪一条是在说我的目的」里认出自己该走哪条路。
+
+    口径与 SYSTEM 里那句 why 要求**同一套**（用户第 3 条质疑）：想拿到什么 +
+    拿到之后接下来怎么做。两处不一的话，模型会照提示写，而失败话术里回显的
+    是另一个口径——它会以为系统在说别人的意图。
     """
     if not call.intent:
         return ""
-    return f"你写的意图是「{call.intent}」。"
+    return (
+        f"你写的意图是「{call.intent}」"
+        "（口径：想拿到什么 + 拿到之后接下来怎么做）。"
+    )
 
 
 def _retry_block_message(call: ToolCall, failure: str) -> str:
@@ -244,7 +281,8 @@ def _retry_block_message(call: ToolCall, failure: str) -> str:
             1,
             intent
             + "这个理由上一次也已经试过了；同样的意图换个说法重发，"
-            "拿到的还是同一个结果。",
+            "拿到的还是同一个结果。"
+            "下一步要能被看见：写明「这一次想拿到什么、拿到之后做什么」。",
         )
     if remedy:
         parts.append(
@@ -333,7 +371,10 @@ def _edit_fail_hint(streak: int) -> str:
         "先用 read_file 看原文，把缩进、空格、引号对上；"
         "片段不唯一时多带几行上下文，使它唯一。\n"
         "- replace_lines 失败时：start_line 与 end_line 是 1 起的行号，"
-        "end_line 大于或等于 start_line，且不得超过文件总行数。\n"
+        "end_line 大于或等于 start_line，且不得超过文件总行数；"
+        "还必须带 expect——被替换区间原来的内容，从 read_file 的结果里逐字抄。"
+        "锚点对不上说明行号漂了（上一次编辑之后行数会变），"
+        "重新 read_file 再抄一遍，或者改用 replace_text。\n"
         "- 文件不存在时：用 write_file 新建，不要用 replace_ 系列工具。\n"
         "- 连续失败 3 次以上时：先用 read_file 重新确认文件内容，再动手。"
     )
@@ -592,6 +633,7 @@ class AgentLoop:
         persona: str = "",
         on_event: Callable[[str, dict], None] | None = None,
         from_channel: bool = False,
+        pending: Any | None = None,
     ) -> None:
         self.gateway = gateway
         self.tokenizer = tokenizer
@@ -604,6 +646,10 @@ class AgentLoop:
         self.verify = verify
         self.incoming = incoming
         self.read_roots = tuple(read_roots)
+        # 待确认改动。护栏要用它算「这个文件现在长什么样」——`read_file` 看到的是
+        # 叠加了 pending 之后的视图，而磁盘上是旧内容。拿磁盘去比会把「文件没变」
+        # 判反，于是该放行的刷新读取被拦下。
+        self.pending = pending
         # 工具输出台账：数字核对要拿它当「出处」。由循环追加，
         # 模型改不了它——模型自己写进去的出处不算出处。
         self.sources = sources
@@ -615,6 +661,22 @@ class AgentLoop:
         # 并把它失败时看过的「照做的下一步」端回去。每次 run() 开始时清空。
         self._failed_calls: dict[str, int] = {}
         self._failed_output: dict[str, str] = {}
+        # ---- 重复调用护栏的两个判据（见 _invoke_guarded）----------------------
+        # ① 上一份结果还在不在上下文里：装配时的历史版本号。
+        self._context_revision = 0
+        self._seen_at_revision: dict[str, int] = {}
+        # ② 文件变没变：路径 → 读它时的内容指纹（叠加 pending 之后的视图）。
+        self._read_fingerprints: dict[str, str] = {}
+        # 放行过的刷新读取次数（有上限，见 _REFRESH_LIMIT）。
+        self._refreshes_used = 0
+        # 最近一次自动验证的结论与它覆盖过的路径。收尾时要报「最终文件的验证
+        # 结果」，而刚刚验过同一批文件时不该再跑一遍——验证是起子进程，重复
+        # 跑只是让运行更慢，结论一模一样（见 _with_final_state）。
+        self._last_verify: tuple[str, bool] | None = None
+        self._verified_paths: set[str] = set()
+        # 本轮的 trace 引用。辅助方法（护栏的放行理由）要往它上面写一行，
+        # 又不能把 trace 当参数一路传下去。
+        self._trace: list[str] | None = None
         # 预算里的每个比例都是能力标定值：走本次运行的覆盖，而不是各写一份常量。
         self._budget = Budget(
             window=config.context_window, overrides=config.overrides
@@ -742,6 +804,13 @@ class AgentLoop:
         redirect: str | None = None
         resets = 0
         trace: list[str] = []
+        # 本轮运行重置护栏状态：上一次 run() 的读取指纹与上下文版本不能带过来
+        # （带了的话，第一次重复读就会拿着旧 run 的文件状态做判断）。
+        self._trace = trace
+        self._context_revision = 0
+        self._seen_at_revision.clear()
+        self._read_fingerprints.clear()
+        self._refreshes_used = 0
         # 上一轮诊断回来的报告：一开局就摆到面前，模型不用记得去查。
         if self.incoming is not None:
             report = self.incoming()
@@ -801,6 +870,9 @@ class AgentLoop:
         failed_repeat_at = int(self.config.limit("failed_repeat_at"))
         edits_made = 0
         tool_calls_made = 0
+        # 这次运行真正被改动过的路径。督导的事实性断言要拿它核对
+        # （「0 处改动」这种话不能端给模型），收手时的最终验证也要用它定范围。
+        changed_paths: list[str] = []
         stopped_by = ""
         # 「步数预算随规模放大」已经补上去几步；只增不减，避免同一个目标
         # 反复把上限抬来抬去（上限抖动会让督导看到的 limit 说不清）。
@@ -952,6 +1024,7 @@ class AgentLoop:
                     same_query=report.same_query,
                     assessment=last_assessment,
                     suggestion=last_suggestion,
+                    changed=tuple(changed_paths),
                 )
                 supervisor_seconds += time.time() - _supervisor_started
                 if verdict is not None:
@@ -1000,6 +1073,12 @@ class AgentLoop:
                     done_text = verdict.message or verdict.reason
                     trace.append(
                         f"step{state.step}: 督导判断已完成——{verdict.reason}"
+                    )
+                    # 说「做完了」之前也要对最终文件跑一次验证：这是用户点名的
+                    # 第 7 条（收手与落盘抢跑）。已经落成（进待确认清单）的改动
+                    # 是真实产出，结论里必须带上它的实际状态。
+                    done_text = self._with_final_state(
+                        done_text, state, trace, changed_paths
                     )
                     self._archive(state, "success", trace, done_text)
                     clear_state(checkpoint)
@@ -1100,6 +1179,9 @@ class AgentLoop:
                 history = [Message(role="user", content=goal)]
                 feedback = None
                 resets += 1
+                # 历史被整个丢掉：此前所有工具结果的**内容**都不在上下文里了。
+                # 版本号 +1，重复调用护栏据此放行刷新读取（见 _refresh_reason）。
+                self._context_revision += 1
                 trace.append(f"step{state.step}: 上下文重置（第 {resets} 次）")
                 _assemble_started = time.time()
                 assembled = self._assemble(
@@ -1108,6 +1190,7 @@ class AgentLoop:
                 assemble_seconds += time.time() - _assemble_started
             elif assembled.demand_tokens >= self._budget.soft_limit():
                 history = history[-(MAX_RECENT_TURNS // 2):]
+                self._context_revision += 1
                 trace.append(f"step{state.step}: 上下文整理")
 
             try:
@@ -1134,6 +1217,8 @@ class AgentLoop:
                 history = [Message(role="user", content=goal)]
                 feedback = None
                 resets += 1
+                # 同上：历史被丢掉，工具结果的内容都不在上下文里了。
+                self._context_revision += 1
                 trace.append(
                     f"step{state.step}: 服务端说提示词超长，丢掉历史重发（第 {resets} 次）"
                 )
@@ -1283,6 +1368,10 @@ class AgentLoop:
                                 f"步数预算按规模放大到 {limit}"
                             )
                     result = self._invoke_guarded(call, repeats, seen)
+                    # 这次调用发生在哪个上下文版本里。重复调用护栏用它判断
+                    # 「上一份结果还在不在上下文里」——被砍过历史之后，
+                    # 同一个签名虽然还算「重复」，内容却已经不在了。
+                    self._seen_at_revision[signature] = self._context_revision
                     blocked = _is_blocked(result)
                     if not blocked:
                         blocked_all = False
@@ -1325,6 +1414,14 @@ class AgentLoop:
                         path = call.arguments.get("path")
                         if isinstance(path, str) and path:
                             changed.append(path)
+                            # 本次运行**累计**改过哪些文件：结尾的最终验证与
+                            # 结论里的真实状态都用它（`changed` 只覆盖这一轮）。
+                            # 两个出口各记一份，不是重复——一个按轮、一个按次运行。
+                            changed_paths.append(path)
+                            # 这个文件改过了：旧的行号与旧的读取指纹都作废。
+                            # 清掉之后，同一个 read_file 的重提会被放行成
+                            # 「刷新读取」，而不是被硬拦在一份过期内容上。
+                            self._forget_read(path)
                     elif not result.ok and call.name in COMMIT_TOOLS and not blocked:
                         # 被硬拦的不计进「连续失败」：它没执行，也不是格式错误，
                         # 而且拦它的话术本身已经给了照做的下一步。
@@ -1489,11 +1586,17 @@ class AgentLoop:
 
             if turn.done:
                 trace.append(f"step{state.step}: 完成")
+                # 它自己宣告完成时也一样要报最终状态：用户点名的第 7 条
+                # （收手与落盘抢跑）不区分「谁收的手」。已经落成的改动、
+                # 最终文件的真实行数与指纹，都附在结论后面。
+                final_text = self._with_final_state(
+                    turn.final or "", state, trace, changed_paths
+                )
                 self._archive(state, "success", trace, turn.final or "")
                 clear_state(checkpoint)
                 return LoopResult(
                     finished=True,
-                    final=turn.final or "",
+                    final=final_text,
                     state=state,
                     steps=state.step,
                     resets=resets,
@@ -1517,6 +1620,12 @@ class AgentLoop:
             # 收尾文案必须说清**为什么**停：是钱花完了，还是督导判断做不下去。
             # 只说「未完成」的话，用户能做的只有原样再来一次。
             final = f"任务没做完，收手的原因：{stopped_by}"
+        # **收手也要报最终状态**（用户点名的第 7 条）。收手判词与落盘是同一次
+        # 运行里的两件事，而旧行为里判词说「0 处改动」时，改动可能刚刚落成、
+        # 甚至已经写进用户的工作区（`--policy auto`）。所以这里对最终文件跑
+        # 一次验证并把真实结果附在结论后面：已经落成的改动不许被判词抹掉，
+        # 文件变好了也要如实说。
+        final = self._with_final_state(final, state, trace, changed_paths)
         return LoopResult(
             finished=False,
             final=final,
@@ -1535,6 +1644,114 @@ class AgentLoop:
             supervisor_seconds=supervisor_seconds,
             lessons_pushed=tuple(item[0] for item in pushed),
             environment_blocked=self.environment_blocked,
+        )
+
+    def _file_state_line(self, changed: Sequence[str]) -> str:
+        """最终文件状态：哪些文件、现在多少行、指纹是什么。
+
+        走的还是 `WorkspaceView`（叠加待确认改动）——模型看到的、验证器验的、
+        这里报的必须是同一份内容。落盘之前也报得出真实状态，因为改动就在
+        待确认清单里。
+        """
+        if not changed:
+            return "最终文件状态：这次运行没有改过任何文件。"
+        view = WorkspaceView(self.config.project_root, self.pending)
+        parts: list[str] = []
+        for path in changed:
+            try:
+                target = resolve_readable(
+                    self.config.project_root, path, self.read_roots
+                )
+                if not view.exists(target):
+                    parts.append(f"{path}（现在不存在）")
+                    continue
+                text = view.read_text(target)
+            except (PathOutsideProjectError, OSError, UnicodeDecodeError):
+                parts.append(f"{path}（读不到）")
+                continue
+            parts.append(
+                f"{path}：{len(text.splitlines())} 行，指纹 {_content_fingerprint(text)}"
+            )
+        return "最终文件状态：" + "；".join(parts) + "。"
+
+    def _with_final_state(
+        self,
+        final: str,
+        state: TaskState,
+        trace: list[str],
+        changed: Sequence[str],
+    ) -> str:
+        """给收尾结论补上「最终文件真实验证结果 + 真实状态」。
+
+        收手时也要对最终文件跑一次验证（有验证器时）。结果**如实**附在后面：
+
+        - 改动确实落成了 → 「改动已落成」+ 验证结果，不许说成「0 处改动」；
+        - 文件在收手时是坏的 → 说出来；收手判词不改写这件事。
+
+        **一处改动都没有时不加这段**。理由有两条，都不是省事：① 「这次运行
+        没改过任何文件」对一个只读角色（审查者）是纯粹的噪声，每一句结论后面
+        都拖着它；② 更要紧的是它会被读成「系统在替我下结论」。真正要防的是
+        「有落盘却被判词抹掉」，而那种情况必然有改动——所以只在有改动时段。
+        """
+        if not changed:
+            return final
+        facts = self._file_state_line(changed)
+        # 刚刚验过的**就是同一批文件**时不再起第二次进程：验证是起子进程跑
+        # 测试，重复一遍只是让运行更慢，结论一字不差。要求是「收手时报出真实
+        # 的最终验证结果」，不是「每收一次手就多跑一次测试」。
+        if self.verify is not None and set(changed) <= self._verified_paths:
+            body, passed = (
+                self._last_verify if self._last_verify else ("（无记录）", False)
+            )
+            outcome = (
+                ("最终验证：通过。" if passed else "最终验证：未通过。")
+                + f"（这一步与上一步验的是同一批文件，沿用那一次的结果）{body}"
+            )
+            trace.append(
+                f"收尾: 报出最终文件的验证结果 -> {'通过' if passed else '未通过'}"
+                "（沿用最近一次）"
+            )
+            self._emit(
+                "tool",
+                {
+                    "name": "最终验证",
+                    "ok": passed,
+                    "detail": " ".join(body.split())[:200],
+                },
+            )
+            return f"{final}\n本次运行共落成 {len(changed)} 处改动。{facts} {outcome}"
+        if self.verify is not None:
+            report, passed = self._run_verification(list(changed))
+            outcome = ("最终验证：通过。" if passed else "最终验证：未通过。") + report
+            trace.append(
+                f"收尾: 对最终文件跑了一次验证 -> {'通过' if passed else '未通过'}"
+            )
+            self._emit(
+                "tool",
+                {
+                    "name": "最终验证",
+                    "ok": passed,
+                    "detail": " ".join(report.split())[:200],
+                },
+            )
+        else:
+            outcome = "最终验证：本次运行没有挂验证器，未跑。"
+        landed = f"本次运行共落成 {len(changed)} 处改动"
+        return f"{final}\n{landed}。{facts} {outcome}"
+
+    def _run_facts(
+        self, *, edits: int = 0, changed: tuple[str, ...] = ()
+    ) -> RunFacts:
+        """交给督导断言核对用的运行记录。
+
+        三个来源都是机械的：工具名取自注册表，改动与路径取自循环自己的账。
+        **不用 trace 里的字**——那正是不能拿来当事实的东西（督导的错话就是
+        从那些字里猜出来的）。
+        """
+        return RunFacts(
+            tools=frozenset(self.registry.names()),
+            edits=edits,
+            changed=frozenset(changed),
         )
 
     def _ask_supervisor(
@@ -1556,9 +1773,9 @@ class AgentLoop:
         same_query: int = 0,
         assessment: str = "",
         suggestion: str = "",
+        changed: tuple[str, ...] = (),
     ) -> Verdict | None:
         """问一次督导。关着、或者它没能给出结论，都返回 None。
-
         证据里刻意不含对话历史：要判断的是「这些动作有没有进展」，
         读到主循环的推理只会让它附和那个推理——和审查者必须独立同一个理由。
         它看到的是事实（记录下来的状态、发生过什么、机械统计）。
@@ -1593,11 +1810,22 @@ class AgentLoop:
             assessment=assessment,
             suggestion=suggestion,
         )
-        verdict = supervise(
+        verdict, conflicts = supervise(
             self.gateway,
             evidence,
             max_grant=int(self.config.limit("supervisor_max_grant")),
+            facts=self._run_facts(edits=edits, changed=changed),
         )
+        if conflicts:
+            # 说错话被拦下这件事必须看得见：否则「督导的断言有人核对」这条
+            # 规矩坏掉时，日志里什么都看不出来，而它端给模型的是假事实。
+            detail = "；".join(f"{one.claim} → {one.truth}" for one in conflicts)
+            line = f"督导的断言与记录不符，已按记录改写：{detail}"
+            self._log(line)
+            self._emit(
+                "note",
+                {"text": line, "ok": False, "kind": "supervisor_fact_conflict"},
+            )
         if verdict is None:
             self._emit("note", {"text": "督导：没能给出结论", "ok": False})
             return None
@@ -1627,6 +1855,19 @@ class AgentLoop:
         归零，于是同一个必然失败的 write_file 又跑了一遍，白吃一步。参数一字
         未改的失败调用不会因为重发而改变结果，所以第一次重提就拦住，并把
         上一步的「照做的下一步」端回去。
+
+        **重复调用的硬拦还要看两件事实**（这一轮用户点名的死锁就在这里）：
+
+        - 上一份结果**还在不在上下文里**：循环在软/硬触发时会砍历史
+          （`_context_revision` 在那两处 +1），砍掉之后那个签名虽然还在
+          `recent` 窗口里，内容却已经不在了——模型手上什么都没有，
+          再拦一次就是「只有一个被拦的 read、别的啥也没有」的死锁。
+        - **文件变没变**：它刚改过这个文件（或改动还没落盘、但已经在
+          待确认清单里），旧结果描述的是旧文件。
+
+        两者任一不成立 → **照常执行，但把「为什么允许再来一次」写进 trace
+        与事件流**（`GUARD_REFRESH_PREFIX`）。放行有上限：`_REFRESH_LIMIT`，
+        否则「不断被拦」+ 硬拦退还预算就成了无限预算。
         """
         signature = call_signature(call)
         failures = self._failed_calls.get(signature, 0)
@@ -1640,16 +1881,55 @@ class AgentLoop:
             )
         level = max(repeats, seen)
         if level >= self.config.limit("repeat_block_at"):
+            reason = self._refresh_reason(signature, call)
+            if reason:
+                self._refreshes_used += 1
+                trace_line = (
+                    f"{GUARD_REFRESH_PREFIX}同一个调用第 {level} 次，"
+                    f"但{reason}，因此重新执行一次"
+                    f"（已放行 {self._refreshes_used}/{_REFRESH_LIMIT}）"
+                )
+                self._log(trace_line)
+                self._emit(
+                    "note",
+                    {
+                        "text": trace_line,
+                        "ok": True,
+                        "kind": "guard_refresh",
+                    },
+                )
+                result = self.registry.invoke(call)
+                self._note_guard_result(call, result)
+                # 这次放行后就地更新「它看过什么」：不更新的话，下一次同签名
+                # 进来时第一条判据（版本过期）仍然成立，会连着放行到上限——
+                # 那是把刷新当成了常规通道，而它只是一次性的补救。
+                self._seen_at_revision[signature] = self._context_revision
+                intent = _intent_clause(call)
+                return ToolResult(
+                    ok=result.ok,
+                    content=(
+                        f"{GUARD_REFRESH_PREFIX}{reason}，所以这一次重新取了一遍"
+                        f"（上面那份已经不在你的上下文里或已经过期）。"
+                        f"{self._file_state_note(call)}"
+                        + (f"\n{intent}" if intent else "")
+                        + f"\n{result.content}"
+                    ),
+                )
             return ToolResult(
                 ok=False,
                 content=(
                     f"{BLOCKED_PREFIX}这个调用在最近几步里已经做过 {level - 1} 次，"
-                    "结果不会改变，因此没有执行。换一种做法：换一个工具、"
+                    "结果不会改变，因此没有执行。"
+                    "上一步的输出仍在你的上下文里：换一种做法：换一个工具、"
                     "换一组参数，或者先查别的地方；如果上一步的输出已经够了，"
                     "就基于它往下做（提改动 / 给结论），不要再查一遍。"
+                    "下一步的意图要写清「这一次想拿到什么、拿到之后做什么」——"
+                    "只重复一句「再看一遍文件」不算下一步。"
+                    + (f"\n{_intent_clause(call)}" if call.intent else "")
                 ),
             )
         result = self.registry.invoke(call)
+        self._note_guard_result(call, result)
         if not result.ok:
             self._remember_failure(signature, result.content)
         elif result.content.startswith(STAGE_MARKER):
@@ -1667,6 +1947,104 @@ class AgentLoop:
                 content=(note + "如果它没有帮你推进，就换一种做法。\n" + result.content),
             )
         return result
+
+    def _log(self, line: str) -> None:
+        """往本轮的 trace 上追加一行（给人和督导看的那一份）。
+
+        与 `self._emit` 分开：emit 发给外部观察者（网页壳、`--events`），
+        trace 是督导的证据。护栏的放行理由两边都要有，所以两个出口各写一次。
+        """
+        if self._trace is not None:
+            self._trace.append(line)
+
+    def _text_of(self, path: str) -> str | None:
+        """这个路径现在的内容（**叠加待确认改动之后**的视图）。取不到返回 None。
+
+        必须走 WorkspaceView 而不是读磁盘：`read_file` 给模型的就是这个视图，
+        拿磁盘去比会把「文件已经变了」判成没变。
+        """
+        try:
+            view = WorkspaceView(self.config.project_root, self.pending)
+            target = resolve_readable(
+                self.config.project_root, path, self.read_roots
+            )
+        except (PathOutsideProjectError, OSError, ValueError):
+            return None
+        if not view.exists(target):
+            return None
+        try:
+            return view.read_text(target)
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def _file_changed(self, call: ToolCall) -> bool:
+        """这次要读的文件，与上次读它时相比变了没有。"""
+        path = call.arguments.get("path")
+        if not isinstance(path, str) or not path:
+            return False
+        expected = self._read_fingerprints.get(path)
+        if expected is None:
+            return False
+        text = self._text_of(path)
+        return text is not None and _content_fingerprint(text) != expected
+
+    def _refresh_reason(self, signature: str, call: ToolCall) -> str:
+        """重复调用该不该放行。放行返回**理由**，该拦返回空串。
+
+        两个判据都只看事实，不看它看起来是否在打转：
+
+        - 内容已被压掉：装配历史被砍过（`_context_revision` 变了），那个签名
+          虽然还在 `recent` 窗口里算「重复」，内容却不在上下文里。硬拦的后果
+          是模型手上只剩一份被拦的 read——什么都读不到，也走不出去。
+        - 文件变了：它读完之后这个文件被改过（含还在待确认清单里的改动），
+          旧结果描述的是旧文件；行号也可能已经漂了。
+        """
+        if self._refreshes_used >= _REFRESH_LIMIT:
+            return ""
+        mark = self._seen_at_revision.get(signature)
+        if mark is not None and mark < self._context_revision:
+            return "上一次的结果已经被上下文压缩丢弃"
+        if self._file_changed(call):
+            return "这个文件在读取之后已经改过，旧结果描述的是旧内容"
+        return ""
+
+    def _file_state_note(self, call: ToolCall) -> str:
+        """紧凑的文件状态摘要：行数 + 指纹。
+
+        刻意不重发整份内容（那正是要省的东西）：给的是「现在的状态长什么样」，
+        让模型能判断自己的行号还在不在、接下来该重新读还是直接改。
+        """
+        path = call.arguments.get("path")
+        if not isinstance(path, str) or not path:
+            return ""
+        text = self._text_of(path)
+        if text is None:
+            return f"{path} 现在不存在或读不到。"
+        lines = len(text.splitlines())
+        return f"{path} 现在是 {lines} 行，指纹 {_content_fingerprint(text)}。"
+
+    def _note_guard_result(self, call: ToolCall, result: ToolResult) -> None:
+        """记下这次读文件的结果指纹，供下一次重复调用比对「文件变没变」。"""
+        if not result.ok or call.name != "read_file":
+            return
+        path = call.arguments.get("path")
+        if not isinstance(path, str) or not path:
+            return
+        text = self._text_of(path)
+        if text is not None:
+            self._read_fingerprints[path] = _content_fingerprint(text)
+
+    def _forget_read(self, path: str) -> None:
+        """这个文件被改过：清掉它的读取指纹，下一次重复读必须能重新取。
+
+        顺带把它的「读于哪个上下文版本」也清掉——留着它，重复调用的第二条
+        判据（内容还在不在）会拿到一个描述旧文件的时间戳。
+        """
+        self._read_fingerprints.pop(path, None)
+        for signature in [
+            one for one in self._seen_at_revision if f'"{path}"' in one
+        ]:
+            self._seen_at_revision.pop(signature, None)
 
     def _remember_failure(self, signature: str, content: str) -> None:
         """记下一个失败过的调用（只留最近几个）。"""
@@ -1700,6 +2078,9 @@ class AgentLoop:
         if result.content.startswith(ENVIRONMENT_MARKER):
             # 记下来：任务没做成时，这决定要不要替它登记诊断请求。
             self.environment_blocked = True
+        # 结论与「验过哪些文件」都留一份：收尾报最终状态时用它避免重复起进程。
+        self._last_verify = (body, result.ok)
+        self._verified_paths.update(changed or [])
         if result.ok:
             # 成功那句**不能请它收尾**。验证只覆盖「这次改动的地方」，
             # 任务整体做完没有它并不知道；而一句「没有别的要改就收尾」，

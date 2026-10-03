@@ -23,6 +23,7 @@ from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable
 from spoolkit.tools.types import ToolResult, ToolSpec
 from spoolkit.check.constraints import check_source, format_violations
+from spoolkit.tools.view import WorkspaceView
 
 # 项目里所有代码文件都不超过这个行数时，只提供整份重写。
 #
@@ -44,6 +45,13 @@ WHOLE_FILE_LINE_LIMIT = 150
 # 清单没确认完同样不放行。
 REWRITE_REASON_PARAM = "rewrite_reason"
 ACK_PARAM = "acked_disappeared"
+
+# 按行替换的内容锚点（用户点名的第 5 条发现）。
+#
+# 名与形都刻意贴近「你看到的原文」：它只能从 read_file 的结果里抄。纯行号在
+# 一次编辑之后就失效了，而失效时**不一定报错**——区间还落在文件里时会静默
+# 改错一段，那就是「多出来的结束标签」的来源。锚点把这件事变成硬校验。
+EXPECT_PARAM = "expect"
 
 # ---- 确认清单拆成独立小回合：正文只发一次、确认只发项 id --------------------
 #
@@ -461,9 +469,15 @@ def _remedy_lines(
     span = duplicate_span(old_text)
     if span is not None and "replace_lines" in alternatives:
         a, b, c, d = span
+        removed = "\n".join(old_text.splitlines()[c - 1 : d])
         lines.append(
-            f'replace_lines(path="{stored}", start_line={c}, end_line={d}, content="")'
+            f'replace_lines(path="{stored}", start_line={c}, end_line={d}, content="",'
+            f' {EXPECT_PARAM}="<第 {c}–{d} 行的原文，逐字抄>")'
             f"  # 删掉第 {c}–{d} 行那份重复内容（它与第 {a}–{b} 行逐行相同）"
+        )
+        lines.append(
+            "# 那一段的原文现在长这样（抄进 expect 即可）：\n"
+            f"<expect>\n{removed}\n</expect>"
         )
     ids = _ids_of(items, missing)
     ack = ", ".join(f'"{one}"' for one in ids)
@@ -1345,6 +1359,60 @@ def revert(root: Path, baseline: Baseline) -> list[str]:
     return touched
 
 
+def _normalize_span(text: str) -> str:
+    """比对锚点时的口径：只忽略**行尾空白与换行风格**。
+
+    不这么做的代价是真实的：模型从带行号的读取结果里抄原文时，末尾常常多一个
+    空格（或反过来少一个），严格逐字比对会把一次**完全正确**的替换拒掉，而它
+    除了一直重试没有别的办法。行首缩进不忽略——缩进错了就是抄错了内容。
+    """
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n"))
+
+
+def _line_edit_receipt(root: Path, pending: PendingChanges, args: dict) -> str:
+    """一次按行替换之后的行号回执。
+
+    用户点名的第 5 条发现是「行号漂移把文件改坏」。锚点挡住了**改错**，
+    但「模型不知道自己手上的行号已经过期」这件事还在：它下一次接着用旧行号，
+    锚点会拒绝，然后它得再读一遍——这一行回执把那次往返省掉。
+
+    给的是三个数，不是整份内容：**新行数、新指纹、这次动了哪一段**。
+    """
+    path = args.get("path")
+    if not isinstance(path, str) or not path:
+        return ""
+    try:
+        stored = pending.path_of(path)
+        target = pending.disk_path(stored)
+        # 必须走 WorkspaceView（叠加待确认改动之后的视图），不能读磁盘：
+        # 这次改动还没落盘，读磁盘拿到的是**替换之前**的内容，回执里
+        # 那一行行号就会指错地方——而回执的全部价值就是让人别再算错行号。
+        text = WorkspaceView(root, pending).read_text(target)
+    except (PathOutsideProjectError, OSError, UnicodeDecodeError, KeyError):
+        return ""
+    if not text:
+        return ""
+    lines = text.splitlines()
+    start = args.get("start_line")
+    end = args.get("end_line")
+    count = len(text.splitlines())
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    head = (
+        f"\n行号回执：第 {start}–{end} 行已被替换，"
+        f"{stored} 现在是 {count} 行，指纹 {digest}。"
+        "此前的行号已经失效——要再动别处请重新 read_file 确认行号，"
+        f"并把目标区间的原文放进 {EXPECT_PARAM}。"
+    )
+    if isinstance(start, int) and isinstance(end, int):
+        replacement = args.get("content")
+        new_len = len(replacement.splitlines()) if isinstance(replacement, str) else 0
+        if new_len:
+            stop = min(start + new_len - 1, len(lines))
+            touched = "\n".join(lines[start - 1 : stop])
+            head += f"\n这次写入的是第 {start}–{stop} 行：\n{touched}"
+    return head
+
+
 def _propose(
     root: Path,
     pending: PendingChanges,
@@ -1366,7 +1434,16 @@ def _propose(
         return ToolResult(ok=False, content=str(exc))
 
     target = pending.disk_path(stored)
-    old_text = target.read_text(encoding="utf-8") if target.exists() else ""
+    try:
+        # **必须读叠加视图**，不能读磁盘。用户点名的第 5 条发现正是这条：
+        # 连续两次编辑同一个文件时，磁盘还是最老的那一版，于是第二次的
+        # 行号与锚点都对着**上一次改动之前**的内容校验——锚点明明对不上
+        # 「模型刚读到的内容」却通过了，第二次替换把第一次的结果整个盖掉，
+        # 落盘的就是「少掉开始标签 / 多出结束标签」的那种文件。
+        # 读视图之后，工具看到的世界与 read_file 给模型的世界是同一个。
+        old_text = WorkspaceView(root, pending).read_text(target)
+    except (OSError, UnicodeDecodeError):
+        old_text = ""
     try:
         new_text = transform(old_text)
     except ValueError as exc:
@@ -1545,7 +1622,21 @@ def replace_lines_spec(
     pending: PendingChanges,
     alternatives: Sequence[str] = ("replace_lines",),
 ) -> ToolSpec:
-    """按行区间替换。比整文件写入精确得多，是改动的首选方式。"""
+    """按行区间替换。比整文件写入精确得多，是改动的首选方式。
+
+    **纯行号是不安全的**（用户点名的第 5 条发现）：一次编辑之后行号就漂了，
+    模型拿着旧行号再改一次，区间还落在文件里时**不报错**——它安静地替换错
+    的那一段，结果正是「多出来的结束标签 / 少掉的开始标签」那类改坏。
+    所以这一版要求带 `expect`：被替换区间**原来的内容**，一字不差。
+
+    为什么选内容锚点而不是「编辑后提示新行数」：提示是软要求，模型可以不看；
+    锚点是硬校验，错了当场拒绝并把那一区间现在的真实内容端回去。模型因此
+    必然要 read_file（锚点只能从读来的内容里抄），行号漂移这件事就被机械地
+    挡住，而不是靠它记得。
+
+    编辑成功后的回执里带上**新行数 / 新指纹 / 这次动了哪一段**：行号已经
+    失效是模型自己看不见的事，这三个数就是它下一次动行号前该看的依据。
+    """
 
     def transform(old_text: str, args: dict) -> str:
         if not old_text:
@@ -1553,16 +1644,47 @@ def replace_lines_spec(
         lines = old_text.splitlines()
         start = args["start_line"]
         end = args["end_line"]
+        expected = args.get(EXPECT_PARAM)
+        if not isinstance(expected, str) or not expected.strip():
+            # 没带锚点时不放行。理由写在话术里：出路是「先读再抄」，不是猜行号。
+            raise ValueError(
+                "replace_lines 必须带 expect：被替换区间**原来的内容**"
+                "（从 read_file 的结果里逐字抄，含缩进）。"
+                "只给行号的话，上一次编辑之后行号就漂了，"
+                "替换会落到错的那一段上而不报错。"
+                f"当前 {args['path']} 共 {len(lines)} 行，"
+                "先 read_file 看一下要改的那一段。"
+            )
         if start < 1 or end < start or end > len(lines):
-            raise ValueError(f"行号区间非法：文件共 {len(lines)} 行")
+            raise ValueError(
+                f"行号区间非法：文件共 {len(lines)} 行"
+                f"（行号可能已经漂了：上一次编辑之后行数会变）。"
+                "先 read_file 重新确认行号与内容，再带 expect 改。"
+            )
+        actual = "\n".join(lines[start - 1 : end])
+        if _normalize_span(actual) != _normalize_span(expected):
+            raise ValueError(
+                f"expect 与实际内容不一致，这次替换没有执行——"
+                f"{args['path']} 第 {start} 到 {end} 行现在实际是：\n"
+                f"{actual}\n"
+                f"（你给的 expect 是：{expected}）\n"
+                "行号很可能已经漂了。用 read_file 重新读这一段，"
+                "把真实内容抄进 expect，或者改用 replace_text（不用行号）。"
+            )
         replacement = args["content"].splitlines()
         merged = lines[: start - 1] + replacement + lines[end:]
         return "\n".join(merged) + ("\n" if old_text.endswith("\n") else "")
 
     def handler(args: dict) -> ToolResult:
-        return _propose(
+        result = _propose(
             root, pending, args, lambda old: transform(old, args),
             alternatives=alternatives,
+        )
+        if not result.ok:
+            return result
+        return ToolResult(
+            ok=result.ok,
+            content=result.content + _line_edit_receipt(root, pending, args),
         )
 
     return ToolSpec(
@@ -1570,6 +1692,8 @@ def replace_lines_spec(
         description=(
             "替换文件的指定行区间；只生成 diff，需用户确认后才写入。"
             "只用于大文件或只动一两行的情况。"
+            "**必须带 expect**：被替换区间原来的内容（从 read_file 逐字抄）。"
+            "行号在上一次编辑之后会漂，锚点对不上时这次替换会被拒绝。"
             "这次替换让行数减少一半以上时，同样要给出 rewrite_reason，"
             "否则会被拒绝；正文会被收下并返回令牌，清单用 confirm_rewrite 按项 id 补"
         ),
@@ -1580,6 +1704,13 @@ def replace_lines_spec(
                 "start_line": {"type": "integer"},
                 "end_line": {"type": "integer"},
                 "content": {"type": "string"},
+                EXPECT_PARAM: {
+                    "type": "string",
+                    "description": (
+                        "被替换区间原来的内容，必须与文件里逐字一致"
+                        "（含缩进与换行）；从 read_file 的结果里抄"
+                    ),
+                },
                 REWRITE_REASON_PARAM: {
                     "type": "string",
                     "description": "这次大改的原因（删重复段/合并/搬运等）",
@@ -1593,10 +1724,10 @@ def replace_lines_spec(
                     ),
                 },
             },
-            "required": ["path", "start_line", "end_line", "content"],
+            "required": ["path", "start_line", "end_line", "content", EXPECT_PARAM],
             "additionalProperties": False,
         },
         handler=handler,
-        brief="按行号替换",
+        brief="按行号替换（需带 expect 锚点）",
         group="改",
     )

@@ -544,6 +544,10 @@ def assemble_loop(
         read_roots=parts.read_roots,
         sources=sources,
         from_channel=parts.from_channel,
+        # 重复调用护栏要判断「这个文件现在长什么样」，而那必须与 read_file
+        # 看到的是同一个视图（叠加待确认改动）。不传的话，护栏会拿磁盘内容
+        # 去比，把「文件已经改过」判成没变——该放行的刷新读取被拦死。
+        pending=parts.pending,
     )
 
 

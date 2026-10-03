@@ -135,6 +135,8 @@ def test_自动验证的结果会回灌给模型(tmp_path: Path) -> None:
     loop.verify = verify
     loop.run("改一下")
 
+    # 只有一次：改完那一步的自动验证。收尾报最终状态时验的是同一批文件，
+    # 沿用那一次的结果，不再起第二次子进程（见 AgentLoop._with_final_state）。
     assert len(calls) == 1
     prompt = _text_of(loop.gateway.requests[-1])
     # 钉要点：验证的结论与失败正文都要回灌给模型——它自己不会去跑测试，

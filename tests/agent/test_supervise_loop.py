@@ -508,4 +508,7 @@ def test_督导说完成时带上它给的话(tmp_path: Path) -> None:
     )
     result = loop.run("做点什么")
     assert result.finished is True
+    # 它给的那句话原样落在结论里；有落盘时后面才附最终状态与验证结果
+    # （第 7 条：收手/收尾时也要报真实状态）。这条脚本一处改动都没有，
+    # 所以结论原样——只读运行不该拖一句「这次没改过任何文件」。
     assert result.final == "8 个目录逐个跑 pytest 都通过，任务已完成。"
