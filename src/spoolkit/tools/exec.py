@@ -557,6 +557,11 @@ def _restore_originals(work_root: Path, pending, paths: object) -> None:
         if Path(change.path).is_absolute():
             continue
         target = work_root / change.path
+        if getattr(change, "deleted", False):
+            # 验证要按**原始内容**判定：模型删掉的那个文件没落盘，副本里
+            # 也还在——留着它，测的就是真实的项目状态；而它在待确认清单里
+            # 的删除不该改变验证口径（验证判的是「改动前的测试怎么判」）。
+            continue
         if change.is_new_file:
             if target.exists():
                 target.unlink()

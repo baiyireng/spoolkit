@@ -35,6 +35,17 @@ class EventWriter:
         self.emit(kind, **data)
 
 
+def _to_stderr(line: str) -> None:
+    """人读的散文（diff、留档、审计行）在 events 模式下的出口。
+
+    选 stderr 而不是另开日志文件：探针与桥已经在分别收 stdout / stderr，
+    多一个文件就多一个「谁负责清理」的问题；而 stderr 不参与 JSON 行协议，
+    谁想看就看，谁不想看就当它不存在。
+    """
+    print(line, file=sys.stderr)
+    sys.stderr.flush()
+
+
 def settle_with_events(
     pending: PendingChanges,
     policy: str,
@@ -66,7 +77,10 @@ def settle_with_events(
 
     if policy == AUTO and not out_of_scope([c.path for c in changes], scope):
         if not any(pending.is_linked(c.path) for c in changes):
-            written = apply_with_audit(pending, baseline_path)
+            # diff 与人读的留档走 **stderr**：stdout 上只能有 JSON 行。
+            # 实测把 diff 打到 stdout 时，一条记录里混进 36 行散文，
+            # `--events` 的解析器要么崩、要么被迫打补丁，录下来的文件也读不了。
+            written = apply_with_audit(pending, baseline_path, out=_to_stderr)
             writer.emit(CONFIRM, applied=True, auto=True, count=len(written))
             return "auto"
 

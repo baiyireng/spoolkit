@@ -23,12 +23,24 @@ def _read_file(root: Path, args: dict, pending=None, read_roots=()) -> ToolResul
     view = WorkspaceView(root, pending)
 
     if not view.exists(target):
+        # 删除也要出一句人话：只说「文件不存在」时，模型分不清是它自己刚
+        # 删掉的（那是预期状态）、还是路径写错了（那是要改的）。
+        if target.resolve() in view.deleted_paths():
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"{args['path']} 已在待确认改动里被删除（还没落盘）——"
+                    "现在读不到它，这是删除生效后的正常状态。"
+                ),
+            )
         return ToolResult(ok=False, content=f"文件不存在: {args['path']}")
     if view.is_dir(target):
         return ToolResult(ok=False, content=f"目标是目录而非文件: {args['path']}")
 
     try:
         text = view.read_text(target)
+    except FileNotFoundError:
+        return ToolResult(ok=False, content=f"文件不存在: {args['path']}")
     except UnicodeDecodeError:
         return ToolResult(ok=False, content=f"文件不是 UTF-8 文本: {args['path']}")
 
@@ -63,9 +75,18 @@ def _list_dir(root: Path, args: dict, pending=None, read_roots=()) -> ToolResult
         return ToolResult(ok=False, content=f"目标不是目录: {args['path']}")
 
     entries = [f"{c.name}/" if c.is_dir() else c.name for c in sorted(target.iterdir())]
-    # 待确认改动里新建的文件在磁盘上还不存在，但模型应该看得到它们。
+    # 待确认改动里新建的文件在磁盘上还不存在，但模型应该看得到它们；
+    # 反过来，待确认删除的文件不该再被列出来——列出来它就会以为没删掉。
+    view = WorkspaceView(root, pending)
+    gone = {
+        path.name
+        for path in view.deleted_paths()
+        if path.parent.resolve() == target.resolve()
+    }
+    if gone:
+        entries = [name for name in entries if name not in gone]
     known = {name.rstrip("/") for name in entries}
-    for name in WorkspaceView(root, pending).overlay_children(target):
+    for name in view.overlay_children(target):
         if name not in known:
             entries.append(name)
     return ToolResult(ok=True, content="\n".join(entries))

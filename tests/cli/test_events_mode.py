@@ -127,3 +127,45 @@ def test_数字都对得上时不发note(tmp_path: Path) -> None:
     _report_numbers(loop, result, EventWriter(buffer))
     assert buffer.getvalue() == ""
 
+
+# ---- stdout 纯净：diff 与人读的留档必须走 stderr -----------------------------
+#
+# 实测（首轮探针）：auto 落盘时 `apply_with_audit` 把 diff 直接 `print` 到了
+# stdout，于是 `--events` 的 stdout 里混进 12–91 行散文（merge-html 那条 36 行）。
+# 跑分器数出来的就是 `plain_lines`，它必须为 0——否则「stdout 上只有 JSON」
+# 这条约定只是文档里的一句话。
+
+
+def _stdout_json_lines(captured: str) -> list[str]:
+    return [line for line in captured.splitlines() if line.strip()]
+
+
+def test_自动落盘时stdout只有JSON(tmp_path: Path, capsys) -> None:
+    buffer = io.StringIO()
+    pending = _stage(tmp_path)
+    settle_with_events(
+        pending, AUTO, ("src",), None, EventWriter(buffer), io.StringIO("")
+    )
+    out, err = capsys.readouterr()
+
+    assert out == "", f"stdout 上出现了非事件输出：{out[:200]!r}"
+    for line in _stdout_json_lines(buffer.getvalue()):
+        assert json.loads(line)["type"] in (DIFF, CONFIRM, NOTE)
+    # 人读的那一份没有消失，只是换了出口。
+    assert "+++ b/src/a.py" in err
+    assert "已自动应用 1 处修改" in err
+    # 落盘语义一个字没变。
+    assert (tmp_path / "src" / "a.py").read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_落盘后的diff不在stdout上(tmp_path: Path, capsys) -> None:
+    """落到磁盘的内容照样能被 events 的消费者看见（走 diff 事件）。"""
+    buffer = io.StringIO()
+    pending = _stage(tmp_path)
+    settle_with_events(pending, ASK, (), None, EventWriter(buffer), io.StringIO("y\n"))
+    out, _ = capsys.readouterr()
+    assert out == ""
+    diff_lines = [line for line in _lines(buffer) if line["type"] == DIFF]
+    assert len(diff_lines) == 1
+    assert "x = 1" in diff_lines[0]["text"]
+

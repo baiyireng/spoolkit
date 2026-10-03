@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 
 from spoolkit import limits
 from spoolkit.errors import PathOutsideProjectError
-from spoolkit.paths import resolve_readable
+from spoolkit.paths import resolve_readable, resolve_within
 from spoolkit.tools.types import ToolResult, ToolSpec
 from spoolkit.check.constraints import check_source, format_violations
 from spoolkit.tools.view import WorkspaceView
@@ -87,6 +87,19 @@ REWRITE_SHRINK_RATIO = 0.5
 # 拒绝话术的开头。循环靠它认出「这次调用是被护栏拦下的，不是执行后失败」，
 # 于是这一步不占步数预算（见 agent/loop.py 的 BLOCKED 判定）。
 REFUSAL_MARKER = "⚠ 拒绝整文件重写"
+
+# ---- 删除文件的声明式通道 -------------------------------------------------
+#
+# 为什么要有它：merge-html 那条探针里，模型把内容合并好了，用户那句「以后我
+# 就看一个文件」却落不了地——工具集里**没有删除文件的工具**，它只能让用户
+# 自己去 `rm pricing.html`（两次输出一字不差），而判据要求 pricing.html 要么
+# 不存在、要么不再是那份带完整导航的重复页面。缺的不是能力，是一只手。
+DELETE_TOOL = "delete_file"
+DELETE_REASON_PARAM = "reason"
+
+# 删除也走「拒绝」那条前缀：**没有执行**的动作不该白吃一步预算，而且
+# 模型需要从话术里认出「这是一次被拦下的调用，不是执行失败」。
+DELETED_NOT_FOUND = "文件不存在"
 
 # 出路话术的标记行。循环硬拦「原样重试」时把这一行原样端回给模型——
 # 复用既有的工具输出通道（trace / --events 的 tool 事件），不新造一套事件。
@@ -157,6 +170,162 @@ def looks_like_path(text: str) -> bool:
     """这个字符串看起来是不是路径，而不是符号名。"""
     return "/" in text or "\\" in text or text.endswith(
         (".py", ".md", ".json", ".toml", ".txt")
+    )
+
+
+# ---- 跨文件改名的残留检测 --------------------------------------------------
+#
+# 实测（rename-cross-file 探针首轮）：模型把 `get_rows` 改成了 `load_rows`，
+# 四个 .py 文件全改对了、测试全过，却**宣称「整个项目都统一了」**——
+# 而 README.md 与 docs/design.md 里那两处旧名一个字没动。
+#
+# 「说没统一」这件事是可机械判定的：改过的那份正文里**消失的顶层定义名**，
+# 如果在别处还在，那就是残留。检测放在工具层（改完立刻算），报告跟着工具
+# 输出回到模型面前——它在写「已统一」那句话之前看得到反例。
+_TOP_DEF_PATTERN = re.compile(
+    r"(?m)^(?:async[ \t]+)?(?:def|class)[ \t]+([A-Za-z_]\w*)"
+)
+LINGERING_MARKER = "旧名仍有残留"
+# 扫描是有界的：单文件字符数上限、整次扫描字符总量上限、报告文件条数上限。
+# 没有上限的话，一次改名会在一个大仓库上把每一步都拖慢，而收尾报告的读者是人。
+LINGER_SCAN_MAX_FILE_CHARS = 200_000
+LINGER_SCAN_BUDGET = 400_000
+LINGER_MAX_FILES = 8
+LINGER_MAX_LINES_PER_FILE = 4
+LINGER_SKIP_DIRS = frozenset(
+    {"__pycache__", ".git", ".venv", "venv", ".agent", "node_modules", ".mypy_cache"}
+)
+# 只扫这些后缀：残留报告是给人看的，扫二进制只会白花时间。
+LINGER_TEXT_SUFFIXES = frozenset(
+    {
+        ".py", ".md", ".txt", ".rst", ".html", ".htm", ".js", ".ts", ".tsx",
+        ".jsx", ".json", ".toml", ".cfg", ".ini", ".yaml", ".yml", ".css",
+        ".sh", ".bat", ".ps1", ".sql", ".java", ".go", ".rs", ".c", ".h",
+        ".cpp", ".rb", ".php",
+    }
+)
+
+
+def vanished_def_names(old_text: str, new_text: str) -> list[str]:
+    """改过的那份正文里**整个都不见了的顶层定义名**。
+
+    两层收窄，都是为了不报假残留：
+
+    1. 只看顶层 `def`/`class` 名。把普通词也算进来的话，一次 HTML 合并会把
+       几十个标签名报成「改名」。
+    2. 这个名字必须在**新正文里以标识符形态彻底消失**。只比顶层定义会漏掉
+       一种真实写法：模型换了名字，但在原处留了一行兼容别名
+       （`get_rows = load_rows`）——那时定义确实不见了，名字却还在本文件里，
+       而它**不是**残留。实测这条误报把模型引去「删掉自己刚留的兼容别名」，
+       连着 4 步原地打转（探针复跑第 2 次，19 步红）。
+    """
+    before = {name for name in _TOP_DEF_PATTERN.findall(old_text)}
+    if not before:
+        return []
+    return sorted(
+        name for name in before if not _name_lines(new_text, name)
+    )
+
+
+def _name_lines(text: str, name: str) -> list[int]:
+    """`name` 在这个文件里出现的行号（按标识符边界，1 起）。
+
+    边界必须判：`load_rows` 里含 `rows`、`get_rows_v2` 里含 `get_rows`，
+    不做边界检查就会把「已经改好了」的文件报成残留。
+    """
+    found: list[int] = []
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])"
+    )
+    for index, line in enumerate(text.splitlines(), start=1):
+        if pattern.search(line):
+            found.append(index)
+    return found
+
+
+def lingering_references(
+    root: Path, pending, change: PendingChange
+) -> list[str]:
+    """这次改动让哪些名字消失了，它们还在**别的文件**里出现了几处。
+
+    「别的文件」同时看两处：磁盘上的现状，与待确认改动里的正文。只看磁盘
+    会把「这一轮刚改过、还没落盘」的文件漏掉——而改名恰恰是一轮里连着改
+    好几个文件。不看待确认正文，收尾报告就会说「都统一了」，而同一轮里
+    刚写下的 `from pipeline.fetch import get_rows` 就在清单上。
+    """
+    names = vanished_def_names(change.old_text, change.new_text)
+    if not names or change.deleted:
+        return []
+
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in pending.items() if pending is not None else ():
+        if item.path == change.path or item.deleted:
+            continue
+        try:
+            text = WorkspaceView(root, pending).read_text(pending.disk_path(item.path))
+        except (OSError, UnicodeDecodeError, FileNotFoundError):
+            continue
+        seen.add(item.path)
+        candidates.append((item.path, text))
+
+    budget = LINGER_SCAN_BUDGET
+    try:
+        for candidate in sorted(root.rglob("*")):
+            if budget <= 0:
+                break
+            if not candidate.is_file():
+                continue
+            relative = candidate.relative_to(root).as_posix()
+            if relative in seen or LINGER_SKIP_DIRS & set(candidate.parts):
+                continue
+            if candidate.suffix.lower() not in LINGER_TEXT_SUFFIXES:
+                continue
+            try:
+                if candidate.stat().st_size > LINGER_SCAN_MAX_FILE_CHARS:
+                    continue
+                text = candidate.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            budget -= len(text)
+            candidates.append((relative, text))
+    except OSError:  # pragma: no cover - 枚举失败不该毁掉一次成功的写入
+        pass
+
+    hits: list[str] = []
+    for relative, text in candidates:
+        for name in names:
+            lines = _name_lines(text, name)
+            if not lines:
+                continue
+            where = "、".join(str(item) for item in lines[:LINGER_MAX_LINES_PER_FILE])
+            more = (
+                f" 等 {len(lines)} 处"
+                if len(lines) > LINGER_MAX_LINES_PER_FILE
+                else ""
+            )
+            hits.append(f"{relative} 第 {where} 行{more}（{name}）")
+    return hits[:LINGER_MAX_FILES]
+
+
+def lingering_note(root: Path, pending, change: PendingChange) -> str:
+    """残留报告（没有残留就返回空串）。
+
+    话术里**必须点名那句不许说的话**：模型不是没看到旧名，它是在结论里
+    写下了「整个项目里都统一了」。一句「旧名仍有残留」它可能读成背景信息，
+    所以这里直接把「不许宣称已统一」写成要求，并给出下一步。
+    """
+    hits = lingering_references(root, pending, change)
+    if not hits:
+        return ""
+    return (
+        f"⚠ {LINGERING_MARKER}：这次改名里有名字在本文件里已经没有了，"
+        "但下面这些地方还在引用它们——旧名与新名混用的项目是坏的"
+        "（导入会直接失败）：\n"
+        + "".join(f"  - {item}\n" for item in hits)
+        + "这些非代码文本（README / docs）与其它文件都要一起改。"
+        f"在它们改完之前，**不要说「整个项目里都统一了」**——"
+        "那句话现在与事实不符。改完再给结论，或者如实说明还有哪几处没改。\n"
     )
 
 
@@ -683,11 +852,16 @@ def register_edit_tools(registry: Any, root: Path, pending: PendingChanges) -> N
 
     **确认入口跟着 write_file 一起注册**：它管的是「正文已经暂存、清单还没
     交代完」那一回合。少了它，暂存下去的正文就没人能确认——那比不暂存更糟。
+
+    **删除文件与写工具一起给**：合并/去重类任务里「删掉多余那一份」是任务的
+    另一半，只有写工具时模型只能让用户自己动手。两者一起注册也保证
+    「提示词里提到的工具」与「真的能用」始终一致。
     """
     small = is_small_project(root)
     alternatives = () if small else ("replace_lines",)
     registry.register(write_file_spec(root, pending, alternatives=alternatives))
     registry.register(confirm_rewrite_spec(root, pending))
+    registry.register(delete_file_spec(root, pending))
     if not small:
         registry.register(
             replace_lines_spec(root, pending, alternatives=alternatives)
@@ -972,13 +1146,24 @@ class PendingChange:
     # 这处改动是**声明式重写**时留下的痕迹（为什么大改、确认了哪些消失项）。
     # 沿用既有的待确认清单当留档：不新造一套日志，用户确认时看得到理由。
     declared: str = ""
+    # 这是一处**删除**（不是把文件写成空内容）。两者在磁盘上的结果相同，
+    # 在台账上完全不同：删除的 `old_text` 是全文，回滚要把它写回去；
+    # 而「把文件写成空」回滚之后剩下的也是一个空文件。
+    # 靠 `old_text` 反推不出来，所以显式记一位。
+    deleted: bool = False
 
     @property
     def is_new_file(self) -> bool:
-        return not self.old_text
+        # 删除的 old_text 非空，所以它不会被误判成「新建」。
+        return not self.old_text and not self.deleted
 
     @property
     def diff(self) -> str:
+        if self.deleted:
+            # 删除的 diff 用「文件 → /dev/null」：用户一眼看得出这是删除，
+            # 而不是「把一个文件改空」。
+            body = "".join(f"-{line}" for line in self.old_text.splitlines(True))
+            return f"--- a/{self.path}\n+++ /dev/null\n{body}"
         if self.is_new_file:
             body = "".join(f"+{line}" for line in self.new_text.splitlines(True))
             return f"--- /dev/null\n+++ b/{self.path}\n{body}"
@@ -1122,6 +1307,29 @@ class PendingChanges:
                 self._staged.pop(token, None)
         return change
 
+    def propose_delete(
+        self, path: str, old_text: str, declared: str = ""
+    ) -> PendingChange:
+        """登记一处删除。`old_text` 是删除前的全文——它就是回滚的退路。
+
+        与 `propose` 分开写（而不是加一个布尔参数）是因为两者对 old_text 的
+        期待正好相反：`propose` 里 old_text 是**从磁盘读出来的**当前内容，
+        删除这里则是**由调用方交进来的**（磁盘上的内容此刻就是它），
+        写成两个入口，两个方向都不会被读错。
+        """
+        change = PendingChange(
+            path=path,
+            old_text=old_text,
+            new_text="",
+            declared=declared,
+            deleted=True,
+        )
+        self._changes[path] = change
+        for token, record in list(self._staged.items()):
+            if record.path == path:
+                self._staged.pop(token, None)
+        return change
+
     # ---- 已声明重写的暂存区 -------------------------------------------------
 
     def staged_count(self) -> int:
@@ -1255,10 +1463,18 @@ class PendingChanges:
 
         落盘之前先构造基线。没有基线的写操作等于没有退路，
         而「确认错了」是必然会发生的——diff 看得再仔细也挡不住走神。
+
+        删除在这里落地：`unlink` 之后文件真的没了，而基线里留着它的全文，
+        所以 `revert` 能把它恢复回来——「可回滚」这条对删除同样成立。
         """
         written: list[str] = []
         for change in self._changes.values():
             target = self.disk_path(change.path)
+            if change.deleted:
+                if target.exists():
+                    target.unlink()
+                written.append(change.path)
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(change.new_text, encoding="utf-8")
             written.append(change.path)
@@ -1266,16 +1482,27 @@ class PendingChanges:
         return written
 
     def baseline(self) -> "Baseline":
-        """把当前待写入的修改转成可持久化的基线。"""
-        return Baseline(
-            entries=tuple(
+        """把当前待写入的修改转成可持久化的基线。
+
+        **「改动之前磁盘上有没有它」是一个事实，不能从 old_text 反推**：
+        「把一份刚新建的文件删掉」与「把一份已有文件删掉」在待确认记录里长得
+        很像，而回滚的动作正好相反（一个该删掉、一个该把内容写回去）。
+        所以这里按 `disk_path().exists()` 判；删掉的那个在这两种情形下都是
+        「磁盘上还在」（改动尚未落盘），差别只体现在 old_text 该不该留。
+        """
+        entries: list[BaselineEntry] = []
+        for change in self._changes.values():
+            existed = self.disk_path(change.path).exists()
+            entries.append(
                 BaselineEntry(
                     path=change.path,
-                    old_text=None if change.is_new_file else change.old_text,
+                    # 之前不存在就没有「改动前的内容」可回填——这一轮自己造出来
+                    # 的东西不该在回滚时被当成原来就有的。
+                    old_text=change.old_text if existed else None,
+                    existed=existed,
                 )
-                for change in self._changes.values()
             )
-        )
+        return Baseline(entries=tuple(entries))
 
     def discard(self) -> None:
         self._changes.clear()
@@ -1299,10 +1526,16 @@ class PendingChanges:
 
 @dataclass(frozen=True)
 class BaselineEntry:
-    """一个文件的改动前状态。old_text 为 None 表示这个文件是新建的。"""
+    """一个文件的改动前状态。old_text 为 None 表示这个文件是新建的。
+
+    `existed` 显式记「改动之前磁盘上有没有它」。它与 `old_text is None` 在
+    绝大多数情况下一致，分成两位是因为删除与「新建后又改」在事后长得一样，
+    而回滚的动作相反。缺省值让老基线文件照样读得动（读回来按 old_text 推）。
+    """
 
     path: str
     old_text: str | None
+    existed: bool = False
 
 
 @dataclass(frozen=True)
@@ -1313,7 +1546,16 @@ class Baseline:
 
     def to_json(self) -> str:
         return json.dumps(
-            {"entries": [{"path": e.path, "old_text": e.old_text} for e in self.entries]},
+            {
+                "entries": [
+                    {
+                        "path": e.path,
+                        "old_text": e.old_text,
+                        "existed": e.existed,
+                    }
+                    for e in self.entries
+                ]
+            },
             ensure_ascii=False,
             indent=2,
         )
@@ -1323,7 +1565,15 @@ class Baseline:
         payload = json.loads(text)
         return cls(
             entries=tuple(
-                BaselineEntry(path=item["path"], old_text=item.get("old_text"))
+                BaselineEntry(
+                    path=item["path"],
+                    old_text=item.get("old_text"),
+                    existed=bool(
+                        item.get(
+                            "existed", item.get("old_text") is not None
+                        )
+                    ),
+                )
                 for item in payload.get("entries", [])
             )
         )
@@ -1344,13 +1594,17 @@ def revert(root: Path, baseline: Baseline) -> list[str]:
     """把文件恢复到基线状态，返回被处理过的路径。
 
     新建的文件在回滚时删除——恢复到「它不存在」才算真的恢复。
+    被删除的文件反过来：基线里存着它的全文，回滚要把它写回磁盘。
     """
     touched: list[str] = []
     for entry in baseline.entries:
         target = Path(entry.path) if Path(entry.path).is_absolute() else root / entry.path
-        if entry.old_text is None:
+        if not entry.existed:
             if target.exists():
                 target.unlink()
+            touched.append(entry.path)
+            continue
+        if entry.old_text is None:  # pragma: no cover - 与 existed 同进同出
             touched.append(entry.path)
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1613,6 +1867,154 @@ def write_file_spec(
         },
         handler=handler,
         brief="整份写文件",
+        group="改",
+    )
+
+
+def delete_file_spec(root: Path, pending: PendingChanges) -> ToolSpec:
+    """删除工作区里的一个文件，走待确认清单，可 revert。
+
+    存在的理由是一条实测：merge-html 那条探针里模型把内容合并好了，用户那句
+    「以后我就看一个文件」却落不了地——**工具集里没有删除文件的工具**，它只能
+    建议用户自己去 `rm pricing.html`（两次输出一字不差）。合并、去重、搬运这类
+    任务里，「把那份多余的删掉」和「把内容并过去」是同一件事的两半。
+
+    四道守卫，缺一条都会变成一个坏工具：
+
+    - **只允许工作区内的文件**：路径走 `resolve_within(root, ...)` 而不是
+      `resolve_readable`——后者包含 `--allow-read` 授权过的外部目录，那些目录
+      本来就只读，能删就等于把「读得到」偷换成「删得掉」。
+    - **必须给理由**：没有理由的删除在报告里与「误删」长得一模一样。理由进
+      `declared`，跟着这处改动走到用户确认的那一刻，和声明式重写同一套留痕。
+    - **不许删目录**：删目录是递归操作，一次调用能毁掉整个工作区，而模型要做的
+      是「把这一份多余的文件删掉」。目录一律拒绝，并指着它去看有哪些文件。
+    - **目标不存在时给人话**：这里有一个必须分开说的情形——**它自己刚删过**。
+      报「不存在」会让模型以为自己没删成，于是原样再来一次，白烧一步。
+    """
+
+    def handler(args: dict) -> ToolResult:
+        reason = args.get(DELETE_REASON_PARAM)
+        reason = reason.strip() if isinstance(reason, str) else ""
+        if not reason:
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"{REFUSAL_MARKER}：{DELETE_TOOL} 必须给出 {DELETE_REASON_PARAM}——"
+                    "一句话说明为什么这个文件可以被删掉（合并、去重、搬运到别处了）。"
+                    "没有理由的删除无法在报告里与误删区分，所以这次没有执行。"
+                ),
+            )
+        try:
+            raw = resolve_within(root, str(args.get("path") or ""))
+        except PathOutsideProjectError as exc:
+            return ToolResult(ok=False, content=str(exc))
+
+        # 视图口径与 read_file / write_file 一致：待确认的删除也算「已经删了」。
+        view = WorkspaceView(root, pending)
+        if raw.is_dir():
+            listing = ""
+            try:
+                listing = "、".join(sorted(item.name for item in raw.iterdir())[:20])
+            except OSError:  # pragma: no cover - 枚举失败不影响拒绝本身
+                listing = ""
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"{REFUSAL_MARKER}：{DELETE_TOOL} 只删文件，不删目录："
+                    f"{args.get('path')} 是一个目录。"
+                    "删目录是递归操作，不在这个工具的能力范围内。"
+                    + (f"它下面有：{listing}。" if listing else "")
+                    + "要清理里面的文件，请逐个点名删除。"
+                ),
+            )
+        if raw.resolve() in view.deleted_paths():
+            # **必须先于「不存在」判**：待确认的删除在磁盘上文件还在、在视图里
+            # 已经没了。顺序反了的话，模型第一次删除成功、第二次原样重提会收到
+            # 「不存在」，于是它以为自己没删成——正是要避免的那一步浪费。
+            return ToolResult(
+                ok=True,
+                content=(
+                    f"{args.get('path')} 已经删除（在待确认清单里，尚未落盘）——"
+                    "这一步不需要再做一次，接着做别的事。"
+                ),
+            )
+        if not view.exists(raw):
+            # 视图口径：这一轮刚新建、还没落盘的文件也「存在」（它在待确认清单
+            # 里）。用磁盘判会把「我刚建的那份要撤掉」误判成路径写错了。
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"{DELETED_NOT_FOUND}: {args.get('path')} 不存在。"
+                    "先 list_dir 看一下有哪些文件，再点名要删哪一个；"
+                    "如果它本来就该不存在，那这件事已经做完了，不必再删一次。"
+                ),
+            )
+
+        stored = pending.path_of(str(args.get("path")))
+        # 删除前的全文从**叠加视图**里取：这一轮刚新建（还没落盘）的文件，
+        # 磁盘上根本没有它，读磁盘会拿到空串——那样留档是空的、diff 是空的，
+        # 而回滚会把一份「这一轮自己造出来的内容」当成不存在。
+        old_text = next(
+            (
+                item.new_text
+                for item in pending.items()
+                if item.path == stored and not item.deleted
+            ),
+            None,
+        )
+        if old_text is None:
+            try:
+                old_text = WorkspaceView(root, pending).read_text(raw)
+            except (OSError, UnicodeDecodeError):
+                return ToolResult(
+                    ok=False,
+                    content=(
+                        f"删不了 {args.get('path')}：它不是可读的 UTF-8 文本文件。"
+                        "这个工具只处理文本文件——二进制文件请让用户自己决定怎么处理。"
+                    ),
+                )
+
+        declared = f"删除文件——{reason}"
+        # 只登记，不删：落盘与回滚都走既有的待确认清单（`apply` / `revert`）。
+        change = pending.propose_delete(stored, old_text, declared=declared)
+        lines = _count_lines(old_text)
+        body = (
+            f"已登记删除预览（尚未落盘，需用户确认）：{stored}（{lines} 行）。\n"
+            f"留档：{declared}\n"
+            "确认之后它就不再存在；这次运行仍可 revert 回滚——"
+            "删除前的全文已经记进基线，回滚会把它原样写回去。\n\n"
+            + change.diff
+        )
+        return ToolResult(ok=True, content=body)
+
+    return ToolSpec(
+        name=DELETE_TOOL,
+        description=(
+            "删除工作区里的一个文件（只删文件，不删目录）；不直接落盘，"
+            "先进待确认清单，用户确认后文件才真的消失，本次运行可用 revert 回滚。"
+            "必须给出原因（reason）：为什么这个文件可以被删掉。"
+            "合并/去重/搬运这类任务里「把多余的那份删掉」就用它——"
+            "不要建议用户自己去 rm，也不要靠把内容改空来假装删除。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "要删除的文件（工作区内的相对路径）",
+                },
+                DELETE_REASON_PARAM: {
+                    "type": "string",
+                    "description": (
+                        "为什么这个文件可以删掉（一句话，例如「内容已并入 index.html」）"
+                    ),
+                },
+            },
+            "required": ["path", DELETE_REASON_PARAM],
+            "additionalProperties": False,
+        },
+        handler=handler,
+        brief="删除文件（需给理由，可回滚）",
         group="改",
     )
 

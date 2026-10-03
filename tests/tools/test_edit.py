@@ -527,7 +527,9 @@ def test_纯HTML工作区只给write_file时出路不提不存在的工具(tmp_p
     registry = ToolRegistry()
     register_edit_tools(registry, tmp_path, pending)
     # 确认入口跟着 write_file 一起注册：少了它，暂存下去的正文没人能确认。
-    assert registry.names() == ("confirm_rewrite", "write_file")
+    # 删除文件与写工具一起注册：合并类任务里「删掉多余那一份」是另一半，
+    # 而纯 HTML 工作区（没有 replace_lines）最需要它。
+    assert registry.names() == ("confirm_rewrite", "delete_file", "write_file")
 
     result = registry.invoke(
         ToolCall("write_file", {"path": "snake.html", "content": _MERGED})

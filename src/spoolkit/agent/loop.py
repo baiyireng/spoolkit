@@ -39,7 +39,14 @@ from spoolkit.llm.retry import chat_with_escalation
 from spoolkit.llm.tokenizer import TokenCounter
 from spoolkit.llm.types import ChatRequest, Message
 from spoolkit.paths import resolve_readable
-from spoolkit.tools.edit import CONFIRM_TOOL, NEXT_STEP_MARKER, REFUSAL_MARKER, STAGE_MARKER
+from spoolkit.tools.edit import (
+    CONFIRM_TOOL,
+    DELETE_TOOL,
+    NEXT_STEP_MARKER,
+    REFUSAL_MARKER,
+    STAGE_MARKER,
+    lingering_note,
+)
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import ToolCall, ToolResult
 from spoolkit.tools.verify import ENVIRONMENT_MARKER
@@ -50,6 +57,13 @@ SYSTEM_PROMPT = T.SYSTEM
 LOOKUP_TOOLS = ("find_symbol", "file_symbols", "find_callers")
 EDIT_TOOLS = ("replace_lines", "replace_text", "write_file")
 
+# 「把工作区变成我要的样子」的写工具：交内容的那几把 + 删除。
+#
+# 删除必须与写工具并列，否则循环看不见它：`edited` / `changed_paths` /
+# 自动验证的范围都按这个集合判定，漏了它就会出现「删掉了文件，但系统认为
+# 这一步什么都没做」——收尾时不报最终状态，验证也不会为它跑一次。
+WRITE_TOOLS = EDIT_TOOLS + (DELETE_TOOL,)
+
 # 「把改动推进下去」的工具：写工具 + 确认入口。
 #
 # 与 EDIT_TOOLS 分开的理由是它们各自回答不同的问题：EDIT_TOOLS 是**交内容**
@@ -57,7 +71,7 @@ EDIT_TOOLS = ("replace_lines", "replace_text", "write_file")
 # 不交内容、只是一个很小的举证回合。但有一处它必须算进去：漫游太久时循环会把
 # 采样空间收窄成「只能写」——收窄之后如果确认入口被语法拿掉，模型就再也
 # 确认不了那份暂存的正文了。
-COMMIT_TOOLS = EDIT_TOOLS + (CONFIRM_TOOL,)
+COMMIT_TOOLS = WRITE_TOOLS + (CONFIRM_TOOL,)
 
 # 同一个调用连续重复到第几次时加提醒（仍然执行），到第几次时不再执行。
 #
@@ -127,7 +141,7 @@ FAILED_REPEAT_AT = int(_limits.knob("failed_repeat_at").default)
 # 原样重提 survey、被拦、照样吃掉一步（4 步预算是上限，再撞一次就收手）。
 # 编辑类退还一直是对的（dogfood：两次被拒的 write_file 白吃 2 步），
 # 这里只是把同一条账算到查询类上。
-_REFUND_TOOLS = EDIT_TOOLS + (CONFIRM_TOOL, "read_file", "list_dir", "search_code", "survey")
+_REFUND_TOOLS = WRITE_TOOLS + (CONFIRM_TOOL, "read_file", "list_dir", "search_code", "survey")
 
 # 空回合连续出现到这个次数就收尾。
 #
@@ -470,6 +484,14 @@ def build_workflow(
         if "write_file" in edits:
             # 紧跟改动方式：它管的正是「那几条路都被拦下时怎么办」。
             lines.append(T.WORKFLOW_REWRITE_DECLARE)
+        if registry.get(DELETE_TOOL) is not None:
+            # 紧跟改动方式：删除与写、改并列，是「把工作区变成我要的样子」
+            # 的第三种动作。没注册就一个字都不提——提到一把没有的工具，
+            # 等于给模型一条它做不到的指令。
+            lines.append(T.WORKFLOW_DELETE)
+        # 改名是「改动」的一个特例，判据却跨出被改的文件本身，所以单列一条。
+        # 这个分支本来就在「有写工具」里面，只读角色看不到它。
+        lines.append(T.WORKFLOW_RENAME)
 
     if registry.get("recall") is not None:
         lines.append(T.WORKFLOW_RECALL)
@@ -528,6 +550,9 @@ def build_workflow(
         lines.append(T.WORKFLOW_CHANNEL_SCOPE)
 
     lines.append(T.WORKFLOW_NO_GUESS)
+    # 新增的两段（删除、跨文件改名）常驻，是每个请求都要付的税。实测它们把
+    # system 区段顶过了 900 token 的绝对上界，于是 4096 窗口下报「必留区段
+    # system 超出有效预算」——所以 SYSTEM 与 WORKFLOW_* 同步做了等量压缩。
     return "\n".join(lines)
 
 MAX_RECENT_TURNS = 6
@@ -558,7 +583,7 @@ def _is_repeat_output(content: str, prefetched: str, seen: set[str]) -> bool:
 
 # 只有这几类工具的结果算「进度」。读文件和搜索不算：它们是手段，
 # 不是产出，记进去只会把状态撑满噪声。
-PROGRESS_TOOLS = ("write_file", "replace_lines", "run_command")
+PROGRESS_TOOLS = ("write_file", DELETE_TOOL, "replace_lines", "run_command")
 # 「已完成」在状态块里列几条。它每轮都注入，所以是每个请求的税——
 # 完整记录留在状态与 .agent/progress.md 里（见 TaskState.DONE_INLINE）。
 MAX_DONE_NOTES = TaskState.DONE_INLINE
@@ -670,10 +695,19 @@ class AgentLoop:
         # 放行过的刷新读取次数（有上限，见 _REFRESH_LIMIT）。
         self._refreshes_used = 0
         # 最近一次自动验证的结论与它覆盖过的路径。收尾时要报「最终文件的验证
-        # 结果」，而刚刚验过同一批文件时不该再跑一遍——验证是起子进程，重复
-        # 跑只是让运行更慢，结论一模一样（见 _with_final_state）。
+        # 结果」，而刚刚验过**同一批内容**时不该再跑一遍——验证是起子进程，
+        # 重复跑只是让运行更慢，结论一模一样（见 _with_final_state）。
+        #
+        # 缓存键是 `(路径 → 内容指纹)`，**不是路径集合**。这是实测抓出来的
+        # bug：改名那条探针里，中途那一步验的是「2 处改动、导入已经断了」的
+        # 版本（结论是不通过），而收尾时 4 处改动都已落盘、模型自己的
+        # run_command 与判据跑测试都是 0；可 `set(changed) <= self._verified_paths`
+        # 只看路径——路径没变，于是那份**失败原文**被原样搬进了收尾报告，
+        # 结论与文件真实状态相反。内容一变就必须重新验证。
         self._last_verify: tuple[str, bool] | None = None
-        self._verified_paths: set[str] = set()
+        # 上一次验证覆盖过的**内容键**（路径 + 内容指纹）。与 _last_verify
+        # 同生共死：结论和「它是对哪一份内容下的」必须成对存在。
+        self._last_verify_key: str = ""
         # 本轮的 trace 引用。辅助方法（护栏的放行理由）要往它上面写一行，
         # 又不能把 trace 当参数一路传下去。
         self._trace: list[str] | None = None
@@ -1431,10 +1465,21 @@ class AgentLoop:
                             f"step{state.step}: 重复调用第 {level} 次：{call.name}"
                         )
                     repeats = level
+                    # 改完当场查「这次改名有没有在别处留下旧名」。报告跟着工具
+                    # 输出回到模型面前，而不是等它自己想起来去全项目搜一遍——
+                    # 实测它不会搜，它会在四个 .py 改完之后直接宣称「已统一」，
+                    # 而 README / docs 里的旧名一个字没动（见 edit.lingering_note）。
+                    extra = self._lingering_text(call, result)
                     payload = {
                         "name": call.name,
                         "ok": result.ok,
-                        "detail": " ".join(result.content.split())[:200],
+                        # 残留报告提到**前面**：事件里的 detail 会被截到 200 字，
+                        # 而写在末尾的那一段就永远读不到（实测：调试时我从事件流
+                        # 里搜「旧名仍有残留」搜不到，一度以为功能没生效）。
+                        # 「有没有报出残留」是该被机械核对的事实，放在第一位。
+                        "detail": " ".join(f"{extra} {result.content}".split())[:200]
+                        if extra
+                        else " ".join(result.content.split())[:200],
                     }
                     # 意图进事件流。**这是「工具调用带上意图」这件事的出口**：
                     # `--events` 录下来的 JSONL 里每一行 tool 事件都能读到
@@ -1459,6 +1504,11 @@ class AgentLoop:
                         repeated += 1
                     else:
                         outputs.append(f"[{call.name}] {status}: {result.content}")
+                    if extra:
+                        outputs.append(extra)
+                        trace.append(
+                            f"step{state.step}: {extra.splitlines()[0]}"
+                        )
                     # 失败时把输出压成一行摘要。取第一行不行：那里是命令本身，
                     # 而不是错误原因——调试时会被误导。
                     # 失败信息给足长度：160 字刚好够看到命令本身，
@@ -1646,6 +1696,35 @@ class AgentLoop:
             environment_blocked=self.environment_blocked,
         )
 
+    def _content_key(self, changed: Sequence[str]) -> str | None:
+        """这批改动**当前内容**的缓存键：`路径=内容指纹` 排序后拼起来。
+
+        为什么不是路径集合：路径集合只回答「验的是不是同一批文件」，而
+        「同一批文件」在改名途中可以先是坏的、后被改好——沿用旧的结论就会
+        把一份**过期的失败原文**搬进收尾报告，与文件真实状态相反。
+        内容一变，键就变，收尾必然重新验证。
+        """
+        view = WorkspaceView(self.config.project_root, self.pending)
+        parts: list[str] = []
+        for path in sorted(set(changed)):
+            try:
+                target = resolve_readable(
+                    self.config.project_root, path, self.read_roots
+                )
+                if not view.exists(target):
+                    # 「现在不存在」也是一个必须有别于其它状态的内容事实：
+                    # 拿空串冒充它，会把「刚删掉」与「刚写成空文件」混成一条。
+                    parts.append(f"{path}=<不存在>")
+                    continue
+                text = view.read_text(target)
+            except (PathOutsideProjectError, OSError, UnicodeDecodeError):
+                parts.append(f"{path}=<读不到>")
+                continue
+            parts.append(f"{path}={_content_fingerprint(text)}")
+        if not parts:
+            return None
+        return "\n".join(parts)
+
     def _file_state_line(self, changed: Sequence[str]) -> str:
         """最终文件状态：哪些文件、现在多少行、指纹是什么。
 
@@ -1696,20 +1775,28 @@ class AgentLoop:
         if not changed:
             return final
         facts = self._file_state_line(changed)
-        # 刚刚验过的**就是同一批文件**时不再起第二次进程：验证是起子进程跑
+        # 刚刚验过的**就是同一批内容**时不再起第二次进程：验证是起子进程跑
         # 测试，重复一遍只是让运行更慢，结论一字不差。要求是「收手时报出真实
         # 的最终验证结果」，不是「每收一次手就多跑一次测试」。
-        if self.verify is not None and set(changed) <= self._verified_paths:
+        #
+        # **判据是内容指纹，不是路径集合**（这是实测抓出来的 bug）：路径集合
+        # 会命中「中途那一版」，而中途那一版可能正是坏的——改名那条探针里
+        # 验的是「2 处改动、导入已断」的版本，收尾时 4 处都已落盘、都是绿的，
+        # 却把那份失败原文原样搬进了报告。内容变了就必须重新验证一次。
+        key = self._content_key(changed)
+        if self.verify is not None and key is not None and key == self._last_verify_key:
             body, passed = (
                 self._last_verify if self._last_verify else ("（无记录）", False)
             )
             outcome = (
                 ("最终验证：通过。" if passed else "最终验证：未通过。")
-                + f"（这一步与上一步验的是同一批文件，沿用那一次的结果）{body}"
+                + "（上一步验过之后这些文件的内容一字未变，"
+                "所以沿用那一次的结果）"
+                + body
             )
             trace.append(
                 f"收尾: 报出最终文件的验证结果 -> {'通过' if passed else '未通过'}"
-                "（沿用最近一次）"
+                "（内容未变，沿用最近一次）"
             )
             self._emit(
                 "tool",
@@ -1977,6 +2064,35 @@ class AgentLoop:
         except (OSError, UnicodeDecodeError):
             return None
 
+    def _lingering_text(self, call: ToolCall, result: ToolResult) -> str:
+        """这次写入有没有留下「旧名仍在别处」的残留；有就返回一段提醒。
+
+        只在两个前提下才算：这次调用真的改出了一个文件的内容（成功、不是
+        暂存），以及待确认清单里确实有这处改动。算不出来一律返回空串——
+        它是附加的旁证，不是主流程，不能因为它没算出来而影响一次成功的写入。
+        """
+        if not result.ok or call.name not in WRITE_TOOLS or self.pending is None:
+            return ""
+        if result.content.startswith(STAGE_MARKER):
+            return ""
+        path = call.arguments.get("path")
+        if not isinstance(path, str) or not path:
+            return ""
+        try:
+            stored = self.pending.path_of(path)
+        except PathOutsideProjectError:
+            return ""
+        change = next(
+            (item for item in self.pending.items() if item.path == stored), None
+        )
+        if change is None:
+            return ""
+        try:
+            return lingering_note(self.config.project_root, self.pending, change)
+        except Exception:
+            # 残留报告是给人看的旁证，它自己出问题不该毁掉一次成功的写入。
+            return ""
+
     def _file_changed(self, call: ToolCall) -> bool:
         """这次要读的文件，与上次读它时相比变了没有。"""
         path = call.arguments.get("path")
@@ -2078,9 +2194,10 @@ class AgentLoop:
         if result.content.startswith(ENVIRONMENT_MARKER):
             # 记下来：任务没做成时，这决定要不要替它登记诊断请求。
             self.environment_blocked = True
-        # 结论与「验过哪些文件」都留一份：收尾报最终状态时用它避免重复起进程。
+        # 结论、覆盖过的路径、以及**这些路径当时的内容指纹**三样一起留档：
+        # 收尾报最终状态时，只有内容一字未变才允许沿用这一次的结论。
         self._last_verify = (body, result.ok)
-        self._verified_paths.update(changed or [])
+        self._last_verify_key = self._content_key(changed) or ""
         if result.ok:
             # 成功那句**不能请它收尾**。验证只覆盖「这次改动的地方」，
             # 任务整体做完没有它并不知道；而一句「没有别的要改就收尾」，

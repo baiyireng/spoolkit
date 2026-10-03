@@ -123,3 +123,44 @@ def test_版本号与改动记录同步() -> None:
     source = Path(T.__file__).read_text(encoding="utf-8")
     assert f'PROMPT_VERSION = "{T.PROMPT_VERSION}"' in source
     assert T.PROMPT_VERSION in source.split("# 改动记录", 1)[1]
+
+
+# 探针首轮（5 个形状 3 绿 2 红）抓出的两个提示层缺陷，各自对应的锚点。
+# 它们是「丢了就是行为变了」的那几句，所以同样机械核对。
+PROBE_ANCHORS = {
+    # merge-html 红：工具集里没有删除文件的工具，模型只能让用户自己 rm。
+    "WORKFLOW_DELETE": [
+        "delete_file",
+        "不删目录",
+        "待确认",
+        "revert",
+        "不要建议用户自己去 rm",
+        "假装删除",
+    ],
+    # rename-cross-file 红：只改了 .py，README / docs 没动却说「已统一」。
+    "WORKFLOW_RENAME": [
+        "README",
+        "docs",
+        "残留清单",
+        "统一",
+        "与事实不符",
+    ],
+}
+
+
+def test_探针轮新增的锚点一条不缺() -> None:
+    missing: list[str] = []
+    for name, anchors in PROBE_ANCHORS.items():
+        text = getattr(T, name)
+        missing += [f"{name}:{one}" for one in anchors if one not in text]
+    assert not missing, f"语义锚点缺: {missing}"
+
+
+def test_探针轮新增的两段没有引入新的占位符() -> None:
+    """新增的两段是纯文本：工具名与参数名写死在里面。
+
+    一旦它们被写成 `{delete_tool}` 这种占位符，`SYSTEM.format(tools=..., workflow=...)`
+    会在运行期 KeyError——而那条路只在真的注册了删除工具的工作区里才走到。
+    """
+    for name in PROBE_ANCHORS:
+        assert _placeholders(name) == [], name

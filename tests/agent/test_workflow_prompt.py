@@ -258,3 +258,50 @@ def test_远程通道工作方式只限制文件读写() -> None:
 
 def test_本地运行不提远程通道那条() -> None:
     assert "聊天通道" not in build_workflow(ToolRegistry())
+
+
+# ---- 探针首轮抓出的两个提示层缺陷 -------------------------------------------
+
+
+def test_删除工具的说明只在注册了它时出现(tmp_path: Path) -> None:
+    """merge-html 首轮红：模型把内容合并好了，工具集里却没有删除文件的手。
+
+    提示词里点到的工具必须**真的能用**：注册表里没有 delete_file 时，一个
+    字都不许出现——提到一把没有的工具，等于给模型一条它做不到的指令。
+    """
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path))
+    assert "delete_file" not in build_workflow(registry)
+
+    pending = PendingChanges(tmp_path)
+    registry.register(write_file_spec(tmp_path, pending))
+    # 只注册写工具、没注册删除：仍然不许提。
+    assert "delete_file" not in build_workflow(registry)
+
+    from spoolkit.tools.edit import delete_file_spec
+
+    registry.register(delete_file_spec(tmp_path, pending))
+    text = build_workflow(registry)
+    assert "delete_file" in text
+    assert "reason" in text
+    # 三件必须说清的事：只删文件不删目录、先进待确认、不许建议用户自己 rm。
+    assert "不删目录" in text
+    assert "待确认" in text
+    assert "不要建议用户自己去 rm" in text
+
+
+def test_改名那条写清判据与残留清单(tmp_path: Path) -> None:
+    """rename-cross-file 首轮红：只改了 .py，README / docs 没动，却宣称「已统一」。
+
+    提示层要把三件事写死：判据是整个项目（含非代码文本）、工具输出会附一份
+    残留清单、清单没清空前不得说「已统一」。
+    """
+    registry = _full_registry(tmp_path)
+    text = build_workflow(registry)
+    assert "README" in text and "docs" in text
+    assert "残留清单" in text
+    assert "统一" in text
+    # 只读角色看不到这条：它没有«改名»这个动作。
+    read_only = ToolRegistry()
+    read_only.register(read_file_spec(tmp_path))
+    assert "残留清单" not in build_workflow(read_only)

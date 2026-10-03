@@ -35,9 +35,26 @@ EXCLUDED_DIRS = frozenset(
     }
 )
 
+# pytest 在 basetemp 下租的目录名（`_pytest.pathlib.make_numbered_dir`）。
+# 建的时候写死 0o700，在受限环境里连复制都过不去——见 `_ignore` 的注释。
+PYTEST_TEMP_PREFIX = "pytest-cache-files-"
+
 
 def _ignore(directory: str, names: list[str]) -> set[str]:
-    return {name for name in names if name in EXCLUDED_DIRS}
+    """复制时跳过虚拟环境、缓存与**pytest 自己租的临时目录**。
+
+    最后那一条（`pytest-cache-files-*`）是实测踩出来的：受限环境里
+    `tempfile.mkdtemp` 建出来的目录是 `0o700`，`shutil.copytree` 复制到它时
+    直接 `[WinError 5] 拒绝访问`——于是自动验证报的是「代码跑不起来」，
+    而真实原因是「副本里有两个别人建的、权限受限的空目录」。它们是与
+    `.pytest_cache` 同类的东西：**上一轮跑测试留下的痕迹，不是项目内容**，
+    复制它们既没有意义，又会让整次验证失败。
+    """
+    return {
+        name
+        for name in names
+        if name in EXCLUDED_DIRS or name.startswith(PYTEST_TEMP_PREFIX)
+    }
 
 
 def copy_project(root: Path, target: Path) -> None:
@@ -61,6 +78,12 @@ def trial_workspace(root: Path, changes: Sequence[PendingChange]) -> Iterator[Pa
                 # 关联目录的改动不进试跑副本：副本只代表主工作区。
                 continue
             target = copy_root / change.path
+            if getattr(change, "deleted", False):
+                # 试跑副本要反映「现在文件已经没了」：留着它，模型跑测试时
+                # 测到的是一份它在自己那边已经删掉的文件。
+                if target.exists():
+                    target.unlink()
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(change.new_text, encoding="utf-8")
         yield copy_root
