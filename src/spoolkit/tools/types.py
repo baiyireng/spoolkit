@@ -64,8 +64,18 @@ class ToolSpec:
 
 @dataclass(frozen=True)
 class ToolCall:
-    """模型发出的一次工具调用请求。"""
+    """模型发出的一次工具调用请求。
+
+    `intent` 是**这次调用想干什么**，来自模型自己写的 `why`（读不到时退回
+    这一轮的 `thought`，见 protocol._parse_tool_calls）。它不参与任何工具
+    参数校验，也不改变执行——它的用处只有两个：① 让人与督导看得到「它
+    为什么按这个按钮」，从而分得清「工具不完善」还是「它理解错了」；
+    ② 让失败与拒绝的话术能**回应意图**，而不是只给一条通用替代方案。
+
+    默认空串：老检查点与直接构造 ToolCall 的调用方（测试、MCP）都不受影响。
+    """
 
     name: str
     arguments: dict[str, Any]
+    intent: str = ""
 

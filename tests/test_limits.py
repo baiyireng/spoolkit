@@ -296,10 +296,21 @@ CONFIRM_KNOBS: tuple[tuple[str, float], ...] = (
 )
 
 
+# 「意图与可评估的建议」那一轮补登的旋钮：把「只看不写」按任务形状拆开
+# （读了东西 vs 白看）、把「同一失败动作反复重试」单列成一条判据，
+# 以及督导自相矛盾时的兜底额度。单列的理由同上：它们不属于 P1 的登记批次。
+INTENT_KNOBS: tuple[tuple[str, float], ...] = (
+    ("no_edit_explore_grace", 1),  # 只看不写时先看那几步有没有拿到新信息
+    ("no_edit_look_window", 6),  # 往回看 6 步
+    ("failed_repeat_at", 2),  # 同一动作连续失败 2 次就叫督导
+    ("explore_grant_steps", 3),  # 说「正常探索」却要收手时，替它续 3 步
+)
+
+
 def test_p1_旋钮全部登记且可覆盖() -> None:
     """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
     for name, default in (
-        P1_NEW_KNOBS + T11_GAP_KNOBS + WALL_KNOBS + CONFIRM_KNOBS
+        P1_NEW_KNOBS + T11_GAP_KNOBS + WALL_KNOBS + CONFIRM_KNOBS + INTENT_KNOBS
     ):
         entry = limits.knob(name)
         assert entry is not None, f"{name} 没登记"
@@ -336,7 +347,8 @@ def test_旋钮没有重名() -> None:
 
     总数 = P0 的 62 + P1 Task 1 的 22 + T11 补缺轮的 2（`T11_GAP_KNOBS`）
     + 「三道墙」那一轮的 4（`WALL_KNOBS`）
-    + 「确认清单拆成独立小回合」那一轮的 5（`CONFIRM_KNOBS`）。
+    + 「确认清单拆成独立小回合」那一轮的 5（`CONFIRM_KNOBS`）
+    + 「意图与可评估的建议」那一轮的 4（`INTENT_KNOBS`）。
     """
     assert len(limits.KNOBS) == len(limits._BY_NAME)
     assert len(limits.KNOBS) == (
@@ -345,6 +357,7 @@ def test_旋钮没有重名() -> None:
         + len(T11_GAP_KNOBS)
         + len(WALL_KNOBS)
         + len(CONFIRM_KNOBS)
+        + len(INTENT_KNOBS)
     )
 
 

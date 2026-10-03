@@ -17,17 +17,27 @@ from spoolkit.tools.fs import list_dir_spec, read_file_spec
 from spoolkit.tools.registry import ToolRegistry
 
 
-def _turn(thought: str, calls=None, final=None) -> str:
-    return json.dumps(
-        {
-            "thought": thought,
-            "tool_calls": calls or [],
-            "state": None,
-            "done": final is not None,
-            "final": final,
-        },
-        ensure_ascii=False,
-    )
+def _turn(thought: str, calls=None, final=None, why=None, assessment=None) -> str:
+    """一轮脚本回合。
+
+    `why` 是给**每个**调用补的意图（想省事时一次给全部），`assessment`
+    是它对上一次督导建议的表态。两者都能省——省了就是「模型没写」，
+    而那本身也是一种要被看见的状态。
+    """
+    payload = {
+        "thought": thought,
+        "tool_calls": calls or [],
+        "state": None,
+        "done": final is not None,
+        "final": final,
+    }
+    if why is not None and payload["tool_calls"]:
+        payload["tool_calls"] = [
+            {**call, "why": why} for call in payload["tool_calls"]
+        ]
+    if assessment is not None:
+        payload["assessment"] = assessment
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _verdict(action: str, **rest) -> str:
@@ -169,6 +179,11 @@ def test_换着花样绕也逃不掉(tmp_path: Path) -> None:
     实测那条轨迹 12 步里换了 8 种不同的调用，机械计数器一次都没响过。
     这里每一步读的文件都不同，重复计数永远是 1——只有「一直没产出」这个
     信号还在涨。
+
+    但**这些读全都成功了**（每个文件都存在），所以按新的判据它们属于
+    正常探索，督导被叫起来时问的不再是「它只看不写」——**意图**要看的是
+    「拿到了新信息还是同一个坑里反复试」。这条用例里它每一轮读的、
+    **每一轮想的「下一步」都是一个新的文件名**，那正是「换着花样绕」。
     """
     for name in "abcdefgh":
         (tmp_path / f"{name}.py").write_text("x = 0\n", encoding="utf-8")
@@ -189,8 +204,223 @@ def test_换着花样绕也逃不掉(tmp_path: Path) -> None:
     loop = _build(tmp_path, script, max_steps=20)
     result = loop.run("改一下")
     assert result.finished is True
-    # 督导是在漫游到第 8 步时被叫起来的，不是等到 20 步烧完。
+    # 督导是在漫游到第 8 步时被叫起来的，不是等到 20 步烧完；而且问的
+    # 那句话必须说准——八次读取**都成功了**，它是「先读后计划」，
+    # 不是「只看不写、什么都没有」。
     assert any("连续 8 步只看不写" in line for line in result.trace), result.trace
+    assert any("像是先读后计划" in line for line in result.trace), result.trace
+    assert any("这一步按**正常探索**交给督导" in line for line in result.trace)
+
+
+def test_每一步都拿到新信息时督导不会被无产出叫起来(tmp_path: Path) -> None:
+    """**用户那条轨迹的核心**：先读后计划不是打转。
+
+    「优化一下旧文件的代码」这类目标本来就要先读再计划；把它当打转、
+    督导据此建议收手，等于把正常的探索掐死。
+
+    阈值压到 3 是为了让**漫游判据**先于「预算用完」那一支触发：默认 8 的话，
+    小预算下督导会先在「预算用完」上被叫起来，这条就测不到探索分支了
+    （踩过一次：用例绿着，判据根本没执行）。
+    """
+    for name in "abcdefgh":
+        (tmp_path / f"{name}.py").write_text("x = 0\n", encoding="utf-8")
+    script = [
+        _turn(f"翻 {name}.py", [{"name": "read_file", "arguments": {"path": f"{name}.py"}}])
+        for name in "abcdefgh"
+    ]
+    script.append(_verdict("stop", reason="该收了"))
+    script.append(_turn("收尾", [], final="好了"))
+
+    loop = _build(
+        tmp_path, script, max_steps=20, overrides={"no_edit_intervene_at": 3}
+    )
+    result = loop.run("优化一下旧文件的代码")
+    asked = [line for line in result.trace if "叫督导" in line]
+    assert asked, result.trace
+    # 每一步都拿到了新内容 → 问的是「像是先读后计划」，不是「只看不写」。
+    assert any("像是先读后计划" in line for line in asked), asked
+    assert not any("一次都没有拿到新内容" in line for line in asked), asked
+
+
+def test_窗口里夹着落空就不算探索() -> None:
+    """`still_exploring` 的判据是 **all** 而不是 any。
+
+    这里直接钉判据本身，因为写反了不会有任何报错：只会让「先读后计划」
+    这个说法被用在一段其实在空转的窗口上，而督导据此续期——预算就投进了
+    一个什么都没看到的循环。集成路径上这两种写法的差别很容易被别的分支
+    盖住（试过三次，前两次的用例绿着而分支根本没执行）。
+    """
+    from spoolkit.agent.loop import still_exploring
+
+    assert still_exploring([True, True, True]) is True
+    assert still_exploring([True, False, True]) is False, "一次落空被后面的一次成功抵消了"
+    assert still_exploring([False, False]) is False
+    assert still_exploring([]) is False, "什么都没看过时不许说它在探索"
+
+
+def test_每一步都拿到新信息时问的是先读后计划(tmp_path: Path) -> None:
+    """窗口里每步都成功 → 报给督导的说法是「像是先读后计划」。"""
+    for name in "abcdefgh":
+        (tmp_path / f"{name}.py").write_text("x = 0\n", encoding="utf-8")
+    script = [
+        _turn(f"翻 {name}.py", [{"name": "read_file", "arguments": {"path": f"{name}.py"}}])
+        for name in "abcdefgh"
+    ]
+    script.append(_verdict("stop", reason="该收了"))
+    script.append(_turn("收尾", [], final="好了"))
+
+    loop = _build(
+        tmp_path, script, max_steps=20, overrides={"no_edit_intervene_at": 3}
+    )
+    result = loop.run("优化一下旧文件的代码")
+    asked = [line for line in result.trace if "叫督导" in line]
+    assert any("像是先读后计划" in line for line in asked), asked
+
+
+def test_看了好几步却什么也没看到时按白看报给督导(tmp_path: Path) -> None:
+    """反过来：每一步换一个不存在的文件，读**全失败**、一步新信息都没进来。
+
+    这才是那类该被看见的漫游，问督导的话必须说「一次都没拿到新内容」。
+    这条单独关掉「同一个失败动作」那一条判据——它比漫游先越线（两次失败
+    就够），两条判据各测各的才说得清是谁在说话。读的名字也**避开 a.py**：
+    夹具里那个文件是存在的，它一被读到，全失败的前提就不成立了。
+    """
+    script = [
+        _turn(f"看 {name}", [{"name": "read_file", "arguments": {"path": f"{name}.py"}}])
+        for name in "bcdefghi"
+    ]
+    script.append(_verdict("redirect", steps=2, reason="一直在白看"))
+    script.append(_turn("明白", [], final="好了"))
+
+    loop = _build(tmp_path, script, max_steps=20, overrides={"failed_repeat_at": 0})
+    result = loop.run("改一下")
+    asked = [line for line in result.trace if "叫督导" in line]
+    assert any("一次都没有拿到新内容" in line for line in asked), asked
+    # 每一次的参数都不同，机械层的重复计数永远归零——这条只可能由漫游判据
+    # 抓出来，不是因为「它在重复调用」。
+    assert not any("同一个失败动作" in line for line in asked), asked
+
+
+def test_同一个失败动作反复重试会被单独叫给督导(tmp_path: Path) -> None:
+    """用户说的「后一种才算打转」：同一个**失败**动作反复重试。
+
+    参数一字不改的重提由机械层硬拦（动作没执行），但「它想干那件事」
+    没被拦下——那是要给判断的事。这条用例里它每一步换一个不存在的文件名，
+    指纹每次不同、机械层抓不到，只有「连续失败」这个信号在涨。
+    """
+    script = [
+        _turn(f"看 {name}", [{"name": "read_file", "arguments": {"path": f"{name}.py"}}])
+        for name in "abcdefgh"
+    ]
+    script.append(_verdict("redirect", steps=2, reason="同一个失败动作重复了 4 次"))
+    script.append(_turn("明白", [], final="好了"))
+
+    loop = _build(tmp_path, script, max_steps=20)
+    result = loop.run("改一下")
+    asked = [line for line in result.trace if "叫督导" in line]
+    assert any("同一个动作已经连续失败" in line for line in asked), asked
+
+
+def test_意图会被记进轨迹(tmp_path: Path) -> None:
+    """工具调用必须带上「想干什么」。
+
+    没有它，同一个失败在记录里只有工具名与参数——分不清「工具不完善」
+    还是「它理解错了」，也就没法顺着它的思路排查。
+    """
+    (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
+    loop = _build(
+        tmp_path,
+        [
+            _turn(
+                "先看它的内容",
+                [{"name": "read_file", "arguments": {"path": "a.py"}}],
+                why="看 a.py 里现在是什么样",
+            ),
+            _turn("好了", [], final="好了"),
+        ],
+    )
+    result = loop.run("优化一下")
+    assert any("意图: 看 a.py 里现在是什么样" in line for line in result.trace)
+
+
+def test_工具事件里带意图(tmp_path: Path) -> None:
+    """`--events` 录下来的 JSONL 是排查的第一手材料，意图必须在里面。"""
+    (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
+    seen: list[tuple[str, dict]] = []
+    loop = _build(
+        tmp_path,
+        [
+            _turn(
+                "先看内容",
+                [{"name": "read_file", "arguments": {"path": "a.py"}}],
+                why="读 a.py 当前内容",
+            ),
+            _turn("好了", [], final="好了"),
+        ],
+    )
+    loop.on_event = lambda kind, data: seen.append((kind, data))
+    loop.run("优化一下")
+    tools = [data for kind, data in seen if kind == "tool"]
+    assert tools[0]["intent"] == "读 a.py 当前内容"
+
+
+def test_督导建议要求表态且允许带理由拒绝(tmp_path: Path) -> None:
+    """督导的话是**建议**，不是命令。
+
+    注入时必须①写清这是建议、②要求用 assessment 表态、③写明不接受
+    是允许的。缺任何一条，它都只能照做——而「照做了没有」不是我们能
+    判断的东西。
+    """
+    (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
+    loop = _build(
+        tmp_path,
+        [
+            _turn("看目录", [_look()]),
+            _turn("看目录", [_look()]),
+            _turn("看目录", [_look()]),
+            _turn("看目录", [_look()]),
+            _verdict(
+                "redirect",
+                steps=2,
+                reason="连着四次读同一个目录",
+                message="别再看目录了，直接读 a.py",
+            ),
+            _turn("明白", [], final="好了"),
+        ],
+        max_steps=8,
+    )
+    result = loop.run("做点什么")
+    prompt = "\n".join(
+        message.content
+        for request in loop.gateway.requests
+        for message in request.messages
+    )
+    assert "别再看目录了" in prompt
+    assert "建议" in prompt and "不是命令" in prompt
+    assert "assessment" in prompt
+    assert "不接受是允许的" in prompt
+
+
+def test_它带着理由拒绝督导时表态被记下来(tmp_path: Path) -> None:
+    """接受 / 不接受都要留下理由——否则「它为什么没照做」无从查起。"""
+    (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
+    loop = _build(
+        tmp_path,
+        [
+            _turn("看目录", [_look()]),
+            _turn("看目录", [_look()]),
+            _turn("看目录", [_look()]),
+            _turn("看目录", [_look()]),
+            _verdict("redirect", steps=2, reason="连着四次读同一个目录",
+                     message="别再看目录了，直接读 a.py"),
+            _turn("明白了", [], final="好了", assessment="不接受：任务要求的是优化，我先确认现状"),
+        ],
+        max_steps=8,
+    )
+    result = loop.run("做点什么")
+    assert any(
+        "它对此前督导建议的表态：不接受" in line for line in result.trace
+    ), result.trace
 
 
 def test_督导说完成后按成功收尾(tmp_path: Path) -> None:

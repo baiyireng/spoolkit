@@ -82,3 +82,30 @@ def test_单个文件用read_file而不是它(tmp_path: Path) -> None:
     result = _spec(tmp_path).handler({"path": "13_case/search.py"})
     assert result.ok is False
     assert "不是目录" in result.content
+
+
+def test_拿文件当目录时话术回应它的意图(tmp_path: Path) -> None:
+    """一句「要看单个文件用 read_file」不够：dogfood 里模型照原样又试了一次。
+
+    因为「看一个文件」有两种目的——要**内容**、要**它属于哪儿**。话术必须
+    把两种都摆出来，它才能认出哪一条在说自己的目的；只给第一种，第二种
+    意图就被判成「它不听话」，而不是「我们没有它要的那个动作」。
+    """
+    _dir(tmp_path)
+    result = _spec(tmp_path).handler({"path": "13_case/search.py"})
+    assert result.ok is False
+    # 要内容 → read_file；要它属于哪儿/目录里有什么 → list_dir 父目录。
+    assert "read_file(" in result.content
+    assert "list_dir(" in result.content
+    assert 'list_dir("13_case")' in result.content
+    # 有意的第三种：要把这一处的代码与测试一次收齐 → 对目录调 survey。
+    assert "survey" in result.content
+
+
+def test_工具说明里写清只对目录生效(tmp_path: Path) -> None:
+    """模型不会先读完整说明再动手，但 tool_help 与索引都得说这件事——
+    描述里含糊（「这一处」读起来像「这个文件」）正是那次误用的来源。"""
+    text = _spec(tmp_path).description
+    assert "必须是**目录**" in text
+    assert "read_file" in text
+    assert "list_dir" in text

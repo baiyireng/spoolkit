@@ -25,6 +25,7 @@ TURN_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "name": {"type": "string"},
                     "arguments": {"type": "object"},
+                    "why": {"type": "string"},
                 },
                 "required": ["name", "arguments"],
             },
@@ -32,6 +33,7 @@ TURN_SCHEMA: dict[str, Any] = {
         "state": {"type": "object"},
         "final": {"type": ["string", "null"]},
         "done": {"type": "boolean"},
+        "assessment": {"type": "string"},
     },
     "required": ["thought", "tool_calls", "done"],
 }
@@ -63,6 +65,13 @@ def build_turn_schema(registry: Any, only: list[str] | None = None) -> dict[str,
 
     only 给定时只允许这几个工具。这不是裁剪提示词，是改采样本身——
     实测里文字提醒推不动小模型，把选项从语法里拿掉才推得动。
+
+    `why` 必须在这里出现，而且必须与 `arguments` **平级**。放在 arguments
+    里有两个后果，都不能接受：① 它会被当成某个工具的参数，撞上
+    `additionalProperties: false` 的参数校验而整次调用失败；② 上面的并集
+    只有「所有工具参数的并集」这一层，一个不属于任何工具的参数进不去。
+    平级之后它不参与工具参数校验，语法层却能采样出它——这是「意图能被
+    看见」这条要求唯一可靠的位置。
     """
     tool_names = tuple(only) if only is not None else registry.names()
     merged: dict[str, Any] = {}
@@ -89,13 +98,18 @@ def build_turn_schema(registry: Any, only: list[str] | None = None) -> dict[str,
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "properties": {"name": name_rule, "arguments": arguments},
+                    "properties": {
+                        "name": name_rule,
+                        "arguments": arguments,
+                        "why": {"type": "string"},
+                    },
                     "required": ["name", "arguments"],
                 },
             },
             "state": STATE_SCHEMA,
             "done": {"type": "boolean"},
             "final": {"type": ["string", "null"]},
+            "assessment": {"type": "string"},
         },
         "required": ["thought", "tool_calls", "done"],
     }
@@ -110,6 +124,9 @@ class AgentTurn:
     state_delta: StateDelta | None
     final: str | None
     done: bool
+    # 它对上一次督导建议的表态（接受 / 不接受 + 理由）。空串表示这一轮
+    # 没有督导建议要回应——不是「它没表态」，见 loop 里注入时写死的三种回答。
+    assessment: str = ""
 
 
 @dataclass(frozen=True)
@@ -122,8 +139,16 @@ class ParseFailure:
     kind: str = ""
 
 
-def _parse_tool_calls(raw: Any) -> tuple[ToolCall, ...] | str:
-    """返回工具调用元组，或返回错误说明字符串。"""
+def _parse_tool_calls(raw: Any, thought: str = "") -> tuple[ToolCall, ...] | str:
+    """返回工具调用元组，或返回错误说明字符串。
+
+    `why` 与 `arguments` 平级读，读不到就退回这一轮的 `thought`——只在
+    **只有一个调用**时退。多个调用共用一句说话时，把它绑到每一个上会把
+    第二个调用的意图写成第一个的，那比没有意图更坏：排查时它是一句假话。
+
+    意图的赋值刻意不做校验（不查长度、不查内容）：它是给人看的旁证，
+    校验只会多出「模型写长了就整轮失败」这种与行为无关的失败。
+    """
     if not isinstance(raw, list):
         return "tool_calls 必须是数组"
 
@@ -137,7 +162,15 @@ def _parse_tool_calls(raw: Any) -> tuple[ToolCall, ...] | str:
         arguments = item.get("arguments", {})
         if not isinstance(arguments, dict):
             return f"tool_calls[{index}].arguments 必须是对象"
-        calls.append(ToolCall(name=name, arguments=arguments))
+        why = item.get("why")
+        intent = why.strip() if isinstance(why, str) and why.strip() else ""
+        calls.append(ToolCall(name=name, arguments=arguments, intent=intent))
+    if len(calls) == 1 and not calls[0].intent and thought.strip():
+        calls[0] = ToolCall(
+            name=calls[0].name,
+            arguments=calls[0].arguments,
+            intent=thought.strip(),
+        )
     return tuple(calls)
 
 
@@ -193,7 +226,7 @@ def parse_turn(text: str) -> AgentTurn | ParseFailure:
     if not isinstance(done, bool):
         return ParseFailure(reason="缺少布尔字段 done")
 
-    calls = _parse_tool_calls(payload.get("tool_calls", []))
+    calls = _parse_tool_calls(payload.get("tool_calls", []), thought)
     if isinstance(calls, str):
         return ParseFailure(reason=calls)
 
@@ -204,6 +237,12 @@ def parse_turn(text: str) -> AgentTurn | ParseFailure:
     final = payload.get("final")
     if final is not None and not isinstance(final, str):
         return ParseFailure(reason="final 必须是字符串或 null")
+
+    assessment = payload.get("assessment")
+    if assessment is None:
+        assessment = ""
+    elif not isinstance(assessment, str):
+        return ParseFailure(reason="assessment 必须是字符串")
 
     if done:
         if not isinstance(final, str) or not final.strip():
@@ -219,5 +258,6 @@ def parse_turn(text: str) -> AgentTurn | ParseFailure:
         state_delta=state_delta,
         final=final,
         done=done,
+        assessment=assessment.strip(),
     )
 

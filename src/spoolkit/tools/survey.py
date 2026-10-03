@@ -15,7 +15,7 @@
 预算是有界的：给不完就明说「哪些没给」，而不是悄悄少给。
 """
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable
@@ -83,8 +83,27 @@ def survey_spec(
         except PathOutsideProjectError as exc:
             return ToolResult(ok=False, content=str(exc))
         if not base.is_dir():
+            # 失败话术要**回应它想干什么**，而不是只给一条替代方案。
+            #
+            # 原先只有一句「要看单个文件用 read_file」。dogfood 那条轨迹里
+            # 模型仍然原样重试了一次——因为「看一个文件」有两种完全不同的
+            # 目的：要**内容**（read_file）、要**它属于哪儿/还有什么**
+            # （list_dir 或对父目录 survey）。只说前者，后者那类意图就被
+            # 判成「它不听话」，而不是「我们没有它要的那个动作」。
+            # 父目录用 posix 形态：工作区里的路径一律按 `/` 写（提示词与
+            # 报错话术用的都是这个约定），Windows 上给它一个反斜杠路径，
+            # 模型下一轮很可能照着抄回去，而它自己不知道那是同一个地方。
+            parent = str(PurePosixPath(raw.replace("\\", "/")).parent) or "."
             return ToolResult(
-                ok=False, content=f"不是目录: {raw}（要看单个文件用 read_file）"
+                ok=False,
+                content=(
+                    f"不是目录: {raw}（survey 只对目录生效）。"
+                    "按你的意图选一个：要看这个文件的**内容** → read_file(\""
+                    f"{raw}\", start_line=…, end_line=…) 只取需要的行区间；"
+                    "要看**它在哪儿、这个目录里还有什么** → list_dir(\""
+                    f"{parent}\")；"
+                    "要把**这一处的代码与验收测试一次收齐** → 对它所处的目录调 survey。"
+                ),
             )
 
         budget = int(args.get("budget") or default_budget)
@@ -127,12 +146,17 @@ def survey_spec(
             "一次收齐「这一处该看的东西」：这个目录里有什么、它的验收测试"
             "（契约：固定了模块对外长什么样）、以及目录里的代码。"
             "**动手改一处之前用它**，比「列目录 → 猜文件名 → 读 → 猜错了再换」"
-            "省好几步。默认只收文本文件，总量有预算，给不完会明说。"
+            "省好几步。path 必须是**目录**：要看单个文件的内容用 read_file，"
+            "要只看目录里有什么用 list_dir。默认只收文本文件，总量有预算，"
+            "给不完会明说。"
         ),
         parameters={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "要看的目录，默认当前目录"},
+                "path": {
+                    "type": "string",
+                    "description": "要看的目录（必须是目录，不是单个文件），默认当前目录",
+                },
                 "budget": {
                     "type": "integer",
                     "description": "最多收多少 token，默认 1200（目录很大时调大）",

@@ -161,6 +161,12 @@ def test_服务端说提示词超长时丢掉历史重发(tmp_path: Path) -> Non
 
 
 def test_上下文需求过大时触发重置(tmp_path: Path) -> None:
+    """撑爆上下文时丢掉历史重发，但任务状态不丢。
+
+    这里关掉督导：**它也会占一次模型调用**（同一个网关），脚本会被它吃掉
+    一条而在这个用例里耗尽；而且被拦的重复调用会退还步数预算，实际跑几轮
+    取决于拦截次数，不是脚本长度能覆盖的。督导那条路有自己的测试文件。
+    """
     long_state = {"current": "很长的当前状态" * 200}
     script = [
         _turn(
@@ -168,9 +174,9 @@ def test_上下文需求过大时触发重置(tmp_path: Path) -> None:
             [{"name": "list_dir", "arguments": {"path": "."}}],
             state=long_state,
         )
-        for i in range(12)
+        for i in range(24)
     ]
-    loop = _build(tmp_path, script, context_window=2000)
+    loop = _build(tmp_path, script, context_window=2000, supervise=False)
     result = loop.run("把上下文撑爆")
     assert result.resets >= 1
 

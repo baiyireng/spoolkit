@@ -87,12 +87,43 @@ RECENT_WINDOW = 6
 # 的漫游——实测那条轨迹 12 步里换了 8 种不同的调用，一次都没被拦住。
 NO_EDIT_LIMIT = int(_limits.knob("no_edit_limit").default)
 
+# 只看不写**不等于**打转：先读后计划本来是许多任务的第一步（「优化一下旧文件」
+# 就属于这种）。所以到干预线时先回头看这几步有没有**拿到新信息**——有任何
+# 一次成功的查看，就按正常探索处理。1 = 开，0 = 退回「只看不写即打转」。
+NO_EDIT_EXPLORE_GRACE = bool(int(_limits.knob("no_edit_explore_grace").default))
+# 往回看几步。它与 RECENT_WINDOW 同量级，但不是同一个东西：那个管
+# 「同一个调用出现几次」，这个管「这几步里有没有新信息进来」。
+NO_EDIT_LOOK_WINDOW = int(_limits.knob("no_edit_look_window").default)
+
 # 漫游到这个步数还没产出，就升级给督导。
 #
 # NO_EDIT_LIMIT 那一步做的是**收窄输出通道**（只能写），它盖得住「它还想查」
 # 这一种。盖不住的是「收窄之后它去翻别的文件」——每一步换一个查询，
 # 机械计数器永远归零。到这一步该有人看看它到底在干什么，而不是继续加规则。
+#
+# 判据已经按任务形状区分：**同一个失败动作反复重试**才算打转（见
+# failed_repeat_at 那条升级路径），而「读了很多步、每一步都拿到新东西」
+# 只在超过本条阈值时交给督导**问一句**（措辞是「它还在探索」，不是
+# 「它在打转」）——两者给督导的问题不一样，结论也就不一样。
 NO_EDIT_INTERVENE_AT = int(_limits.knob("no_edit_intervene_at").default)
+
+# 同一个动作**连续失败**几次就升级给督导。
+#
+# 这是「后一种才算打转」那条判据的机械阈值：参数一字不改的重提由
+# failed_repeat_block_at 硬拦（护栏层），而「同一个坑连着踩」是**要给判断**
+# 的事——拦住了动作，但拦不住它想干那件事。把它单独说出来，督导看到的
+# 就是「同一个失败动作反复重试」，而不是「它好几步没写代码」这种含糊信号。
+FAILED_REPEAT_AT = int(_limits.knob("failed_repeat_at").default)
+
+# 硬拦（没有执行）时**退还步数预算**的工具类别。
+#
+# 查询类的硬拦原先不退：理由是「查询被拦是在打转，退预算等于延长打转」。
+# 那条理由对「同一查询重发」成立，对「同一个失败动作重试」不成立——后者
+# 的出路是换做法，而不是让它把预算花在复读上。dogfood 那条轨迹里它第 3 步
+# 原样重提 survey、被拦、照样吃掉一步（4 步预算是上限，再撞一次就收手）。
+# 编辑类退还一直是对的（dogfood：两次被拒的 write_file 白吃 2 步），
+# 这里只是把同一条账算到查询类上。
+_REFUND_TOOLS = EDIT_TOOLS + (CONFIRM_TOOL, "read_file", "list_dir", "search_code", "survey")
 
 # 空回合连续出现到这个次数就收尾。
 #
@@ -113,6 +144,12 @@ def call_signature(call: ToolCall) -> str:
     参数按 key 排序后再序列化。不排序的话 {"a":1,"b":2} 与 {"b":2,"a":1}
     会算成两次不同的调用——模型只要换个字段顺序就绕过了检测，
     而它换顺序几乎不花任何代价。
+
+    **意图不进指纹**（虽然它是「同一次调用」的一部分）。理由是一次实测：
+    意图不可靠时会读不到，而退路是这一轮的 `thought`——那个字段几乎每轮
+    都不同。把它算进指纹，等于让模型**换一句说法就绕过重复检测**，
+    护栏当场失效（test_repeat_guard 那几条会变成绿的反面）。要看「它换个
+    说法又试了一遍」，看的是 trace 里那两行「意图:」，不是指纹。
     """
     return call.name + " " + json.dumps(
         call.arguments, sort_keys=True, ensure_ascii=False
@@ -139,6 +176,35 @@ def _is_blocked(result: ToolResult) -> bool:
     return (not result.ok) and result.content.startswith(_BLOCKED_MARKS)
 
 
+def still_exploring(look_window: list[bool]) -> bool:
+    """只看不写的那几步，是不是**每一步**都拿到了新东西。
+
+    写成独立函数是因为这里有一个很容易写反的判据，而且反了不会有任何报错，
+    只会让「先读后计划」这个说法被用在一段其实在空转的窗口上（督导据此续期，
+    预算就投进了一个什么都没看到的循环）。判据是 `all` 而不是 `any`：
+    窗口里夹着一次落空，那一次落空没有被任何东西补偿——后一步的成功是自己
+    的收获，不是前一步的。
+
+    空窗口返回 False：还没看过任何东西时，说「它在探索」没有依据。
+    """
+    if not NO_EDIT_EXPLORE_GRACE:
+        return False
+    return bool(look_window) and all(look_window)
+
+
+def _intent_clause(call: ToolCall) -> str:
+    """把「你像是要做什么」这句话写出来。
+
+    失败话术里必须先回应意图：只说「用 read_file」时，一个真正想做别的事
+    （比如「这个文件在哪儿」）的模型会把那句话判成「不适用于我」，然后原样
+    重试——dogfood 里 survey 一个文件连撞两次就是这么来的。回应了意图之后，
+    它能从「哪一条是在说我的目的」里认出自己该走哪条路。
+    """
+    if not call.intent:
+        return ""
+    return f"你写的意图是「{call.intent}」。"
+
+
 def _retry_block_message(call: ToolCall, failure: str) -> str:
     """原样重提一个失败过的调用时的话术：**给出能照做的下一步**。
 
@@ -155,6 +221,7 @@ def _retry_block_message(call: ToolCall, failure: str) -> str:
         if line.strip().startswith(NEXT_STEP_MARKER)
     ]
     staged = failure.lstrip().startswith(STAGE_MARKER)
+    intent = _intent_clause(call)
     if staged:
         parts = [
             f"{BLOCKED_PREFIX}这个调用与上一次**完全相同**（工具 {call.name}，"
@@ -171,6 +238,14 @@ def _retry_block_message(call: ToolCall, failure: str) -> str:
             "所以这次没有执行。",
             f"上一次的结论：{' '.join(failure.split())[:300]}",
         ]
+    if intent:
+        # 意图单独一段：它回答的是「你为什么又发一遍」，而不是「错在哪」。
+        parts.insert(
+            1,
+            intent
+            + "这个理由上一次也已经试过了；同样的意图换个说法重发，"
+            "拿到的还是同一个结果。",
+        )
     if remedy:
         parts.append(
             "上一次已经给出了能照做的下一步：" if not staged
@@ -595,7 +670,17 @@ class AgentLoop:
         if prefetched:
             sections.append(Section(name="retrieval", text=prefetched, priority=35))
         if feedback:
-            sections.append(Section(name="retrieval", text=feedback, priority=40))
+            # **必留区段**，而不是与预取共用 retrieval 配额。
+            #
+            # 原先它排在 retrieval（0.15，本机 8K 窗口下约 1044 token）里跟
+            # 预取抢位置：一段督导建议加「请用 assessment 表态」那三选一，
+            # 一旦超配额就会被 `_fit` 从**尾部**裁掉——而尾部正是那句表态
+            # 要求。被裁掉不会报错，只会安静地退化成「督导下命令、模型照做」，
+            # 也就是这一次要修的那个毛病。实测两处合起来的量很小（一段
+            # message 加 60 余字），必留没有成本，但换来「这段话一定完整送到」。
+            sections.append(
+                Section(name="feedback", text=feedback, priority=40, mandatory=True)
+            )
         return assembler.assemble(sections, recent_turns=history[-MAX_RECENT_TURNS:])
 
     def run(
@@ -623,6 +708,10 @@ class AgentLoop:
         if state is None:
             state = TaskState(task_id=task_id, goal=goal)
         goal = state.goal
+        # 「上次建议 + 它的表态」是**本次会话内**的对照，不是任务状态：
+        # 续跑时读到上一段留下的表态，等于让新的一次运行替上一次认账。
+        state.assessment = ""
+        state.suggestion = ""
 
         # 续跑给的是**新增**预算，不是沿用已经耗尽的那份。
         # 否则一个撞过上限的任务永远续不动——检查点里的步数已经等于上限了。
@@ -683,6 +772,22 @@ class AgentLoop:
         # 不告诉它正确格式它就死循环（dogfood：贪吃蛇第 2 步连续 4 次 write_file 失败）。
         edit_fail_streak = 0
         no_edit_steps = 0
+        # 「只看不写而且什么都没看到」的连续步数。它与 no_edit_steps 分开数，
+        # 理由正是用户那条质疑：「优化一个旧文件」本来就要先读、再计划，
+        # **读了东西**的步数与**白看**的步数不该进同一个计数器。
+        no_progress_steps = 0
+        # 「同一个失败动作反复重试」的连续计数：任何一次失败 +1，任何一次成功
+        # 清零。它与 edit_fail_streak 不是一回事——后者只数写工具（用来决定
+        # 什么时候给格式提示），这个数**所有**工具，用来决定什么时候该问督导
+        # 「这是不是同一个坑里反复试」。
+        failed_streak = 0
+        # 最近几步里有没有拿到新信息：每次结果**成功**记 True，失败记 False。
+        # 只看不写时用它区分「正常探索」与「连读都读不到东西」。
+        look_results: list[bool] = []
+        # 上一次督导建议的原文，与它对那条建议的表态。两者都要送到下一轮
+        # 督导的证据里——否则督导只能看到「它没照做」，看不到为什么。
+        last_suggestion = ""
+        last_assessment = ""
         empty_turns = 0
         overflow_retried = False
         # 督导连续问几次就该退避：同一个打转状态每步问一遍，问出来的话是一样的，
@@ -693,6 +798,7 @@ class AgentLoop:
         cycle_at = int(self.config.limit("name_cycle_at"))
         oscillation_at = int(self.config.limit("oscillation_at"))
         same_query_at = int(self.config.limit("same_query_at"))
+        failed_repeat_at = int(self.config.limit("failed_repeat_at"))
         edits_made = 0
         tool_calls_made = 0
         stopped_by = ""
@@ -722,10 +828,32 @@ class AgentLoop:
                 # 它是一个可用的对照，也是督导自己出问题时的最终退路。
                 break
             stuck_on_repeat = self.config.supervise and repeats >= intervene_at
-            # 换着花样绕：每步都换了查询，重复计数永远归零，只有「一直没产出」
-            # 这个信号还在涨。
+            # 「先读后计划」不是打转：只看不写到干预线时，先回头看这几步
+            # 有没有**拿到新信息**。全都有，就是正常探索——照样交给督导，
+            # 但给它的**问题**不同（「它还在探索，判断该不该继续」），
+            # 于是它不会像原来那样一看到「几步没产出」就建议收手。
+            look_window = look_results[-NO_EDIT_LOOK_WINDOW:]
+            exploring = still_exploring(look_window)
+            # 反过来，「看了好几步却一步新信息都没进来」才是那类该被看见的
+            # 漫游：它每一步都在换查询，机械计数器永远归零。这条与
+            # no_edit_limit 的分工是：限值**收窄输出通道**（语法层，不花钱），
+            # 这条**叫督导**（花一次调用，但能给出「换个做法」的具体建议）。
             stuck_on_roam = (
-                self.config.supervise and no_edit_steps >= roam_intervene_at
+                self.config.supervise
+                and no_progress_steps >= roam_intervene_at
+            )
+            stuck_on_explore = (
+                self.config.supervise
+                and exploring
+                and no_edit_steps >= roam_intervene_at
+            )
+            # 同一个动作连续失败：机械层已经把原样重提拦下了（动作没执行），
+            # 但「它想干那件事」这件事没被拦下。这是**要判断**的点，
+            # 也正是用户说的「同一失败动作反复重试才算打转」。
+            stuck_on_failed_repeat = (
+                self.config.supervise
+                and failed_repeat_at > 0
+                and failed_streak >= failed_repeat_at
             )
             report = inspect(
                 sights,
@@ -748,9 +876,11 @@ class AgentLoop:
                 state.step >= limit
                 or stuck_on_repeat
                 or stuck_on_roam
+                or stuck_on_explore
                 or stuck_on_cycle
                 or stuck_on_oscillation
                 or stuck_on_query
+                or stuck_on_failed_repeat
             ):
                 # 两个触发点，同一件事：机械层已经说了有事，而模型自己没纠正。
                 # 这是**要判断**的点，不是失败点——原先的处理是停下来提示用户
@@ -770,14 +900,40 @@ class AgentLoop:
                     )
                 elif stuck_on_query:
                     asking = f"同一检索词已经查了 {report.same_query} 次"
+                elif stuck_on_failed_repeat:
+                    asking = (
+                        f"同一个动作已经连续失败 {failed_streak} 次，"
+                        "每次都在同一个坑里换说法重试"
+                    )
                 elif stuck_on_roam:
-                    asking = f"它已经连续 {no_edit_steps} 步只看不写，没有任何产出"
+                    asking = (
+                        f"它已经连续 {no_progress_steps} 步只看不写，"
+                        "而且这几步里一次都没有拿到新内容（查询都在失败或落空）"
+                    )
+                elif stuck_on_explore:
+                    # 只改「问题」不改「阈值」：交给督导判断，但把事实说准。
+                    # 这一步是用户第二条质疑的落点——「只看不写」本身不是
+                    # 打转的证据，先读后计划本来就要看几步。
+                    asking = (
+                        f"它已经连续 {no_edit_steps} 步只看不写，"
+                        f"但最近 {len(look_window)} 步每一步都拿到了新内容，"
+                        "没有任何失败动作被反复重试（像是先读后计划）"
+                    )
                 else:
                     asking = (
                         f"它已经连续 {repeats} 次调用同一个工具，参数也相同，仍在重复"
                     )
+                if exploring and stuck_on_explore:
+                    trace.append(
+                        f"step{state.step}: 这一步按**正常探索**交给督导"
+                        "（读到了新内容，不是打转）"
+                    )
                 # 把「为什么把它叫起来」记下来：调这块时唯一能看的东西就是它。
                 trace.append(f"step{state.step}: 叫督导——{asking}")
+                # 上一轮注入过的建议要一起送去：督导看不到「它上次怎么答的」，
+                # 就只能一遍遍重复同一个建议，最后从建议滑向命令。
+                state.suggestion = last_suggestion
+                state.assessment = last_assessment
                 _supervisor_started = time.time()
                 verdict = self._ask_supervisor(
                     state,
@@ -794,6 +950,8 @@ class AgentLoop:
                     cycle=report.cycle,
                     oscillations=report.oscillations,
                     same_query=report.same_query,
+                    assessment=last_assessment,
+                    suggestion=last_suggestion,
                 )
                 supervisor_seconds += time.time() - _supervisor_started
                 if verdict is not None:
@@ -806,7 +964,11 @@ class AgentLoop:
                     # 打转那条不打断任务，只退避：它还没到花光预算的地步。
                     intervene_at = max(repeats * 2, intervene_at * 2)
                     roam_intervene_at = max(
-                        no_edit_steps * 2, roam_intervene_at * 2
+                        # 退避按「这次是被哪个信号叫起来的」算：白看那条用
+                        # no_progress_steps，探索那条用 no_edit_steps。
+                        # 混用会让另一个信号的门槛莫名其妙地翻倍。
+                        (no_progress_steps if not exploring else no_edit_steps) * 2,
+                        roam_intervene_at * 2,
                     )
                     cycle_at = max(cycle_streak * 2, cycle_at * 2)
                     cycle_streak = 0
@@ -815,6 +977,9 @@ class AgentLoop:
                     )
                     same_query_at = max(
                         report.same_query * 2, same_query_at * 2
+                    )
+                    failed_repeat_at = max(
+                        failed_streak * 2, failed_repeat_at * 2
                     )
                     if exhausted:
                         stopped_by = "督导没能给出结论（调用失败或结论不合格式）"
@@ -862,6 +1027,9 @@ class AgentLoop:
                         limit = state.step + verdict.grants
                     if verdict.message:
                         redirect = verdict.message
+                        # 记下「我们转给它的那段原话」：下一次叫督导时要
+                        # 连它的表态一起送过去，督导才知道自己的建议被怎么答的。
+                        last_suggestion = verdict.message
                     what = (
                         f"续 {verdict.grants} 步"
                         if verdict.action == EXTEND
@@ -877,7 +1045,9 @@ class AgentLoop:
                         # 只是把成本翻倍。门槛翻倍，别设定时器。
                         intervene_at = max(repeats * 2, intervene_at * 2)
                         roam_intervene_at = max(
-                            no_edit_steps * 2, roam_intervene_at * 2
+                            # 与上面那条退避同一个口径：按被叫起来的信号算。
+                            (no_progress_steps if not exploring else no_edit_steps) * 2,
+                            roam_intervene_at * 2,
                         )
                         cycle_at = max(cycle_streak * 2, cycle_at * 2)
                         cycle_streak = 0
@@ -886,6 +1056,9 @@ class AgentLoop:
                         )
                         same_query_at = max(
                             report.same_query * 2, same_query_at * 2
+                        )
+                        failed_repeat_at = max(
+                            failed_streak * 2, failed_repeat_at * 2
                         )
             # 强制收敛：连续若干步只查看不修改时，把「继续查」这个选项从
             # 语法里拿掉。实测这个模型对文字提醒完全免疫（重复提醒、拦截
@@ -906,8 +1079,14 @@ class AgentLoop:
                 feedback = T.FORCE_CONCLUDE
             # 督导的话排在最后：它比通用提醒具体，不该被顶掉。只发一次——
             # 一直挂着会让每一轮的装配都多一段重复内容。
+            #
+            # **后面必须缀上「请用 assessment 表态」那一段**：没有它，督导的
+            # 话就只是一段会被照做的命令（dogfood 里「建议收手」下去，模型就
+            # 收手了）。要求表态之后，接受与不接受都会留下理由，而那段理由
+            # 会进 trace、进状态块、进下一次督导的证据——「它到底为什么那样做」
+            # 这件事才第一次可查。
             if redirect is not None:
-                feedback = redirect
+                feedback = f"{redirect}\n\n{T.SUPERVISOR_ASK}"
                 redirect = None
             _assemble_started = time.time()
             assembled = self._assemble(
@@ -1024,6 +1203,28 @@ class AgentLoop:
 
             if turn.state_delta is not None:
                 state.apply(turn.state_delta)
+            # 它对督导建议的表态。记下来的理由与记意图一样：**没有它，
+            # 「它为什么没照做」无从查起**，而下一个结论就会从建议滑向命令。
+            # 空串不记——「没有督导建议要回应」和「它拒绝回应」是两件事，
+            # 混在一起会让日志说谎。
+            if turn.assessment:
+                last_assessment = turn.assessment
+                trace.append(
+                    f"step{state.step}: 它对此前督导建议的表态："
+                    f"{' '.join(turn.assessment.split())[:200]}"
+                )
+                if self.on_event is not None:
+                    # 单独一类事件：网页壳/桥要能把它显示成「Agent 回应了督导」，
+                    # 而不是混在工具流水里。`kind` 放在 data 里，`--events`
+                    # 打出来就是一行 note，text 里能直接读到它的表态原文。
+                    self._emit(
+                        "note",
+                        {
+                            "text": f"Agent 表态：{turn.assessment}",
+                            "ok": True,
+                            "kind": "assessment",
+                        },
+                    )
             history.append(Message(role="assistant", content=response.text))
 
             blocked_all = False
@@ -1085,6 +1286,16 @@ class AgentLoop:
                     blocked = _is_blocked(result)
                     if not blocked:
                         blocked_all = False
+                    # 「同一个失败动作反复重试」判据的原料，以及「这几步有没有
+                    # 拿到新信息」的原料。被硬拦的那次同样算一次失败：它没有
+                    # 换来任何新东西，那正是「在同一个坑里」的证据。
+                    if result.ok:
+                        failed_streak = 0
+                    else:
+                        failed_streak += 1
+                    look_results.append(result.ok)
+                    if NO_EDIT_LOOK_WINDOW > 0:
+                        del look_results[:-NO_EDIT_LOOK_WINDOW]
                     sights.append(_tool_sight(call, result.ok))
                     tool_calls_made += 1
                     if result.usage is not None:
@@ -1128,6 +1339,13 @@ class AgentLoop:
                         "ok": result.ok,
                         "detail": " ".join(result.content.split())[:200],
                     }
+                    # 意图进事件流。**这是「工具调用带上意图」这件事的出口**：
+                    # `--events` 录下来的 JSONL 里每一行 tool 事件都能读到
+                    # 「它这次想干什么」，调工具与调提示词时才有依据分清
+                    # 「工具不完善」和「它理解错了」。没有这一项，同一个失败
+                    # 在日志里只有工具名与参数，意图只能靠人去猜。
+                    if call.intent:
+                        payload["intent"] = call.intent[:200]
                     if result.usage is not None:
                         # 派发 / research 自己花的账。总用量把它们加进去了，
                         # 量「主循环省了多少」时要从这里减回来。
@@ -1150,7 +1368,16 @@ class AgentLoop:
                     # 而真正的原因在后面——调试时会被自己的截断挡住。
                     flat = " ".join(result.content.split())
                     detail = "" if result.ok else f": {flat[:400]}"
-                    trace.append(f"step{state.step}: 工具 {call.name} -> {status}{detail}")
+                    # 意图进 trace（督导看到的正是它）。一行里同时给出
+                    # 「想干什么」与「结果如何」，督导才不必从工具名去猜目的。
+                    why = (
+                        f"（意图: {' '.join(call.intent.split())[:120]}）"
+                        if call.intent
+                        else "（它没有写意图）"
+                    )
+                    trace.append(
+                        f"step{state.step}: 工具 {call.name}{why} -> {status}{detail}"
+                    )
                 tool_seconds += time.time() - _tools_started
                 if repeated:
                     trace.append(
@@ -1204,11 +1431,25 @@ class AgentLoop:
                 and any(call.name in EDIT_TOOLS for call in turn.tool_calls)
             ):
                 no_edit_steps = 0
+                no_progress_steps = 0
+                # 拿到过产出，窗口清零：留着上一步的成功查看，会让「正在推进」
+                # 那一侧永远为真（旧的成功记录不该替新的一步作证）。
+                look_results.clear()
                 # 产出过一次，漫游就算结束了。门槛跟着复位，否则下一段漫游
                 # 要等到翻倍后的那个数字才会被看见。
                 roam_intervene_at = NO_EDIT_INTERVENE_AT
+                # 「同一个失败动作反复试」这一段也结束了：失败计数从零起算，
+                # 否则下一段里第一次失败就会立刻越线（9 成是误报）。
+                failed_repeat_at = FAILED_REPEAT_AT
+                failed_streak = 0
             elif turn.tool_calls:
                 no_edit_steps += 1
+                # 这一步有没有拿到新信息。窗口里全是失败 = 它换着花样
+                # 也什么都没看到，那才是该被督导看见的那种漫游。
+                if not any(look_results[-NO_EDIT_LOOK_WINDOW:]):
+                    no_progress_steps += 1
+                else:
+                    no_progress_steps = 0
                 # 只读角色没有写工具，收窄无从谈起——日志说「收窄为只能写」
                 # 而实际什么都没发生，那是最难查的一类假日志。
                 if (
@@ -1224,15 +1465,17 @@ class AgentLoop:
             # （dogfood：两次被拒的 write_file 白吃了 2 步）。退还必须有上限，
             # 否则「不断被拦」就成了无限预算；上限也是可覆盖的标定值。
             #
-            # 只退还**编辑类**的拦截。查询类的重复被拦是在打转，那正是「该停」
-            # 的信号：给它退预算等于把打转延长（实测：12 条脚本的用例因此被
-            # 多跑一两轮，把假模型的脚本耗尽）。护栏拦编辑是怕丢内容，
-            # 拦查询是怕它原地转圈——两种拦截的后果不一样，处理也不该一样。
+            # 退还范围包括**查看类**（read_file / list_dir / search_code / survey）。
+            # 原先只退编辑类，理由写的是「查询被拦是在打转，退预算等于延长打转」；
+            # 那条理由对**同一查询重发**成立，对**同一失败动作重试**不成立——
+            # 后者的出路是换个做法，而不是让它把预算花在复读上。用户那条轨迹里
+            # 第 3 步原样重提 survey 被拦、照样吃掉一步，4 步预算直接见底、
+            # 来不及做任何改动。退还仍有上限，所以「靠被拦换无限预算」不成立。
             refund_cap = int(self.config.limit("blocked_refund_limit"))
-            blocked_edits = blocked_all and any(
-                call.name in EDIT_TOOLS for call in turn.tool_calls
+            blocked_repeat = blocked_all and any(
+                call.name in _REFUND_TOOLS for call in turn.tool_calls
             )
-            if blocked_edits and refunds_used < refund_cap:
+            if blocked_repeat and refunds_used < refund_cap:
                 refunds_used += 1
                 trace.append(
                     f"step{state.step}: 这一步的调用全部被硬拦（没有执行），"
@@ -1311,12 +1554,19 @@ class AgentLoop:
         cycle: str = "",
         oscillations: int = 0,
         same_query: int = 0,
+        assessment: str = "",
+        suggestion: str = "",
     ) -> Verdict | None:
         """问一次督导。关着、或者它没能给出结论，都返回 None。
 
         证据里刻意不含对话历史：要判断的是「这些动作有没有进展」，
         读到主循环的推理只会让它附和那个推理——和审查者必须独立同一个理由。
         它看到的是事实（记录下来的状态、发生过什么、机械统计）。
+
+        **但两样东西必须给它**：每条工具记录的意图（`trace` 里的「意图:」），
+        与它上一次建议后被怎么回答的（`assessment` / `suggestion`）。前者回答
+        「它按这些按钮是想干什么」，后者回答「我的建议有没有被当成命令」——
+        缺了后者，它只能看到「它没照做」，下一个结论就会从建议滑向命令。
 
         结论以事件发出去。网页里看得到「督导说了什么」这件事很重要：
         否则一次续期在界面上和「它自己一直在跑」完全分不清。
@@ -1340,6 +1590,8 @@ class AgentLoop:
             cycle=cycle,
             oscillations=oscillations,
             same_query=same_query,
+            assessment=assessment,
+            suggestion=suggestion,
         )
         verdict = supervise(
             self.gateway,
