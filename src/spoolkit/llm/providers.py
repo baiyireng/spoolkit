@@ -38,6 +38,11 @@ class ProviderConfig:
     script: tuple[str, ...] = ()
     timeout: float = 120.0
     env: dict[str, str] = field(default_factory=dict)
+    # 采样参数：默认温度 0（确定性），种子不给就是服务端自己取。
+    # 它们存在的理由只有一个——**测波动**：温度 0 下连跑 N 次只能证明「可复现」，
+    # 证明不了「稳定」。探针跑分器靠这两个参数做带扰动的重复。
+    temperature: float = 0.0
+    seed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +100,8 @@ def _build_llamacpp(config: ProviderConfig) -> ModelGateway:
         model=config.model or LOCAL_MODEL,
         timeout=config.timeout,
         proxy=config.proxy,
+        temperature=config.temperature,
+        seed=config.seed,
     )
 
 

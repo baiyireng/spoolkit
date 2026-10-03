@@ -56,3 +56,55 @@ def test_provider_gateway包WaitingGateway(tmp_path: Path) -> None:
     )
     gateway = provider_gateway(args, tmp_path)
     assert isinstance(gateway, WaitingGateway)
+
+
+def test_采样参数从命令行进ProviderConfig(tmp_path: Path, monkeypatch) -> None:
+    """`--temperature/--seed` 必须真的走到网关构造里，而不只是记在跑分记录里。
+
+    默认值也必须保持「温度 0、不给种子」：历史读数全是在那种设置下取的。
+    """
+    from spoolkit.cli import app as cli_app
+    from spoolkit.cli import runtime as cli_runtime
+
+    parser = argparse.ArgumentParser(prog="spool")
+    sub = parser.add_subparsers(dest="command")
+    cli_app._add_run_command(sub)
+
+    seen: dict = {}
+
+    class Stub:
+        def context_window(self):
+            return 8192
+
+        def close(self):
+            pass
+
+    def fake_load(name, config):
+        seen["name"] = name
+        seen["config"] = config
+        return Stub()
+
+    monkeypatch.setattr(cli_runtime, "load_gateway", fake_load)
+
+    args = parser.parse_args(
+        [
+            "run",
+            "--goal",
+            "g",
+            "--provider",
+            "llamacpp",
+            "--temperature",
+            "0.4",
+            "--seed",
+            "7",
+        ]
+    )
+    assert cli_runtime.provider_gateway(args, tmp_path) is not None
+    assert seen["name"] == "llamacpp"
+    assert seen["config"].temperature == 0.4
+    assert seen["config"].seed == 7
+
+    plain = parser.parse_args(["run", "--goal", "g", "--provider", "llamacpp"])
+    assert cli_runtime.provider_gateway(plain, tmp_path) is not None
+    assert seen["config"].temperature == 0.0
+    assert seen["config"].seed is None

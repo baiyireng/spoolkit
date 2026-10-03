@@ -29,6 +29,10 @@ SECONDS_PER_OUTPUT_TOKEN = 0.2
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_MODEL = "local"
 
+# 采样温度默认 0：既有的每一条读数都是在确定性采样下取的，默认值一变，
+# 历史记录就再也对不上新记录。要测「波动」必须显式把它抬起来。
+DEFAULT_TEMPERATURE = 0.0
+
 # 本机地址不走代理。llama-server 按定义就跑在本机，把它的请求交给系统代理
 # 只会绕远路——实测（Clash 开着时）直接被代理拒成 502。
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
@@ -49,7 +53,12 @@ class LlamaCppError(RuntimeError):
     """调用 llama.cpp 服务失败。"""
 
 
-def _to_payload(request: ChatRequest, model: str) -> dict[str, Any]:
+def _to_payload(
+    request: ChatRequest,
+    model: str,
+    temperature: float = DEFAULT_TEMPERATURE,
+    seed: int | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
         "messages": [
@@ -57,9 +66,14 @@ def _to_payload(request: ChatRequest, model: str) -> dict[str, Any]:
             for message in request.messages
         ],
         "max_tokens": max(1, request.max_tokens),
-        "temperature": 0.0,
+        "temperature": float(temperature),
         "stream": False,
     }
+    if seed is not None:
+        # 温度 > 0 时不给种子，同一句提示词每次采样都不同——那么「这一次红」
+        # 就没法跟「上一次绿」比较了。所以种子只在显式给出时才下发，
+        # 默认保持「服务端说了算」（llama.cpp 自己会随机取）。
+        payload["seed"] = int(seed)
     if request.response_schema:
         # llama.cpp 会把这里转成 GBNF 语法做约束采样。
         payload["response_format"] = {
@@ -79,8 +93,14 @@ class LlamaCppGateway:
         timeout: float = 180.0,
         proxy: str | None = None,
         transport: httpx.BaseTransport | None = None,
+        temperature: float = DEFAULT_TEMPERATURE,
+        seed: int | None = None,
     ) -> None:
         self.model = model
+        # 采样参数属于「这一次跑分用的是什么设置」的一部分，必须由构造方给进来。
+        # 温度 0 时种子不起作用；温度 > 0 时给了种子，同一次跑分才可复现。
+        self.temperature = float(temperature)
+        self.seed = None if seed is None else int(seed)
         # 这是**下限**：每请求的实际超时按 max_tokens 放大（见 _timeout_for）。
         self._timeout = timeout
         self._proxy = proxy
@@ -103,7 +123,9 @@ class LlamaCppGateway:
         try:
             response = self._client.post(
                 "/v1/chat/completions",
-                json=_to_payload(request, self.model),
+                json=_to_payload(
+                    request, self.model, self.temperature, self.seed
+                ),
                 timeout=timeout,
             )
         except httpx.ReadTimeout as exc:

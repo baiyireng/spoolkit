@@ -13,17 +13,36 @@
     python scripts/probe.py --probe merge-html --provider llamacpp --base-url http://127.0.0.1:8080
     python scripts/probe.py --all --root D:\\tmp\\probe-runs --total-budget 5400
 
+带扰动的重复（测的是**波动**，不是复现性）：
+
+    python scripts/probe.py --all --temperature 0 --repeat 1 --total-budget 1800
+    python scripts/probe.py --all --temperature 0.4 --seed 1 --repeat 3 --total-budget 2400
+
+为什么非要有这一层：温度 0 下连跑 3 次，三次事件流**字节完全相同**——那测到的
+是「这份代码可复现」，不是「这份能力稳定」。要谈稳定，就得让采样真的抖起来
+（`--temperature` + `--seed`），把同一句话说上几遍（`--repeat`），再看
+**通过率**与**步数/token/墙钟的极差**。`--seed` 是基准：第 k 次重复用
+`基准 + k`，这样每一次都是独立采样；而每一次用的种子都落在记录里，所以
+单次仍然可复现（`seed` = 这一次实际下发的，`seed_base` = 命令行给的）。
+
 三条不变式，写在最前面是因为它们是这个脚本存在的理由：
 
 1. **绝不动种子目录、绝不动用户工作区。** 每个探针在 `--root` 下自己的沙箱副本里
-   跑（`<root>/<id>`），跑完还要再算一遍种子指纹确认没被污染。
+   跑（`<root>/<id>`；重复多次时是 `<root>/<id>-r<第几次>`，这样每一次的现场
+   ——事件流、判据输出——都留得住，失败轨迹才有得贴），跑完还要再算一遍种子
+   指纹确认没被污染。
 2. **工作区级授权必须真的生效。** 跑之前往沙箱写 `.agent/policy.json`
    （`{"policy":"auto"}`），命令行**不传** `--policy`——这样授权的生效路径就是
    真实的「读工作区策略」那条。写文件必须**无 BOM**：PowerShell 5.1 的
    `-Encoding utf8` 会带 BOM，而 `load_policy` 读不了 BOM 会静默退回 `ask`，
    于是每一步写操作都要确认，无人值守的探针直接跑挂。
 3. **一次跑分有界。** 单探针超时、步数上限、整批总预算都可配；超时就强杀进程树
-   并如实记录，绝不挂死。
+   并如实记录，绝不挂死。总预算按**每一次重复**检查：快撞预算时先减少重复次数，
+   而不是把整条探针丢掉。
+
+判据是**冻结**的：`checks/**`、`seeds/**`、`expected/**` 一个字节都不许动。
+`goal_variants`（预注册措辞变体）只改「用户怎么说」，改不动判据——它轮换的是
+`--goal`，判据脚本路径与 guard 哈希都还是清单里那一份。
 """
 
 import argparse
@@ -77,6 +96,27 @@ REQUIRED_RECORD_KEYS = (
     "file_changed",
     "check_ok",
     "notes",
+    # ---- 带扰动的重复：这一次是「第几遍、用什么设置、说哪句话」 ----
+    # 没有这四个字段，results.jsonl 就分不出「同一设置下的波动」和
+    # 「不同设置之间的差异」，聚合只能靠猜。
+    "temperature",
+    "seed",
+    "seed_base",
+    "repeat_index",
+    "repeat_total",
+    "variant_index",
+    "variant_source",
+)
+
+# 聚合时要看极差与均值的指标。只放「每次跑都必然报出来」的那几个：
+# 步数、模型调用、输入/输出 token、墙钟。拦截计数不在这里——它们是判定下限的
+# 证据，单次就能下结论，不需要极差。
+STABILITY_METRICS = (
+    "steps",
+    "model_calls",
+    "prompt_tokens",
+    "completion_tokens",
+    "wall_seconds",
 )
 
 # ---- 事件流里的字面量 -------------------------------------------------------
@@ -152,7 +192,35 @@ def load_manifest(path=None):
         guards = probe.get("guard_hashes") or {}
         if not isinstance(guards, dict):
             raise ManifestError(f"{where}.guard_hashes 必须是对象")
+        _validate_variants(where, probe)
     return {"version": payload.get("version", 1), "defaults": defaults, "probes": probes}
+
+
+def _validate_variants(where, probe):
+    """`goal_variants` 是可选的预注册措辞变体，校验得比 goal 更严。
+
+    为什么严：变体是**同一件事的另一种说法**，所以它必须与原话、与彼此都不
+    相同——一模一样的「变体」等于没变，而它会在聚合里被当成「换过说法」。
+    ⚠️ 变体只影响 `--goal`，绝不影响判据：`checks/**`、`seeds/**`、
+    `expected/**` 都不参与这里的任何判断。
+    """
+    variants = probe.get("goal_variants")
+    if variants is None:
+        return
+    if not isinstance(variants, list) or not variants:
+        raise ManifestError(
+            f"{where}.goal_variants 必须是非空数组；不用它就把这一项整个去掉"
+        )
+    seen = {probe["goal"]}
+    for index, variant in enumerate(variants):
+        if not isinstance(variant, str) or not variant.strip():
+            raise ManifestError(f"{where}.goal_variants[{index}] 必须是非空字符串")
+        if variant in seen:
+            raise ManifestError(
+                f"{where}.goal_variants[{index}] 与目标原话或别的变体重复："
+                f"{variant[:40]}"
+            )
+        seen.add(variant)
 
 
 def find_probe(manifest, identifier):
@@ -160,6 +228,44 @@ def find_probe(manifest, identifier):
         if probe["id"] == identifier:
             return probe
     raise ManifestError(f"清单里没有这个探针：{identifier}")
+
+
+def seed_for_attempt(seed, repeat_index):
+    """这一次重复实际用的种子。`--seed` 是**基准**，第 k 次用 `基准 + k`。
+
+    为什么不是每次都同一个种子：llama.cpp 的种子是**每次请求**重新初始化的，
+    同一个种子配同一句提示词，在温度 > 0 下采样出来的还是同一条轨迹——那样
+    「重复 3 次」测到的只是措辞差异，不是采样波动。基准加序号让每一次都是
+    独立采样，而每一次用的种子都落进记录，所以单次仍然可复现。
+    """
+    if seed is None:
+        return None
+    return int(seed) + int(repeat_index)
+
+
+def goal_for_attempt(probe, repeat_index, rotate=True):
+    """这一次重复该用哪句「用户原话」。
+
+    - 第 0 次永远是清单里的原话：基线读数要跟历史记录对得上；
+    - 之后按 `goal_variants` 轮换（写几个变体、重复几次就转几格，绕回开头）；
+    - **没写变体就退化成固定目标**，`--no-variants` 也走这一支。
+
+    变体只换说法，不换判据：这里返回的字符串唯一去向是 `--goal`。
+    """
+    base = probe["goal"]
+    variants = list(probe.get("goal_variants") or [])
+    if not variants or not rotate or repeat_index <= 0:
+        return {
+            "goal": base,
+            "variant_index": None,
+            "variant_source": "goal",
+        }
+    index = (repeat_index - 1) % len(variants)
+    return {
+        "goal": variants[index],
+        "variant_index": index,
+        "variant_source": "goal_variants",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -171,6 +277,17 @@ def default_root():
     """不给 --root 时的沙箱根：系统临时目录，一次跑分一个时间戳。"""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return Path(tempfile.gettempdir()) / "spoolkit-probes" / stamp
+
+
+def sandbox_name(identifier, repeat_index=0, repeat_total=1):
+    """这一次重复的沙箱目录名。
+
+    重复多次时每次一个（`-r0`/`-r1`/…）：`run_one` 会把沙箱整个重建，共用一个
+    目录就等于「上一条的现场被下一条抹掉」——而失败轨迹正是从现场里读出来的。
+    """
+    if repeat_total <= 1:
+        return identifier
+    return f"{identifier}-r{repeat_index}"
 
 
 def materialize(seed, sandbox, root):
@@ -383,6 +500,9 @@ def build_command(probe, sandbox, options):
     **不传 `--policy`**：授权的生效路径要走工作区里的 `.agent/policy.json`，
     那正是这条不变式要验的东西。`--scope` 是另一件事（自动落盘的范围），
     它没有工作区级存储，只能由命令行给。
+
+    `--goal` 取 `options["goal"]`（这一次重复实际要说的那句话），温度与种子
+    显式下传：读数必须能回答「这是在什么采样设置下取的」。
     """
     entry = options.get("spool") or repo_spool()
     head = [str(item) for item in entry] if entry else [
@@ -397,7 +517,7 @@ def build_command(probe, sandbox, options):
         "--root",
         str(sandbox),
         "--goal",
-        probe["goal"],
+        options.get("goal") or probe["goal"],
         "--session",
         options["session"],
         "--provider",
@@ -411,6 +531,12 @@ def build_command(probe, sandbox, options):
         "--subagent-steps",
         str(options["subagent_steps"]),
     ]
+    # 温度总是显式给：不给的话「这一次用的是默认 0」就只存在于读代码的人的脑子里，
+    # 而不在记录里。种子只在给了的时候给——温度 0 下它不起作用。
+    if options.get("temperature") is not None:
+        command += ["--temperature", str(options["temperature"])]
+    if options.get("seed") is not None:
+        command += ["--seed", str(options["seed"])]
     if options.get("base_url"):
         command += ["--base-url", options["base_url"]]
     if options.get("model"):
@@ -644,6 +770,12 @@ def resolve_options(manifest, args):
     """命令行 > 清单 defaults。缺项按内置默认补上。"""
     defaults = manifest["defaults"]
     extra = list(defaults.get("extra_args") or [])
+    temperature = (
+        args.temperature
+        if getattr(args, "temperature", None) is not None
+        else defaults.get("temperature")
+    )
+    seed = args.seed if getattr(args, "seed", None) is not None else defaults.get("seed")
     return {
         "provider": args.provider or defaults.get("provider") or "llamacpp",
         "base_url": args.base_url or defaults.get("base_url") or "",
@@ -661,16 +793,85 @@ def resolve_options(manifest, args):
         "no_supervise": bool(args.no_supervise),
         "extra_args": extra,
         "spool": args.spool or "",
+        # 采样设置：不给温度就是 0（与历史读数一致），不给种子就让服务端自己取。
+        "temperature": 0.0 if temperature is None else float(temperature),
+        "seed": None if seed is None else int(seed),
+        # 变体轮换默认开；`--no-variants` 用来做「固定目标」的对照。
+        "rotate_variants": not bool(getattr(args, "no_variants", False)),
     }
 
 
-def run_one(probe, manifest, options, root, runner=run_spool, python=None):
-    """跑一个探针，返回一条记录。这是整个脚本的主干。"""
+def skipped_record(probe, options, repeat_index, repeat_total, budget, elapsed):
+    """预算不够时留下的那条记录。
+
+    它**不是一次尝试**（聚合里既不算分子也不算分母），但仍然带全温度/种子/
+    第几次：不然「这个设置下少采了几次」这件事在记录里就查不到了——
+    而报告里必须说得清「实际跑了多少、为什么」。
+    """
+    variant = goal_for_attempt(
+        probe, repeat_index, rotate=options.get("rotate_variants", True)
+    )
+    return {
+        "id": probe["id"],
+        "shape": probe["shape"],
+        "title": probe.get("title", ""),
+        "goal": variant["goal"],
+        "goal_base": probe["goal"],
+        "variant_index": variant["variant_index"],
+        "variant_source": variant["variant_source"],
+        "temperature": options["temperature"],
+        "seed": seed_for_attempt(options.get("seed"), repeat_index),
+        "seed_base": options.get("seed"),
+        "repeat_index": repeat_index,
+        "repeat_total": repeat_total,
+        "skipped": True,
+        "notes": f"整批预算 {budget}s 不够了（已用 {elapsed:.0f}s），这一次没跑",
+        "wall_seconds": 0.0,
+        "final_ok": False,
+        "check_ok": False,
+        "bounds_ok": False,
+        "steps": None,
+        "model_calls": None,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "verifier_ran": 0,
+        "verifier_ok": None,
+        "repeat_blocks": 0,
+        "read_blocks": 0,
+        "supervisor_interventions": 0,
+        "supervisor_false_claims": 0,
+        "file_changed": {"changed": False},
+        "exit_code": None,
+        "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def run_one(
+    probe,
+    manifest,
+    options,
+    root,
+    runner=run_spool,
+    python=None,
+    repeat_index=0,
+    repeat_total=1,
+    variant=None,
+):
+    """跑一个探针的一次重复，返回一条记录。这是整个脚本的主干。"""
     python = Path(python or repo_python())
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     seed = (PROBES_DIR / probe["seed"]).resolve()
-    sandbox = root / probe["id"]
+    sandbox = root / sandbox_name(probe["id"], repeat_index, repeat_total)
+    # 这一次的采样设置：种子按基准+序号取，记录里两个都留（基准=命令行给的，
+    # 实际=这一次真正下发的），这样「哪一次是同一个设置下的独立采样」查得出来。
+    seed_base = options.get("seed")
+    attempt_seed = seed_for_attempt(seed_base, repeat_index)
+    if variant is None:
+        variant = goal_for_attempt(
+            probe, repeat_index, rotate=options.get("rotate_variants", True)
+        )
+    options = dict(options, goal=variant["goal"], seed=attempt_seed)
 
     seed_before = fingerprint_tree(seed)
     materialize(seed, sandbox, root)
@@ -723,7 +924,18 @@ def run_one(probe, manifest, options, root, runner=run_spool, python=None):
         "id": probe["id"],
         "shape": probe["shape"],
         "title": probe.get("title", ""),
-        "goal": probe["goal"],
+        # goal 是**这一次实际发出去的那句话**（可能是变体）。判据一个字没动：
+        # check.script 与 guard_hashes 都还是清单里那一份，见下面两条。
+        "goal": variant["goal"],
+        "goal_base": probe["goal"],
+        "variant_index": variant["variant_index"],
+        "variant_source": variant["variant_source"],
+        "temperature": options["temperature"],
+        "seed": options["seed"],
+        "seed_base": seed_base,
+        "repeat_index": repeat_index,
+        "repeat_total": repeat_total,
+        "check_script": str(check_script),
         "started_at": started_at,
         "wall_seconds": outcome.get("wall_seconds", 0.0),
         "exit_code": outcome.get("exit_code"),
@@ -875,13 +1087,195 @@ def build_notes(record, probe):
 
 
 # --------------------------------------------------------------------------
+# 聚合：带扰动的重复
+# --------------------------------------------------------------------------
+
+
+def _spread(values):
+    """一组数的 min/max/均/极差。
+
+    `None` 一律**剔除**，不当 0：超时或没跑完的那一次确实没报出步数，
+    把它当 0 会让极差凭空变大，也会把均值拽下去——那是「没数据」，
+    不是「很稳定/很不稳定」。一组全空就如实返回 count=0。
+    """
+    numbers = [
+        float(value)
+        for value in values
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    if not numbers:
+        return {"count": 0, "min": None, "max": None, "mean": None, "span": None}
+    return {
+        "count": len(numbers),
+        "min": min(numbers),
+        "max": max(numbers),
+        "mean": round(sum(numbers) / len(numbers), 3),
+        "span": round(max(numbers) - min(numbers), 3),
+    }
+
+
+def attempt_passed(record):
+    """这一次算不算「过」：**判据绿 且 下限过**。
+
+    两个都要。只看判据会漏掉「交出来的东西对了、但过程中被拦了 3 次」——
+    那是运气好，不是稳定；只看下限会漏掉「一路顺风但没做对」。
+    跳过的记录不是一次尝试，永远不算过。
+    """
+    if record.get("skipped"):
+        return False
+    return bool(record.get("check_ok")) and bool(record.get("bounds_ok"))
+
+
+def aggregate_stability(records):
+    """按探针聚合重复读数：通过率 + 各指标的 min–max–均。
+
+    口径写在返回的每个字段里，谁都能复算：
+    - `attempts`：真的跑了的次数（跳过的**不算**分母，也不算分子）；
+    - `passed`：其中「判据绿 且 下限过」的次数；`pass_rate = passed / attempts`；
+    - `metrics`：每个指标的 `count/min/max/mean/span`，只统计报出了数字的那几次；
+    - `failures`：每一次没过的**现场清单**（含沙箱与事件流路径，失败轨迹从那里读）。
+    """
+    grouped = {}
+    order = []
+    for record in records:
+        identifier = record.get("id") or "?"
+        if identifier not in grouped:
+            grouped[identifier] = []
+            order.append(identifier)
+        grouped[identifier].append(record)
+
+    summary = {}
+    for identifier in order:
+        items = grouped[identifier]
+        attempts = [item for item in items if not item.get("skipped")]
+        passed = [item for item in attempts if attempt_passed(item)]
+        failures = []
+        for item in attempts:
+            if attempt_passed(item):
+                continue
+            failures.append(
+                {
+                    "repeat_index": item.get("repeat_index"),
+                    "temperature": item.get("temperature"),
+                    "seed": item.get("seed"),
+                    "variant_index": item.get("variant_index"),
+                    "variant_source": item.get("variant_source"),
+                    "goal": item.get("goal"),
+                    "steps": item.get("steps"),
+                    "wall_seconds": item.get("wall_seconds"),
+                    "final_ok": item.get("final_ok"),
+                    "check_ok": item.get("check_ok"),
+                    "bounds_ok": item.get("bounds_ok"),
+                    "timed_out": item.get("timed_out"),
+                    "notes": item.get("notes", ""),
+                    "sandbox": item.get("sandbox", ""),
+                    "events_path": item.get("events_path", ""),
+                    "check_output_tail": (item.get("check_output") or "")[-400:],
+                }
+            )
+        summary[identifier] = {
+            "attempts": len(attempts),
+            "skipped": len(items) - len(attempts),
+            "passed": len(passed),
+            "pass_rate": (
+                round(len(passed) / len(attempts), 4) if attempts else None
+            ),
+            "checks_green": sum(1 for item in attempts if item.get("check_ok")),
+            "bounds_ok": sum(1 for item in attempts if item.get("bounds_ok")),
+            "finished": sum(1 for item in attempts if item.get("final_ok")),
+            "unstable": bool(attempts) and len(passed) != len(attempts),
+            "temperatures": sorted(
+                {item.get("temperature") for item in attempts}, key=str
+            ),
+            "seeds": sorted({item.get("seed") for item in attempts}, key=str),
+            "variant_sources": sorted(
+                {item.get("variant_source") for item in attempts}, key=str
+            ),
+            "metrics": {
+                key: _spread([item.get(key) for item in attempts])
+                for key in STABILITY_METRICS
+            },
+            "failures": failures,
+        }
+    return summary
+
+
+def _metric_cell(spread):
+    if not spread or spread["count"] == 0:
+        return "—"
+    if spread["count"] == 1:
+        return f"{spread['min']:.1f}"
+    return f"{spread['min']:.1f}-{spread['max']:.1f}-{spread['mean']:.1f}"
+
+
+def render_stability(records):
+    """给人看的稳定度表：一行一个探针。格式是 `min-max-均`。"""
+    stability = aggregate_stability(records)
+    header = (
+        f"{'探针':<18}{'采样':>4}{'过':>4}{'通过率':>8}"
+        f"{'步数':>14}{'墙钟s':>20}{'输入tok':>26}{'输出tok':>24}{'不稳定':>8}"
+    )
+    lines = [
+        "稳定度（通过率 = 判据绿 且 下限过；指标写 min-max-均，只统计真的跑了的次数）：",
+        header,
+        "-" * len(header),
+    ]
+    for identifier, item in stability.items():
+        rate = "—" if item["pass_rate"] is None else f"{item['pass_rate']:.2f}"
+        metrics = item["metrics"]
+        lines.append(
+            f"{identifier:<18}{item['attempts']:>4}{item['passed']:>4}{rate:>8}"
+            f"{_metric_cell(metrics['steps']):>14}"
+            f"{_metric_cell(metrics['wall_seconds']):>20}"
+            f"{_metric_cell(metrics['prompt_tokens']):>26}"
+            f"{_metric_cell(metrics['completion_tokens']):>24}"
+            f"{'是' if item['unstable'] else '否':>8}"
+        )
+        if item["skipped"]:
+            lines.append(f"{'':<18}（另有 {item['skipped']} 次因预算不足被跳过）")
+    return "\n".join(lines)
+
+
+def render_failures(records):
+    """失败轨迹的入口清单：哪一次、什么设置、现场在哪儿、判据说了什么。
+
+    真正的轨迹（工具调用与拦截）在 `events_path` 指向的 JSONL 里，这里只把
+    「去哪儿读」和「判据的最后一句话」摆出来——聚合里塞全文只会把它淹没。
+    """
+    stability = aggregate_stability(records)
+    lines = []
+    for identifier, item in stability.items():
+        for failure in item["failures"]:
+            lines.append(
+                f"[{identifier}] 第 {failure['repeat_index']} 次（温度 {failure['temperature']}，"
+                f"种子 {failure['seed']}，变体 {failure['variant_index']}）"
+                f"步={failure['steps']} 墙钟={failure['wall_seconds']}s "
+                f"判据={'绿' if failure['check_ok'] else '红'} "
+                f"下限={'过' if failure['bounds_ok'] else '未过'}"
+            )
+            lines.append(f"    说明：{failure['notes']}")
+            lines.append(f"    事件流：{failure['events_path']}")
+            tail = " ".join((failure["check_output_tail"] or "").split())
+            if tail:
+                lines.append(f"    判据尾部：{tail[-300:]}")
+    if not lines:
+        return "没有不过的尝试。"
+    return "不过的尝试（失败轨迹从事件流里读）：\n" + "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
 # 落盘与展示
 # --------------------------------------------------------------------------
 
 
 def save_record(record, stamp):
     RECORDS_DIR.mkdir(parents=True, exist_ok=True)
-    path = RECORDS_DIR / f"{stamp}-{record['id']}.json"
+    # 重复多次时文件名要带上是第几次：同名会把上一次的记录覆盖掉，
+    # 而「同一设置下的 N 次读数」正是这一层要留下的东西。
+    name = f"{stamp}-{record['id']}"
+    if int(record.get("repeat_total") or 1) > 1:
+        name += f"-r{record.get('repeat_index', 0)}"
+    path = RECORDS_DIR / f"{name}.json"
     path.write_text(
         json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -890,12 +1284,19 @@ def save_record(record, stamp):
     return path
 
 
-def save_summary(records, meta):
-    payload = {"meta": meta, "probes": records}
-    SUMMARY_PATH.write_text(
+def save_summary(records, meta, stability=None, path=None):
+    """汇总落盘。`stability` 段就是「带扰动的重复」那一层的结论。"""
+    payload = {
+        "meta": meta,
+        "stability": aggregate_stability(records) if stability is None else stability,
+        "probes": records,
+    }
+    target = Path(path or SUMMARY_PATH)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    return SUMMARY_PATH
+    return target
 
 
 def _cell(value, width=None):
@@ -989,13 +1390,54 @@ def build_parser():
     parser.add_argument("--subagent-steps", type=int, default=0)
     parser.add_argument("--no-supervise", action="store_true")
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help=(
+            "采样温度。不给=清单 defaults 或内置默认 0（确定性基线）；"
+            "抬起来才测得到波动——温度 0 下重复 N 次只能证明「可复现」"
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "采样种子的**基准**：第 k 次重复用 基准+k（每一次独立采样，"
+            "每一次的种子都落记录）。温度 > 0 时给它，同一次跑分才可复现。"
+            "不给=服务端自己取"
+        ),
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="每个探针重复几次（默认 1）。每次一条记录，带上是第几次与当次的设置",
+    )
+    parser.add_argument(
+        "--no-variants",
+        action="store_true",
+        help="不轮换 goal_variants：每次都只用清单里的目标原话（对照组）",
+    )
+    parser.add_argument(
         "--total-budget",
         type=int,
         default=0,
-        help="--all 的总墙钟上限（秒）；超预算的探针记为跳过，不偷偷跑下去",
+        help=(
+            "--all 的总墙钟上限（秒）；预算不够时先减少重复次数，"
+            "连一次都跑不下才记为跳过，不偷偷跑下去"
+        ),
     )
     parser.add_argument(
         "--no-save", action="store_true", help="只打印，不落记录（自检/单测用）"
+    )
+    parser.add_argument(
+        "--summary-out",
+        default="",
+        help=(
+            "把这一次的汇总（含 stability 段）另存一份；三种设置各存一份，"
+            "否则后跑的会把前一份 summary.json 覆盖掉。默认仍更新 summary.json"
+        ),
     )
     parser.add_argument(
         "--report",
@@ -1027,6 +1469,7 @@ def main(argv=None, runner=run_spool):
     budget = args.total_budget or int(
         manifest["defaults"].get("total_budget_seconds") or 0
     )
+    repeats = max(1, int(args.repeat or manifest["defaults"].get("repeat") or 1))
     stamp = time.strftime("%Y%m%d-%H%M%S")
     python = repo_python()
 
@@ -1043,62 +1486,85 @@ def main(argv=None, runner=run_spool):
         + f"；单探针超时 {options['timeout']}s；最多 {options['max_steps']} 步"
         + (f"；整批预算 {budget}s" if budget else "")
     )
+    print(
+        f"采样设置：温度 {options['temperature']}，"
+        f"种子 {'（服务端自己取）' if options['seed'] is None else options['seed']}"
+        f"；每个探针重复 {repeats} 次"
+        + ("；变体轮换开" if options["rotate_variants"] else "；只用目标原话（--no-variants）")
+    )
     print(f"解释器：{python}")
     print("")
 
     records = []
     batch_started = time.time()
     for probe in selected:
-        elapsed = time.time() - batch_started
-        remaining = budget - elapsed if budget else None
-        if remaining is not None and remaining < 60:
-            record = {
-                "id": probe["id"],
-                "shape": probe["shape"],
-                "goal": probe["goal"],
-                "skipped": True,
-                "notes": f"整批预算 {budget}s 不够了（已用 {elapsed:.0f}s），这一条没跑",
-                "wall_seconds": 0.0,
-                "final_ok": False,
-                "check_ok": False,
-                "bounds_ok": False,
-                "steps": None,
-                "model_calls": None,
-                "prompt_tokens": None,
-                "completion_tokens": None,
-                "verifier_ran": 0,
-                "verifier_ok": None,
-                "repeat_blocks": 0,
-                "read_blocks": 0,
-                "supervisor_interventions": 0,
-                "supervisor_false_claims": 0,
-                "file_changed": {"changed": False},
-                "exit_code": None,
-                "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            }
-            records.append(record)
-            print(f"[{probe['id']}] 跳过：整批预算不足")
-            continue
+        # 每个探针重复 repeats 次；预算按**每一次**检查，快撞线时先减少重复次数，
+        # 而不是把整条探针丢掉——「少采几次」比「一个数都没有」有用得多。
+        for repeat_index in range(repeats):
+            elapsed = time.time() - batch_started
+            remaining = budget - elapsed if budget else None
+            if remaining is not None and remaining < 60:
+                record = skipped_record(
+                    probe, options, repeat_index, repeats, budget, elapsed
+                )
+                records.append(record)
+                print(
+                    f"[{probe['id']}] 第 {repeat_index + 1}/{repeats} 次跳过：整批预算不足"
+                    f"（已用 {elapsed:.0f}s / {budget}s）"
+                )
+                if not args.no_save:
+                    save_record(record, stamp)
+                break
 
-        # 单条也不许把整批预算冲破：取「本探针上限」与「剩余预算」里更小的那个。
-        local = dict(options)
-        if remaining is not None:
-            local["timeout"] = int(max(60, min(options["timeout"], remaining)))
-        print(f"[{probe['id']}] 开跑（{probe['shape']}）…")
-        record = run_one(probe, manifest, local, root, runner=runner, python=python)
-        records.append(record)
-        print(
-            f"[{probe['id']}] exit={record['exit_code']} "
-            f"步={record['steps']} 墙钟={record['wall_seconds']:.1f}s "
-            f"验收={'绿' if record['check_ok'] else '红'} 下限={'过' if record['bounds_ok'] else '未过'}"
-        )
-        if not args.no_save:
-            save_record(record, stamp)
+            # 单条也不许把整批预算冲破：取「本探针上限」与「剩余预算」里更小的那个。
+            local = dict(options)
+            if remaining is not None:
+                local["timeout"] = int(max(60, min(options["timeout"], remaining)))
+            variant = goal_for_attempt(
+                probe, repeat_index, rotate=options["rotate_variants"]
+            )
+            label = (
+                f"[{probe['id']}] 第 {repeat_index + 1}/{repeats} 次开跑（{probe['shape']}；"
+                f"温度 {options['temperature']}；"
+                f"种子 {seed_for_attempt(options['seed'], repeat_index)}；"
+                + (
+                    "目标原话"
+                    if variant["variant_index"] is None
+                    else f"变体 #{variant['variant_index']}"
+                )
+                + "）…"
+            )
+            print(label)
+            record = run_one(
+                probe,
+                manifest,
+                local,
+                root,
+                runner=runner,
+                python=python,
+                repeat_index=repeat_index,
+                repeat_total=repeats,
+                variant=variant,
+            )
+            records.append(record)
+            print(
+                f"[{probe['id']}] 第 {repeat_index + 1}/{repeats} 次 exit={record['exit_code']} "
+                f"步={record['steps']} 墙钟={record['wall_seconds']:.1f}s "
+                f"验收={'绿' if record['check_ok'] else '红'} "
+                f"下限={'过' if record['bounds_ok'] else '未过'}"
+            )
+            if not args.no_save:
+                save_record(record, stamp)
 
     total_wall = round(time.time() - batch_started, 1)
     table = render_table(records)
+    stability = aggregate_stability(records)
+    stability_table = render_stability(records)
+    failure_notes = render_failures(records)
     totals = {
         "probes": len(records),
+        "attempts": sum(item.get("attempts", 0) for item in stability.values()),
+        "passed": sum(item.get("passed", 0) for item in stability.values()),
         "finished": sum(1 for item in records if item.get("final_ok")),
         "check_ok": sum(1 for item in records if item.get("check_ok")),
         "bounds_ok": sum(1 for item in records if item.get("bounds_ok")),
@@ -1109,14 +1575,26 @@ def main(argv=None, runner=run_spool):
         "completion_tokens": sum(item.get("completion_tokens") or 0 for item in records),
     }
     summary_line = (
-        "合计：完成 {finished}/{probes}，验收绿 {check_ok}/{probes}，"
-        "下限达标 {bounds_ok}/{probes}，步数 {steps}，模型调用 {model_calls}，"
+        "合计：记录 {probes} 条，真跑的采样 {attempts} 次，"
+        "「判据绿 且 下限过」{passed} 次；完成 {finished}/{probes}，"
+        "验收绿 {check_ok}/{probes}，下限达标 {bounds_ok}/{probes}，跳过 {skipped} 条，"
+        "步数 {steps}，模型调用 {model_calls}，"
         "token 输入 {prompt_tokens} / 输出 {completion_tokens}".format(**totals)
     )
     wall_line = f"整批墙钟：{total_wall}s" + (f"（预算上限 {budget}s）" if budget else "")
+    setting_line = (
+        f"设置：温度 {options['temperature']}，"
+        f"种子 {'（服务端自己取）' if options['seed'] is None else options['seed']}，"
+        f"每探针 {repeats} 次"
+        + ("，变体轮换" if options["rotate_variants"] else "，固定目标原话")
+    )
 
     print("")
     print(table)
+    print("")
+    print(stability_table)
+    print("")
+    print(failure_notes)
     print("")
     print(wall_line)
     print(summary_line)
@@ -1130,14 +1608,23 @@ def main(argv=None, runner=run_spool):
                     f"供应商：{options['provider']}"
                     + (f"（{options['base_url']}）" if options["base_url"] else ""),
                     f"沙箱根：{root}",
+                    setting_line,
                     wall_line,
                     "",
                     table,
                     "",
+                    stability_table,
+                    "",
+                    failure_notes,
+                    "",
                     summary_line,
                     "",
                     "逐条说明：",
-                    *[f"  {item['id']}：{item.get('notes', '')}" for item in records],
+                    *[
+                        f"  {item['id']} 第 {item.get('repeat_index', 0) + 1}/"
+                        f"{item.get('repeat_total', 1)} 次：{item.get('notes', '')}"
+                        for item in records
+                    ],
                     "",
                 ]
             ),
@@ -1154,20 +1641,31 @@ def main(argv=None, runner=run_spool):
             "model": options["model"],
             "root": str(root),
             "python": str(python),
+            "temperature": options["temperature"],
+            "seed": options["seed"],
+            "repeat": repeats,
+            "rotate_variants": options["rotate_variants"],
             "total_wall_seconds": total_wall,
             "budget_seconds": budget,
             "within_budget": (not budget) or total_wall <= budget,
             "totals": totals,
         }
-        if args.all:
-            path = save_summary(records, meta)
-            print(f"汇总已落盘：{path}")
+        if args.all or args.summary_out:
+            if args.summary_out:
+                path = save_summary(records, meta, stability, args.summary_out)
+                print(f"汇总已落盘：{path}")
+                if Path(args.summary_out).resolve() != SUMMARY_PATH.resolve():
+                    # summary.json 仍然表示「最近一次」，否则三种设置跑完只剩最后一份。
+                    save_summary(records, meta, stability, SUMMARY_PATH)
+            else:
+                path = save_summary(records, meta, stability)
+                print(f"汇总已落盘：{path}")
         print(f"逐条记录目录：{RECORDS_DIR}")
         print(f"追加表：{RESULTS_JSONL}")
 
     return 0 if all(
-        item.get("check_ok") and item.get("bounds_ok") for item in records
-    ) else 1
+        attempt_passed(item) for item in records if not item.get("skipped")
+    ) and any(not item.get("skipped") for item in records) else 1
 
 
 if __name__ == "__main__":

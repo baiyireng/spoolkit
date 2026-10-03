@@ -84,6 +84,31 @@ def test_无schema时不带response_format() -> None:
     gateway.close()
 
 
+def test_温度与种子下发给服务端() -> None:
+    """温度 0 下重复 N 次只能证明「可复现」，要测波动必须能把温度抬起来。
+
+    所以这两项必须是**可下发的**，而且默认值不能变：默认温度 0 且不带 seed，
+    历史读数才对得上新读数。
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(200, json=_completion())
+
+    gateway = _gateway(handler, temperature=0.4, seed=7)
+    gateway.chat(_request())
+    assert seen["payload"]["temperature"] == 0.4
+    assert seen["payload"]["seed"] == 7
+    gateway.close()
+
+    default = _gateway(handler)
+    default.chat(_request())
+    assert seen["payload"]["temperature"] == 0.0
+    assert "seed" not in seen["payload"], "不给种子就让服务端自己取"
+    default.close()
+
+
 def test_服务返回非200时报错() -> None:
     gateway = _gateway(lambda request: httpx.Response(500, text="boom"))
     with pytest.raises(LlamaCppError):

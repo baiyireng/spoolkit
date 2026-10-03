@@ -11,6 +11,7 @@
     "max_steps": 8,
     "step_ceiling": 24,
     "total_budget_seconds": 5400,
+    "temperature": 0.0,
     "extra_args": [
       "--no-setup",
       "--no-history",
@@ -25,6 +26,10 @@
       "seed": "seeds/merge-html",
       "expected": "expected/merge-html",
       "goal": "index.html 和 pricing.html 的导航栏和页脚一模一样，我改个链接要改两遍，烦死了。把 pricing 里那些内容并到 index.html 去吧，以后我就看一个文件。",
+      "goal_variants": [
+        "pricing.html 里的内容直接合进 index.html 吧，两页的导航和页脚本来就是同一份，我以后只想维护一个文件。",
+        "index 和 pricing 这两个页面合成一份算了，公共那块我改一次要改两处；以后我只看一个文件。"
+      ],
       "check": {
         "script": "checks/merge_html.py",
         "timeout_seconds": 120
@@ -49,6 +54,10 @@
       "seed": "seeds/vague-optimize",
       "expected": "expected/vague-optimize",
       "goal": "这个 logstat 跑得太慢了，线上几万行日志要等好久才出结果，你帮我看看能不能弄快点，结果别给我改坏了啊。",
+      "goal_variants": [
+        "logstat 处理几万行日志慢得让人等不下去，帮我把速度弄快点，算出来的东西一点都不能变。",
+        "线上日志一多 logstat 就卡半天，能不能优化一下？结果必须跟现在一模一样。"
+      ],
       "check": {
         "script": "checks/vague_optimize.py",
         "timeout_seconds": 300
@@ -72,6 +81,10 @@
       "seed": "seeds/add-feature",
       "expected": "expected/add-feature",
       "goal": "还想要一个按月看的功能：python -m expenses.cli summary --month 2025-03，把这个月一共花了多少、每个分类多少都打出来。",
+      "goal_variants": [
+        "再加个按月的入口吧，像 python -m expenses.cli summary --month 2025-03 这样，能看出这个月总共花了多少、各分类各多少。",
+        "我想按月查账：python -m expenses.cli summary --month 2025-03 跑出来要给出当月合计和每个分类的金额。"
+      ],
       "check": {
         "script": "checks/add_feature.py",
         "timeout_seconds": 300
@@ -98,6 +111,10 @@
       "seed": "seeds/fix-bug",
       "expected": "expected/fix-bug",
       "goal": "订会议室的时段合并有问题，明明是连着占的两段，前台看还是两条。你跑一下 tests 就知道了，帮我修掉。",
+      "goal_variants": [
+        "会议室时段合并这块不对：明明接得上的两段，前台还是显示成两条。跑一下 tests 就能看到，帮我修了。",
+        "连着订的两段时间没有被并成一条，前台看着是两条记录。你跑 tests 复现一下，然后修掉。"
+      ],
       "check": {
         "script": "checks/fix_bug.py",
         "timeout_seconds": 300
@@ -124,6 +141,10 @@
       "seed": "seeds/rename-cross-file",
       "expected": "expected/rename-cross-file",
       "goal": "pipeline 里 get_rows 这名字太含糊了，改成 load_rows 吧，整个项目里都统一一下。",
+      "goal_variants": [
+        "get_rows 这个名字在 pipeline 里不够清楚，换成 load_rows，项目里所有地方都跟着改过来。",
+        "把 pipeline 里的 get_rows 统一改名成 load_rows，整个项目都别再留旧名字。"
+      ],
       "check": {
         "script": "checks/rename_cross_file.py",
         "timeout_seconds": 300

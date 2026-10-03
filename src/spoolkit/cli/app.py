@@ -107,6 +107,24 @@ def _add_provider_args(parser: argparse.ArgumentParser, default: str) -> None:
     parser.add_argument("--model", default="", help="留空则用供应商默认模型")
     parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
     parser.add_argument("--proxy", default="", help="留空则使用系统代理")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help=(
+            "采样温度（当前只对 llamacpp 生效）。不给=网关默认 0，即确定性采样；"
+            "抬起来才测得到波动——温度 0 下连跑 N 次只能证明「可复现」"
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "采样种子（当前只对 llamacpp 生效）。温度 > 0 时不给种子，"
+            "每次采样都不同，两次读数没法对着比"
+        ),
+    )
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.add_argument(
         "--no-setup",

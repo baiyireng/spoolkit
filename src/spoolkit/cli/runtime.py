@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from spoolkit.cli.events import EventWriter
+from spoolkit.llm.llamacpp import DEFAULT_TEMPERATURE
 from spoolkit.llm.providers import ProviderConfig, ProviderError, load_gateway
 from spoolkit.net import system_proxy
 from spoolkit import settings
@@ -194,6 +195,13 @@ def provider_gateway(args, project_root):
         proxy=values["proxy"] or system_proxy(),
         script=script,
         env=dict(__import__("os").environ),
+        # 采样参数**不走 settings 解析**：它们不是用户配置项，而是「这一次跑分
+        # 用什么设置」的一次性输入（探针跑分器按设置逐次给）。不给就是温度 0、
+        # 种子由服务端取——与历史读数完全一致。
+        temperature=DEFAULT_TEMPERATURE
+        if getattr(args, "temperature", None) is None
+        else float(args.temperature),
+        seed=None if getattr(args, "seed", None) is None else int(args.seed),
     )
     try:
         gateway = load_gateway(provider, config)
