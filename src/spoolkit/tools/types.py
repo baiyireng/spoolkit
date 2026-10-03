@@ -42,6 +42,15 @@ class ToolResult:
     facts: tuple[Fact, ...] = ()
     # 这个工具自己花掉的模型开销，由循环累加进用量。
     usage: Usage | None = None
+    # 判据用的**原始**证据，不给模型看。
+    #
+    # 为什么需要它：自动验证回灌给模型的是压缩过的短摘要
+    # （`verify.condense_test_output` 只留 `ERROR tests/x.py` 那一行，
+    # 真正的 `ImportError: cannot import name 'get_rows'` 被丢掉了）。
+    # 而自动审查层判「这次失败是不是改名没铺完造成的」正需要那个名字——
+    # 拿短摘要去判会漏，改成把整个原始输出灌给模型又太贵。所以两份分开：
+    # 模型看 content，审查层看 raw。
+    raw: str = ""
 
 
 @dataclass(frozen=True)

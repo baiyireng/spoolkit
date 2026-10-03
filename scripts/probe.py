@@ -321,6 +321,18 @@ def _tool_dirs():
             Path(local) / "Microsoft" / "WinGet" / "Links",
             Path(local) / "Programs" / "Microsoft VS Code" / "bin",
         ]
+    dirs += [
+        # 本机有 rg 但不在 PATH 里的那两个位置（实测 `where.exe rg` 找不到，
+        # 而 `tests/` 与 `tools/search.py` 都依赖它）。不加这两条，
+        # 探针里每一次 search_code 都会记成工具失败——那不是模型的读数。
+        Path(local) / "SummerEngine" / "current" / "ripgrep" / "bin",
+        Path(local) / "OpenAI" / "Codex" / "bin",
+    ]
+    codex_root = Path(local) / "OpenAI" / "Codex" / "bin"
+    if codex_root.is_dir():
+        for item in sorted(codex_root.iterdir(), reverse=True):
+            if item.is_dir():
+                dirs.append(item)
     dirs += [Path(r"C:\Program Files\ripgrep"), Path("/usr/local/bin"), Path("/usr/bin")]
     return [item for item in dirs if item.is_dir()]
 

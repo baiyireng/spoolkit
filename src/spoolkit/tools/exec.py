@@ -326,14 +326,25 @@ def _execute(
     cwd_arg: str,
     timeout: int,
     max_output: int = MAX_OUTPUT_CHARS,
+    extra_env: dict | None = None,
 ) -> ToolResult:
-    """在指定目录里执行。base 可能是原目录，也可能是试跑副本。"""
+    """在指定目录里执行。base 可能是原目录，也可能是试跑副本。
+
+    `extra_env` 只加不改（覆盖同名变量时以它给的值为准），给自动验证用：
+    范围收窄到子目录后要把项目根补进 `PYTHONPATH`，否则测试项目
+    靠 `parents[1]` 找包根时导不进包，报出来的 ERROR 是假警报。
+    """
     try:
         cwd = resolve_within(base, cwd_arg)
     except PathOutsideProjectError as exc:
         return ToolResult(ok=False, content=str(exc))
     if not cwd.is_dir():
         return ToolResult(ok=False, content=f"工作目录不存在: {cwd_arg}")
+
+    env = None
+    if extra_env:
+        env = dict(os.environ)
+        env.update({str(key): str(value) for key, value in extra_env.items()})
 
     try:
         proc = subprocess.run(
@@ -345,6 +356,7 @@ def _execute(
             errors="replace",
             timeout=timeout,
             shell=False,  # 明确禁止经 shell，参数里的元字符因此是惰性的
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return ToolResult(ok=False, content=f"命令超过 {timeout} 秒未结束，已终止")
@@ -473,6 +485,7 @@ def _run(
     max_output: int = MAX_OUTPUT_CHARS,
     default_timeout: int = DEFAULT_TIMEOUT,
     max_timeout: int = MAX_TIMEOUT,
+    extra_env: dict | None = None,
 ) -> ToolResult:
     argv = list(args["command"])
     original = list(argv)
@@ -536,9 +549,9 @@ def _run(
         with trial_workspace(root, pending.items()) as work_root:
             _restore_originals(work_root, pending, revert)
             return _execute(
-                work_root, resolved, requested, cwd_arg, timeout, max_output
+                work_root, resolved, requested, cwd_arg, timeout, max_output, extra_env
             )
-    return _execute(root, resolved, requested, cwd_arg, timeout, max_output)
+    return _execute(root, resolved, requested, cwd_arg, timeout, max_output, extra_env)
 
 
 def _restore_originals(work_root: Path, pending, paths: object) -> None:
@@ -623,11 +636,16 @@ def run_once(
     revert: object = (),
     cwd: str = ".",
     max_output: int = MAX_OUTPUT_CHARS,
+    extra_env: dict | None = None,
 ) -> ToolResult:
     """执行一条命令，语义与 run_command 工具完全一致。
 
     给自动验证用：它必须走同一套白名单与试跑副本，否则「模型不能随便
     跑命令、但系统可以」就成了一条暗门——而暗门是最难审计的那种东西。
+
+    `extra_env` 只给自动验证用（`run_command` 走同一条 `_run` 但从不传它）：
+    范围收窄到子目录后，项目根要靠它进 `PYTHONPATH`，否则测试项目
+    导不进包、报出来的 ERROR 是假警报。
     """
     return _run(
         root,
@@ -637,4 +655,5 @@ def run_once(
         grants,
         revert,
         max_output,
+        extra_env=extra_env,
     )

@@ -164,3 +164,100 @@ def test_探针轮新增的两段没有引入新的占位符() -> None:
     """
     for name in PROBE_ANCHORS:
         assert _placeholders(name) == [], name
+
+
+# --- 本轮（rename-cross-file 复跑）新增的两句：各自对应的锚点 -----------------
+#
+# 这两句是「丢了就是行为变了」的那几句，所以同样机械核对。判据与话术的主体
+# 在代码层（`verify.py` 的中间态说明、`agent/audit.py` 的三类发现），
+# 提示词只做最小承载——所以这里只冻两句，不再往上加。
+RENAME_REGRESSION_ANCHORS = {
+    # 迎合测试：测试失败时**不许动业务逻辑**。原来只说「不得修改测试」，
+    # 而实测它为了过测试去删了 render() 的表头行——那是删业务逻辑，不是改测试。
+    "WORKFLOW_TESTS_ARE_SPEC": [
+        "不得为了让测试通过而修改它",
+        "不得为了让测试通过而删掉或削弱业务逻辑",
+    ],
+    # 中间态：验证对象是累计改动，半新半旧不是代码失败。
+    "WORKFLOW_TEST_SCOPE": [
+        "本次运行累计的改动",
+        "半新半旧不是代码失败",
+    ],
+}
+
+
+def test_改名复跑新增的两句一条不缺() -> None:
+    missing: list[str] = []
+    for name, anchors in RENAME_REGRESSION_ANCHORS.items():
+        text = getattr(T, name)
+        missing += [f"{name}:{one}" for one in anchors if one not in text]
+    assert not missing, f"语义锚点缺: {missing}"
+
+
+# system 区段是**每个请求都要付一次**的税，所以它的 token 数要能一眼看到。
+#
+# 两个数（2026-10-04.4，4096 窗口，都含工具索引）：
+#
+#     离线计数（`OfflineTokenCounter`，保守）：3301
+#     服务端分词（llama.cpp `/tokenize`，Qwen3.8-27B）：2129
+#
+# 为什么不能拿 `budget.FIXED_QUOTAS["system"] = 900` 当上界：`system` 是
+# mandatory 区段，`Assembler.assemble` 对必留区段**不裁剪**，那个配额管的是
+# `Budget.allocation()` 这张表。真正卡住运行的是另一条：必留区段不得超过
+# `effective()`（4096 窗口下 3482）——**这一条真的会让 `spool run` 直接报错**，
+# 实测本轮就撞上了（`test_end_to_end` 的 CLI 那条路）。
+# 所以下面冻结的是「别再悄悄涨」，而不是「必须 ≤900」（那要删掉整段工作方式）。
+#
+# 这个模块量得到的是「不含工具索引」的那部分（实测 CLI 里工具索引 315 服务器
+# 分词 / 约 640 离线）。注册表相关的部分由 `loop.py` 按实际注册的工具生成。
+PROMPT_TOKEN_CEILING = 2900
+
+
+def _key_registry(tmp_path: Path):
+    """一把关键工具：足以让 workflow 的各个分支都出现。"""
+    from spoolkit.tools.edit import (
+        PendingChanges,
+        delete_file_spec,
+        replace_lines_spec,
+        replace_text_spec,
+        write_file_spec,
+    )
+    from spoolkit.tools.exec import run_command_spec
+    from spoolkit.tools.fs import list_dir_spec, read_file_spec
+    from spoolkit.tools.registry import ToolRegistry
+    from spoolkit.tools.search import search_code_spec
+    from spoolkit.tools.verify import verify_file_spec
+
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path, pending))
+    registry.register(list_dir_spec(tmp_path, pending))
+    registry.register(search_code_spec(tmp_path))
+    registry.register(write_file_spec(tmp_path, pending))
+    registry.register(replace_text_spec(tmp_path, pending))
+    registry.register(replace_lines_spec(tmp_path, pending))
+    registry.register(delete_file_spec(tmp_path, pending))
+    registry.register(run_command_spec(tmp_path, pending))
+    registry.register(verify_file_spec(tmp_path, pending))
+    return registry
+
+
+def test_system区段的token数不许悄悄涨(tmp_path: Path) -> None:
+    """量 system 区段（模板 + 工作方式）的 token 数，不许越过冻结线。
+
+    用**离线计数器**（`OfflineTokenCounter`，非 ASCII 按 1 字符 1 token）：
+    它偏保守，且不依赖服务端在不在。实测值由 `loop.build_workflow` 的真实
+    输出算出，服务端读数（llama.cpp `/tokenize`）见上面的注释。
+    """
+    from spoolkit.agent.loop import build_workflow
+    from spoolkit.llm.tokenizer import OfflineTokenCounter
+
+    counter = OfflineTokenCounter()
+    template = T.SYSTEM.split("{tools}")[0] + T.SYSTEM.split("{workflow}")[1]
+    workflow = build_workflow(_key_registry(tmp_path), ())
+    total = counter.count(template) + counter.count(workflow)
+    assert total <= PROMPT_TOKEN_CEILING, (
+        f"system 区段（不含工具索引）涨到 {total} token"
+        f"（冻结线 {PROMPT_TOKEN_CEILING}）。"
+        "提示词是每个请求都要付一次的税：确有必要就改这个数并说明理由。"
+    )

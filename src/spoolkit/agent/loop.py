@@ -14,6 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from spoolkit.agent.audit import (
+    AUDIT_KIND,
+    Audit,
+    AuditLog,
+    audit,
+)
 from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from spoolkit.agent.state import TaskState, clear_state, load_state, save_state
@@ -45,11 +51,12 @@ from spoolkit.tools.edit import (
     NEXT_STEP_MARKER,
     REFUSAL_MARKER,
     STAGE_MARKER,
+    is_test_path,
     lingering_note,
 )
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import ToolCall, ToolResult
-from spoolkit.tools.verify import ENVIRONMENT_MARKER
+from spoolkit.tools.verify import ENVIRONMENT_MARKER, SCOPE_FALLBACK_MARKER, pending_renames
 from spoolkit.tools.view import WorkspaceView
 
 SYSTEM_PROMPT = T.SYSTEM
@@ -708,6 +715,15 @@ class AgentLoop:
         # 上一次验证覆盖过的**内容键**（路径 + 内容指纹）。与 _last_verify
         # 同生共死：结论和「它是对哪一份内容下的」必须成对存在。
         self._last_verify_key: str = ""
+        # 自动审查层 L1 的账本（见 spoolkit.agent.audit）。每次 run() 开始时清空：
+        # 它是「本次运行」的发现，不是跨任务的记忆。
+        self.audit_log = AuditLog()
+        # 最近一次验证**新加**的那几条发现。事件流按它发 note，
+        # 而不是把整本账每步重发一遍（重发等于给上下文和日志灌噪声）。
+        self._last_findings: tuple = ()
+        # 本次运行里每个改动文件**磁盘上的原始行数**。判「迎合测试」要用它：
+        # 行数是可证伪的证据，比措辞可靠（测试失败的同一步，业务代码变短了）。
+        self._base_lines: dict[str, int] = {}
         # 本轮的 trace 引用。辅助方法（护栏的放行理由）要往它上面写一行，
         # 又不能把 trace 当参数一路传下去。
         self._trace: list[str] | None = None
@@ -1452,6 +1468,10 @@ class AgentLoop:
                             # 结论里的真实状态都用它（`changed` 只覆盖这一轮）。
                             # 两个出口各记一份，不是重复——一个按轮、一个按次运行。
                             changed_paths.append(path)
+                            # 这个文件**第一次被改之前**磁盘上的行数：审查层判
+                            # 「迎合测试」（测试没过而业务代码变短）要用它。
+                            if path not in self._base_lines:
+                                self._base_lines[path] = self._disk_lines(path)
                             # 这个文件改过了：旧的行号与旧的读取指纹都作废。
                             # 清掉之后，同一个 read_file 的重提会被放行成
                             # 「刷新读取」，而不是被硬拦在一份过期内容上。
@@ -1548,13 +1568,22 @@ class AgentLoop:
                 if edited and self.verify is not None:
                     _verify_started = time.time()
                     started = time.time()
-                    report, passed = self._run_verification(changed)
+                    # 验证对象是**本次运行累计落盘 + 待确认的全部改动**，不是
+                    # 这一步的半成品：多文件改名/搬移天生多步，对半新半旧的树
+                    # 逐步验证必然失败，而那个失败必然诱发迎合测试的改动
+                    # （rename-cross-file 复跑实测：模型为此删掉了表头行）。
+                    for _path in changed:
+                        if _path not in changed_paths:
+                            changed_paths.append(_path)
+                    scope_paths = list(dict.fromkeys([*changed, *changed_paths]))
+                    report, passed = self._run_verification(scope_paths)
                     # 验证单独计一笔：它是**起子进程跑测试**，优化方向
                     # （换更快的测试、只跑相关文件）与工具那条完全不同。
                     verify_seconds += time.time() - _verify_started
                     trace.append(
                         f"step{state.step}: 自动验证 -> {'通过' if passed else '失败'}"
-                        f"（{len(changed)} 处改动，{time.time() - started:.1f}s）"
+                        f"（累计 {len(scope_paths)} 处改动，"
+                        f"{time.time() - started:.1f}s）"
                     )
                     self._emit(
                         "tool",
@@ -1564,6 +1593,19 @@ class AgentLoop:
                             "detail": " ".join(report.split())[:200],
                         },
                     )
+                    # 发现（回退 / 中间态 / 迎合测试）单独走一类 note 事件：
+                    # 「高危信号出现过几次」要能机械地数出来，不能靠读自然语言。
+                    # `_run_verification` 会把**这一次新加的那几条**放在
+                    # `self._last_findings` 里，这里只负责发出去。
+                    for finding in self._last_findings:
+                        self._emit(
+                            "note",
+                            {
+                                "text": finding.render(),
+                                "ok": True,
+                                "kind": AUDIT_KIND,
+                            },
+                        )
                     # 必须紧跟在那次改动后面，不能塞进 system 区段。
                     # 区段排在整段历史之前，模型会先读到「测试失败」、
                     # 再读到自己刚才做的事——因果顺序反了，它接不上。
@@ -2183,8 +2225,13 @@ class AgentLoop:
         诚实的反馈告诉模型——把工具故障说成「你的代码错了」，
         会把它引到完全错误的方向上去。
 
-        `changed` 是这一轮改过的文件：验证器据此决定**在哪个范围里验**。
-        一个工作区里有很多件事时，在根上跑整条测试命令会把别人的失败报给它。
+        `changed` 要传**本次运行累计改过的全部文件**（不是某一轮的半成品）：
+        验证器据此决定在哪个范围里验，而多文件改名/搬移天生多步——
+        对半新半旧的树逐步验证必然失败，且必然诱发「为了让测试通过而改坏
+        业务逻辑」（rename-cross-file 复跑实测，见 spoolkit.agent.audit）。
+
+        跑完之后过一遍自动审查层 L1：回退、中间态、迎合测试三类发现
+        由 `spoolkit.agent.audit` 机械地判出来，在这里挂上事件与账本。
         """
         try:
             result = self.verify(changed or [])
@@ -2198,6 +2245,46 @@ class AgentLoop:
         # 收尾报最终状态时，只有内容一字未变才允许沿用这一次的结论。
         self._last_verify = (body, result.ok)
         self._last_verify_key = self._content_key(changed) or ""
+        # ---- 自动审查层 L1：这次验证的结论有什么可疑 ---------------------------
+        # 三类都只看**机械事实**：报错里的旧名、测试文件是不是被还原了、
+        # 业务代码的行数差了多少。高危**不阻断**（本轮只做检测 + 报告 + 挂点）。
+        self._last_findings = ()
+        fallback = ""
+        if SCOPE_FALLBACK_MARKER in result.content:
+            fallback = result.content.split(SCOPE_FALLBACK_MARKER, 1)[1]
+            fallback = fallback.splitlines()[0].strip()
+        found = audit(
+            ok=result.ok,
+            ran_scope=".",
+            changed_paths=list(changed or []),
+            failed_test_paths=self._failing_test_paths(result.content),
+            reverted_paths=[
+                change.path
+                for change in (self.pending.items() if self.pending is not None else [])
+                if is_test_path(change.path)
+            ],
+            renamed=pending_renames(self.pending),
+            shrunk=self._shrunk_business_files(changed or []),
+            detail=result.content,
+            # 原始报错：短摘要里已经没有了 `cannot import name 'get_rows'`
+            # 那一行，而判「这次失败是不是改名没铺完」正需要它。
+            raw_detail=result.raw or result.content,
+            fallback_reason=fallback,
+        )
+        # 中间态这一条不需要「失败」之外的门槛，但它只在报错里出现本次被改掉的
+        # 旧名时才成立——那正是「改名只落了一半」的形状（见 audit 模块头）。
+        if result.ok:
+            found = Audit(
+                tuple(
+                    item for item in found.findings if item.kind == "scope_fallback"
+                )
+            )
+        self.audit_log.extend(found)
+        self._last_findings = found.findings
+        if found.findings:
+            # 发现也要进 trace：调试时「这一步判出了什么」是唯一能看到的信号，
+            # 而高危那条（迎合测试）本来就该在人读的轨迹里留一行。
+            self.audit_trace(found)
         if result.ok:
             # 成功那句**不能请它收尾**。验证只覆盖「这次改动的地方」，
             # 任务整体做完没有它并不知道；而一句「没有别的要改就收尾」，
@@ -2211,8 +2298,77 @@ class AgentLoop:
                 True,
             )
         # 失败到底是什么性质，由验证器说——它才知道退出码的含义。
-        # 循环这边再加一句「测试失败」会盖掉那个区别。
+        # 循环这边再加一句「测试失败」会盖掉那个区别。审查发现跟在后面：
+        # 它回答的是「这次失败意味着什么」，那正是模型最容易判错的一步。
+        verdict = found.render()
+        if verdict:
+            return (f"自动验证的结果：{body}\n{verdict}", False)
         return (f"自动验证的结果：{body}", False)
+
+    def audit_trace(self, found: Audit) -> None:
+        """把发现写进本步的 trace。
+
+        单独成一个方法是为了不改 `_run_verification` 的签名（它被直接调的
+        用例钉着）。`self._trace` 在 run() 之外可能是 None，那就只更新账本。
+        """
+        if self._trace is None:
+            return
+        for finding in found.findings:
+            self._trace.append(f"自动审查：{finding.render()}")
+
+    @staticmethod
+    def _failing_test_paths(content: str) -> list[str]:
+        """从验证结论里挑出被点名的测试文件。
+
+        只认 `FAILED` / `ERROR` 后面那个路径：那是 pytest 自己报的，
+        不是猜的。挑不出来就返回空表——中间态那条判据会因此不成立，
+        宁可不报也不乱报。
+        """
+        found: list[str] = []
+        for raw in content.replace("｜", "\n").splitlines():
+            line = raw.strip()
+            for prefix in ("FAILED ", "ERROR "):
+                if not line.startswith(prefix):
+                    continue
+                path = line[len(prefix):].split(" ", 1)[0].split("::", 1)[0]
+                if path and path not in found:
+                    found.append(path)
+        return found
+
+    def _shrunk_business_files(
+        self, changed: Sequence[str]
+    ) -> list[tuple[str, int, int]]:
+        """改动里的**业务**文件（非测试）比磁盘原始版本更短的那些。
+
+        行数是可证伪的：`_base_lines` 记的是这个文件第一次被改之前磁盘上的
+        行数，「现在多少行」从待确认改动的新正文里数。测试文件不算——
+        那是另一类问题（验证层已按原始内容判定并写在结论里）。
+        """
+        shrunk: list[tuple[str, int, int]] = []
+        if self.pending is None:
+            return shrunk
+        for change in self.pending.items():
+            if change.path not in changed or is_test_path(change.path):
+                continue
+            if Path(change.path).is_absolute():
+                continue
+            before = self._base_lines.get(change.path)
+            if before is None:
+                continue
+            after = len(change.new_text.splitlines())
+            if after < before:
+                shrunk.append((change.path, before, after))
+        return shrunk
+
+    def _disk_lines(self, path: str) -> int:
+        """工作区里那个文件现在的行数（读不到就 0，判据随之不成立）。"""
+        try:
+            target = Path(path)
+            if not target.is_absolute():
+                target = self.config.project_root / path
+            return len(target.read_text(encoding="utf-8", errors="replace").splitlines())
+        except OSError:
+            return 0
 
     @staticmethod
     def _note_progress(state: TaskState, call, result) -> None:

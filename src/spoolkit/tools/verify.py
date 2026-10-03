@@ -6,9 +6,21 @@
 
 验证与 run_command 走同一条路径（同一套白名单、同一个试跑副本），
 真实工作区全程不动。系统自己开一条绕开白名单的暗门，比模型乱跑更糟。
+
+**两套世界必须显式说清**：验证有意按测试文件的**原始内容**判定（模型把测试
+改成 `assert True` 就能骗过一次验证，实测发生过）。代价是出现了一个与
+`run_command` 不同的世界，而两者互相矛盾时，同一个事实会有两个答案——
+`rename-cross-file` 复跑那次就是这么翻车的。所以这里做两件事：
+
+1. 范围收窄到子目录之后**导不进项目根**时，回退到项目根重跑，并说明为什么
+   （见 `_scope_fallback`）；报假 ERROR 会诱导模型去「修」没坏的东西。
+2. 按原始测试判定这件事，只要发生就写在结论里，不设成陷阱。
 """
 
+import builtins
 import json
+import keyword
+import os
 import re
 import shutil
 import tempfile
@@ -19,7 +31,7 @@ from typing import Callable, Sequence
 
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable
-from spoolkit.tools.edit import is_test_path
+from spoolkit.tools.edit import PendingChanges, is_test_path
 from spoolkit.tools.exec import DEFAULT_TIMEOUT, run_once
 from spoolkit.tools.grant import ALLOWED, classify
 from spoolkit.tools.types import ToolResult, ToolSpec
@@ -31,11 +43,29 @@ TEST_COMMAND = ("python", "-m", "pytest", "-q")
 # 而不是去猜文案——文案会改，标记不会。
 ENVIRONMENT_MARKER = "【环境问题】"
 
+# 「范围窄了，导不进项目根」时，报告里带这个前缀。主循环据此把「换了范围」
+# 这件事写进审查发现，而不是让模型去猜这次跑的范围为什么变了。
+SCOPE_FALLBACK_MARKER = "【范围回退】"
+
 _MARKERS = ("pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg")
 
 # 一次改了多少处之后就不再逐处验：每处都要起一个解释器，改动太散时
 # 验证本身比任务还贵。超出的部分会明说「没验」。
 MAX_SCOPES = 5
+
+# 「收集期就报错」的形状：pytest 用 ERROR 报收集失败，
+# 并且把 ImportError / ModuleNotFoundError 写在追溯里。
+_COLLECT_ERROR = re.compile(r"^\s*ERROR\s", re.MULTILINE)
+_IMPORT_ERROR = re.compile(
+    r"ImportError|ModuleNotFoundError|No module named|cannot import name"
+)
+# 「参数用法错」也一律算范畴问题：这种报错与范围强相关
+# （`-m pytest tests/` 在根上跑得通，在 `tests/` 里跑就找不到 tests/ 了）。
+_USAGE_ERROR = re.compile(r"^ERROR: (file or directory not found|unrecognized arguments)")
+
+# 一个范围要当独立测试根，得多少有点「这里就是测试根」的证据。
+_ROOT_MARKERS = ("conftest.py", "pytest.ini", "tox.ini", "pyproject.toml", "setup.cfg")
+
 
 
 def _relative(root: Path, target: Path) -> str:
@@ -70,7 +100,13 @@ def scope_for_change(root: Path, changed: str) -> str:
 def scopes_for_changes(
     root: Path, changed: Sequence[str], max_scopes: int = MAX_SCOPES
 ) -> tuple[list[str], int]:
-    """改动落在哪些范围上，以及有几个范围没来得及验。"""
+    """改动落在哪些范围上，以及有几个范围没来得及验。
+
+    祖先范围会**吸收**它下面的范围：根范围跑 pytest 时本来就会收集 `tests/`。
+    不去重的话，一次改名会报两条一样的 `ERROR tests/test_pipeline.py`
+    （实测 rename-cross-file 复跑：`- .：… - tests：…`），
+    既浪费一次解释器启动，又把「2 处没过」说成了两件事。
+    """
     scopes: list[str] = []
     for path in changed:
         scope = scope_for_change(root, path)
@@ -78,8 +114,201 @@ def scopes_for_changes(
             scopes.append(scope)
     if not scopes:
         return ["."], 0
+    kept: list[str] = []
+    for scope in scopes:
+        if scope in ("", "."):
+            # 根吸收一切，直接收敛成根。
+            kept = ["."]
+            break
+        if any(
+            other != scope
+            and (other == "." or _is_ancestor_scope(other, scope))
+            for other in scopes
+        ):
+            continue
+        kept.append(scope)
+    scopes = kept or ["."]
     dropped = max(0, len(scopes) - max_scopes)
     return scopes[:max_scopes], dropped
+
+
+def _is_ancestor_scope(other: str, scope: str) -> bool:
+    """`other` 是不是 `scope` 的祖先目录（按正斜杠切段比）。"""
+    head = scope.rstrip("/").split("/")
+    tail = other.rstrip("/").split("/")
+    return len(tail) < len(head) and head[: len(tail)] == tail
+
+
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: 不可能是「被改成的那个新名字」的词：关键字与内置名。
+#: 不排掉它们，`assert mod.VALUE == 1` 改成 `assert True` 会被算成
+#: 「VALUE→True」的一次改名，于是「改断言凑绿」被盖上「中间态」的章。
+_NOT_A_NAME = frozenset(keyword.kwlist) | frozenset(dir(builtins))
+
+
+def pending_renames(pending) -> dict[str, str]:
+    """待确认的改动里，哪些名字被改成了什么。
+
+    判据只看**标识符**与它们新旧正文里的**定义**：旧正文里有、新正文里彻底
+    没有了、同时新正文里多出一个新名字——这样的配对才算一次改名。
+    不看字面相似度（`get_rows` → `load_rows` 没有任何可依赖的相似性）。
+
+    用途只有一个：验证失败时判断「这条报错是不是改名只落了一半造成的」。
+    是的话它就不是代码问题，报成代码失败会诱发迎合测试的改坏逻辑
+    （`rename-cross-file` 复跑实测就是这么翻车的）。
+    """
+    if pending is None:
+        return {}
+    renamed: dict[str, str] = {}
+    for change in pending.items():
+        if Path(change.path).is_absolute():
+            continue
+        if getattr(change, "deleted", False) or change.is_new_file:
+            continue
+        old_words = set(_WORD.findall(change.old_text))
+        new_words = set(_WORD.findall(change.new_text))
+        gone = old_words - new_words
+        added = new_words - old_words
+        if len(added) != 1 or not gone:
+            # **新名字只有一个**是判据的锚：一次只换一个名字是绝大多数情形。
+            # 消失的旧名可以不止一个（顺手删掉的辅助函数也算），所以不要求
+            # `gone` 只有一个——实测那条改名里模型连 `helper` 一起并掉了，
+            # 卡死在「只准消失一个」上会让这条判据整个失效。
+            continue
+        new_name = added.pop()
+        if new_name in _NOT_A_NAME:
+            # `assert mod.VALUE == 1` 改成 `assert True` 会算出「VALUE→True」——
+            # 那是**改断言**，不是改名。关键字与内置名不可能是被改的那个新名字，
+            # 不排掉它，这条判据会给「把断言改松散」盖上「中间态」的章。
+            continue
+        for old in gone:
+            renamed[old] = new_name
+    return renamed
+
+
+def _test_imports_in_scope(root: Path, scope: str) -> bool:
+    """这个范围里的测试文件会不会**自己找项目根**。
+
+    `tests/test_x.py` 里写 `sys.path.insert(0, str(Path(__file__).parents[1]))`
+    的项目，收窄到 `tests/` 之后照样导得进包——那种项目不需要回退，
+    回退反而把「别人的失败」报了进来。
+    """
+    base = root if scope in ("", ".") else root / scope
+    try:
+        candidates = sorted(base.glob("test_*.py")) + sorted(base.glob("*_test.py"))
+    except OSError:
+        return False
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "sys.path" in text:
+            return True
+    return False
+
+
+def _is_own_test_root(root: Path, scope: str) -> bool:
+    """这个范围自己就是一套测试的根吗（有多项目工作区里那类独立测试目录）。
+
+    判断不要复杂：有 `conftest.py` 或任一根标记文件（pytest.ini / pyproject.toml …），
+    就认为它是独立测试根——那种目录里跑测试不依赖项目根，不该回退。
+    """
+    base = root / scope
+    for name in _ROOT_MARKERS:
+        if (base / name).exists():
+            return True
+    return False
+
+
+def looks_like_scope_problem(text: str) -> bool:
+    """这条失败看起来是不是「范围不对」而不是「代码不对」。
+
+    只看机械形状：收集期的 ERROR、导入失败、以及「文件/参数找不到」这类
+    用法错误。断言失败（FAILED …::…）不算——那才是真的代码问题。
+    """
+    if _USAGE_ERROR.search(text):
+        return True
+    if not _COLLECT_ERROR.search(text):
+        return False
+    return _IMPORT_ERROR.search(text) is not None
+
+
+def scope_fallback(root: Path, scope: str, output: str) -> str:
+    """该不该把这个范围回退到项目根；该的话给出**为什么**（不该则空串）。
+
+    收窄范围是为了「改 A 时不收 B 的失败」，代价是单项目工作区里
+    `pytest -q` 的 cwd 变了、`sys.path[0]` 也跟着变——测试项目靠
+    `parents[1]` 找包根时，根就不在导入路径上了，于是报一条
+    `ImportError`（实测 rename-cross-file：`ERROR tests/test_pipeline.py`）。
+
+    报出来的 ERROR 是**假警报**：它指向的根本不是代码问题，而模型会照着它
+    去「修」没坏的东西。所以这里回退，并且把原因说出来。
+    """
+    if scope in ("", "."):
+        return ""
+    if _is_own_test_root(root, scope):
+        return ""
+    if _test_imports_in_scope(root, scope):
+        return ""
+    if not looks_like_scope_problem(output):
+        return ""
+    return (
+        f"范围 {scope} 里测试导不进项目根（{_first_error_line(output)}），"
+        "回退到项目根重跑：这个项目的测试靠 sys.path 找包根，"
+        "在子目录里跑会把「导不进来」报成测试失败。"
+    )
+
+
+def _first_error_line(text: str) -> str:
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("ERROR") or _IMPORT_ERROR.search(stripped):
+            return stripped[:120]
+    return "收集期就报错"
+
+
+def adapted_to_rename(
+    pending, renamed: dict[str, str], detail: str
+) -> bool:
+    """模型有没有把**测试文件**跟着改名一起改（这是合法且必要的一步）。
+
+    判据（要全中，缺一条就不认）：
+
+    1. 报错里出现的是本次被改掉的那个旧名（`renamed` 的键）；
+    2. 待确认清单里确实有一个测试文件**把旧名换成了新名**——新正文里有新名、
+       没有旧名，旧正文里有旧名；
+    3. 除了这个名字，测试文件的改动里没有别的东西（改断言来凑绿那条路要被
+       挡在门外：`assert True` 不会带来任何新名字）。
+
+    为什么要开这个口子：验证按**原始测试内容**判定（防「把断言改成 assert True」），
+    而改名任务里测试文件**必须**跟着改——旧测试引用的名字已经被改掉了。
+    两条规矩直接对撞时，实测（rename-cross-file 复跑）模型只有两条路：
+    改测试（被拦）或改坏业务代码（删了 render 的表头行），于是一路红到收手。
+    所以这里把「测试文件跟着改名改」单独认出来，并且**如实写成两套世界**。
+    """
+    if not renamed or pending is None:
+        return False
+    hits = {old: new for old, new in renamed.items() if old in detail}
+    if not hits:
+        return False
+    for change in pending.items():
+        if not is_test_path(change.path) or Path(change.path).is_absolute():
+            continue
+        if getattr(change, "deleted", False) or change.is_new_file:
+            continue
+        for old, new in hits.items():
+            if old not in change.old_text:
+                continue
+            if old in change.new_text or new not in change.new_text:
+                continue
+            # 名字之外的改动一律不认这条通道：判据要窄，免得变成后门。
+            if _WORD.findall(change.new_text) == _WORD.findall(
+                change.old_text.replace(old, new)
+            ):
+                return True
+    return False
 
 
 def condense_test_output(text: str, limit: int = 360) -> str:
@@ -182,6 +411,39 @@ def looks_environmental(text: str, root: Path) -> bool:
         return False
     return not mentions_workspace(text, root)
 
+
+def _intermediate_note(
+    renamed: dict[str, str],
+    detail: str,
+    changed: Sequence[str],
+    reverted: Sequence[str],
+) -> str:
+    """失败如果是「改名只落了一半」造成的，就把它说成中间态。
+
+    三条事实全都要对上才说：报错里出现的是**本次被改掉的名字**、
+    这个名字在新内容里已经不存在、而且测试文件（或测试文件之外的引用处）
+    还没跟着改。对上了就说明这不是代码问题——那正是实测里诱发
+    「为了让测试通过而删掉表头行」的那一步。所以这里把话说死：
+    **不许为了让测试通过去改坏逻辑**。
+
+    对不上就返回空串，一个字都不多说。
+    """
+    if not renamed:
+        return ""
+    hits = {old: new for old, new in renamed.items() if old in detail}
+    if not hits:
+        return ""
+    pairs = "、".join(f"{old}→{new}" for old, new in sorted(hits.items()))
+    done = "、".join(dict.fromkeys(changed)) or "（无）"
+    wait = "、".join(dict.fromkeys(reverted)) or "项目里还引用旧名的那些文件"
+    return (
+        f"\n这是**中间态**，不是代码失败：{pairs} 已经落盘，"
+        f"而 {wait} 还在用旧名，改名天生要多步。"
+        f"本次已落盘：{done}。把剩下的引用一次改完（可一次改多处，"
+        "系统按**本次运行累计的改动**合并验一次）；"
+        "**不得为了让测试通过而删改业务逻辑**。"
+    )
+
 def detect_test_command(root: Path) -> list[str] | None:
     """项目里看起来有测试就返回跑测试的命令，否则返回 None。
 
@@ -255,6 +517,29 @@ def make_verifier(
     # 上下文里再灌一遍同样的报错。实测一次运行里它被重报了 7 次。
     broken = False
 
+    def _root_on_path() -> dict:
+        """让子目录范围也导得进项目根：把根补进 PYTHONPATH。
+
+        这一步解决的是「验证必须导得进」。`sys.path.insert(0, parents[1])`
+        那类项目在收窄范围之后仍然导得进；靠命令行参数或 cwd 找包根的项目
+        也能靠它找到。它**不改变判据**——测试还是那一份原始内容，
+        只是让它有机会真正跑到断言，而不是死在收集阶段。
+        """
+        existing = os.environ.get("PYTHONPATH", "")
+        joined = str(root) + (os.pathsep + existing if existing else "")
+        return {"PYTHONPATH": joined}
+
+    def _scope_result(scope: str, revert: Sequence[str]):
+        return run_once(
+            root,
+            command,
+            pending=pending,
+            timeout=timeout,
+            revert=revert,
+            cwd=scope,
+            extra_env=_root_on_path() if scope not in ("", ".") else None,
+        )
+
     def pytest_part(changed: Sequence[str]) -> ToolResult:
         nonlocal broken
         if broken:
@@ -268,6 +553,9 @@ def make_verifier(
         # 按原始测试判定：模型把测试改成 `assert True` 就能骗过一次验证，
         # 然后宣布完成——实测发生过。验证不能让它自己定标准。
         revert = [change.path for change in pending.items() if is_test_path(change.path)]
+        # 这次改动里哪些名字被改成了什么。只在**失败是改名没铺完**造成的
+        # 时候才用得上；不改名时它是空的，一句话都不多说。
+        renamed = pending_renames(pending)
         # 没给改动路径时，退回「这次会话改过的全部文件」。
         #
         # 审查者的证据包就是这么调的（它不经过某一轮的改动记录）。而在多任务
@@ -288,27 +576,31 @@ def make_verifier(
         # 之后「验证比任务本身还贵」；强模型/快机器上可以多验几个。
         max_scopes = int((overrides or {}).get("max_scopes") or MAX_SCOPES)
         scopes, dropped = scopes_for_changes(root, changed, max_scopes)
-        outcomes = [
-            (
-                scope,
-                run_once(
-                    root,
-                    command,
-                    pending=pending,
-                    timeout=timeout,
-                    revert=revert,
-                    cwd=scope,
-                ),
+        outcomes = [(scope, _scope_result(scope, revert)) for scope in scopes]
+        # 收窄之后导不进项目根的，回退到根重跑一次（并说明为什么）。
+        # 只在「失败的形状像范围问题」时才回退：不这么收口的话，一个真失败
+        # 会连带多跑一次根目录的全量测试，验证本身就成了最贵的那一步。
+        fell_back: list[str] = []
+        for index, (scope, result) in enumerate(list(outcomes)):
+            reason = (
+                "" if result.ok else scope_fallback(root, scope, result.content)
             )
-            for scope in scopes
-        ]
+            if not reason:
+                continue
+            outcomes[index] = (".", _scope_result(".", revert))
+            fell_back.append(reason)
         if len(outcomes) > 1:
             # 一次改了好几处：逐处验、逐处报。汇总成一句「测试失败」，
             # 等于把「哪一处猜错了」这份信息扔掉。
-            return _report_many(outcomes, dropped, root)
+            return _report_many(outcomes, dropped, root, fell_back)
 
         result = outcomes[0][1]
-        where = "" if scopes[0] == "." else f"，范围 {scopes[0]}"
+        where = "" if scopes[0] == "." or fell_back else f"，范围 {scopes[0]}"
+        note = ("\n" + SCOPE_FALLBACK_MARKER + fell_back[0]) if fell_back else ""
+        # 原始输出留在 result.raw 里：模型看的是压缩过的 content，而自动审查层
+        # 判「这次失败是不是改名没铺完」要有 `ImportError: ... 'get_rows'`
+        # 那一行，短摘要里已经没有了。
+        raw = result.content
         if not result.ok:
             # 失败时只留「错在哪」。整段 pytest 输出会把真正的原因淹掉。
             detail = condense_test_output(result.content)
@@ -323,8 +615,34 @@ def make_verifier(
                         "这不是你的代码造成的，不要为它改代码——"
                         "把情况说清楚就行；如果确实需要查清是什么坏了，"
                         "用 request_diagnosis 登记，让具备真实环境权限的会话去验。"
+                        f"{note}"
                     ),
+                    raw=raw,
                 )
+            # 改名任务里，测试文件**必须**跟着改（旧测试引用的名字已被改掉）。
+            # 此时按原始测试判定会永远绿不了，而模型只有两条路：改测试（被拦）
+            # 或改坏业务代码（实测它删了 render 的表头行）。所以这里把
+            # 「测试文件确实跟着这次改名改了」单独认出来，改用模型改过的那份
+            # 测试再判一次——判据仍然是「测试全过」，只是不再拿旧名字去要求新代码。
+            if adapted_to_rename(pending, renamed, result.content):
+                retry = _scope_result(".", ())
+                if retry.ok:
+                    return ToolResult(
+                        ok=True,
+                        content=(
+                            "改名已经铺完，测试全过"
+                            f"（{' '.join(command)}，范围 .）。"
+                            "这次测试文件也跟着改了（旧名已经被改掉，旧测试引用不到"
+                            "它，所以这一份按你改过的测试判定了一回）。"
+                            "测试文件的改动同样在待确认清单里，"
+                            "确认之前它不会写进工作区。"
+                            f"{note}"
+                        ),
+                        raw=retry.content,
+                    )
+                # 用了新测试还是不过：那才是真的代码问题，按它报。
+                detail = condense_test_output(retry.content)
+                raw = retry.content
             return ToolResult(
                 ok=False,
                 content=(
@@ -332,23 +650,42 @@ def make_verifier(
                     # 报错里的文件名未必是它刚改的那个。不给这个信息，
                     # 它会拿别人的失败去查自己的改动——实测连撞了两次。
                     f"测试没有通过（{' '.join(command)}{where}）：{detail}。"
-                    "按这个报错改代码——不要改测试文件。"
+                    + _intermediate_note(renamed, raw, changed, revert)
+                    + "按这个报错改代码，不要改测试：只有「旧名已经被改掉、"
+                    "测试引用不到它」时才跟着改测试文件，别动断言。"
+                    f"{note}"
                 ),
+                raw=raw,
             )
         if revert:
+            # **两套世界必须显式对齐**：验证按原始内容判定这件事，只要发生
+            # 就写在结论里。不写的话，同一个事实会出现两个答案——
+            # `run_command` 跑在磁盘视图上（那里是模型改过的内容），
+            # 而验证跑在「原始测试」上；模型会以为验证在自相矛盾。
             return ToolResult(
                 ok=True,
                 content=(
                     result.content
-                    + f"（注意：你改过 {len(revert)} 个测试文件，"
-                    "验证是按它们原来的内容判定的）"
+                    + f"（注意：你改过 {len(revert)} 个测试文件"
+                    f"（{'、'.join(revert)}），"
+                    "验证是按它们**原来的内容**判定的——这一份才是判据；"
+                    "跑测试时你用 run_command 看到的是你自己改过的版本，"
+                    "两者不一致时以这里为准。"
+                    "想让改动生效就别改测试，改代码。"
+                    f"{note}）"
                 ),
             )
         if where:
             return ToolResult(
-                ok=True, content=f"这一处的测试通过（{scopes[0]}）：{result.content}"
+                ok=True,
+                content=f"这一处的测试通过（{scopes[0]}）：{result.content}",
+                raw=raw,
             )
-        return result
+        return ToolResult(
+            ok=True,
+            content=result.content + note if note else result.content,
+            raw=raw,
+        )
 
     def verify(changed: Sequence[str] = ()) -> ToolResult:
         # 按类型的检查很便宜（只有 HTML/JS 要起一次 node），先跑：即使 pytest
@@ -369,23 +706,31 @@ def _merge_types(pytest_result: ToolResult, check: ToolResult) -> ToolResult:
        （例如 HTML 的运行时行为要浏览器），那不是这次改动的问题，不能把绿的
        判成红的——但也不能吞掉它：「语法通过」被当成「跑得起来」正是 dogfood
        那次翻车（step() 没调 draw()，语法全对）。
+
+    `raw` **必须原样带过去**：它是自动审查层的证据（判「这次失败是不是改名
+    没铺完」要看未压缩的报错）。丢掉它，审查层就只能拿压缩过的短摘要去判，
+    而那一行 `ImportError: cannot import name 'get_rows'` 早就没了。
     """
     body = check.content.strip()
     if not body:
         return pytest_result
     joined = f"{pytest_result.content.rstrip()}\n{body}"
     if check.ok:
-        return ToolResult(ok=pytest_result.ok, content=joined)
+        return ToolResult(ok=pytest_result.ok, content=joined, raw=pytest_result.raw)
     if pytest_result.ok:
         return ToolResult(
             ok=False,
             content=f"{pytest_result.content.rstrip()}\n按产出类型检查发现问题：\n{body}",
+            raw=pytest_result.raw,
         )
-    return ToolResult(ok=False, content=joined)
+    return ToolResult(ok=False, content=joined, raw=pytest_result.raw)
 
 
 def _report_many(
-    outcomes: list[tuple[str, ToolResult]], dropped: int, root: Path
+    outcomes: list[tuple[str, ToolResult]],
+    dropped: int,
+    root: Path,
+    fell_back: Sequence[str] = (),
 ) -> ToolResult:
     """一次改了好几处，就逐处报。"""
     failed = [(scope, item) for scope, item in outcomes if not item.ok]
@@ -397,6 +742,9 @@ def _report_many(
     )
     if dropped:
         head += f"（还有 {dropped} 处没验——一次改得太散，验证会比任务本身还贵。）"
+    if fell_back:
+        # 范围回退必须说出来：不说的话，「这次跑的是哪个范围」就成了暗规则。
+        head += "\n" + SCOPE_FALLBACK_MARKER + "；".join(fell_back)
     if not failed:
         return ToolResult(ok=True, content=head)
 

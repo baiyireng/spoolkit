@@ -90,7 +90,9 @@ class _Verifier:
         self.calls.append(list(changed))
         index = min(len(self.calls) - 1, len(self._answers) - 1)
         body, ok = self._answers[index]
-        return ToolResult(ok=ok, content=body)
+        # raw 与 content 一样：真验证器把**未压缩的报错原文**放在 raw 里，
+        # 审查层判「这次失败是不是改名没铺完」看的正是它（见 ToolResult.raw）。
+        return ToolResult(ok=ok, content=body, raw=body)
 
 
 # ---- 一、缓存键 --------------------------------------------------------------
@@ -281,3 +283,128 @@ def test_改名残留进到模型看得见的输出里(tmp_path: Path) -> None:
 
     assert any("旧名仍有残留" in line for line in result.trace)
     assert "最终文件状态" in result.final
+
+
+# ---- 三、验证按「本次运行累计改动」合并验一次；中间态不当代码失败 ---------------
+#
+# 实测（rename-cross-file 复跑）：多文件改名分多步落盘，逐步验证必然看到
+# 半新半旧的树、必然失败，而那个失败**必然**诱发迎合测试的改坏逻辑。
+# 所以验证对象是累计集合，而且中间态要当场说清。
+
+
+def test_验证按累计改动合并验一次(tmp_path: Path) -> None:
+    """第 2 步验证时，范围里必须有第 1 步改过的那个文件。"""
+    verifier = _Verifier([("全部通过", True)])
+    pending = PendingChanges(tmp_path)
+    loop = _loop(
+        tmp_path,
+        [
+            _turn("改第一个", [_write("pipeline/fetch.py", "def load_rows():\n    pass\n")]),
+            _turn(
+                "改第二个",
+                [_write("pipeline/report.py", "from pipeline.fetch import load_rows\n")],
+            ),
+            _turn("好了", final="改完了"),
+        ],
+        verify=verifier,
+        pending=pending,
+    )
+    loop.run("统一改名")
+
+    assert len(verifier.calls) >= 2
+    assert verifier.calls[0] == ["pipeline/fetch.py"]
+    # 第二次验的是**累计**的两处，不是只有这一步落的那一处。
+    assert set(verifier.calls[1]) == {"pipeline/fetch.py", "pipeline/report.py"}
+    assert any("累计 2 处改动" in line for line in loop._trace or [])
+
+
+def test_中间态会当场说给模型听(tmp_path: Path) -> None:
+    """只落了一半的改名：回灌的话里必须写「中间态」，而不是只说测试失败。"""
+    (tmp_path / "pipeline").mkdir(parents=True, exist_ok=True)
+    old_def = "def get_rows(source):\n    return []\n"
+    (tmp_path / "pipeline" / "fetch.py").write_text(old_def, encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_pipeline.py").write_text(
+        "from pipeline.fetch import get_rows\n\n\ndef test_rows():\n"
+        "    assert get_rows('a') == []\n",
+        encoding="utf-8",
+    )
+    pending = PendingChanges(tmp_path)
+    # 台账直接构造：old_text 是旧正文（磁盘上那一刻的样子），new_text 是新名字。
+    # 这样「只落了一半」这个事实是确定的，不依赖工具的落盘时机。
+    pending._changes["pipeline/fetch.py"] = PendingChange(
+        path="pipeline/fetch.py", old_text=old_def, new_text=NEW_DEF
+    )
+    from spoolkit.tools.verify import make_verifier
+
+    script = [
+        _turn("改抓取层", [_write("pipeline/fetch.py", NEW_DEF)]),
+        _turn("好了", final="统一了"),
+    ]
+    loop = _loop(tmp_path, script, pending=pending)
+    loop.verify = make_verifier(tmp_path, pending)
+    loop.run("把 get_rows 改成 load_rows")
+
+    back = "\n".join(
+        message.content for message in loop.gateway.requests[-1].messages
+    )
+    assert "中间态" in back
+    assert "get_rows→load_rows" in back
+    assert "不得为了让测试通过而删改业务逻辑" in back
+
+
+def test_测试没过而业务代码被改短要报高危(tmp_path: Path) -> None:
+    """最小实现的「迎合测试」信号：测试失败的同一步，业务代码变短了。"""
+    before = "".join(f"VALUE_{i} = {i}\n" for i in range(10))
+    (tmp_path / "mod.py").write_text(before, encoding="utf-8")
+    verifier = _Verifier(
+        [("测试没有通过（python -m pytest -q）：FAILED test_mod.py::test_v。", False)]
+    )
+    pending = PendingChanges(tmp_path)
+    loop = _loop(
+        tmp_path,
+        [_turn("改短它", [_write("mod.py", "pass\n")]), _turn("好了", final="好了")],
+        verify=verifier,
+        pending=pending,
+    )
+
+    loop.run("让测试过")
+
+    high = loop.audit_log.high()
+    assert [item.kind for item in high] == ["tampering_suspected"]
+    assert "从 10 行变成 1 行" in high[0].detail
+    assert any("高危" in line for line in loop._trace or [])
+
+
+def test_合法的改名变短不报高危(tmp_path: Path) -> None:
+    """判据要准：报错就是改名造成的，那变短是改名的正常结果。"""
+    old_def = (
+        "def get_rows(source):\n    return []\n\n\ndef helper():\n    return 1\n"
+    )
+    new_def = "def load_rows(source):\n    return []\n"
+    (tmp_path / "mod.py").write_text(old_def, encoding="utf-8")
+    # 报错里点名被改掉的那个名字：这就是「改名只落了一半」的形状。
+    verifier = _Verifier(
+        [
+            (
+                "测试没有通过：ERROR tests/test_mod.py\n"
+                "E   ImportError: cannot import name 'get_rows' from 'mod'",
+                False,
+            )
+        ]
+    )
+    pending = PendingChanges(tmp_path)
+    pending._changes["mod.py"] = PendingChange(
+        path="mod.py", old_text=old_def, new_text=new_def
+    )
+    loop = _loop(
+        tmp_path,
+        [_turn("改名", [_write("mod.py", new_def)]), _turn("好了", final="好了")],
+        verify=verifier,
+        pending=pending,
+    )
+
+    loop.run("改名")
+
+    assert loop.audit_log.high() == []
+    assert [item.kind for item in loop._last_findings] == ["landing_in_progress"]
