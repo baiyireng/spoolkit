@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "description": "真实任务能力探针集：用用户会真的说的话 + 真的产物去跑 spool，把「能力有没有涨」变成可重复测量的数字。清单格式由 scripts/probe.py 校验，tests/test_probe_runner.py 逐条钉住。",
+  "defaults": {
+    "provider": "llamacpp",
+    "base_url": "http://127.0.0.1:8080",
+    "session": "probe",
+    "scope": "**",
+    "timeout_seconds": 900,
+    "check_timeout_seconds": 300,
+    "max_steps": 8,
+    "step_ceiling": 24,
+    "total_budget_seconds": 5400,
+    "extra_args": [
+      "--no-setup",
+      "--no-history",
+      "--no-mcp"
+    ]
+  },
+  "probes": [
+    {
+      "id": "merge-html",
+      "shape": "merge-html",
+      "title": "把两份静态页面并成一份",
+      "seed": "seeds/merge-html",
+      "expected": "expected/merge-html",
+      "goal": "index.html 和 pricing.html 的导航栏和页脚一模一样，我改个链接要改两遍，烦死了。把 pricing 里那些内容并到 index.html 去吧，以后我就看一个文件。",
+      "check": {
+        "script": "checks/merge_html.py",
+        "timeout_seconds": 120
+      },
+      "guard_hashes": {},
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（repeat_blocks 必须为 0）",
+        "不许出现拦读死锁（read_blocks 必须为 0）",
+        "合并是整文件大重写，不许被「拒绝整文件重写」挡在门外（rewrite_refusals 记为 0 是目标，非零要如实报）",
+        "验收：index.html 同时含两页内容、仍是一份文档、本地引用都存在"
+      ]
+    },
+    {
+      "id": "vague-optimize",
+      "shape": "vague-optimize",
+      "title": "含糊目标：跑得太慢，弄快点别改坏结果",
+      "seed": "seeds/vague-optimize",
+      "expected": "expected/vague-optimize",
+      "goal": "这个 logstat 跑得太慢了，线上几万行日志要等好久才出结果，你帮我看看能不能弄快点，结果别给我改坏了啊。",
+      "check": {
+        "script": "checks/vague_optimize.py",
+        "timeout_seconds": 300
+      },
+      "guard_hashes": {},
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（repeat_blocks 必须为 0）",
+        "不许出现拦读死锁（read_blocks 必须为 0）",
+        "验收：40000 行输入下摘要与独立参考逐字相同，且耗时 < 4.0s（种子约 9s）"
+      ]
+    },
+    {
+      "id": "add-feature",
+      "shape": "add-feature",
+      "title": "加一条按月份汇总的命令行",
+      "seed": "seeds/add-feature",
+      "expected": "expected/add-feature",
+      "goal": "还想要一个按月看的功能：python -m expenses.cli summary --month 2025-03，把这个月一共花了多少、每个分类多少都打出来。",
+      "check": {
+        "script": "checks/add_feature.py",
+        "timeout_seconds": 300
+      },
+      "guard_hashes": {
+        "data/expenses.csv": "11eb1529d7026479fb574c773f8e7bc996c75633ec7051d9a2ead39f63486863"
+      },
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（repeat_blocks 必须为 0）",
+        "不许出现拦读死锁（read_blocks 必须为 0）",
+        "不许改账本数据来凑数字（guard_hashes 钉住 data/expenses.csv）",
+        "验收：summary --month 2025-03 打出 512.40 与三个分类金额，别的月份的金额不许混进来；既有的 total / by-category 与项目测试都不许坏"
+      ]
+    },
+    {
+      "id": "fix-bug",
+      "shape": "fix-bug",
+      "title": "修首尾相接的时段没被合并",
+      "seed": "seeds/fix-bug",
+      "expected": "expected/fix-bug",
+      "goal": "订会议室的时段合并有问题，明明是连着占的两段，前台看还是两条。你跑一下 tests 就知道了，帮我修掉。",
+      "check": {
+        "script": "checks/fix_bug.py",
+        "timeout_seconds": 300
+      },
+      "guard_hashes": {
+        "tests/test_merge.py": "60ee83ee1d1d28a99d9159bed2ae5f2417aaf697d51a5b7d75055325c99fbc86"
+      },
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（repeat_blocks 必须为 0）",
+        "不许出现拦读死锁（read_blocks 必须为 0）",
+        "不许改测试来凑绿（guard_hashes 钉住 tests/test_merge.py）",
+        "验收：项目测试全过 + 判据自己 import 模块跑行为断言"
+      ]
+    },
+    {
+      "id": "rename-cross-file",
+      "shape": "rename-cross-file",
+      "title": "跨文件重命名一个函数",
+      "seed": "seeds/rename-cross-file",
+      "expected": "expected/rename-cross-file",
+      "goal": "pipeline 里 get_rows 这名字太含糊了，改成 load_rows 吧，整个项目里都统一一下。",
+      "check": {
+        "script": "checks/rename_cross_file.py",
+        "timeout_seconds": 300
+      },
+      "guard_hashes": {},
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（repeat_blocks 必须为 0）",
+        "不许出现拦读死锁（read_blocks 必须为 0）",
+        "验收：沙箱里任何文本文件都不再有旧名字、新名字在抓取层被定义、项目测试至少跑 4 条且全过、命令行端到端数字不变"
+      ]
+    }
+  ]
+}
