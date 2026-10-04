@@ -42,6 +42,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Collection
 
 from spoolkit.tools.edit import (
     BROKEN_IMPORT_KIND,
@@ -453,6 +454,16 @@ class AuditLog:
 
     def extend(self, audit: Audit) -> None:
         self.findings.extend(audit.findings)
+
+    def forget_kind(self, kinds: Collection[str]) -> None:
+        """撤掉某一类判词（收尾**重判**之前用，见 `loop._rejudge_mechanical`）。
+
+        账本原先只累加不清，而判词描述的是**某一版内容**：中途那一版上的残留
+        引用在模型改好之后早就不成立了，旧判词却还挂在账本里，收尾报告与
+        T12（「仍在」）就会拿它去拦完成声明——§4 说得很清楚，L1 是机械判据，
+        它有误报就是判据写错了。
+        """
+        self.findings = [item for item in self.findings if item.kind not in kinds]
 
     def of_kind(self, kind: str) -> list[Finding]:
         return [item for item in self.findings if item.kind == kind]

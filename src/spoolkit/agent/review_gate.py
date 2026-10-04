@@ -6,7 +6,8 @@
 
 1. **拦的是动作，不是成果**（§3.2.0）。文件编辑永远只是一条**记录**
    （`record_edit`），成果照落盘；只有「执行命令 / 删文件 / 迁移 / 联网 /
-   越界写」这类**危险动作**才会在**执行前**被拦下挂起（`gate_action`）。
+   越界写」这类**危险动作**才会在**执行前**被拦下挂起
+   （`action_triggers`；T6 的关联目录那一面走 `boundary_action`）。
    所以待批 = 某个动作在等批复，而工作区里已经摆着这一轮的产出。
 2. **每一处升级都要能回指一个具名触发条件**（T1–T13，§3.2.2）。
    回指不到就不许升级——`escalation_precision` 的判据就是这条。
@@ -16,8 +17,9 @@
 判据全部是机械的：路径匹配、AST 签名、既有判定函数的返回值。这里**不写**
 「高风险」这类形容词，也不给没有判据的东西硬造判据（§7.7）。
 
-模块自己不做 I/O 之外的判断：动作拦不拦在 `gate_action`，结论降不降级在
-`completion_block`，两者共用同一张触发条件表。事件由调用方（主循环）
+模块自己不做 I/O 之外的判断：动作拦不拦在 `action_triggers`（T6 的关联目录
+那一面在 `boundary_action`，域外拒绝在 `outside_write_refusal`），结论降不降级在
+`completion_triggers`，两者共用同一张触发条件表。事件由调用方（主循环）
 注入的 `on_escalate` 发出去，这样这一层可以脱离主循环单测。
 """
 
@@ -46,6 +48,27 @@ ACTION_TOOLS = frozenset({"run_command", DELETE_TOOL, "move_file", "rename_file"
 #: 「出网」类工具：出网是环境副作用，不是「写在哪儿」的问题（§3.2.5）。
 NETWORK_TOOLS = frozenset({"web_fetch", "web_search"})
 
+#: 主循环里**真的会出网**的那一个动作（§3.2.2 T3 的「新增出网」那一面）。
+#:
+#: 为什么要点名 `research`：主循环的工具表里只有 `research` 会走到网络
+#: （`web_read` 只读本地缓存，`web_fetch`/`web_search` 只发给研究会话）。
+#: 不点它的话，T3 的联网那一面在主循环里**一个调用方都没有**——升级判据
+#: 写了却永远不触发，等于放行出网。
+NETWORK_ENTRY_TOOLS = frozenset({"research"})
+
+# ---- T6：工作区外的两种落点（§3.2.2 的处置表 + §2.5）------------------------
+
+#: 落在工作区里。
+INSIDE = ""
+#: 落在**已授权关联目录**里（`spool extra add` 加过）：拦动作 + 请示一次。
+#: 理由就是这条语义本身——「读放开，**写要确认**」。
+LINKED = "linked"
+#: 工作区与**所有**关联目录之外：硬拒绝，并说明「怎么才能做」与「为什么不问」。
+OUTSIDE = "outside"
+
+#: 写工具里「目标路径」的参数名（判越界只认这些，避免把正文里的字符串当路径）。
+WRITE_PATH_KEYS = ("path", "paths", "target", "src", "dst", "dest")
+
 #: 写工具：产出，永远只记录、不拦。
 WRITE_TOOLS = frozenset({"write_file", "replace_text", "replace_lines"})
 
@@ -56,8 +79,8 @@ TRIGGER_NOTES: dict[str, str] = {
     "T3": "触及认证/密钥/安全，或新增出网、shell=True、eval/exec",
     "T4": "数据/schema 迁移",
     "T5": "批量删除文件",
-    "T6": "越界或工作区外路径",
-    "T7": "改动规模超阈值",
+    "T6": "工作区外路径（关联目录：拦下写、请示一次；域外：直接拒绝并说明怎么才能做）",
+    "T7": "改动规模越线**且**（该批没被验证过 或 同批有高严重度发现）",
     "T8": "L2 行为回归",
     "T9": "L3 高严重度发现未处理（P2 才接，本轮只留挂点）",
     "T10": "没有验证器可用的高风险改动",
@@ -220,6 +243,44 @@ def _stored_path(root: Path, raw: str) -> str | None:
     return _posix(raw)
 
 
+def outside_label(root: Path, raw: str) -> str:
+    """工作区外路径在人话里的名字：能算出绝对路径就给绝对的，算不出给原文。
+
+    报错要点名**到底哪个路径**被拒了：只说「越界」的拒绝话术，模型会照原样
+    再试一次（`paths.py` 里那句注释记着这次事故）。
+    """
+    candidate = Path(str(raw))
+    try:
+        target = candidate if candidate.is_absolute() else Path(root) / candidate
+        return _posix(target.resolve())
+    except (OSError, ValueError):  # pragma: no cover - 解析不出来就退回原文
+        return _posix(raw)
+
+
+def outside_write_refusal(path: str, directory: str = "") -> str:
+    """T6 的域外分支：**硬拒绝**，但把「怎么才能做」与「为什么不问」说清。
+
+    两句话都必须在，缺哪一句这个话术就变成坏话术：
+
+    - **怎么才能做**：关联目录只能由本机指令写（`spool extra add`），聊天里
+      加不了——不说这句，模型只知道「越界了」，它会换个写法接着撞。
+    - **为什么不问**：这条路径没有可批准的正当情形（既不是工作区，也没有
+      人显式授过权），请示一次也只是白花打扰预算（§3.2.4）。
+    """
+    where = directory or "那个目录"
+    return (
+        f"⛔ 没有执行：{path} 既不在工作区里、也不在任何一个已关联的目录里。"
+        "这种路径**连一次都不问**——它没有任何可批准的正当情形（既不是工作区身份，"
+        "也没有人显式授过权），请示只会白花一次打扰预算（§3.2.4）。\n"
+        f"**怎么才能做**：在跑 agent 的那台机器上先关联它：`spool extra add {where}`"
+        "（本机指令，聊天通道里加不了）。关联之后的语义是「**读放开，写要确认**」——"
+        "读得到；写会被拦下来请示一次，批准了才写。\n"
+        "拦的是**写到工作区外**这一次动作，**不是「不许删文件、不许精简」**："
+        "删死代码、合并重复实现、删已被替代的文件都是正常编辑，照样落盘、"
+        "照样可回退（§2.5 的反向条款）。要往下做就在工作区里改，或先关联目录。"
+    )
+
+
 def public_symbols(text: str) -> dict[str, str]:
     """模块级公开符号 → 签名快照。
 
@@ -352,6 +413,8 @@ class EscalationGate:
         run_id: str = "",
         pending_path: Path | None = None,
         canonical_fix: bool = False,
+        extra_roots: Sequence[Path] = (),
+        gate_network: bool = True,
     ) -> None:
         self.root = Path(root)
         #: 标定值入口（`Config.limit`）。不给就用兜底默认值。
@@ -361,6 +424,16 @@ class EscalationGate:
         #: 「只记录不拦」的那条降级线的开关（T11：对回退能力没把握时，
         #: 有 Baseline/回退命令就记录、没有才拦）。
         self.canonical_fix = canonical_fix
+        #: 已授权关联目录（`spool extra`）：判 T6 的分流要用它。
+        self.extra_roots = tuple(Path(item).resolve() for item in extra_roots)
+        #: 出网（T3 的联网那一面）在**这一层**拦不拦。
+        #:
+        #: 子会话（研究会话 / 派发出去的实现者）关掉它：出网这个**动作**的
+        #: 入口在主循环（`research`），进去之后抓页是那个动作的内部机制。
+        #: 开着的话研究会话连一次 `web_fetch` 都执行不了，`research` 永远
+        #: 只能交回一句「没抓到」——`tests/tools/test_research.py` 那条用例
+        #: 就是这么红的（拦的是动作，不该把动作的效果一起拦掉）。
+        self.gate_network = gate_network
         #: 本次运行里只记录不拦的改动（T1–T4/T6/T7 的编辑那一面）。
         self.recorded: list[RecordedChange] = []
         #: 本次运行里已经请示过的触发条件（同一条件不重复打扰）。
@@ -506,7 +579,7 @@ class EscalationGate:
             for stored in (_stored_path(self.root, raw) for raw in _arg_paths(call))
             if stored is not None
         ]
-        if name in NETWORK_TOOLS:
+        if self.gate_network and name in NETWORK_TOOLS | NETWORK_ENTRY_TOOLS:
             out.append(
                 self._make(
                     "T3",
@@ -524,7 +597,12 @@ class EscalationGate:
         return out
 
     def _dangerous_path_triggers(self, stored: str) -> list[EscalationRequest]:
-        """删除文件那一面：T5（批量）/ T6（越界）。"""
+        """删除文件那一面：**只判 T5**（同一路径批量删）。
+
+        T6（工作区外路径）**不在这里**：它按路径落在哪儿分流（关联目录 →
+        `boundary_action` 请示一次；域外 → 直接拒绝），判据是解析后的真实路径，
+        不是删了几次——两件事的机械判据不同，混在一处会互相污染。
+        """
         out: list[EscalationRequest] = []
         count = self._deleted.get(stored, 0) + 1
         self._deleted[stored] = count
@@ -574,12 +652,69 @@ class EscalationGate:
             )
         return out
 
+    def boundary_kind(self, raw: str) -> str:
+        """这个路径落在哪儿：工作区内 / 已授权关联目录内 / 域外（T6 的分流）。
+
+        **解析后的真实路径**是判据（`resolve()`），不是字符串前缀：`..`、
+        绝对路径、符号链接逃逸都按解析结果算，与 `paths.py` 的口径一致。
+        """
+        if not raw or not looks_like_path(raw):
+            return INSIDE
+        base = self.root.resolve()
+        candidate = Path(str(raw))
+        try:
+            target = (
+                candidate.resolve()
+                if candidate.is_absolute()
+                else (base / candidate).resolve()
+            )
+        except (OSError, ValueError):  # pragma: no cover - 解析不了就不当越界
+            return INSIDE
+        if target == base or base in target.parents:
+            return INSIDE
+        for extra in self.extra_roots:
+            if target == extra or extra in target.parents:
+                return LINKED
+        return OUTSIDE
+
+    def boundary_targets(self, call: Any) -> list[tuple[str, str]]:
+        """这次调用里每一个**写到工作区外**的目标 →（落点, 给人看的路径）。
+
+        只认写工具：编辑是成果（§3.2.0），而「读到关联目录」本来就是允许的
+        ——`resolve_readable` 的语义就是那样，读不该被这里拦一次。
+        """
+        name = str(getattr(call, "name", "") or "")
+        if name not in WRITE_TOOLS:
+            return []
+        out: list[tuple[str, str]] = []
+        for key in WRITE_PATH_KEYS:
+            raw = (getattr(call, "arguments", None) or {}).get(key)
+            items = [raw] if isinstance(raw, str) else list(raw or ())
+            for item in items:
+                if not isinstance(item, str) or not item:
+                    continue
+                kind = self.boundary_kind(item)
+                if kind != INSIDE:
+                    out.append((kind, outside_label(self.root, item)))
+        return out
+
     def boundary_action(self, stored: str) -> EscalationRequest:
-        """T6：越界或工作区外的路径（由调用方判定后显式登记）。"""
+        """T6：落在**已授权关联目录**里的写（由调用方判定后显式登记）。
+
+        这就是 `spool extra` 自己的语义：「读放开，**写要确认**」。所以这一次
+        不硬拒，而是**拦下这次写、请示一次**（五件齐全，§3.2.3）；没批准就
+        不执行它，而这一轮**其余成果照落盘**（§2.5 的硬不变量）。
+
+        域外（工作区与所有关联目录之外）不走这里：那条路径没有可批准的正当
+        情形，走硬拒绝 + 「怎么才能做」，见 `outside_write_refusal`。
+        """
         return self._make(
             "T6",
             action=f"write {stored}",
-            detail="解析后的真实路径不在工作区根",
+            detail=(
+                "解析后的真实路径不在工作区根，落在已授权关联目录里——"
+                "关联目录的语义是「读放开，写要确认」，所以这次写要确认一次"
+            ),
             paths=(stored,),
         )
 
@@ -619,6 +754,7 @@ class EscalationGate:
         has_baseline: bool = True,
         revert_command: str = "",
         written: dict[str, str] | None = None,
+        verified: bool = False,
     ) -> list[EscalationRequest]:
         """收尾这一刻命中的触发条件（纯规模 / 纯语义那一类）。
 
@@ -626,7 +762,8 @@ class EscalationGate:
         唯一「扣成果」的 T13 不在这一组里——它由调用方在落盘口判（给不出
         回退就不落盘并点名）。
 
-        `blocking_failure` 是 T8 的**门槛**，见方法体里那段说明。
+        `blocking_failure` 是 T8 的**门槛**，`verified` 是 T7 的**充分条件**
+        那一半，两段说明都在方法体里。
         """
         out: list[EscalationRequest] = []
         high = [item for item in findings if item.severity == HIGH]
@@ -646,12 +783,27 @@ class EscalationGate:
         scale_hit = (
             len(set(touched)) >= self.trigger_files or int(lines) >= trigger_lines
         )
-        if scale_hit:
+        # ---- T7 的充分条件：**规模只是必要条件，不是充分条件**（§3.2.4）----
+        #
+        # 「改了 6 个文件」本身不是风险：一次跨文件改名天生要改 5–8 个文件
+        # （rename 那条探针恰好 6 个），而它可能是**验过且没有高严重度发现**
+        # 的一批正常改动。把规模当充分条件，等于按「改动大小」而不是按
+        # 「有没有风险」打扰人——升级率就是这么被顶上去的（§3.2.4：超标要
+        # 回去改触发条件，**不是**调高阈值削弱覆盖）。
+        #
+        # 所以规模之上再加一条**风险**：要么这一批**还没被验证过**（不知道
+        # 对不对），要么同批**有高严重度发现**（知道不对）。两条都不成立时
+        # T7 不升级——它照样记进账本，只是不再打扰人。
+        scale_risky = scale_hit and (not verified or bool(high))
+        if scale_risky:
             out.append(
                 self._completion(
                     "T7",
-                    f"改动规模越过阈值：文件 {len(set(touched))}/{self.trigger_files}，"
-                    f"行数 {int(lines)}/{trigger_lines}",
+                    f"改动规模越过阈值且未验证/带高危发现：文件 "
+                    f"{len(set(touched))}/{self.trigger_files}，"
+                    f"行数 {int(lines)}/{trigger_lines}，"
+                    f"最终验证 {'通过' if verified else '没通过或没跑'}，"
+                    f"高严重度发现 {len(high)} 条",
                     paths=tuple(sorted(touched)),
                 )
             )

@@ -27,10 +27,16 @@ def resolve_within(root: Path, candidate: str) -> Path:
         # 报错要带上「该怎么写」。实测有模型拿 `/workspace` 这种绝对路径当 cwd
         # （那是它在别处见过的约定），连续撞十几次都不换写法——因为它只知道
         # 越界了，不知道什么才算不越界。
+        #
+        # 「怎么才能做」有两个入口，两个都点出来：命令行一次性的 `--allow-read`，
+        # 以及本机持久关联的 `spool extra add`（读放开，**写要确认**）。
+        # 只说「越界了」等于把出路指到墙外。
         raise PathOutsideProjectError(
             f"路径越出项目根目录: {candidate}。"
             f"要用**相对于工作区**的路径，例如 `{base.name}/子目录` 或 `src/x.py`；"
-            "绝对路径只在额外授权过的可读根之外才有意义。"
+            "要真的碰工作区外的目录，先在那台机器上关联它："
+            "`spool extra add <目录>`（读放开，写要确认；聊天里加不了），"
+            "或临时用 `--allow-read <目录>`。"
         )
     return resolved
 
@@ -58,7 +64,8 @@ def resolve_readable(
             return resolved
 
     hint = (
-        "（要读工作区之外，先显式授权：加 --allow-read <目录>）"
+        "（要读工作区之外，先在那台机器上关联它：`spool extra add <目录>`"
+        "——读放开，写要确认；或临时用 `--allow-read <目录>`）"
         if not extra_roots
         else f"（已授权的可读目录：{'、'.join(str(item) for item in allowed)}）"
     )

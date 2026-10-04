@@ -239,6 +239,13 @@ def run_role(
         # 它会拿主循环的预算来估自己的活。
         persona=role.system_prompt.replace("{limit}", str(limit)),
         verify=verify,
+        # 出网（T3 的联网那一面）**只在主循环拦一次**：子会话的入口动作
+        # （主循环调 `research`）已经过了那道闸门，进来之后抓页是这个动作的
+        # 内部机制。子会话里再拦一次的结果是研究会话连一次 `web_fetch` 都执行
+        # 不了——`research` 永远只能交回「没抓到」，而它是主循环唯一的出网口
+        # （实测：`tests/tools/test_research.py` 那条用例就是这么红的）。
+        # 子会话的工具表是只读的（`restrict` 按角色裁剪），其余判据一条不少。
+        gate_network=False,
     )
     # 检查点用**角色自己的 id**：主循环和子智能体跑在同一个工作区里，
     # 共用 task.json 会让子智能体的状态盖掉主循环的进度——实测长任务里

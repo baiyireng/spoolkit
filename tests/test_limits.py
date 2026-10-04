@@ -15,6 +15,9 @@ from spoolkit import limits
 from spoolkit.config import Config
 from spoolkit.limits import CAPABILITY, SAFETY
 
+#: 仓库根：这一条读的是**仓库里**那份源码，不是「当前目录下的」源码。
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def test_默认值来自登记表() -> None:
     assert limits.resolve("repeat_block_at") == (3.0, "默认")
@@ -137,13 +140,17 @@ def test_表里列的每一项都真的接上了() -> None:
     所以这里**穷尽地**检查：每个 capability / mechanical 项都必须在代码里
     被取用一次（安全项是符号项——它们描述的是一条规则，不是一个数值）。
 
+    `src/spoolkit` 按**仓库根**锚定，不用 `Path("src/spoolkit")`：后者量的
+    其实是「跑测试时 cwd 在哪」，任何一处没还原的 `chdir` 都能让它变红，
+    而它要回答的是「仓库里那份源码有没有取用这个旋钮」。
+
     P1 Task 1 是**一次登记、分批消费**（计划「并行与串行」的单写者清单把
     `limits.py` 钉成单写点）：那 22 个新旋钮里，`recall_limit` 在本批就接线，
     其余 21 个要等批次 2–4 的消费者落地，名单见 `P1_PENDING_WIRING`。
     """
     sources = [
         path
-        for path in Path("src/spoolkit").rglob("*.py")
+        for path in (_REPO_ROOT / "src" / "spoolkit").rglob("*.py")
         if path.name != "limits.py"
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in sources)

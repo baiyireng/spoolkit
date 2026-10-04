@@ -31,6 +31,7 @@ from spoolkit.agent.audit import (
     NOT_RUN,
     PASS,
     ReviewLedger,
+    TESTS_WEAKENED_KIND,
     audit,
     boundary_write,
     load_protected,
@@ -41,9 +42,12 @@ from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from spoolkit.agent.review_gate import (
     PENDING as ESCALATION_PENDING,
+    LINKED,
+    OUTSIDE,
     EscalationDecision,
     EscalationGate,
     EscalationRequest,
+    outside_write_refusal,
     parse_reply,
     render_decisions,
     render_summary,
@@ -278,6 +282,18 @@ _HIT_SUMMARY = {
     DELETED_REFERENCE_KIND: "删掉的文件/符号仍被引用",
     BROKEN_IMPORT_KIND: "导入的本地模块不存在",
 }
+
+#: `_mechanical_review` 那几条判据产出的**发现类别**：收尾重判时要整批作废、
+#: 按终态内容重新登记（旧判词描述的是中途那一版内容，见 `_rejudge_mechanical`）。
+#: 名单必须与 `_mechanical_findings` 实际产出的 kind 一致，否则会漏撤或误撤。
+MECHANICAL_KINDS = frozenset(
+    {
+        STALE_REFERENCE_KIND,
+        DELETED_REFERENCE_KIND,
+        BROKEN_IMPORT_KIND,
+        TESTS_WEAKENED_KIND,
+    }
+)
 
 
 def _hit_finding(hit) -> Finding:
@@ -744,6 +760,7 @@ class AgentLoop:
         from_channel: bool = False,
         pending: Any | None = None,
         escalation_review: Callable[[EscalationRequest, str], tuple[str, str]] | None = None,
+        gate_network: bool = True,
     ) -> None:
         self.gateway = gateway
         self.tokenizer = tokenizer
@@ -782,6 +799,13 @@ class AgentLoop:
             # 挂起清单只放在**会话目录**里：跨结算要保留的只有「还没执行的动作」，
             # 成果已经在工作区里了（§2.5）。
             pending_path=config.state_dir / "review" / "pending-actions.json",
+            # 关联目录：T6 的分流要看它（关联目录里的写拦下来请示一次，
+            # 域外直接拒绝）。不传的话「已授权」这件事在这一层看不见，
+            # 落在关联目录里的写会被误判成域外、被硬拒。
+            extra_roots=self.read_roots,
+            # 出网的**动作入口**在主循环（`research`）：子会话里关掉，否则
+            # 研究会话连一次 web_fetch 都执行不了（见 EscalationGate 那段注释）。
+            gate_network=gate_network,
         )
         # 自动修有限轮：命中「不许宣称完成」时先回灌发现让它自己修，轮数用完
         # 才按 §3.1 报「未完成 + 逐条 file:line」。**默认 0（关）**：自动修要
@@ -2176,7 +2200,12 @@ class AgentLoop:
         facts = self._file_state_line(changed)
         # L1 机械一致性在收尾这一刻再跑一遍：模型最后几步可能又削弱了测试、
         # 又留下了残留。去重集合保证同一条不会重复上报（P0：只报不阻断）。
-        self._mechanical_review(list(changed))
+        #
+        # **这里是「重判」而不是「再判一遍」**：账本只累加不清，而判词是就
+        # **某一版内容**下的结论——中途那一版有残留、模型随后改好了，旧判词
+        # 还挂在账本里，收尾报告与 T12（判据原话是「仍在」）就会拿一条**已经
+        # 不成立**的判词去拦完成声明。所以先按终态内容重算，再拿它替换旧判词。
+        self._rejudge_mechanical(list(changed))
         # 越界写那类高危发现要进收尾报告：它回答的是「这次运行动了不该动的
         # 东西没有」，而收尾报告是人真的会读的那一份文本（见 `_boundary_report`）。
         boundary = self._boundary_report()
@@ -2459,13 +2488,33 @@ class AgentLoop:
         否则「不断被拦」+ 硬拦退还预算就成了无限预算。
         """
         signature = call_signature(call)
+        # ---- T6：写工具的目标越过工作区根（§3.2.2 的分流）--------------------
+        #
+        # 分流的判据是**路径落在哪儿**，两条路的处置完全不同（Lead 的裁决）：
+        #
+        # - **已授权关联目录里**（`spool extra add` 加过）：那是「读放开，
+        #   **写要确认**」的语义。所以拦下这次写、请示一次；没批准就不执行
+        #   它，而这一轮其余成果照落盘（§2.5 的硬不变量）。以前这里要么按
+        #   策略静默丢掉、要么在无人值守时连整批一起丢——那条语义就没兑现。
+        # - **工作区与所有关联目录之外**：保持硬拒绝，但把「怎么才能做」与
+        #   「为什么不问」写进话术（`outside_write_refusal`）。
+        boundary = self.escalation_gate.boundary_targets(call)
+        for kind, label in boundary:
+            if kind == OUTSIDE:
+                self._log(f"T6 域外写直接拒绝：{label}")
+                return ToolResult(ok=False, content=outside_write_refusal(label))
         # ---- 风险分级放行：**动作执行口之前的拦截**（§2.6 第 2 条）------------
         #
         # 位置就在这里（`registry.invoke` 与刷新放行都在它后面）：判据是
         # 「命中 T1–T13 → 在执行那个动作前拦下并请示」（§3.2.2）。文件编辑
         # 不会走到这里——`action_triggers` 对写工具**永远**返回空表，它们是
-        # 成果，成果照落盘（§3.2.0）。
-        for request in self.escalation_gate.action_triggers(call):
+        # 成果，成果照落盘（§3.2.0）；**唯一**让写工具进闸门的就是上面那条
+        # T6 的关联目录分流。
+        gate_requests = list(self.escalation_gate.action_triggers(call))
+        for kind, label in boundary:
+            if kind == LINKED:
+                gate_requests.insert(0, self.escalation_gate.boundary_action(label))
+        for request in gate_requests:
             self._emit(
                 "note",
                 {
@@ -2889,6 +2938,11 @@ class AgentLoop:
             has_baseline=baseline_ok and bool(revert_command),
             revert_command=revert_command,
             written=written,
+            # T7 的充分条件那一半（§3.2.4）：**这一批已经被验证过**时，「改了
+            # 6 个文件」本身不再是打扰人的理由——规模只是必要条件。
+            verified=bool(
+                self._final_verify is not None and self._final_verify[0] is True
+            ),
         )
         if not requests:
             # 没有触发条件（这一轮清清白白）：清掉上一轮留下的拦下判词，
@@ -2952,8 +3006,20 @@ class AgentLoop:
         回灌到模型面前（模型正要在结论里写「已统一」）。其余发现不进模型上下文
         ——每改一个文件就往对话里塞一段提醒，会挤掉真正要它读的东西。
         """
+        for finding in self._mechanical_findings(changed, interim=interim):
+            self._emit_review_finding(finding)
+
+    def _mechanical_findings(
+        self, changed: Sequence[str], *, interim: bool = False
+    ) -> list[Finding]:
+        """机械判据算出来的那批发现（**只算，不落账本、不发事件**）。
+
+        与 `_mechanical_review` 分开是因为收尾要**重判**（见
+        `_rejudge_mechanical`）：重判必须能拿到一份干净的判词，而不是在
+        「已经发过的那些」上面继续叠。
+        """
         if self.pending is None:
-            return
+            return []
         root = self.config.project_root
         findings: list[Finding] = []
         # ① 残留引用（含**被改的文件自己**、含**被删掉的文件**）。
@@ -2975,7 +3041,41 @@ class AgentLoop:
                     deleted=change.deleted,
                 )
             )
+        return findings
+
+    def _mechanical_scope(self, changed: Sequence[str]) -> list[str]:
+        """重判要覆盖的路径：这一轮的改动 + 本次运行**所有**待落盘改动。
+
+        只传「这一轮改过的」会漏掉前几轮的判词（引用闭合那一半按路径判）：
+        重判时把它撤掉了，却没有按同一批路径重算一遍，那条真发现就凭空消失。
+        """
+        paths = list(changed)
+        if self.pending is not None:
+            paths += [item.path for item in self.pending.items()]
+        return list(dict.fromkeys(paths))
+
+    def _rejudge_mechanical(self, changed: Sequence[str]) -> None:
+        """收尾那一刻**重判**机械发现：旧判词作废，按终态内容重新登记。
+
+        为什么必须重判（这是实测抓出来的）：判词是**就某一版内容**下的结论。
+        中途那一版上有残留引用，模型随后把文件改好了；而账本是只累加不清的，
+        于是收尾报告与 T12（判据原话是「自动修 N 轮后**仍在**」）拿着一条
+        **已经不成立**的判词去拦完成声明——§4 说得很清楚，L1 是机械判据，
+        它有误报就是判据写错了。
+
+        已经发过的那条 note **不重发**：探针按 note 数发现条数，重发会把同一个
+        缺陷数成两条（`stale_references` 这类必填读数会凭空翻倍）。
+        """
+        findings = self._mechanical_findings(
+            self._mechanical_scope(changed), interim=False
+        )
+        self.audit_log.forget_kind(MECHANICAL_KINDS)
         for finding in findings:
+            signature = (finding.kind, finding.path, finding.line, finding.summary)
+            if signature in self._reviewed_notes:
+                # 仍然成立：账本要有它（T12 与收尾报告都读账本），事件不再发一次。
+                self.audit_log.add(finding)
+                continue
             self._emit_review_finding(finding)
 
     def _emit_review_finding(self, finding: Finding) -> None:

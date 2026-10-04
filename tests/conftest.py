@@ -38,6 +38,29 @@ def _isolate_run_origin():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_cwd():
+    """每个用例结束时，**进程的工作目录必须回到它进来时的样子**。
+
+    这是顺序隔离，不是产品判据：用例之间共用一个进程，于是任何一处
+    **没还原的 `chdir`** 都会漏给后面所有用例。症状是最难查的那一类——
+    「单跑绿、全跑红」，而且红的是**读仓库文件**的那些判据（它们写成
+    `Path("benchmarks/tasks")` / `Path("src/spoolkit")` 这种相对当前目录的
+    形状时，量的其实是「跑测试时 cwd 在哪」）。
+
+    夹具在**每个用例的 teardown** 检查，所以报出来的就是泄漏的那一条用例
+    （`monkeypatch.chdir` 的还原排在本夹具之前，用它不会误报）。
+    """
+    before = os.getcwd()
+    yield
+    after = os.getcwd()
+    assert after == before, (
+        f"这个用例改了进程的工作目录且没有还原：{before} → {after}。"
+        "后面所有用例都会在错的目录里跑（「单跑绿、全跑红」的常见成因）。"
+        "要用 chdir 就 `monkeypatch.chdir(...)`，它会在 teardown 自动还原。"
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_user_config(tmp_path_factory, monkeypatch):
     path = tmp_path_factory.mktemp("user-config") / "config.toml"
     monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
