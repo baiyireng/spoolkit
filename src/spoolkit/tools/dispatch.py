@@ -24,6 +24,7 @@ from spoolkit.agents.runtime import TaskSpec
 from spoolkit.config import Config
 from spoolkit.llm.gateway import ModelGateway
 from spoolkit.llm.tokenizer import TokenCounter
+from spoolkit.prompt_sanitize import for_prompt
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import ToolResult, ToolSpec
 
@@ -282,6 +283,10 @@ def _render(outcome: object) -> str:
 
     主循环要从中得到三件事：**做没做**、**验没验过**、**改动在哪儿**。
     最后一条最重要——不说清楚它会把同样的活再做一遍。
+
+    出口过一遍 `for_prompt`：实现者/审查者交回来的正文里可能有本次运行专属的
+    临时/随机路径（它们在各自的试跑副本里跑过命令），而这段文字是直接回灌进
+    主循环提示的。给人看的那一份在 `record_dispatch` 的日志与事件流里，不动。
     """
     lines = ["子智能体做过一轮了。"]
     lines.append(f"实现者说：{_flatten(getattr(outcome, 'implementer_final', ''), 400)}")
@@ -316,7 +321,7 @@ def _render(outcome: object) -> str:
         "改动已经在待确认的 diff 里了——**不要自己再写一遍**；"
         "下一步要么根据审查意见再派一次，要么去做别的。"
     )
-    return "\n".join(lines)
+    return for_prompt("\n".join(lines))
 
 
 def _flatten(text: str, limit: int) -> str:

@@ -31,6 +31,7 @@ from typing import Callable, Sequence
 
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable
+from spoolkit.prompt_sanitize import for_prompt
 from spoolkit.tools.edit import PendingChanges, is_test_path
 from spoolkit.tools.exec import DEFAULT_TIMEOUT, run_once
 from spoolkit.tools.grant import ALLOWED, classify
@@ -319,7 +320,19 @@ def condense_test_output(text: str, limit: int = 360) -> str:
 
     优先取 pytest 的短摘要（`FAILED test_x.py::test_y - AssertionError: ...`）：
     一行里同时有文件、用例名和具体差异，是最省 token 也最可行动的形式。
+
+    **出口必过 `for_prompt`**：这一段就是回灌给模型的那一份。实测两条 t=0 的
+    `add-feature` 事件流 20 行里 18 行逐字节相同，唯一的分叉点正是这里——
+    `PytestCacheWarning` 里带着本次试跑副本的随机目录名（`spool-trial-<8 位>`），
+    它落在正文第 371 字，于是下一次请求的 token 数差了 2 个，贪心解码把这个
+    差别放大成两句不同的收尾。给人看的那一份（`ToolResult.raw`、落盘日志、
+    收尾报告）一个字都不动，精确路径仍要能查——见 `prompt_sanitize` 模块头。
     """
+    return for_prompt(_condense_test_output(text, limit))
+
+
+def _condense_test_output(text: str, limit: int = 360) -> str:
+    """`condense_test_output` 的本体：只挑行，不做清理。"""
     lines = [line.rstrip() for line in text.splitlines()]
 
     summary = [
@@ -691,9 +704,30 @@ def make_verifier(
         # 按类型的检查很便宜（只有 HTML/JS 要起一次 node），先跑：即使 pytest
         # 那条路坏掉了，它照样能给出结论——旧实现里这种项目根本不验 HTML。
         check = checker(changed)
-        return _merge_types(pytest_part(changed), check)
+        # 出口统一过一遍清理：**验证结论是要回灌给模型的文本**，里面凡是
+        # 本次运行专属的临时/随机路径（试跑副本、pytest 临时目录、%TEMP%）
+        # 都要换成占位符。放在这一层而不是每个 return 上，是因为结论的出口
+        # 有七八个（成功、失败、环境问题、改名重判、逐处汇总…），漏一个就
+        # 等于没做。`raw` 原样带出去：那是给人看与自动审查层用的证据。
+        return _for_prompt_result(_merge_types(pytest_part(changed), check))
 
     return verify
+
+
+def _for_prompt_result(result: ToolResult) -> ToolResult:
+    """把结果的**进提示那一份**清理干净，`raw` 一个字不动。
+
+    `raw` 是「给人看 / 给自动审查层判据用」的证据（见 `ToolResult.raw` 的
+    注释），精确路径与时刻必须留在那里——排查时照着它回现场。所以这一层
+    只替换 `content`，其余字段原样搬过去。
+    """
+    return ToolResult(
+        ok=result.ok,
+        content=for_prompt(result.content),
+        facts=result.facts,
+        usage=result.usage,
+        raw=result.raw,
+    )
 
 
 def _merge_types(pytest_result: ToolResult, check: ToolResult) -> ToolResult:

@@ -23,6 +23,7 @@ from spoolkit.config import Config
 from spoolkit.context import templates as T
 from spoolkit.llm.gateway import ModelGateway
 from spoolkit.llm.types import ChatRequest, Message
+from spoolkit.prompt_sanitize import for_prompt
 from spoolkit.tools.registry import ToolRegistry
 
 PLAN_SCHEMA: dict[str, Any] = {
@@ -150,15 +151,20 @@ def _evidence(artifact: str, verify) -> str:
 
     实测不给测试结果时，审查者会自己一路翻文件去还原「刚才发生了什么」，
     把整轮预算耗光，最后连结论都给不出来。它要的是证据，不是自由度。
+
+    验证正文与异常正文都要过 `for_prompt`：这段文字直接进**审查者**的提示，
+    而验证是在试跑副本里跑的，正文里会带本次副本的随机路径。
     """
     if verify is None:
         return artifact
     try:
         result = verify()
     except Exception as exc:  # 验证出问题不该让审查整个跑不起来
-        return f"{artifact}\n\n自动验证没能跑起来（{type(exc).__name__}）：{exc}"
+        return for_prompt(
+            f"{artifact}\n\n自动验证没能跑起来（{type(exc).__name__}）：{exc}"
+        )
     status = "通过" if result.ok else "未通过"
-    return f"{artifact}\n\n自动验证结果：{status}\n{result.content[:600]}"
+    return for_prompt(f"{artifact}\n\n自动验证结果：{status}\n{result.content[:600]}")
 
 
 def plan_dispatch(

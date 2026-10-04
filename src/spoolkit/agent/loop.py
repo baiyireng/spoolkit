@@ -48,6 +48,7 @@ from spoolkit.llm.tokenizer import TokenCounter
 from spoolkit.llm.types import ChatRequest, Message
 from spoolkit.memory.transcript import set_run_origin
 from spoolkit.paths import resolve_readable
+from spoolkit.prompt_sanitize import for_prompt
 from spoolkit.tools.edit import (
     CONFIRM_TOOL,
     DELETE_TOOL,
@@ -753,6 +754,10 @@ class AgentLoop:
         """按当前状态与历史装配本轮上下文。
 
         预取内容与解析反馈共用 retrieval 预算：它们语义相同，都是外部检索来的内容。
+
+        **注入型区段统一过 `for_prompt`**：预取、热记忆、教训、督导反馈都是
+        「从别处取回来、直接摆到模型面前」的文本，里面同样不许带本次运行专属的
+        临时/随机路径（同一份内容换个随机副本名重跑，提示必须逐字相同）。
         """
         assembler = Assembler(tokenizer=self.tokenizer, budget=self._budget)
         system_text = SYSTEM_PROMPT.format(
@@ -767,9 +772,13 @@ class AgentLoop:
             Section(name="system", text=system_text, priority=10, mandatory=True),
         ]
         if hot:
-            sections.append(Section(name="hot_memory", text=hot, priority=20))
+            sections.append(
+                Section(name="hot_memory", text=for_prompt(hot), priority=20)
+            )
         if lesson_text:
-            sections.append(Section(name="lessons", text=lesson_text, priority=25))
+            sections.append(
+                Section(name="lessons", text=for_prompt(lesson_text), priority=25)
+            )
         sections.append(
             Section(
                 name="task_state",
@@ -783,7 +792,9 @@ class AgentLoop:
             )
         )
         if prefetched:
-            sections.append(Section(name="retrieval", text=prefetched, priority=35))
+            sections.append(
+                Section(name="retrieval", text=for_prompt(prefetched), priority=35)
+            )
         if feedback:
             # **必留区段**，而不是与预取共用 retrieval 配额。
             #
@@ -794,7 +805,12 @@ class AgentLoop:
             # 也就是这一次要修的那个毛病。实测两处合起来的量很小（一段
             # message 加 60 余字），必留没有成本，但换来「这段话一定完整送到」。
             sections.append(
-                Section(name="feedback", text=feedback, priority=40, mandatory=True)
+                Section(
+                    name="feedback",
+                    text=for_prompt(feedback),
+                    priority=40,
+                    mandatory=True,
+                )
             )
         return assembler.assemble(sections, recent_turns=history[-MAX_RECENT_TURNS:])
 
@@ -1535,9 +1551,16 @@ class AgentLoop:
                         )
                         repeated += 1
                     else:
-                        outputs.append(f"[{call.name}] {status}: {result.content}")
+                        # **回灌边界的兜底口**：所有工具输出都从这里进提示，所以
+                        # 这里过一遍 `for_prompt`（本次运行专属的临时/随机路径换
+                        # 成占位符）。放在装配这一步而不是各个工具里，是因为工具
+                        # 的输出同时还要给人看——事件流的 `detail`、trace、落盘
+                        # 日志都用上面那份**未清理**的原文，精确路径仍可查。
+                        outputs.append(
+                            f"[{call.name}] {status}: {for_prompt(result.content)}"
+                        )
                     if extra:
-                        outputs.append(extra)
+                        outputs.append(for_prompt(extra))
                         trace.append(
                             f"step{state.step}: {extra.splitlines()[0]}"
                         )
@@ -2297,12 +2320,23 @@ class AgentLoop:
 
         跑完之后过一遍自动审查层 L1：回退、中间态、迎合测试三类发现
         由 `spoolkit.agent.audit` 机械地判出来，在这里挂上事件与账本。
+
+        **返回的每一句都会进提示**，所以出口统一过 `for_prompt`：验证正文里
+        带着本次试跑副本的随机目录名（`…\\spool-trial-<8 位随机>\\project`，
+        来自 pytest 的 `PytestCacheWarning`）时，两条同设置的运行会因此在
+        同一个位置产生不同的 token 数，贪心解码随即放大成两条轨迹——实测
+        20 行事件流里就差 `usage` 与 `final` 两行。路径本身不丢：给人看的那
+        一份在 `ToolResult.raw` 与事件流里原样保留。
         """
         try:
             result = self.verify(changed or [])
         except Exception as exc:
-            return (f"自动验证无法运行，错误类型 {type(exc).__name__}：{exc}", False)
-        body = " ".join(result.content.split())[:400]
+            # 异常正文也常带临时路径（"没有这个文件: …\\Temp\\spool-trial-x\\…"）。
+            return (
+                for_prompt(f"自动验证无法运行，错误类型 {type(exc).__name__}：{exc}"),
+                False,
+            )
+        body = " ".join(for_prompt(result.content).split())[:400]
         if result.content.startswith(ENVIRONMENT_MARKER):
             # 记下来：任务没做成时，这决定要不要替它登记诊断请求。
             self.environment_blocked = True
@@ -2356,10 +2390,12 @@ class AgentLoop:
             # 实测在 20 道题的铺盘里做完 5 道就让它宣布完成——
             # 它把「这一批做完」当成了「任务完成」。
             return (
-                f"系统自动跑了一遍测试：通过（{body}）。"
-                "这说的是这次改的地方通过了。"
-                "任务整体做完没有由你判断：还有未完成的接着做，"
-                "确实都做完再给出结论。",
+                for_prompt(
+                    f"系统自动跑了一遍测试：通过（{body}）。"
+                    "这说的是这次改的地方通过了。"
+                    "任务整体做完没有由你判断：还有未完成的接着做，"
+                    "确实都做完再给出结论。"
+                ),
                 True,
             )
         # 失败到底是什么性质，由验证器说——它才知道退出码的含义。
@@ -2367,8 +2403,8 @@ class AgentLoop:
         # 它回答的是「这次失败意味着什么」，那正是模型最容易判错的一步。
         verdict = found.render()
         if verdict:
-            return (f"自动验证的结果：{body}\n{verdict}", False)
-        return (f"自动验证的结果：{body}", False)
+            return (for_prompt(f"自动验证的结果：{body}\n{verdict}"), False)
+        return (for_prompt(f"自动验证的结果：{body}"), False)
 
     def audit_trace(self, found: Audit) -> None:
         """把发现写进本步的 trace。
