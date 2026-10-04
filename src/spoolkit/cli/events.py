@@ -26,13 +26,27 @@ class EventWriter:
     def __init__(self, stream: TextIO | None = None) -> None:
         self._stream = stream if stream is not None else sys.stdout
 
-    def emit(self, kind: str, **data: Any) -> None:
+    def _write(self, kind: str, data: dict) -> None:
         self._stream.write(Event(kind, data).to_line() + "\n")
         self._stream.flush()
 
+    def emit(self, kind: str, **data: Any) -> None:
+        self._write(kind, dict(data))
+
     def handle(self, kind: str, data: dict) -> None:
-        """签名与 AgentLoop 的 on_event 一致，可直接传进去。"""
-        self.emit(kind, **data)
+        """签名与 AgentLoop 的 on_event 一致，可直接传进去。
+
+        **不许写成 `self.emit(kind, **data)`**：`note` 事件里带一个 `kind`
+        字段（`audit` / `stale_references` / `tests_weakened` …，探针按它计数），
+        而它会与 `emit(self, kind, ...)` 的位置参数重名，抛
+        `TypeError: emit() got multiple values for argument 'kind'`——那个异常
+        被 `AgentLoop._emit` 的 `except Exception` 吞掉，于是**所有带 kind 的
+        note 都静默丢失**。实测现场：013137-rename-cross-file-r0 的事件流里
+        8 条 note 全是**不带 kind** 的那种，`guard_refresh` /
+        `supervisor_fact_conflict` / `audit` 一条都没有——探针里
+        `supervisor_false_claims` 常年为 0 就是这个原因，不是督导从不说错。
+        """
+        self._write(kind, dict(data))
 
 
 def _to_stderr(line: str) -> None:

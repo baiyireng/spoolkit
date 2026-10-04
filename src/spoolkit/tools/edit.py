@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import ast
 import difflib
 import hashlib
 import json
@@ -184,10 +185,29 @@ def looks_like_path(text: str) -> bool:
 # 「说没统一」这件事是可机械判定的：改过的那份正文里**消失的顶层定义名**，
 # 如果在别处还在，那就是残留。检测放在工具层（改完立刻算），报告跟着工具
 # 输出回到模型面前——它在写「已统一」那句话之前看得到反例。
+#
+# ---- 这次补的三个盲区（P0，全部只报不阻断）----------------------------------
+#
+# 1. **被改的文件自己**：旧口径要求名字在新正文里「以标识符形态彻底消失」，
+#    于是同一文件里留下的旧名调用（定义改了、调用点没改）永远进不了候选。
+#    现在定义一消失就进候选，是不是真的悬空由 `ast` 判（见 `_module_index`）。
+# 2. **删掉的文件**：删除走的是同一份台账，但旧代码一进门就
+#    `if ... or change.deleted: return []`——「删了这个文件，别人还在用它」。
+# 3. **引用闭合**：改过的 `.py` 里导入一个**本仓并不存在**的模块，
+#    以及删掉的文件仍在被 `import` / 属性访问引用（`ast` 判，不看字符串）。
 _TOP_DEF_PATTERN = re.compile(
     r"(?m)^(?:async[ \t]+)?(?:def|class)[ \t]+([A-Za-z_]\w*)"
 )
 LINGERING_MARKER = "旧名仍有残留"
+
+#: 事件流里「残留引用」这一类 note 的 kind。探针按它统计 `stale_references`。
+STALE_REFERENCES_KIND = "stale_references"
+
+#: 机械发现的判据名。写在常量里是为了事件流、探针与用例都按它取，
+#: 不靠散文措辞去认（设计稿 §4：判据必须机械）。
+STALE_REFERENCE_KIND = "stale_reference"
+DELETED_REFERENCE_KIND = "deleted_reference"
+BROKEN_IMPORT_KIND = "broken_import"
 # 扫描是有界的：单文件字符数上限、整次扫描字符总量上限、报告文件条数上限。
 # 没有上限的话，一次改名会在一个大仓库上把每一步都拖慢，而收尾报告的读者是人。
 LINGER_SCAN_MAX_FILE_CHARS = 200_000
@@ -208,25 +228,28 @@ LINGER_TEXT_SUFFIXES = frozenset(
 )
 
 
-def vanished_def_names(old_text: str, new_text: str) -> list[str]:
-    """改过的那份正文里**整个都不见了的顶层定义名**。
+@dataclass(frozen=True)
+class MechanicalHit:
+    """一条机械发现：判据 + `文件:行` + 事实。**没有 file:line 不上报**（§4）。
 
-    两层收窄，都是为了不报假残留：
-
-    1. 只看顶层 `def`/`class` 名。把普通词也算进来的话，一次 HTML 合并会把
-       几十个标签名报成「改名」。
-    2. 这个名字必须在**新正文里以标识符形态彻底消失**。只比顶层定义会漏掉
-       一种真实写法：模型换了名字，但在原处留了一行兼容别名
-       （`get_rows = load_rows`）——那时定义确实不见了，名字却还在本文件里，
-       而它**不是**残留。实测这条误报把模型引去「删掉自己刚留的兼容别名」，
-       连着 4 步原地打转（探针复跑第 2 次，19 步红）。
+    `line` 是第一条命中的行，`lines` 是全部命中的行。分开是因为用途不同：
+    事件流与探针要一个可回指的坐标，报告要「还有几处」。
     """
-    before = {name for name in _TOP_DEF_PATTERN.findall(old_text)}
-    if not before:
-        return []
-    return sorted(
-        name for name in before if not _name_lines(new_text, name)
-    )
+
+    kind: str
+    path: str
+    line: int
+    name: str
+    detail: str = ""
+    lines: tuple[int, ...] = ()
+
+    def where(self) -> str:
+        return f"{self.path}:{self.line}"
+
+    def render(self) -> str:
+        more = f" 等 {len(self.lines)} 处" if len(self.lines) > 1 else ""
+        tail = f"——{self.detail}" if self.detail else ""
+        return f"{self.where()}（{self.name}{more}）{tail}"
 
 
 def _name_lines(text: str, name: str) -> list[int]:
@@ -245,24 +268,113 @@ def _name_lines(text: str, name: str) -> list[int]:
     return found
 
 
-def lingering_references(
-    root: Path, pending, change: PendingChange
-) -> list[str]:
-    """这次改动让哪些名字消失了，它们还在**别的文件**里出现了几处。
+def _literal_lines(text: str, needle: str) -> list[int]:
+    """`needle` 作为**字面量**出现的行号。路径与点号模块名走这一条。"""
+    found: list[int] = []
+    for index, line in enumerate(text.splitlines(), start=1):
+        if needle and needle in line:
+            found.append(index)
+    return found
 
-    「别的文件」同时看两处：磁盘上的现状，与待确认改动里的正文。只看磁盘
-    会把「这一轮刚改过、还没落盘」的文件漏掉——而改名恰恰是一轮里连着改
-    好几个文件。不看待确认正文，收尾报告就会说「都统一了」，而同一轮里
-    刚写下的 `from pipeline.fetch import get_rows` 就在清单上。
+
+def _module_index(text: str) -> tuple[set[str], dict[str, list[int]]] | None:
+    """这份 Python 正文里「被绑定过的名字」与「每个名字的读用行号」。
+
+    两者的差别只能靠语法树看出来，这是本轮补盲的核心判据：
+
+    - `get_rows = load_rows` 是一次**绑定**（兼容别名）——名字还接着，
+      引用不会坏，**不是**残留；
+    - `return get_rows(...)` 是一次**读用**——定义已经没了，它就是悬空引用。
+
+    纯文本比对做不到这个区分：旧口径为了躲开别名误报（实测那次误报把模型
+    引去删自己刚留的别名，连着 4 步打转），把「名字还在新正文里」整个划掉，
+    于是同一文件里的悬空引用也一起漏掉了。
+
+    解析不了（语法错、不是 Python）返回 `None`——**判不了就不报**，
+    乱报的代价比漏报大（§4）。
     """
-    names = vanished_def_names(change.old_text, change.new_text)
-    if not names or change.deleted:
-        return []
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+    bound: set[str] = set()
+    loaded: dict[str, list[int]] = {}
 
+    def bind(name: str) -> None:
+        if name:
+            bound.add(name)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Store):
+                bind(node.id)
+            else:
+                loaded.setdefault(node.id, []).append(node.lineno)
+        elif isinstance(node, ast.arg):
+            bind(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name)
+        elif isinstance(node, ast.alias):
+            # `import a.b` 绑的是 `a`；`from x import y as z` 绑的是 `z`。
+            bind((node.asname or node.name).split(".")[0])
+        elif isinstance(node, ast.ExceptHandler):
+            bind(node.name or "")
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for one in node.names:
+                bind(one)
+        elif isinstance(node, ast.MatchAs):  # pragma: no cover - 3.10+ 才有
+            bind(node.name or "")
+        elif isinstance(node, ast.MatchStar):  # pragma: no cover - 3.10+ 才有
+            bind(node.name or "")
+        elif isinstance(node, ast.MatchMapping):  # pragma: no cover - 3.10+ 才有
+            bind(node.rest or "")
+    return bound, loaded
+
+
+def vanished_definitions(old_text: str, new_text: str) -> list[str]:
+    """改过的那份正文里**顶层定义消失**的名字（不管它还在不在正文里出现）。
+
+    与旧口径 `vanished_def_names` 的差别就是这次的补盲：旧口径额外要求
+    名字在新正文里「以标识符形态彻底消失」，于是**被改的文件自己**那一处
+    永远进不了候选——定义改名了、同一文件里还留着一处旧名调用时，
+    名字当然还出现在新正文里。现在定义消失就进候选，它到底是不是真的
+    悬空（还是留了兼容别名）交给 `_module_index` 判。
+    """
+    before = {name for name in _TOP_DEF_PATTERN.findall(old_text)}
+    if not before:
+        return []
+    after = {name for name in _TOP_DEF_PATTERN.findall(new_text)}
+    return sorted(before - after)
+
+
+def vanished_def_names(old_text: str, new_text: str) -> list[str]:
+    """（旧口径）名字在新正文里**彻底不见了**的那几个定义名。
+
+    保留它是因为 `pending_renames` 那条判据（「改名只落了一半」）就是按
+    「旧名彻底消失 + 新名多出一个」的形状算的。残留检测不再用它——
+    见 `vanished_definitions`。
+    """
+    return [
+        name
+        for name in vanished_definitions(old_text, new_text)
+        if not _name_lines(new_text, name)
+    ]
+
+
+def _scan_texts(root: Path, pending, skip: set[str]) -> list[tuple[str, str]]:
+    """可以拿来扫的正文：待确认改动的新正文 + 磁盘上的文本文件（有界）。
+
+    「先看待确认改动」这一条不能省：改名常常是一轮里连着改好几个文件，
+    磁盘上还是旧内容；只看磁盘，同一轮里刚写下的
+    `from pipeline.fetch import get_rows` 就会从清单上漏掉。
+
+    上界沿用 `LINGER_SCAN_*`（单文件 200k / 合计 400k），一次改名不会把
+    每一步都拖慢。
+    """
     candidates: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    seen: set[str] = set(skip)
     for item in pending.items() if pending is not None else ():
-        if item.path == change.path or item.deleted:
+        if item.path in skip or item.deleted:
             continue
         try:
             text = WorkspaceView(root, pending).read_text(pending.disk_path(item.path))
@@ -293,21 +405,354 @@ def lingering_references(
             candidates.append((relative, text))
     except OSError:  # pragma: no cover - 枚举失败不该毁掉一次成功的写入
         pass
+    return candidates
 
-    hits: list[str] = []
-    for relative, text in candidates:
+
+def _module_path_of(relative: str) -> str:
+    """`pipeline/fetch.py` → `pipeline.fetch`；`pipeline/__init__.py` → `pipeline`。"""
+    pure = PurePosixPath(relative)
+    parts = list(pure.parts)
+    if pure.name == "__init__.py":
+        return ".".join(parts[:-1])
+    return ".".join(parts[:-1] + [pure.stem])
+
+
+def _absolute_module(module: str | None, level: int, relative: str) -> str:
+    """把 `from .fetch import x` 这类相对导入解析成点号绝对名。
+
+    `level` 是点号个数（`ast.ImportFrom.level`）：1 = 当前包（文件所在目录），
+    2 = 上一层。解析不出来（点号越过了项目根）返回空串——那种导入本来
+    就是错的，但判不出指向谁，宁可不报。
+    """
+    if level <= 0:
+        return module or ""
+    base = list(PurePosixPath(relative).parent.parts)
+    drop = level - 1
+    if drop > len(base):
+        return ""
+    keep = base[: len(base) - drop] if drop else base
+    return ".".join([*keep, *([module] if module else [])])
+
+
+def _import_statements(text: str, relative: str) -> list[tuple[int, str, tuple[str, ...]]]:
+    """这份 `.py` 里所有导入：`(行号, 绝对模块名, 导入的名字)`。
+
+    **用 `ast` 而不是文本匹配**：`.py` 里出现 `pipeline/fetch.py` 这种字符串
+    常常正是「断言它不存在」的测试，拿字符串判会把测试报成残留。
+    解析不了就返回空表（判不了不报）。
+    """
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    found: list[tuple[int, str, tuple[str, ...]]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.append((node.lineno, alias.name, ()))
+        elif isinstance(node, ast.ImportFrom):
+            absolute = _absolute_module(node.module, int(node.level or 0), relative)
+            if not absolute:
+                continue
+            found.append(
+                (node.lineno, absolute, tuple(one.name for one in node.names))
+            )
+    return found
+
+
+def _dotted_attributes(text: str) -> list[tuple[int, str]]:
+    """`pipeline.fetch.rows` 这类属性访问的点号全名与行号。
+
+    删掉 `pipeline/fetch.py` 之后，`import pipeline` + `pipeline.fetch.rows()`
+    不会出现在任何 ImportFrom 里——只有把点号链拼起来才看得见。
+    """
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    found: list[tuple[int, str]] = []
+
+    def dotted(node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            head = dotted(node.value)
+            return f"{head}.{node.attr}" if head else ""
+        return ""
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            name = dotted(node)
+            if name:
+                found.append((node.lineno, name))
+    return found
+
+
+def _import_targets(module: str, imported: tuple[str, ...], target: str) -> bool:
+    """这条导入是不是指向被删掉的那个模块 `target`。
+
+    三种形状都算，其余不算：
+    - `import a.b` / `from a.b import x` 里 a.b 就是 target（或它的子模块）；
+    - `from a import b` 里 a 是 target 的**父包**、b 是 target 的末段
+      （删掉 `pipeline/fetch.py` 之后 `from pipeline import fetch` 就是这种）；
+    - `import a.b as c` 同上。
+    """
+    if not module or not target:
+        return False
+    if module == target or module.startswith(target + "."):
+        return True
+    parent, _, last = target.rpartition(".")
+    if parent and module == parent and last in imported:
+        return True
+    return False
+
+
+def _dedupe_hits(hits: Sequence[MechanicalHit]) -> list[MechanicalHit]:
+    """同一 (判据, 文件, 第一行, 名字) 只留一条，顺序即发现顺序。"""
+    out: list[MechanicalHit] = []
+    seen: set[tuple[str, str, int, str]] = set()
+    for hit in hits:
+        mark = (hit.kind, hit.path, hit.line, hit.name)
+        if mark in seen:
+            continue
+        seen.add(mark)
+        out.append(hit)
+    return out
+
+
+def deleted_reference_hits(root: Path, pending, change: PendingChange) -> list[MechanicalHit]:
+    """**删掉的那个文件**还有谁在引用它（本轮补的第二个盲区）。
+
+    两条机械判据：
+
+    1. **按导入/属性引用**（`.py` 走 `ast`）：`import a.b`、`from a.b import x`、
+       `from a import b`、`a.b.rows()`——真的指向这个被删的模块才算。
+    2. **按名字/路径点名**（非 `.py` 文本）：README / docs / 配置里还写着它的
+       顶层符号名、相对路径或点号模块名。
+
+    `.py` 里的纯文本出现**不算**：`assert not Path("pipeline/fetch.py").exists()`
+    正是「确认它删掉了」的写法，报它就是把对的判成错的（§4 零误报）。
+    """
+    names = sorted(set(_TOP_DEF_PATTERN.findall(change.old_text)))
+    module = _module_path_of(change.path)
+    slash = change.path.replace("/", "\\")
+    hits: list[MechanicalHit] = []
+    for relative, text in _scan_texts(root, pending, {change.path}):
+        if relative.endswith(".py"):
+            for line, module_text, imported in _import_statements(text, relative):
+                if _import_targets(module_text, imported, module):
+                    hits.append(
+                        MechanicalHit(
+                            kind=DELETED_REFERENCE_KIND,
+                            path=relative,
+                            line=line,
+                            name=module_text,
+                            detail=f"这个 import 还指向已删除的 {change.path}",
+                        )
+                    )
+            for line, dotted in _dotted_attributes(text):
+                if dotted == module or dotted.startswith(module + "."):
+                    hits.append(
+                        MechanicalHit(
+                            kind=DELETED_REFERENCE_KIND,
+                            path=relative,
+                            line=line,
+                            name=dotted,
+                            detail=f"这个属性访问还指向已删除的 {change.path}",
+                        )
+                    )
+            continue
         for name in names:
             lines = _name_lines(text, name)
-            if not lines:
+            if lines:
+                hits.append(
+                    MechanicalHit(
+                        kind=DELETED_REFERENCE_KIND,
+                        path=relative,
+                        line=lines[0],
+                        name=name,
+                        detail=f"{change.path} 已被删除，这里还在按名字提到它",
+                        lines=tuple(lines),
+                    )
+                )
+        for needle in (change.path, slash, module):
+            lines = _literal_lines(text, needle)
+            if lines:
+                hits.append(
+                    MechanicalHit(
+                        kind=DELETED_REFERENCE_KIND,
+                        path=relative,
+                        line=lines[0],
+                        name=needle,
+                        detail=f"这里点名了已删除的 {change.path}",
+                        lines=tuple(lines),
+                    )
+                )
+    return _dedupe_hits(hits)[:LINGER_MAX_FILES]
+
+
+def lingering_hits(root: Path, pending, change: PendingChange) -> list[MechanicalHit]:
+    """这次改动（改名 / 删除）留下的残留引用，逐条带 `文件:行`。
+
+    三个来源都是机械判据（见本节头部那三个盲区）：
+
+    - **本文件内**：定义没了，而同一份新正文里还有它的**读用处**（不是绑定）
+      ——悬空引用；
+    - **别处**：在新正文里连绑定都没有的名字，在别的文件里还出现
+      （README / docs / 配置 / 字符串也算）；
+    - **删掉的文件**：见 `deleted_reference_hits`。
+    """
+    if change.deleted:
+        return deleted_reference_hits(root, pending, change)
+
+    names = vanished_definitions(change.old_text, change.new_text)
+    if not names:
+        return []
+
+    index = _module_index(change.new_text)
+    bound = index[0] if index is not None else None
+    hits: list[MechanicalHit] = []
+
+    if bound is not None:
+        for name in names:
+            if name in bound:
+                # 新正文里还有它的绑定（兼容别名 / 重新导入）——引用不会坏。
                 continue
-            where = "、".join(str(item) for item in lines[:LINGER_MAX_LINES_PER_FILE])
-            more = (
-                f" 等 {len(lines)} 处"
-                if len(lines) > LINGER_MAX_LINES_PER_FILE
-                else ""
+            lines = sorted(set(index[1].get(name) or []))
+            if lines:
+                hits.append(
+                    MechanicalHit(
+                        kind=STALE_REFERENCE_KIND,
+                        path=change.path,
+                        line=lines[0],
+                        name=name,
+                        detail="本文件内仍在引用它，而它的定义已经没有了",
+                        lines=tuple(lines),
+                    )
+                )
+        elsewhere = [name for name in names if name not in bound]
+    else:  # pragma: no cover - 只在新正文语法坏掉时走到
+        # 判不了绑定关系时退回旧口径：正文里彻底没有它的名字才当残留候选。
+        elsewhere = [name for name in names if not _name_lines(change.new_text, name)]
+
+    if elsewhere:
+        for relative, text in _scan_texts(root, pending, {change.path}):
+            for name in elsewhere:
+                lines = _name_lines(text, name)
+                if not lines:
+                    continue
+                hits.append(
+                    MechanicalHit(
+                        kind=STALE_REFERENCE_KIND,
+                        path=relative,
+                        line=lines[0],
+                        name=name,
+                        detail="这里仍在引用旧名",
+                        lines=tuple(lines),
+                    )
+                )
+    return _dedupe_hits(hits)[:LINGER_MAX_FILES]
+
+
+def lingering_references(
+    root: Path, pending, change: PendingChange
+) -> list[str]:
+    """残留清单（人读的一行一条）。`lingering_hits` 的文本形态。"""
+    hits = lingering_hits(root, pending, change)
+    out: list[str] = []
+    for hit in hits:
+        where = "、".join(
+            str(item) for item in hit.lines[:LINGER_MAX_LINES_PER_FILE]
+        )
+        more = (
+            f" 等 {len(hit.lines)} 处"
+            if len(hit.lines) > LINGER_MAX_LINES_PER_FILE
+            else ""
+        )
+        tail = f"，{hit.detail}" if hit.detail else ""
+        out.append(f"{hit.path} 第 {where} 行{more}（{hit.name}{tail}）")
+    return out
+
+
+def _local_top_segments(root: Path, view: WorkspaceView) -> set[str]:
+    """工作区（含 `src/`）里**第一方**的顶层包/模块名。
+
+    导入闭合只判这些：第三方与标准库装在哪儿不归工作区管，拿工作区去找
+    只会制造误报（§7「不给没有机械判据的东西硬造判据」）。
+    """
+    found: set[str] = set()
+    for base in (root, root / "src"):
+        if not base.is_dir():
+            continue
+        try:
+            for item in base.iterdir():
+                if item.is_dir() and not (LINGER_SKIP_DIRS & set(item.parts)):
+                    found.add(item.name)
+                elif item.suffix == ".py" and item.stem != "__init__":
+                    found.add(item.stem)
+        except OSError:  # pragma: no cover - 枚举失败不算发现
+            continue
+    return found
+
+
+def broken_local_imports(
+    root: Path, pending, changed: Sequence[str] | None = None
+) -> list[MechanicalHit]:
+    """改动过的 `.py` 里，**指向本仓却不存在的模块**的 import（引用闭合）。
+
+    只判「第一方 + 模块文件不存在」这一种形状：判据是「这个点号名在工作区里
+    没有对应的 `.py` / 包」，机械且可证伪。名字级的闭合（`from a import b`
+    里 b 有没有）不在这里判——那种形状由残留检测那条覆盖（被删掉的顶层定义
+    名还会在别的文件里以文本形态出现）。
+
+    `changed` 给了就只判这几个路径；不给就判全部待确认改动。
+    """
+    view = WorkspaceView(root, pending)
+    items = pending.items() if pending is not None else []
+    wanted = set(changed) if changed else None
+    local = _local_top_segments(root, view)
+    hits: list[MechanicalHit] = []
+    for change in items:
+        if change.deleted or Path(change.path).is_absolute():
+            continue
+        if wanted is not None and change.path not in wanted:
+            continue
+        if not change.path.endswith(".py"):
+            continue
+        for line, module_text, _imported in _import_statements(
+            change.new_text, change.path
+        ):
+            if not module_text:
+                continue
+            head = module_text.split(".")[0]
+            if head not in local:
+                continue
+            if _module_exists(root, view, module_text):
+                continue
+            hits.append(
+                MechanicalHit(
+                    kind=BROKEN_IMPORT_KIND,
+                    path=change.path,
+                    line=line,
+                    name=module_text,
+                    detail=f"导入的本地模块 {module_text} 在工作区里不存在",
+                )
             )
-            hits.append(f"{relative} 第 {where} 行{more}（{name}）")
-    return hits[:LINGER_MAX_FILES]
+    return _dedupe_hits(hits)[:LINGER_MAX_FILES]
+
+
+def _module_exists(root: Path, view: WorkspaceView, module_text: str) -> bool:
+    """点号模块名在工作区里有没有对应的文件/包（叠加待确认改动之后）。"""
+    parts = module_text.split(".")
+    for base in (root, root / "src"):
+        for suffix in (parts[:-1] + [parts[-1] + ".py"], [*parts, "__init__.py"]):
+            target = base.joinpath(*suffix)
+            if view.exists(target):
+                return True
+        # PEP 420 命名空间包：没有 `__init__.py` 的目录也是合法的包。
+        if view.is_dir(base.joinpath(*parts)):
+            return True
+    return False
 
 
 def lingering_note(root: Path, pending, change: PendingChange) -> str:
@@ -316,6 +761,11 @@ def lingering_note(root: Path, pending, change: PendingChange) -> str:
     话术里**必须点名那句不许说的话**：模型不是没看到旧名，它是在结论里
     写下了「整个项目里都统一了」。一句「旧名仍有残留」它可能读成背景信息，
     所以这里直接把「不许宣称已统一」写成要求，并给出下一步。
+
+    **末尾那句反向条款是这段文字的组成部分，不许删**（设计稿 §2.5 的
+    「硬规矩（给未来）」+ §8 D12）：这段会进模型可见的上下文，只留
+    「去把引用改对」这半段，它会把「清残留」读成「禁止删除 / 禁止精简」，
+    于是不敢删死代码、不敢合并重复实现。
     """
     hits = lingering_references(root, pending, change)
     if not hits:
@@ -323,11 +773,13 @@ def lingering_note(root: Path, pending, change: PendingChange) -> str:
     return (
         f"⚠ {LINGERING_MARKER}：这次改名里有名字在本文件里已经没有了，"
         "但下面这些地方还在引用它们——旧名与新名混用的项目是坏的"
-        "（导入会直接失败）：\n"
+        "（导入或调用会直接失败）：\n"
         + "".join(f"  - {item}\n" for item in hits)
         + "这些非代码文本（README / docs）与其它文件都要一起改。"
         f"在它们改完之前，**不要说「整个项目里都统一了」**——"
         "那句话现在与事实不符。改完再给结论，或者如实说明还有哪几处没改。\n"
+        "（这一段要的是把引用改对：删除死代码与冗余分支、合并重复实现、"
+        "精简文件、删除已被替代的文件，都是允许的正常编辑。）\n"
     )
 
 

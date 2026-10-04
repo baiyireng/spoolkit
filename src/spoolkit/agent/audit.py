@@ -35,10 +35,21 @@
 判据、严重度与输出行做出来，升级挂点见 `escalate`。
 """
 
+import ast
+import configparser
 import json
 import re
+import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from spoolkit.tools.edit import (
+    BROKEN_IMPORT_KIND,
+    DELETED_REFERENCE_KIND,
+    STALE_REFERENCE_KIND,
+    STALE_REFERENCES_KIND,
+    is_test_path,
+)
 
 # 严重度。只有两档：这一轮要做的是「检测 + 报出来」，
 # 分级放行（T1–T12 那一套）是后面几层的事，这里不假装有。
@@ -47,6 +58,48 @@ INFO = "提示"
 
 #: 事件流里这类发现的 note kind。探针据它统计「高危信号出现几次」。
 AUDIT_KIND = "audit"
+
+#: 「测试被改弱」这一类 note 的 kind。与 audit 分开是因为探针要单独数它
+#: （`tests_weakened` 字段），而混在 audit 里就只能靠读散文认。
+TESTS_WEAKENED_KIND = "tests_weakened"
+
+#: 「完成声明没有证据」这一类 note 的 kind（探针的 `evidence_gaps` 字段）。
+EVIDENCE_GAPS_KIND = "evidence_gaps"
+
+#: 判据名 → 事件流里的 note kind。**探针按 kind 数，不读散文**。
+_WEAKENED_KINDS = frozenset(
+    {
+        "test_deleted",
+        "test_data_deleted",
+        "test_data_changed",
+        "test_removed",
+        "test_skipped",
+        "assert_loosened",
+        "fixture_removed",
+        "conftest_collection_changed",
+        "pytest_addopts_weakened",
+        "pytest_config_changed",
+        "pytest_config_deleted",
+    }
+)
+
+#: 判据名 → 事件流里的 note kind（探针按它数，见 `note_kind`）。
+_NOTE_KIND_BY_KIND = {
+    **{kind: TESTS_WEAKENED_KIND for kind in _WEAKENED_KINDS},
+    # 残留引用与「删掉的文件还有人引用」是同一类读数（`stale_references`）。
+    STALE_REFERENCE_KIND: STALE_REFERENCES_KIND,
+    DELETED_REFERENCE_KIND: STALE_REFERENCES_KIND,
+    BROKEN_IMPORT_KIND: BROKEN_IMPORT_KIND,
+}
+
+
+def note_kind(kind: str, default: str = AUDIT_KIND) -> str:
+    """这条发现该用哪个 note kind 发出去。
+
+    **探针按这个 kind 数**（`stale_references` / `tests_weakened` /
+    `broken_import`）——映射写在一处，事件流与探针字段不会各认一套。
+    """
+    return _NOTE_KIND_BY_KIND.get(kind, default)
 
 #: 高严重度发现要单独顶出来一行。它同时是**升级挂点**的形状：
 #: 以后接「先请示后落盘 / 阻断」时，拦的就是这一行对应的发现。
@@ -63,10 +116,21 @@ class Finding:
     detail: str = ""   # 证据（谁、差了多少、哪个文件）
     escalate: bool = False  # 是否已到「该动硬手段」的门槛（本轮只挂点）
     scope: str = ""    # 这条发现是在哪个验证范围里得出的（回退那条要它）
+    # **每条发现都要能指到 `文件:行` 与判据**（设计稿 §4：指不到就不上报）。
+    # 老判据（回退 / 中间态 / 迎合测试）按验证范围给，路径留空即可。
+    path: str = ""
+    line: int = 0
+
+    @property
+    def where(self) -> str:
+        if not self.path:
+            return ""
+        return f"{self.path}:{self.line}" if self.line else self.path
 
     def render(self) -> str:
         head = f"{ESCALATION_MARKER}" if self.severity == HIGH else "·"
-        line = f"{head} {self.summary}"
+        spot = f"{self.where} " if self.where else ""
+        line = f"{head} {spot}{self.summary}"
         return f"{line}（{self.detail}）" if self.detail else line
 
 
@@ -433,3 +497,430 @@ def audit(
             if tamper is not None:
                 found.append(tamper)
     return Audit(tuple(found))
+
+
+# ---- L1.4 测试被改弱（P0：**只报不阻断**）-----------------------------------
+#
+# 现有防线是「按原测试判定」（`verify.exec._restore_originals` + 试跑副本），
+# 它挡得住两种形状：把断言改成 `assert True`、删掉测试文件。它挡不住的是
+# **不在测试文件判定口径里**的那些（设计稿 §1.7 G3）：
+#
+#   - `conftest.py`（删 fixture / 塞 collect_ignore）；
+#   - `pyproject.toml` / `pytest.ini` / `tox.ini` / `setup.cfg` 里的
+#     `addopts`（`-k` / `--ignore` / `--deselect` …）；
+#   - 非 `.py` 的测试数据与 golden 文件；
+#   - 测试文件本身被削弱：删用例、加 skip/xfail、放宽断言。
+#
+# 判据全部是**静态、可证伪**的：删了什么、少了几条断言、新增了哪个开关，
+# 逐条都能指到 `文件:行`。这一层不做判断之外的处置——**不阻断、不落盘干预、
+# 不改 `finished`**（那是 P1 的事）。
+TEST_CONFIG_NAMES = ("pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg")
+
+#: 只在这些键上判「配置被改」：它们直接决定「哪些测试会被收集」。
+_NARROWING_KEYS = (
+    "testpaths",
+    "norecursedirs",
+    "python_files",
+    "python_classes",
+    "python_functions",
+)
+
+#: 新增即视为「跳过了一批测试」的开关。判据是**新增**，不是出现。
+_WEAKENING_SWITCHES = (
+    "-k",
+    "-m",
+    "--ignore",
+    "--deselect",
+    "--lf",
+    "--last-failed",
+    "--ff",
+    "--failed-first",
+    "-p no:",
+)
+
+#: conftest 里新增这些构造 = 改掉了收集规则。
+_COLLECT_HOOKS = (
+    "collect_ignore",
+    "pytest_collection_modifyitems",
+    "pytest_ignore_collect",
+)
+
+#: 跳过类写法。`xfail` 也算：把一个用例标成「预期失败」就是把验收放宽。
+_SKIP_PATTERNS = (
+    r"pytest\.mark\.skip\b",
+    r"pytest\.mark\.skipif\b",
+    r"pytest\.mark\.xfail\b",
+    r"pytest\.skip\(",
+    r"pytest\.xfail\(",
+    r"unittest\.skip\b",
+)
+
+_TEST_DEF_PATTERN = re.compile(
+    r"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+(test[A-Za-z0-9_]*)[ \t]*\("
+)
+_FIXTURE_DEF_PATTERN = re.compile(
+    r"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+([A-Za-z_]\w*)[ \t]*\("
+)
+
+#: golden 类文件的**路径段**。刻意要求整段相等（而不是「名字里含 golden」）：
+#: `docs/expected-output.md` 不是测试数据，把它报成「测试数据被改」就是误报。
+_GOLDEN_SEGMENTS = frozenset(
+    {"golden", "goldens", "expected", "snapshot", "snapshots"}
+)
+
+_TEST_DIR_NAMES = ("test", "tests")
+
+
+def _golden_like(pure: PurePosixPath) -> bool:
+    """路径里有没有一段是 golden/expected/snapshot（含 `*.golden` / `*.snap`）。"""
+    parts = [part.lower() for part in pure.parts[:-1]] + [pure.stem.lower()]
+    return any(
+        part in _GOLDEN_SEGMENTS or part.endswith((".golden", ".snap"))
+        for part in parts
+    )
+
+
+def is_test_related(path: str) -> bool:
+    """这个路径是不是「测试这一侧」的东西。
+
+    比 `is_test_path` 宽：后者只认 `.py` 且只看 `test_*` / `tests/` 目录，
+    于是 `conftest.py`、pytest 配置、测试数据与 golden 文件全落在口径之外
+    ——那正是 G3 说「挡不住」的那一批。
+    """
+    pure = PurePosixPath(str(path).replace("\\", "/"))
+    if is_test_path(str(path)):
+        return True
+    if pure.name == "conftest.py" or pure.name in TEST_CONFIG_NAMES:
+        return True
+    if any(part.lower() in _TEST_DIR_NAMES for part in pure.parts[:-1]):
+        return True
+    return pure.suffix != ".py" and _golden_like(pure)
+
+
+def _def_line_map(text: str, pattern: re.Pattern[str]) -> dict[str, int]:
+    """`名字 → 第一次定义的行号`（1 起）。"""
+    out: dict[str, int] = {}
+    for match in pattern.finditer(text):
+        out.setdefault(match.group(1), text.count("\n", 0, match.start()) + 1)
+    return out
+
+
+def _assert_lines(text: str) -> list[int]:
+    """这份正文里的 `assert` 语句行号（`ast` 判；解析不了退回行首写法）。"""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return [
+            index
+            for index, line in enumerate(text.splitlines(), start=1)
+            if line.strip().startswith("assert ")
+        ]
+    return sorted(
+        {node.lineno for node in ast.walk(tree) if isinstance(node, ast.Assert)}
+    )
+
+
+def _pytest_options(text: str, name: str) -> dict[str, str] | None:
+    """这份 pytest 配置里的键值；读不出来返回 None（**判不了不报**）。"""
+    if name == "pyproject.toml":
+        try:
+            data = tomllib.loads(text)
+        except (tomllib.TOMLDecodeError, ValueError):
+            return None
+        section = data.get("tool", {})
+        section = section.get("pytest", {}) if isinstance(section, dict) else {}
+        section = section.get("ini_options", {}) if isinstance(section, dict) else {}
+        if not isinstance(section, dict):
+            return None
+        out: dict[str, str] = {}
+        for key, value in section.items():
+            if isinstance(value, (str, int, bool)):
+                out[str(key)] = str(value)
+            elif isinstance(value, list):
+                out[str(key)] = " ".join(str(one) for one in value)
+        return out
+    parser = configparser.RawConfigParser(strict=False)
+    try:
+        parser.read_string(text)
+    except (configparser.Error, ValueError):
+        return None
+    for section in ("pytest", "tool:pytest"):
+        if parser.has_section(section):
+            return {key: str(value) for key, value in parser.items(section)}
+    return {}
+
+
+def _added_switches(before: str, after: str) -> list[str]:
+    """`addopts` 里**新增**的跳过类开关。"""
+    old = set(str(before or "").split())
+    out: list[str] = []
+    for token in str(after or "").split():
+        if token in old:
+            continue
+        if any(
+            token == switch or token.startswith(switch)
+            for switch in _WEAKENING_SWITCHES
+        ):
+            out.append(token)
+    return out
+
+
+def _line_of(text: str, needle: str) -> int:
+    """`needle` 第一次出现的行号；找不到返回 0。"""
+    position = text.find(needle)
+    if position < 0:
+        return 0
+    return text.count("\n", 0, position) + 1
+
+
+def tests_weakened(
+    *, path: str, before: str, after: str, deleted: bool = False
+) -> list[Finding]:
+    """这次改动把测试改弱了没有；逐条给 `文件:行`。
+
+    **只报不改**：返回的发现进事件流与收尾报告，不参与落盘与 `finished`
+    （P0 的纪律）。路径不是「测试这一侧」的东西时返回空表。
+    """
+    if not is_test_related(path):
+        return []
+    pure = PurePosixPath(str(path).replace("\\", "/"))
+    found: list[Finding] = []
+
+    def add(kind: str, severity: str, summary: str, detail: str, line: int) -> None:
+        found.append(
+            Finding(
+                kind=kind,
+                severity=severity,
+                summary=summary,
+                detail=detail,
+                path=path,
+                line=line,
+            )
+        )
+
+    if deleted:
+        if pure.name in TEST_CONFIG_NAMES:
+            add(
+                "pytest_config_deleted",
+                INFO,
+                f"pytest 配置 {path} 被删了",
+                "测试怎么跑是由这份配置决定的，删掉它等于换了一套验收口径。",
+                1,
+            )
+        elif pure.suffix == ".py":
+            add(
+                "test_deleted",
+                HIGH,
+                f"测试文件 {path} 被删了",
+                "删除测试文件就是把这条验收标准撤掉（验证层还会按原始内容判定，"
+                "但报告里必须看得见）。",
+                1,
+            )
+        else:
+            add(
+                "test_data_deleted",
+                HIGH,
+                f"测试数据 {path} 被删了",
+                "这类文件是验收标准的一部分，改动它等于改了判据。",
+                1,
+            )
+        return found
+
+    if pure.name in TEST_CONFIG_NAMES:
+        old = _pytest_options(before, pure.name)
+        new = _pytest_options(after, pure.name)
+        if old is None or new is None:
+            return []
+        added = _added_switches(old.get("addopts", ""), new.get("addopts", ""))
+        if added:
+            flags = "、".join(added)
+            add(
+                "pytest_addopts_weakened",
+                HIGH,
+                f"pytest 配置新增了跳过类开关：{flags}",
+                f"addopts 现在会缩小或跳过测试集合（{path}："
+                f"{old.get('addopts', '')!r} → {new.get('addopts', '')!r}）。",
+                _line_of(after, "addopts"),
+            )
+        for key in _NARROWING_KEYS:
+            if key in old and old[key] != new.get(key):
+                add(
+                    "pytest_config_changed",
+                    INFO,
+                    f"pytest 配置的 {key} 被改了",
+                    f"{old[key]!r} → {new.get(key)!r}（这决定哪些测试会被收集）。",
+                    _line_of(after, key),
+                )
+        return found
+
+    if not pure.suffix == ".py":
+        add(
+            "test_data_changed",
+            INFO,
+            f"测试数据 {path} 被改了",
+            "非代码的测试数据/golden 文件被改：判据本身变了，不是实现变好。",
+            1,
+        )
+        return found
+
+    # ---- `.py`：删用例 / 加 skip·xfail / 放宽断言 ---------------------------
+    before_tests = _def_line_map(before, _TEST_DEF_PATTERN)
+    after_tests = _def_line_map(after, _TEST_DEF_PATTERN)
+    for name in sorted(set(before_tests) - set(after_tests)):
+        add(
+            "test_removed",
+            HIGH,
+            f"测试用例 {name} 没了",
+            f"改动前它在第 {before_tests[name]} 行；删用例等于撤掉验收标准。",
+            before_tests[name],
+        )
+    if pure.name == "conftest.py":
+        before_fixtures = _def_line_map(before, _FIXTURE_DEF_PATTERN)
+        after_fixtures = _def_line_map(after, _FIXTURE_DEF_PATTERN)
+        for name in sorted(set(before_fixtures) - set(after_fixtures)):
+            add(
+                "fixture_removed",
+                HIGH,
+                f"conftest 里的 fixture {name} 没了",
+                f"改动前它在第 {before_fixtures[name]} 行；删 fixture 会让一批"
+                "用例改走别的分支或直接报错。",
+                before_fixtures[name],
+            )
+        for hook in _COLLECT_HOOKS:
+            if hook in after and hook not in before:
+                add(
+                    "conftest_collection_changed",
+                    HIGH,
+                    f"conftest 新增了收集期构造 {hook}",
+                    "它在收集阶段决定跑哪些用例，是「跳过测试」的另一种写法。",
+                    _line_of(after, hook),
+                )
+    for pattern in _SKIP_PATTERNS:
+        old_hits = len(re.findall(pattern, before))
+        new_hits = [
+            after.count("\n", 0, match.start()) + 1
+            for match in re.finditer(pattern, after)
+        ]
+        if len(new_hits) <= old_hits:
+            continue
+        flag = pattern.replace("\\", "")
+        add(
+            "test_skipped",
+            HIGH,
+            f"新增了跳过/xfail 写法（{flag}）",
+            f"改动前 {old_hits} 处、现在 {len(new_hits)} 处——测试被跳过就等于"
+            "没跑。",
+            new_hits[0],
+        )
+    old_asserts = _assert_lines(before)
+    new_asserts = _assert_lines(after)
+    if len(new_asserts) < len(old_asserts):
+        gone = [
+            line
+            for line in old_asserts
+            if before.splitlines()[line - 1].strip()
+            not in {
+                one.strip()
+                for one in after.splitlines()
+            }
+        ]
+        add(
+            "assert_loosened",
+            INFO,
+            f"断言少了 {len(old_asserts) - len(new_asserts)} 条",
+            f"改动前 {len(old_asserts)} 条、现在 {len(new_asserts)} 条"
+            + (f"；第 {gone[0]} 行那条现在这个文件里找不到了" if gone else ""),
+            gone[0] if gone else (new_asserts[0] if new_asserts else 1),
+        )
+    return found
+
+
+# ---- L4 最小证据账本（P0：**只在报告层降级**）-------------------------------
+#
+# 「完成」是一句**声明**，不是事实。这一层只做一件很窄的事：把声明与
+# 「跑过哪条检查、结果如何」对上；一条有结论的检查都没挂上时，那句完成
+# 在收尾报告里降级为「未验证」。
+#
+# **它不改 `finished`、不改落盘判定、不新增请示流**——那些是 P1 的事。
+PASS = "通过"
+FAIL = "失败"
+CANNOT = "查不了"
+NOT_RUN = "没跑"
+
+
+@dataclass(frozen=True)
+class LedgerEntry:
+    """一条「声明 ← 检查 ← 结果 ← 证据」。"""
+
+    claim: str
+    check: str
+    result: str
+    evidence: str = ""
+    content_key: str = ""
+
+    def render(self) -> str:
+        spot = f"（{self.evidence}）" if self.evidence else ""
+        return f"{self.check} → {self.result}{spot}"
+
+
+@dataclass
+class ReviewLedger:
+    """本次运行的证据账本。"""
+
+    entries: list[LedgerEntry] = field(default_factory=list)
+    claims: list[str] = field(default_factory=list)
+
+    def claim(self, text: str) -> None:
+        if text and text not in self.claims:
+            self.claims.append(text)
+
+    def record(
+        self,
+        claim: str,
+        check: str,
+        result: str,
+        evidence: str = "",
+        content_key: str = "",
+    ) -> None:
+        self.claim(claim)
+        self.entries.append(
+            LedgerEntry(
+                claim=claim,
+                check=check,
+                result=result,
+                evidence=evidence,
+                content_key=content_key,
+            )
+        )
+
+    def evidence_for(self, claim: str) -> list[LedgerEntry]:
+        """这条声明挂上的**有结论**的证据（「查不了」不算证据）。"""
+        return [
+            item
+            for item in self.entries
+            if item.claim == claim and item.result in (PASS, FAIL)
+        ]
+
+    def gaps(self) -> list[str]:
+        """没有证据的完成声明。"""
+        return [claim for claim in self.claims if not self.evidence_for(claim)]
+
+    def render(self) -> str:
+        return "；".join(item.render() for item in self.entries)
+
+    def downgrade_note(self) -> str:
+        """没有证据的完成声明 → 一句话降级（**只降级这句话**）。"""
+        gaps = self.gaps()
+        if not gaps:
+            return ""
+        why = "；".join(
+            item.render()
+            for item in self.entries
+            if item.result in (CANNOT, NOT_RUN)
+        ) or "这次运行没有挂上任何一条能作证的检查"
+        subject = "、".join(f"「{claim}」" for claim in gaps)
+        return (
+            f"⚠ 证据账本：{subject} 没有可核对的证据（{why}）"
+            "——按规矩在报告里**降级为「未验证」**"
+            "（本轮只降级这句话，不拦成果、不改落盘判定）。"
+        )

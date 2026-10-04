@@ -96,6 +96,18 @@ REQUIRED_RECORD_KEYS = (
     "file_changed",
     "check_ok",
     "notes",
+    # ---- 自动审查层 P0：只读数、不改结局的五个字段（设计稿 §6 字段表）--------
+    #
+    # 五个都从**事件流里的机械判据**读出来，不看模型的总结文字：
+    #   `stale_references` / `tests_weakened` / `review_findings` / `evidence_gaps`
+    # 是审查层发出来的 note 的条数；`false_completion` 由 `final_ok` 与
+    # `check_ok` 派生（自认完成而验收红）。P0 **不许**因为多了这些字段而改变
+    # `final_ok` / `check_ok` / 落盘——所以 `false_completion` 应与基线一致。
+    "stale_references",
+    "tests_weakened",
+    "review_findings",
+    "false_completion",
+    "evidence_gaps",
     # ---- 带扰动的重复：这一次是「第几遍、用什么设置、说哪句话」 ----
     # 没有这四个字段，results.jsonl 就分不出「同一设置下的波动」和
     # 「不同设置之间的差异」，聚合只能靠猜。
@@ -132,6 +144,21 @@ READ_TOOLS = frozenset(
 SUPERVISOR_PREFIX = "督导："
 GUARD_REFRESH_KIND = "guard_refresh"
 FACT_CONFLICT_KIND = "supervisor_fact_conflict"
+
+# ---- 自动审查层 P0：事件流里的审查 note kind ---------------------------------
+#
+# 判据名在 `spoolkit.agent.audit` / `spoolkit.tools.edit` 里定义，这里只按
+# kind 计数（**不读散文**）。`stale_references` 收的是残留引用与「删掉的文件
+# 还有人引用」两类；`broken_import` 是「导入的本地模块不存在」。
+AUDIT_KIND = "audit"
+STALE_REFERENCES_KIND = "stale_references"
+BROKEN_IMPORT_KIND = "broken_import"
+TESTS_WEAKENED_KIND = "tests_weakened"
+EVIDENCE_GAPS_KIND = "evidence_gaps"
+#: 算「审查发现条数」的那几类 note（`evidence_gaps` 是账本读数，不算发现）。
+REVIEW_NOTE_KINDS = frozenset(
+    {AUDIT_KIND, STALE_REFERENCES_KIND, BROKEN_IMPORT_KIND, TESTS_WEAKENED_KIND}
+)
 
 POLICY_RELATIVE = Path(".agent") / "policy.json"
 
@@ -640,6 +667,14 @@ def parse_events(text):
         "guard_refreshes": 0,
         "supervisor_interventions": 0,
         "supervisor_false_claims": 0,
+        # 自动审查层 P0 的读数（见 §6 字段表）。全部按事件流的 note kind 数，
+        # 不看模型的总结文字。
+        "stale_references": 0,
+        "broken_imports": 0,
+        "tests_weakened": 0,
+        "review_findings": 0,
+        "review_findings_by_kind": {},
+        "evidence_gaps": 0,
         "verifier_ran": 0,
         "verifier_auto_ran": 0,
         "verifier_final_ran": 0,
@@ -711,6 +746,24 @@ def parse_events(text):
                 counters["guard_refreshes"] += 1
             if note_kind == FACT_CONFLICT_KIND:
                 counters["supervisor_false_claims"] += 1
+            if note_kind in REVIEW_NOTE_KINDS:
+                # 一条 note 就是一条发现（审查层按 (判据, 文件, 行, 摘要) 去过重，
+                # 所以同一条不会在多个验证点被重复计一遍）。
+                counters["review_findings"] += 1
+                by_kind = counters["review_findings_by_kind"]
+                by_kind[note_kind] = by_kind.get(note_kind, 0) + 1
+                if note_kind == STALE_REFERENCES_KIND:
+                    counters["stale_references"] += 1
+                elif note_kind == TESTS_WEAKENED_KIND:
+                    counters["tests_weakened"] += 1
+                elif note_kind == BROKEN_IMPORT_KIND:
+                    counters["broken_imports"] += 1
+            if note_kind == EVIDENCE_GAPS_KIND:
+                # 账本读数：一次运行里「没有证据的完成声明」条数（取最大值——
+                # 重复发同一句话不该把它累加成一堆）。
+                counters["evidence_gaps"] = max(
+                    counters["evidence_gaps"], int(payload.get("count") or 1)
+                )
             if note_text.startswith(SUPERVISOR_PREFIX):
                 counters["supervisor_interventions"] += 1
         elif kind == "usage":
@@ -840,6 +893,12 @@ def skipped_record(probe, options, repeat_index, repeat_total, budget, elapsed):
         "read_blocks": 0,
         "supervisor_interventions": 0,
         "supervisor_false_claims": 0,
+        # 跳过的那一次什么都没跑，读数是 0（字段仍要齐：聚合与对照都按它取）。
+        "stale_references": 0,
+        "tests_weakened": 0,
+        "review_findings": 0,
+        "false_completion": False,
+        "evidence_gaps": 0,
         "file_changed": {"changed": False},
         "exit_code": None,
         "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -950,6 +1009,13 @@ def run_one(
         "read_blocks": counters["read_blocks"],
         "supervisor_interventions": counters["supervisor_interventions"],
         "supervisor_false_claims": counters["supervisor_false_claims"],
+        # 自动审查层 P0 的五个必填读数（判据口径见 design 的 §6 字段表）：
+        # `false_completion` 是**派生**的（自认完成 + 验收红），其余四个来自事件流。
+        "stale_references": counters["stale_references"],
+        "tests_weakened": counters["tests_weakened"],
+        "review_findings": counters["review_findings"],
+        "false_completion": bool(counters["final_ok"] and not check_ok),
+        "evidence_gaps": counters["evidence_gaps"],
         "file_changed": {
             "seed_digest": digest(seed_before),
             "result_digest": digest(result_files),
@@ -979,6 +1045,10 @@ def run_one(
         "verifier_final_ran": counters["verifier_final_ran"],
         "verifier_passed": counters["verifier_passed"],
         "verifier_failed": counters["verifier_failed"],
+        # 非必填的细分读数：`review_findings` 按 kind 拆开，加一条「导入的本地
+        # 模块不存在」。报告要能回答「是哪一类在刷屏」。
+        "review_findings_by_kind": dict(counters["review_findings_by_kind"]),
+        "broken_imports": counters["broken_imports"],
         "step_events": counters["step_events"],
         "event_lines": counters["event_lines"],
         "plain_lines": counters["plain_lines"],
@@ -1024,6 +1094,12 @@ def evaluate_bounds(probe, record):
             "max_supervisor_false_claims",
             "督导说错事实的次数超上限",
         ),
+        # 自动审查层 P0 的读数也走下限（清单里没写这几条时它们只是被记录）：
+        # 判据话术与阈值由 P1 标定，P0 只把旋钮接上。
+        ("stale_references", "max_stale_references", "残留引用处数超上限"),
+        ("tests_weakened", "max_tests_weakened", "测试被改弱的条数超上限"),
+        ("evidence_gaps", "max_evidence_gaps", "没有证据的完成声明条数超上限"),
+        ("review_findings", "max_review_findings", "审查发现条数超上限"),
     ):
         if expect_key not in expect:
             continue
@@ -1075,6 +1151,15 @@ def build_notes(record, probe):
         parts.append(f"督导介入 {record['supervisor_interventions']} 次")
     if record["supervisor_false_claims"]:
         parts.append(f"督导说错事实 {record['supervisor_false_claims']} 次")
+    # 自动审查层 P0 的读数（有才说：全是 0 时加四句噪声，没人会读）。
+    if record.get("stale_references"):
+        parts.append(f"残留引用 {record['stale_references']} 处")
+    if record.get("tests_weakened"):
+        parts.append(f"测试被改弱 {record['tests_weakened']} 条")
+    if record.get("evidence_gaps"):
+        parts.append(f"无证据的完成声明 {record['evidence_gaps']} 条")
+    if record.get("false_completion"):
+        parts.append("假完成（自认完成而验收红）")
     if not record["file_changed"]["changed"]:
         parts.append("一个文件都没改")
     if record["bounds_failed"]:

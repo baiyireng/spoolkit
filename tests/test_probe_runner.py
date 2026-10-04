@@ -512,3 +512,117 @@ def test_汇总表把一条跳过也画得出来():
     table = probe_runner.render_table([record])
     assert "跳过" in table
     assert "x" in table
+
+
+# --------------------------------------------------------------------------
+# 自动审查层 P0 的五个读数（设计稿 §6 字段表）
+# --------------------------------------------------------------------------
+
+
+def test_审查读数从事件流里数得出来():
+    """五个字段全部按 note 的 kind 数，不看模型的总结文字。"""
+    text = "\n".join(
+        [
+            json.dumps({"type": "note", "text": "中间态", "kind": "audit"}, ensure_ascii=False),
+            json.dumps({"type": "note", "text": "残留 1", "kind": "stale_references"}, ensure_ascii=False),
+            json.dumps({"type": "note", "text": "残留 2", "kind": "stale_references"}, ensure_ascii=False),
+            json.dumps({"type": "note", "text": "删了用例", "kind": "tests_weakened"}, ensure_ascii=False),
+            json.dumps({"type": "note", "text": "导入不存在", "kind": "broken_import"}, ensure_ascii=False),
+            json.dumps(
+                {"type": "note", "text": "账本：整轮无证据", "kind": "evidence_gaps", "count": 1},
+                ensure_ascii=False,
+            ),
+            json.dumps({"type": "final", "ok": True, "text": "做完了", "settled": "auto"}, ensure_ascii=False),
+        ]
+    )
+
+    counters = probe_runner.parse_events(text)
+
+    assert counters["stale_references"] == 2
+    assert counters["tests_weakened"] == 1
+    assert counters["broken_imports"] == 1
+    assert counters["evidence_gaps"] == 1
+    # 审查发现 = audit + 残留 + 改弱 + 导入闭合四类 note（账本是读数，不算发现）。
+    assert counters["review_findings"] == 5
+    assert counters["review_findings_by_kind"]["stale_references"] == 2
+
+
+def test_没改弱没残留时读数为零():
+    """零误报的反例：没有这些事的运行必须读成 0。"""
+    counters = probe_runner.parse_events(CANNED_EVENTS)
+
+    assert counters["stale_references"] == 0
+    assert counters["tests_weakened"] == 0
+    assert counters["broken_imports"] == 0
+    assert counters["evidence_gaps"] == 0
+
+
+def test_记录里五个审查字段齐全且假完成由两个结局派生(tmp_path):
+    probe = probe_by_id("merge-html")
+    captured = []
+    options = probe_runner.resolve_options(
+        MANIFEST,
+        probe_runner.build_parser().parse_args(
+            ["--probe", "merge-html", "--root", str(tmp_path)]
+        ),
+    )
+    record = probe_runner.run_one(
+        probe,
+        MANIFEST,
+        options,
+        tmp_path,
+        runner=fake_runner_factory(captured),
+        python=sys.executable,
+    )
+
+    for key in (
+        "stale_references",
+        "tests_weakened",
+        "review_findings",
+        "false_completion",
+        "evidence_gaps",
+    ):
+        assert key in probe_runner.REQUIRED_RECORD_KEYS, f"{key} 必须是必填字段"
+        assert key in record, f"记录缺字段 {key}"
+    # 假 runner：自认完成（final_ok=True）而验收红（check_ok=False）→ 假完成。
+    assert record["final_ok"] is True and record["check_ok"] is False
+    assert record["false_completion"] is True
+    # P0 的纪律：这几个字段是**读数**，不许反过来改结局。
+    assert record["stale_references"] == 0
+    assert record["tests_weakened"] == 0
+
+
+def test_审查读数的上限旋钮接上了():
+    probe = probe_by_id("fix-bug")
+    base = {
+        "repeat_blocks": 0,
+        "read_blocks": 0,
+        "supervisor_false_claims": 0,
+        "stale_references": 2,
+        "tests_weakened": 1,
+        "evidence_gaps": 1,
+        "review_findings": 3,
+        "timed_out": False,
+        "spawn_error": "",
+        "seed_unchanged": True,
+        "policy_file_ok": True,
+        "guards_ok": True,
+        "guard_failures": [],
+        "policy_in_run": "auto",
+    }
+    limited = dict(
+        probe,
+        expect={
+            "max_stale_references": 1,
+            "max_tests_weakened": 0,
+            "max_evidence_gaps": 0,
+            "max_review_findings": 2,
+        },
+    )
+
+    failed = probe_runner.evaluate_bounds(limited, base)
+
+    assert len(failed) == 4, failed
+    assert all("超上限" in item for item in failed)
+    # 清单里没写这几条时它们只是被记录，不参与判定。
+    assert probe_runner.evaluate_bounds(probe, dict(base)) == []

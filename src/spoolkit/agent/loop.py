@@ -18,9 +18,19 @@ from spoolkit.agent.audit import (
     AUDIT_KIND,
     Audit,
     AuditLog,
+    CANNOT,
+    EVIDENCE_GAPS_KIND,
+    FAIL,
+    Finding,
+    HIGH,
+    NOT_RUN,
+    PASS,
+    ReviewLedger,
     audit,
     boundary_write,
     load_protected,
+    note_kind,
+    tests_weakened,
 )
 from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
@@ -50,12 +60,18 @@ from spoolkit.memory.transcript import set_run_origin
 from spoolkit.paths import resolve_readable
 from spoolkit.prompt_sanitize import for_prompt
 from spoolkit.tools.edit import (
+    BROKEN_IMPORT_KIND,
     CONFIRM_TOOL,
+    DELETED_REFERENCE_KIND,
     DELETE_TOOL,
     NEXT_STEP_MARKER,
     REFUSAL_MARKER,
     STAGE_MARKER,
+    STALE_REFERENCE_KIND,
+    STALE_REFERENCES_KIND,
+    broken_local_imports,
     is_test_path,
+    lingering_hits,
     lingering_note,
 )
 from spoolkit.tools.registry import ToolRegistry
@@ -234,6 +250,34 @@ def _flat_line(text: str) -> str:
 def _is_blocked(result: ToolResult) -> bool:
     """这次失败是「被拦下没执行」，而不是「执行了但失败」。"""
     return (not result.ok) and result.content.startswith(_BLOCKED_MARKS)
+
+
+#: 机械发现的判据名 → 人读的一句话。判据本身在 `tools/edit.py`，
+#: 这里只负责把它翻成收尾报告里那一行（**每条都带 `文件:行`**）。
+_HIT_SUMMARY = {
+    STALE_REFERENCE_KIND: "改名后旧名仍有残留",
+    DELETED_REFERENCE_KIND: "删掉的文件/符号仍被引用",
+    BROKEN_IMPORT_KIND: "导入的本地模块不存在",
+}
+
+
+def _hit_finding(hit) -> Finding:
+    """把一条机械命中翻成发现：`文件:行` 落在 `detail`，判据名落在 `kind`。
+
+    高严重度**不阻断**（P0 的纪律）：严重度只用于「收尾报告里顶一行」，
+    阻断语义是 P1 的事。
+    """
+    where = hit.where()
+    detail = f"{hit.name} @ {where}——{hit.detail}" if hit.detail else f"{hit.name} @ {where}"
+    return Finding(
+        kind=hit.kind,
+        severity=HIGH,
+        summary=_HIT_SUMMARY.get(hit.kind, hit.kind),
+        detail=detail,
+        escalate=True,
+        path=hit.path,
+        line=hit.line,
+    )
 
 
 def still_exploring(look_window: list[bool]) -> bool:
@@ -738,6 +782,12 @@ class AgentLoop:
         # 最近一次验证**新加**的那几条发现。事件流按它发 note，
         # 而不是把整本账每步重发一遍（重发等于给上下文和日志灌噪声）。
         self._last_findings: tuple = ()
+        # 机械发现（残留 / 引用闭合 / 测试改弱）已经发过哪些：同一条在每个验证点
+        # 会被重新算出来，不去重就会把日志灌满（设计稿 §4 的噪声控制）。
+        self._reviewed_notes: set[tuple] = set()
+        # 本次运行里「没有证据的完成声明」条数（探针的 `evidence_gaps` 字段）。
+        # **它只进报告与事件流，不改 `finished`**（P0 的纪律）。
+        self._evidence_gaps: int = 0
         # 本次运行里每个改动文件**磁盘上的原始行数**。判「迎合测试」要用它：
         # 行数是可证伪的证据，比措辞可靠（测试失败的同一步，业务代码变短了）。
         self._base_lines: dict[str, int] = {}
@@ -898,6 +948,10 @@ class AgentLoop:
         self._seen_at_revision.clear()
         self._read_fingerprints.clear()
         self._refreshes_used = 0
+        # 机械审查的去重集合与证据缺口计数也是**本次运行**的：上一次 run() 发过
+        # 的那几条不该把这一次的同类发现压掉。
+        self._reviewed_notes.clear()
+        self._evidence_gaps = 0
         # 上一轮诊断回来的报告：一开局就摆到面前，模型不用记得去查。
         if self.incoming is not None:
             report = self.incoming()
@@ -1654,6 +1708,10 @@ class AgentLoop:
                                 "kind": AUDIT_KIND,
                             },
                         )
+                    # L1 机械一致性（残留引用 / 删除引用 / 测试改弱）：与验证同一个
+                    # 出口、同一批改动，但**只发事件流与报告**，不进模型上下文，
+                    # 也不阻断（P0）。`interim=True`：引用闭合留到收尾判终态。
+                    self._mechanical_review(scope_paths, interim=True)
                     # 必须紧跟在那次改动后面，不能塞进 system 区段。
                     # 区段排在整段历史之前，模型会先读到「测试失败」、
                     # 再读到自己刚才做的事——因果顺序反了，它接不上。
@@ -1875,6 +1933,7 @@ class AgentLoop:
         *,
         passed: bool | None,
         body: str,
+        ledger: str = "",
     ) -> str:
         """拼收尾报告。**验证未通过时把结论与撤销命令挪到最前**。
 
@@ -1884,6 +1943,10 @@ class AgentLoop:
 
         所以未通过时：**结论 + 失败要点 + 撤销命令在最前**，模型那段（常常带着
         diff）退到其后；通过时顺序不动，只在末尾补上撤销命令。
+
+        `ledger` 是证据账本的降级那一句（没有缺口时为空串）：它紧跟最终验证
+        结论，因为「通过 / 未通过 / 未验证」是同一句话的三个取值（P0 里第三
+        个取值只写在报告上，不改 `finished`）。
         """
         undo = self._undo_command()
         head = ""
@@ -1894,7 +1957,10 @@ class AgentLoop:
                 + (f"撤销这一轮（可直接复制）：{undo}\n" if undo else "")
                 + "（上面是结论与退路，下面才是本次运行的结论与文件状态。）\n"
             )
-        tail = f"{final}\n本次运行共落成 {len(changed)} 处改动。{facts} {outcome}{boundary}"
+        tail = f"{final}\n本次运行共落成 {len(changed)} 处改动。{facts} {outcome}"
+        if ledger:
+            tail += f"\n{ledger}"
+        tail += boundary
         if undo and passed is not False:
             tail += f"\n撤销这一轮（可直接复制）：{undo}"
         return head + tail
@@ -1922,6 +1988,9 @@ class AgentLoop:
         if not changed:
             return final
         facts = self._file_state_line(changed)
+        # L1 机械一致性在收尾这一刻再跑一遍：模型最后几步可能又削弱了测试、
+        # 又留下了残留。去重集合保证同一条不会重复上报（P0：只报不阻断）。
+        self._mechanical_review(list(changed))
         # 越界写那类高危发现要进收尾报告：它回答的是「这次运行动了不该动的
         # 东西没有」，而收尾报告是人真的会读的那一份文本（见 `_boundary_report`）。
         boundary = self._boundary_report()
@@ -1959,7 +2028,14 @@ class AgentLoop:
             self._final_verify = (passed, body)
             self._note_verification(passed, body)
             return self._collect_report(
-                final, changed, facts, outcome, boundary, passed=passed, body=body
+                final,
+                changed,
+                facts,
+                outcome,
+                boundary,
+                passed=passed,
+                body=body,
+                ledger=self._evidence_ledger(changed, passed).downgrade_note(),
             )
         passed: bool | None = None
         body = ""
@@ -1983,7 +2059,14 @@ class AgentLoop:
         else:
             outcome = "最终验证：本次运行没有挂验证器，未跑。"
         return self._collect_report(
-            final, changed, facts, outcome, boundary, passed=passed, body=body
+            final,
+            changed,
+            facts,
+            outcome,
+            boundary,
+            passed=passed,
+            body=body,
+            ledger=self._evidence_ledger(changed, passed).downgrade_note(),
         )
 
     def _note_verification(self, passed: bool, summary: str) -> None:
@@ -2254,6 +2337,119 @@ class AgentLoop:
         if not lines:
             return ""
         return "\n本次运行的自动审查发现：\n" + "\n".join(f"- {line}" for line in lines)
+
+    # ---- L1 机械一致性（P0：**只报不阻断**）--------------------------------
+
+    def _mechanical_review(
+        self, changed: Sequence[str], *, interim: bool = False
+    ) -> None:
+        """改完之后把机械一致性判一遍：残留引用 / 删除引用 / 引用闭合 / 测试改弱。
+
+        **P0 的纪律**：这一层只把发现送进事件流、trace 与收尾报告，
+        **不碰 `finished`、不碰落盘判定、不新增请示**——阻断语义是 P1。
+
+        `interim=True` 是「某一步刚改完」，此时**不判引用闭合**：多文件改动
+        天生多步，先写 A（它 import 了同一步里还没落盘的 B）是正常中间态，
+        拿它去报「模块不存在」就是误报。闭合只在收尾那一刻判——那时树是终态。
+
+        三条可见性出口里，残留那一条同时还有第四条：`_lingering_text` 会把它
+        回灌到模型面前（模型正要在结论里写「已统一」）。其余发现不进模型上下文
+        ——每改一个文件就往对话里塞一段提醒，会挤掉真正要它读的东西。
+        """
+        if self.pending is None:
+            return
+        root = self.config.project_root
+        findings: list[Finding] = []
+        # ① 残留引用（含**被改的文件自己**、含**被删掉的文件**）。
+        for change in self.pending.items():
+            for hit in lingering_hits(root, self.pending, change):
+                findings.append(_hit_finding(hit))
+        # ② 引用闭合：改过的 .py 导入了本仓并不存在的本地模块（只判终态）。
+        if not interim:
+            for hit in broken_local_imports(root, self.pending, list(changed)):
+                findings.append(_hit_finding(hit))
+        # ③ 测试被改弱（删用例 / skip·xfail / 放宽断言 / conftest / pytest 配置 /
+        #    测试数据）——只报不阻断。
+        for change in self.pending.items():
+            findings.extend(
+                tests_weakened(
+                    path=change.path,
+                    before=change.old_text,
+                    after=change.new_text,
+                    deleted=change.deleted,
+                )
+            )
+        for finding in findings:
+            self._emit_review_finding(finding)
+
+    def _emit_review_finding(self, finding: Finding) -> None:
+        """一条机械发现的三条出口：账本、事件流、trace。同一条只发一次。
+
+        事件流的 `kind` 按**判据分类**给（`note_kind`）：探针要单独数
+        `stale_references` / `tests_weakened`，不能靠读散文去认（设计稿 §6 的
+        字段表与 §4「每条发现必须带 file:line 与机械证据」）。
+        """
+        signature = (finding.kind, finding.path, finding.line, finding.summary)
+        if signature in self._reviewed_notes:
+            return
+        self._reviewed_notes.add(signature)
+        self.audit_log.add(finding)
+        self._emit(
+            "note",
+            {
+                "text": finding.render(),
+                "ok": finding.severity != HIGH,
+                "kind": note_kind(finding.kind),
+            },
+        )
+        self._log(f"自动审查：{finding.render()}")
+
+    # ---- L4 最小证据账本（P0：**只在报告层降级**）--------------------------
+
+    def _evidence_ledger(
+        self, changed: Sequence[str], passed: bool | None
+    ) -> ReviewLedger:
+        """这次运行的「完成」声明挂上了哪条检查。
+
+        P0 只做一件事：**一条有结论的检查都没挂上时，那句完成在报告里降级为
+        「未验证」**（`ReviewLedger.downgrade_note`）。它不改 `finished`、
+        不改落盘判定、不新增请示流——那些是 P1。
+        """
+        ledger = ReviewLedger()
+        if not changed:
+            # 一处改动都没有时没有「完成声明」可挂：只读角色不该被这句话打扰。
+            return ledger
+        claim = f"这次运行的完成结论（{len(changed)} 处改动）"
+        if self.verify is None:
+            ledger.record(
+                claim, "自动验证", CANNOT, "本次运行没有挂验证器，一次检查都没跑"
+            )
+        elif passed is None:
+            ledger.record(
+                claim, "最终验证", NOT_RUN, "收尾这一刻没有拿到验证结论"
+            )
+        else:
+            ledger.record(
+                claim,
+                "最终验证",
+                PASS if passed else FAIL,
+                (self._final_verify[1] if self._final_verify else "")[:120],
+                content_key=self._last_verify_key,
+            )
+        gaps = ledger.gaps()
+        if gaps and not self._evidence_gaps:
+            self._evidence_gaps = len(gaps)
+            self._emit(
+                "note",
+                {
+                    "text": ledger.downgrade_note(),
+                    "ok": False,
+                    "kind": EVIDENCE_GAPS_KIND,
+                    "count": len(gaps),
+                },
+            )
+            self._log("证据账本：" + "、".join(gaps) + " 没有证据 → 降级为未验证")
+        return ledger
 
     def _log(self, line: str) -> None:
         """往本轮的 trace 上追加一行（给人和督导看的那一份）。
