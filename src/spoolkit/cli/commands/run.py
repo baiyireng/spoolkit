@@ -12,6 +12,7 @@ from spoolkit.agents.dispatcher import plan_dispatch, run_delegated
 from spoolkit.config import Config
 from spoolkit.cli.commands.plan import advance_plan, autonomous
 from spoolkit import diagnosis
+from spoolkit import runlog
 from spoolkit.check.numbers import render as render_numbers
 from spoolkit.check.numbers import actionable, mismatched, summarize, untraceable
 from spoolkit.cli.options import (
@@ -35,7 +36,7 @@ from spoolkit.cli.runtime import (
     settle_lessons,
     show_history,
 )
-from spoolkit.cli.settle import settle
+from spoolkit.cli.settle import settle, undo_command, verification_header
 from spoolkit.cli.events import EventWriter, settle_with_events
 from spoolkit.kernel.target import resolve_target
 from spoolkit.llm.tokenizer import OfflineTokenCounter
@@ -72,6 +73,10 @@ def run(args: argparse.Namespace) -> int:
     )
     args.root, args.session = str(target.root), target.session
     project_root = Path(args.root).resolve()
+    # 一次入口 = 一轮：id 在这里发一次，后面每一次落盘都记进同一份运行记录。
+    # 计划那条路每一步都会新建待确认清单，但它们共用这一个 id——用户反悔时
+    # 要退掉的是**整次调用**，不是最后一步。
+    args.run_id = runlog.take_run_id(args)
     overrides = _overrides(args, project_root)
     read_roots, bad_roots = _resolve_read_roots(args, project_root)
     if bad_roots:
@@ -116,7 +121,11 @@ def run(args: argparse.Namespace) -> int:
         notice = pending_notice(project_root)
         if notice:
             print(notice)
-    pending = PendingChanges(project_root, extra_roots=read_roots)
+    pending = PendingChanges(project_root, extra_roots=read_roots, run_id=args.run_id)
+    # 运行记录要知道这一轮是谁、为了什么跑的：`.agent/runs/<id>/run.json` 里
+    # 记下它们，事后（`spool revert --run <id>`）才答得出「这是哪一轮」。
+    pending.run_session = args.session
+    pending.run_goal = args.goal
     if args.events:
         return _events_mode(args, project_root, gateway, window, pending)
     if args.delegate:
@@ -248,7 +257,16 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
         completion_tokens=result.completion_tokens,
     )
     outcome = settle_with_events(
-        pending, policy, scope, project_root / ".agent" / "last_change.json", writer
+        pending,
+        policy,
+        scope,
+        project_root / ".agent" / "last_change.json",
+        writer,
+        # 验证未通过时，结论与撤销命令必须**排在 diff 事件之前**发出去：
+        # 网页壳按事件顺序渲染，diff 一大，埋在后面的判词就没人读到。
+        header=verification_header(
+            result.verified, result.verify_summary, undo_command(pending)
+        ),
     )
     writer.emit(FINAL, ok=result.finished, text=result.final or "", settled=outcome)
     return 0 if result.finished else 1
@@ -330,7 +348,7 @@ def _standard(args, project_root, gateway, window, pending) -> int:
     print("---")
     print(result.final)
 
-    _settle_pending(args, project_root, pending)
+    _settle_pending(args, project_root, pending, result)
     return 0 if result.finished else 1
 
 
@@ -390,7 +408,7 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
         print("--- 这块活太大，子智能体没做完 ---")
         print(delegated.too_big)
         print("拆小之后再派，或者加 --subagent-steps 再来一次。")
-    _settle_pending(args, project_root, pending)
+    _settle_pending(args, project_root, pending, delegated)
     return 0
 
 
@@ -529,7 +547,7 @@ def _report_numbers(loop, result, writer: EventWriter | None = None) -> None:
     print(render_numbers(claims, wrong))
 
 
-def _settle_pending(args, project_root, pending) -> None:
+def _settle_pending(args, project_root, pending, result=None) -> None:
     # 只有整份改动都落完、暂存也空了才真的没话说：暂存里那几份正文同样需要
     # 一句交代（`settle` 会替它说话），否则进程一退出就是静默丢弃。
     if not len(pending) and not pending.staged_count():
@@ -540,4 +558,11 @@ def _settle_pending(args, project_root, pending) -> None:
         resolve_policy(args, project_root),
         resolve_scope(args),
         baseline_path=project_root / ".agent" / "last_change.json",
+        # 验证未通过时这一段打在 diff **之前**：判词不能埋在一大片 diff 底下
+        # （用户接受了一份没通过验证的改动，就是这么发生的）。
+        header=verification_header(
+            getattr(result, "verified", None),
+            getattr(result, "verify_summary", ""),
+            undo_command(pending),
+        ),
     )

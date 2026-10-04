@@ -28,19 +28,32 @@ def settle(
     baseline_path: Path | None = None,
     ask: Callable[[str], str] = input,
     non_interactive: bool = False,
+    header: str = "",
 ) -> tuple[str, list[str]]:
     """按策略处理待落盘改动，返回（结果动作，已写入路径）。
+
+    `header` 是**打在 diff 之前**的那一段（收尾处理用）：验证未通过时，
+    「最终验证：未通过 + 失败要点 + 撤销命令」必须在这一大片 diff 之上被读到，
+    而不是埋在下面。顺序就是这条要求本身，所以它由这里保证，而不是靠调用方
+    记得先 print 一次。
 
     「没确认完的暂存重写」在任何清理**之前**取一次读数，最后统一说一句：
     deny 会把暂存一起清掉，那一句如果放到后面就永远打不出来——而它正是
     「没有静默丢弃」这条要求的落点。
     """
     note = unconfirmed_note(pending)
+    if header:
+        print(header)
     outcome, written = _settle(
         pending, policy, scope, baseline_path, ask, non_interactive
     )
     if note:
         print(note)
+    # **扣成果也要说出来**：给不出基线的改动没有落盘（见 `PendingChanges.apply`），
+    # 静默跳过会让人以为改好了——而那是最坏的一种报告。
+    refused = refused_note(pending)
+    if refused:
+        print(refused)
     return outcome, written
 
 
@@ -118,4 +131,48 @@ def unconfirmed_note(pending: PendingChanges) -> str:
         f"还有 {len(live)} 份已声明的大重写没有确认完，因此没有落盘：{held}。"
         "消失清单没逐项交代（确认保留或声明有意丢弃）之前不会写入——"
         "这是有意挡住，不是失败；下次重新发起时会拿到新令牌。"
+    )
+
+
+def refused_note(pending: PendingChanges) -> str:
+    """给不出基线的改动被扣掉了：逐条说明原因（没有就返回空串）。
+
+    「每一处落成改动都必须有 baseline」是那条不变量；**给不出 baseline 的
+    改动不许落盘**是它允许的唯一一种「扣成果」。扣掉必须有声音——否则用户
+    看到的是一个「安静地少做了一处」的运行，而他会以为那处改好了。
+    """
+    refused = pending.refused()
+    if not refused:
+        return ""
+    return (
+        f"有 {len(refused)} 处改动**没有落盘**，因为给不出回滚用的基线"
+        "（不许留下一个退不回去的改动）：\n"
+        + "".join(f"  - {item.path}：{item.reason}\n" for item in refused)
+        + "这几处要写的内容仍在这次运行的正文里，但工作区没有被它改动。"
+    )
+
+
+def undo_command(pending: PendingChanges) -> str:
+    """收尾报告里那一行可复制的撤销命令（没有待退的改动就返回空串）。"""
+    if not len(pending):
+        return ""
+    return f"spool revert --run {pending.run_id}"
+
+
+def verification_header(
+    passed: bool | None, summary: str, undo: str = ""
+) -> str:
+    """收尾处理里**打在 diff 之前**的那一段（未通过时才非空）。
+
+    它和收尾报告开头那段是同一个要求的两处落点：终端里 diff 是随后由
+    `settle` 打出来的，事件流里 diff 是 DIFF 事件——两种通道都必须让结论
+    排在它们前面。没有这一段，一次「接受了一份未通过验证的改动」就是
+    大 diff 先入眼、判词埋在下面。
+    """
+    if passed is not False:
+        return ""
+    line = " ".join((summary or "（验证器没有给出细节）").split())[:300]
+    return (
+        "⚠ 最终验证：未通过——下面这些改动没有通过验收，先看这一行再往下看 diff。\n"
+        f"失败要点：{line}\n" + (f"撤销这一轮（可直接复制）：{undo}\n" if undo else "")
     )

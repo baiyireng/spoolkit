@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from spoolkit import limits
+from spoolkit import runlog
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable, resolve_within
 from spoolkit.tools.types import NEXT_STEP_MARKER, ToolResult, ToolSpec
@@ -1239,10 +1240,28 @@ class PendingChanges:
         root: Path,
         extra_roots: Sequence[Path] = (),
         overrides: dict | None = None,
+        run_id: str = "",
     ) -> None:
         self._root = root.resolve()
         self._extra_roots = tuple(Path(item).resolve() for item in extra_roots)
         self._changes: dict[str, PendingChange] = {}
+        # ---- 运行记录（`.agent/runs/<id>/`）--------------------------------
+        #
+        # **运行要可识别**：收尾报告里那句可复制的撤销命令必须点名「退的是哪一轮」，
+        # 而用户事后要能拿同一个名字把整轮退回去。id 在待确认清单建出来的时候就定，
+        # 因为报告与落盘是两个时刻（报告先说、落盘在收尾），中间没有第二次机会。
+        #
+        # 记录目录是**落盘那一刻**才建的（`apply`）：只读运行、被拒的运行不该
+        # 在用户工作区里留下一堆空目录。
+        self.run_id = run_id or runlog.new_run_id()
+        self.run_session = ""
+        self.run_goal = ""
+        self.started_at = runlog.now_iso()
+        # 最终验证结论：由循环在收尾那一刻写进来，落盘时随记录一起落。
+        # 它是「最终验证：未通过 + 撤销命令放在最前」那句话的出处。
+        self.verification: tuple[bool, str] | None = None
+        self._landed: list[runlog.RunEntry] = []
+        self._refused: list[RefusedChange] = []
         # 已声明、清单还没交代完的重写：token → 暂存记录。
         #
         # 与 `_changes` 分开的理由是**语义**，不是洁癖：`_changes` 里的东西
@@ -1288,6 +1307,21 @@ class PendingChanges:
         except ValueError:
             return str(target)
 
+    def _pre_image(self, target: Path) -> str:
+        """登记这一刻磁盘上的原文；读不出来就返回空串。
+
+        **不许在这里抛**：读不出来的文件（二进制/坏编码）当然不该被改，但
+        「为什么不该改」这句话要说在落盘那一刻、并且带着解决办法（见
+        `_baseline_entry`）——在这里抛出去，模型只会看到一句栈里的
+        UnicodeDecodeError，然后照原样再试一次。
+        """
+        if not target.exists():
+            return ""
+        try:
+            return target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ""
+
     def propose(self, path: str, new_text: str, declared: str = "") -> PendingChange:
         """登记一处修改。同一路径重复提出时以最后一次为准。
 
@@ -1295,7 +1329,7 @@ class PendingChanges:
         跟着这处改动一起走：用户确认的那一刻看得到理由。
         """
         target = self.disk_path(path)
-        old_text = target.read_text(encoding="utf-8") if target.exists() else ""
+        old_text = self._pre_image(target)
         change = PendingChange(
             path=path, old_text=old_text, new_text=new_text, declared=declared
         )
@@ -1467,20 +1501,100 @@ class PendingChanges:
 
         删除在这里落地：`unlink` 之后文件真的没了，而基线里留着它的全文，
         所以 `revert` 能把它恢复回来——「可回滚」这条对删除同样成立。
+
+        **给不出基线的改动不许落盘**（不变量）：这一条是唯一允许「扣成果」的
+        理由——一个退不回去的改动留在用户工作区里，比少做一处改动坏得多。
+        被扣掉的那几处连同原因记在 `refused()` 里，收尾报告会逐条说出来，
+        绝不静默跳过。
+
+        落成的每一处都记进运行记录（`.agent/runs/<id>/`）：改了什么、改动前
+        是什么、落盘后指纹是什么。整轮回退（`spool revert --run <id>`）读的就是它。
         """
         written: list[str] = []
+        entries: list[runlog.RunEntry] = []
+        self._landed = []
+        self._refused = []
         for change in self._changes.values():
             target = self.disk_path(change.path)
+            entry, why = self._baseline_entry(change)
+            if entry is None:
+                self._refused.append(RefusedChange(path=change.path, reason=why))
+                continue
             if change.deleted:
                 if target.exists():
                     target.unlink()
-                written.append(change.path)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(change.new_text, encoding="utf-8")
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(change.new_text, encoding="utf-8")
             written.append(change.path)
+            entries.append(
+                runlog.RunEntry(
+                    path=change.path,
+                    old_text=entry.old_text,
+                    existed=entry.existed,
+                    deleted=change.deleted,
+                    # 落盘后的指纹：「这一处退之前，磁盘上应该是什么」。
+                    # 回退靠它认出「落盘之后又被别人改过」。
+                    after=runlog.fingerprint(
+                        None if change.deleted else change.new_text
+                    ),
+                    declared=change.declared,
+                )
+            )
+        self._landed = entries
         self._changes.clear()
+        if entries:
+            runlog.append_landing(
+                self._root,
+                self.run_id,
+                entries,
+                session=self.run_session,
+                goal=self.run_goal,
+                started_at=self.started_at,
+                verification=self.verification,
+            )
         return written
+
+    def _baseline_entry(self, change: PendingChange) -> tuple[BaselineEntry | None, str]:
+        """这一处改动的**改动前状态**；给不出就返回 (None, 为什么)。
+
+        口径是「**落盘这一刻**磁盘上是什么」，不是「登记那一刻台账里记了什么」。
+        登记之后、落盘之前文件完全可能又被改过（人手工改的、别的工具改的），
+        而回退要回到的是**它被覆盖之前**的样子。
+
+        删除走同一条口径：删除前那一刻的全文，才是「恢复删除」要写回去的东西。
+        拿一份过期的 `old_text` 写回去得到的是内容不对的文件；拿空串写回去
+        得到的就是「留一个空文件」——那正是这条不变量要拦的形状。
+        """
+        target = self.disk_path(change.path)
+        if not target.exists():
+            # 之前不存在就没有「改动前的内容」可回填——这一轮自己造出来的东西
+            # 不该在回滚时被当成原来就有的。
+            return BaselineEntry(path=change.path, old_text=None, existed=False), ""
+        try:
+            current = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return None, (
+                f"改动前它就在磁盘上，但内容读不出来（{type(exc).__name__}）——"
+                "没有改动前的原文就没有退路，所以这一处没有落盘"
+            )
+        return BaselineEntry(path=change.path, old_text=current, existed=True), ""
+
+    def landed(self) -> list[runlog.RunEntry]:
+        """上一次 `apply()` 真正落成的那几处（含每处的改动前状态）。"""
+        return list(self._landed)
+
+    def note_verification(self, passed: bool, summary: str) -> None:
+        """记下收尾那一刻的**最终验证结论**。
+
+        它是运行记录里的一栏，也是收尾报告「最终验证：未通过 + 撤销命令放在
+        最前面」那句话的出处。落盘在报告之后，所以这里先把结论存下来。
+        """
+        self.verification = (bool(passed), str(summary))
+
+    def refused(self) -> list["RefusedChange"]:
+        """上一次 `apply()` 因为给不出基线而被扣掉的那几处。"""
+        return list(self._refused)
 
     def baseline(self) -> "Baseline":
         """把当前待写入的修改转成可持久化的基线。
@@ -1488,21 +1602,16 @@ class PendingChanges:
         **「改动之前磁盘上有没有它」是一个事实，不能从 old_text 反推**：
         「把一份刚新建的文件删掉」与「把一份已有文件删掉」在待确认记录里长得
         很像，而回滚的动作正好相反（一个该删掉、一个该把内容写回去）。
-        所以这里按 `disk_path().exists()` 判；删掉的那个在这两种情形下都是
-        「磁盘上还在」（改动尚未落盘），差别只体现在 old_text 该不该留。
+        所以这里按 `disk_path().exists()` 判。
+
+        给不出基线的那几处**不进基线**：它们也不会落盘（见 `apply`），
+        进来只会让一份「覆盖了它」的记录凭空出现在退路里。
         """
         entries: list[BaselineEntry] = []
         for change in self._changes.values():
-            existed = self.disk_path(change.path).exists()
-            entries.append(
-                BaselineEntry(
-                    path=change.path,
-                    # 之前不存在就没有「改动前的内容」可回填——这一轮自己造出来
-                    # 的东西不该在回滚时被当成原来就有的。
-                    old_text=change.old_text if existed else None,
-                    existed=existed,
-                )
-            )
+            entry, _why = self._baseline_entry(change)
+            if entry is not None:
+                entries.append(entry)
         return Baseline(entries=tuple(entries))
 
     def discard(self) -> None:
@@ -1523,6 +1632,19 @@ class PendingChanges:
         for path in removed:
             self._changes.pop(path, None)
         return removed
+
+
+@dataclass(frozen=True)
+class RefusedChange:
+    """一处**没有落盘**的改动，以及为什么。
+
+    「给不出 baseline 的改动不许落盘」是那条不变量唯一允许「扣成果」的理由。
+    扣掉这件事必须说出来——静默跳过会让人以为改好了，而那正是最坏的一种
+    报告：文件没变，结论却说变了。
+    """
+
+    path: str
+    reason: str
 
 
 @dataclass(frozen=True)

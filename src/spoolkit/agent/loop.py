@@ -226,6 +226,11 @@ def _content_fingerprint(text: str) -> str:
     return f"{digest}/{len(text.splitlines())}行"
 
 
+def _flat_line(text: str) -> str:
+    """压成一行。收尾报告里「失败要点」只有一行的位置，换行会把后面挤没。"""
+    return " ".join((text or "").split())
+
+
 def _is_blocked(result: ToolResult) -> bool:
     """这次失败是「被拦下没执行」，而不是「执行了但失败」。"""
     return (not result.ok) and result.content.startswith(_BLOCKED_MARKS)
@@ -632,6 +637,11 @@ class LoopResult:
     # 这次运行里确认过「失败是环境造成的」。任务没做成时，它是决定
     # 要不要替 Agent 登记诊断请求的依据之一。
     environment_blocked: bool = False
+    # 收尾那一刻对最终文件的验证结论（None = 没跑或没改动）。
+    # 收尾报告之后的收尾处理（settle）要拿它把「最终验证：未通过 + 撤销命令」
+    # 摆到 diff 之前——那句话不能只藏在报告正文里。
+    verified: bool | None = None
+    verify_summary: str = ""
 
     def usage(self) -> str:
         """一行用量摘要，用于比较不同配置的实际成本。"""
@@ -719,6 +729,9 @@ class AgentLoop:
         # 上一次验证覆盖过的**内容键**（路径 + 内容指纹）。与 _last_verify
         # 同生共死：结论和「它是对哪一份内容下的」必须成对存在。
         self._last_verify_key: str = ""
+        # 收尾那一刻报出去的那次验证结论（`_with_final_state` 写）：
+        # 收尾处理要拿它把「最终验证：未通过 + 撤销命令」摆到 diff 之前。
+        self._final_verify: tuple[bool, str] | None = None
         # 自动审查层 L1 的账本（见 spoolkit.agent.audit）。每次 run() 开始时清空：
         # 它是「本次运行」的发现，不是跨任务的记忆。
         self.audit_log = AuditLog()
@@ -1739,6 +1752,8 @@ class AgentLoop:
                     supervisor_seconds=supervisor_seconds,
                     lessons_pushed=tuple(item[0] for item in pushed),
                     environment_blocked=self.environment_blocked,
+                    verified=self._final_verify[0] if self._final_verify else None,
+                    verify_summary=self._final_verify[1] if self._final_verify else "",
                 )
 
         self._archive(state, "fail", trace, "")
@@ -1771,6 +1786,8 @@ class AgentLoop:
             supervisor_seconds=supervisor_seconds,
             lessons_pushed=tuple(item[0] for item in pushed),
             environment_blocked=self.environment_blocked,
+            verified=self._final_verify[0] if self._final_verify else None,
+            verify_summary=self._final_verify[1] if self._final_verify else "",
         )
 
     def _content_key(self, changed: Sequence[str]) -> str | None:
@@ -1830,6 +1847,58 @@ class AgentLoop:
             )
         return "最终文件状态：" + "；".join(parts) + "。"
 
+    def _undo_command(self) -> str:
+        """收尾报告里那一行**可直接复制**的撤销命令。
+
+        为什么非得有这一行（真实经历）：用户接受了一份「最终验证未通过」的改动，
+        事后反悔，用系统外的手段（自己找备份 / 编辑器）退了回去——而
+        `spool revert` 明明存在。可发现性不是文档问题：报告说了「共落成 N 处
+        改动」，却没说「退掉它们的那条命令是什么」，人只能自己想办法。
+
+        没有改动就不给：一条跑不通的命令比不给更坏——用户会去跑它，然后
+        得到「没有这条记录」，从此不再相信这个入口。
+        """
+        if self.pending is None:
+            return ""
+        landed = getattr(self.pending, "landed", None)
+        if not len(self.pending) and not (landed() if landed else []):
+            return ""
+        return f"spool revert --run {self.pending.run_id}"
+
+    def _collect_report(
+        self,
+        final: str,
+        changed: Sequence[str],
+        facts: str,
+        outcome: str,
+        boundary: str,
+        *,
+        passed: bool | None,
+        body: str,
+    ) -> str:
+        """拼收尾报告。**验证未通过时把结论与撤销命令挪到最前**。
+
+        顺序是有理由的，不是排版洁癖：大 diff 抢眼，而「最终验证：未通过」
+        原先只排在模型那段结论之后——模型那段经常就是一份大 diff，于是判词
+        被埋在下面。用户「接受了一份没通过验证的改动、事后才发现」正是这么来的。
+
+        所以未通过时：**结论 + 失败要点 + 撤销命令在最前**，模型那段（常常带着
+        diff）退到其后；通过时顺序不动，只在末尾补上撤销命令。
+        """
+        undo = self._undo_command()
+        head = ""
+        if passed is False:
+            head = (
+                "⚠ 最终验证：未通过——这一轮的改动没有通过验收。\n"
+                f"失败要点：{_flat_line(body)[:300]}\n"
+                + (f"撤销这一轮（可直接复制）：{undo}\n" if undo else "")
+                + "（上面是结论与退路，下面才是本次运行的结论与文件状态。）\n"
+            )
+        tail = f"{final}\n本次运行共落成 {len(changed)} 处改动。{facts} {outcome}{boundary}"
+        if undo and passed is not False:
+            tail += f"\n撤销这一轮（可直接复制）：{undo}"
+        return head + tail
+
     def _with_final_state(
         self,
         final: str,
@@ -1843,6 +1912,7 @@ class AgentLoop:
 
         - 改动确实落成了 → 「改动已落成」+ 验证结果，不许说成「0 处改动」；
         - 文件在收手时是坏的 → 说出来；收手判词不改写这件事。
+        - **验证未通过时，那句判词与撤销命令要出现在最前**（见 `_collect_report`）。
 
         **一处改动都没有时不加这段**。理由有两条，都不是省事：① 「这次运行
         没改过任何文件」对一个只读角色（审查者）是纯粹的噪声，每一句结论后面
@@ -1886,9 +1956,16 @@ class AgentLoop:
                     "detail": " ".join(body.split())[:200],
                 },
             )
-            return f"{final}\n本次运行共落成 {len(changed)} 处改动。{facts} {outcome}{boundary}"
+            self._final_verify = (passed, body)
+            self._note_verification(passed, body)
+            return self._collect_report(
+                final, changed, facts, outcome, boundary, passed=passed, body=body
+            )
+        passed: bool | None = None
+        body = ""
         if self.verify is not None:
             report, passed = self._run_verification(list(changed))
+            body = report
             outcome = ("最终验证：通过。" if passed else "最终验证：未通过。") + report
             trace.append(
                 f"收尾: 对最终文件跑了一次验证 -> {'通过' if passed else '未通过'}"
@@ -1901,10 +1978,23 @@ class AgentLoop:
                     "detail": " ".join(report.split())[:200],
                 },
             )
+            self._final_verify = (passed, report)
+            self._note_verification(passed, report)
         else:
             outcome = "最终验证：本次运行没有挂验证器，未跑。"
-        landed = f"本次运行共落成 {len(changed)} 处改动"
-        return f"{final}\n{landed}。{facts} {outcome}{boundary}"
+        return self._collect_report(
+            final, changed, facts, outcome, boundary, passed=passed, body=body
+        )
+
+    def _note_verification(self, passed: bool, summary: str) -> None:
+        """把最终验证结论交给待确认清单。
+
+        落盘那一刻它会被写进运行记录（`.agent/runs/<id>/run.json`）——
+        整轮退回去之后再回头看这份记录，要能读到「这一轮当初是什么结论」。
+        """
+        note = getattr(self.pending, "note_verification", None)
+        if note is not None:
+            note(passed, summary)
 
     def _run_facts(
         self, *, edits: int = 0, changed: tuple[str, ...] = ()

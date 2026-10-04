@@ -14,7 +14,7 @@ from typing import Any, TextIO
 
 from spoolkit.agents.plan import out_of_scope
 from spoolkit.cli.approval import apply_with_audit
-from spoolkit.cli.settle import unconfirmed_note
+from spoolkit.cli.settle import refused_note, unconfirmed_note
 from spoolkit.policy import AUTO
 from spoolkit.tools.edit import PendingChanges, save_baseline
 from spoolkit.web.protocol import AWAIT, CONFIRM, DIFF, Event, NOTE
@@ -53,6 +53,7 @@ def settle_with_events(
     baseline_path: Path | None,
     writer: EventWriter,
     reader: Callable[[], str] | object = None,
+    header: str = "",
 ) -> str:
     """按策略处理待落盘改动，全程以事件表达。
 
@@ -60,14 +61,23 @@ def settle_with_events(
     「发 diff 与 await，再从 stdin 读一行」。**两条路径的判定必须一样**，
     否则同一个策略在终端和网页里表现不同——那种差异不会报错，
     只会让人困惑「为什么这里自动、那里不自动」。
+
+    `header`（验证未通过那一段）**先于 DIFF 发出去**：网页壳按事件顺序渲染，
+    大 diff 排在前面时，「最终验证：未通过 + 撤销命令」就沉到下面去了——
+    用户正是这么接受了一份没通过验证的改动。
     """
     changes = pending.items()
+    if header:
+        writer.emit(NOTE, text=header, ok=False)
     if not changes:
         # 没有待确认改动，但可能还有「清单没交代完、因此没落盘」的暂存重写。
         # 那句必须发出去：不吭声就是静默丢弃模型真交出来的正文。
         note = unconfirmed_note(pending)
         if note:
             writer.emit(NOTE, text=note, ok=False)
+        refused = refused_note(pending)
+        if refused:
+            writer.emit(NOTE, text=refused, ok=False)
         return "none"
 
     for change in changes:
@@ -81,6 +91,7 @@ def settle_with_events(
             # 实测把 diff 打到 stdout 时，一条记录里混进 36 行散文，
             # `--events` 的解析器要么崩、要么被迫打补丁，录下来的文件也读不了。
             written = apply_with_audit(pending, baseline_path, out=_to_stderr)
+            _emit_refused(writer, pending)
             writer.emit(CONFIRM, applied=True, auto=True, count=len(written))
             return "auto"
 
@@ -93,6 +104,18 @@ def settle_with_events(
         if baseline_path is not None:
             save_baseline(baseline_path, pending.baseline())
         pending.apply()
+        _emit_refused(writer, pending)
         return "confirmed"
     pending.discard()
     return "declined"
+
+
+def _emit_refused(writer: EventWriter, pending: PendingChanges) -> None:
+    """给不出基线、因此没落盘的改动要发一条 NOTE。
+
+    静默扣成果与「报告说改好了而文件没变」是同一件事的两面——这条出口
+    就是为了不让它发生。
+    """
+    refused = refused_note(pending)
+    if refused:
+        writer.emit(NOTE, text=refused, ok=False)

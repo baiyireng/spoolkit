@@ -34,6 +34,7 @@ from spoolkit.agents.plan import (
 )
 from spoolkit.llm.gateway import CountingGateway
 from spoolkit import limits
+from spoolkit import runlog
 from spoolkit.cli.options import (
     report_policy,
     resolve_policy,
@@ -53,7 +54,7 @@ from spoolkit.cli.runtime import (
     bind_model_wait,
     settle_lessons,
 )
-from spoolkit.cli.settle import settle
+from spoolkit.cli.settle import settle, undo_command, verification_header
 from spoolkit.kernel.target import resolve_target
 from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.grant import Grants
@@ -261,7 +262,13 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
     report_policy(resolve_policy(args, project_root), scope)
     window = resolve_window(gateway, args.window)
     read_roots, _ = _resolve_read_roots(args, project_root)
-    pending = PendingChanges(project_root, extra_roots=read_roots)
+    pending = PendingChanges(
+        project_root, extra_roots=read_roots, run_id=runlog.take_run_id(args)
+    )
+    # 运行记录要点名「这是哪一轮」：按步执行那条路每一**步**落一次盘，
+    # 所以一轮 = 一步，id 与 goal 都跟着这一步走。
+    pending.run_session = getattr(args, "session", "cli")
+    pending.run_goal = getattr(step, "goal", "") or getattr(args, "goal", "")
     memory = (
         None
         if args.no_memory
@@ -394,6 +401,12 @@ def record_step(ctx: StepRun, step, result, pending, scope: Sequence[str]) -> No
             scope,
             baseline_path=project_root / ".agent" / "last_change.json",
             non_interactive=ctx.non_interactive,
+            # 与命令行那条路同一条要求：未通过的判词与撤销命令要排在 diff 之前。
+            header=verification_header(
+                getattr(result, "verified", None),
+                getattr(result, "verify_summary", ""),
+                undo_command(pending),
+            ),
         )
     if dropped:
         # **越界被丢掉这件事必须进记录**。实测代价：第 3 步改的是

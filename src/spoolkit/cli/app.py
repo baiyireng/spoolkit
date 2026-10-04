@@ -328,8 +328,27 @@ def _add_policy_command(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_revert_command(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("revert", help="回滚上一次写入的改动")
+    parser = sub.add_parser(
+        "revert", help="回滚上一次写入的改动，或整轮（--run / --last-run）"
+    )
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
+    parser.add_argument(
+        "--run",
+        default="",
+        help="回滚**整轮**：运行 id（.agent/runs/<id>），见收尾报告里那一行撤销命令",
+    )
+    parser.add_argument(
+        "--last-run",
+        dest="last_run",
+        action="store_true",
+        help="回滚最近一轮落成过改动的运行",
+    )
+    parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="只报这一轮会退哪些、哪些退不动（冲突），磁盘一个字不动",
+    )
     parser.set_defaults(func=revert_command)
 
 
