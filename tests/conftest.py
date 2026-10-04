@@ -16,6 +16,25 @@ import tempfile
 import pytest
 
 from spoolkit import sandbox_dirs
+from spoolkit.memory.transcript import clear_run_origin
+
+
+@pytest.fixture(autouse=True)
+def _isolate_run_origin():
+    """每个用例都从「这个进程还没跑过运行」开始。
+
+    `memory.transcript` 的运行起点是**进程级**的：`spool run` 一次运行一个
+    进程，所以那是最自然的粒度（运行开始时标定一次，注入文本里的时间就都
+    相对它归一化）。用例之间共用同一个进程，于是**上一个用例里
+    `AgentLoop.run()` 标下的起点会漏到下一个用例**——症状是「没跑过运行时
+    时间只到日期」这条兜底在单独跑时成立、整套跑时失效（真踩过：
+    `test_历史检索::test_时间方向是新到旧` 在只跑那一个文件时绿、全套时红）。
+
+    这是隔离，不是改判据：产品里的起点仍然只在一次运行的范围内有意义。
+    """
+    clear_run_origin()
+    yield
+    clear_run_origin()
 
 
 @pytest.fixture(autouse=True)

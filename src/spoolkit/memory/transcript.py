@@ -73,6 +73,70 @@ def _stamp(value: float) -> str:
     return datetime.fromtimestamp(value).strftime("%m-%d %H:%M")
 
 
+# ---- 注入文本里的时间：按运行起点归一化 -------------------------------------
+#
+# 为什么要单开一条渲染：同一份冻结代码上两次 t=0 的 pass，`add-feature` 与
+# `fix-bug` 的事件流不同，而分叉点就在**这里**——`search_history` 的输出里
+# 带着 `[MM-DD HH:MM]` 的实际时刻，两次 pass 相差 6 分钟，贪心解码把它放大成
+# 28 行 / 62 行两种轨迹（`merge-html` 等三条逐字节相同，正是因为它们没走到
+# 这条路）。所以判据只有一条：**同一份内容在不同实际时刻重跑，进提示的那段
+# 文字必须逐字相同**。
+#
+# 绝对时刻做不到这一点，于是这里给的是**相对运行起点**的说法（"今天" /
+# "N 天前"）：两次 pass 里每一条消息与运行起点的**间隔**是一样的，绝对时刻
+# 差 6 分钟不影响这个间隔。粒度取到「天」而不是「分钟」是有意的：秒级的
+# 抖动（沙箱落地到消息落库之间差几秒）在分钟粒度上会翻桶，在天粒度上翻不动。
+#
+# **漂的是提示，不是记录**：库里 `transcript.created_at` 一个字节都没动，
+# 聊天区域（`render_transcript`）与给人看的 CLI 输出照旧保留精确到分钟的时刻。
+
+#: 本次运行的时间起点。进程内一个够用：`spool run` 一次运行一个进程，起点在
+#: `AgentLoop.run()` 开头标定；同进程里的第二次运行会**重新标定**，覆盖上一次。
+#: 一次运行之外的调用方（直接查库的脚本、人不经运行时看的检索输出）拿到的是
+#: `None`，走 `prompt_stamp` 里那条只到日期的兜底。
+_RUN_ORIGIN: float | None = None
+
+
+def set_run_origin(moment: float | None = None) -> float:
+    """标定本次运行的时间起点（`None` = 取当前时刻），返回标定值。
+
+    循环在 `run()` 开头调一次；测试用它注入「相隔 6 分钟」的两个起点，
+    从而把「两次运行」这件事真的构造出来。
+    """
+    global _RUN_ORIGIN
+    _RUN_ORIGIN = time.time() if moment is None else float(moment)
+    return _RUN_ORIGIN
+
+
+def run_origin() -> float | None:
+    """当前标定的运行起点；没标定过返回 None。"""
+    return _RUN_ORIGIN
+
+
+def clear_run_origin() -> None:
+    """丢掉起点（用例之间的隔离；运行中不需要调）。"""
+    global _RUN_ORIGIN
+    _RUN_ORIGIN = None
+
+
+def prompt_stamp(value: float, origin: float | None = None) -> str:
+    """把一个时刻渲染成**进提示也稳定**的那一段（判据见上面那一段注释）。
+
+    - 标定了运行起点：起点当天或之后的写「今天」，更早的写「N 天前」；
+    - 没标定起点（还没跑过运行，或者这次渲染根本不在一次运行里）：退回
+      **只到日期**（`MM-DD`）——它不再带分钟，两次重跑不会因为差了几分钟而漂。
+      粒度到「天」而不是「分钟」是有意的：秒级抖动（沙箱落地到消息落库之间
+      差几秒）在分钟粒度上会翻桶，在天粒度上翻不动。
+    """
+    moment = _RUN_ORIGIN if origin is None else float(origin)
+    if moment is None:
+        return datetime.fromtimestamp(value).strftime("%m-%d")
+    delta = moment - value
+    if delta < 86400:  # 起点当天、或就在起点之后写下的
+        return "今天"
+    return f"{int(delta // 86400)} 天前"
+
+
 def render_transcript(rows: Sequence[sqlite3.Row]) -> str:
     """渲染成聊天区域的样子。
 
@@ -473,12 +537,19 @@ def render_history_hits(
     *,
     cross_session: bool = False,
     scope_said: str = "",
+    exact_time: bool = False,
 ) -> str:
     """把命中渲染成「片段 + 出处」。
 
     出处要给齐（会话、时间、角色、消息 id、命中位置）：只给一句结论，
     模型没法判断「这个问题是从哪来的」，人也没法回库核对。
     列表按新到旧的方向排——时间戳在最前面。
+
+    **时间那一栏默认走 `prompt_stamp`（进提示要稳定）**：这份输出是回灌给
+    模型的上下文，绝对到分钟的时刻会让同一份内容在不同时刻重跑出不同的
+    提示（一次 t=0 复跑就是被这里那 6 分钟放大成两条轨迹的）。要给人看精确
+    时刻时传 `exact_time=True`——`spool session --search` 那条路就是这么调的，
+    记录侧的精度一点没丢。
 
     **每一行都带会话名**（同一份格式，不按作用域分叉），**跨会话时抬头还要
     额外点名**（`cross_session`）：默认只查当前会话时那句会话名是冗余的，
@@ -497,8 +568,9 @@ def render_history_hits(
         title = (titles or {}).get(hit.session_id, "")
         label = ROLE_LABELS.get(hit.role, hit.role)
         where = f"会话 {hit.session_id}" + (f"「{title}」" if title else "")
+        when = _stamp(hit.created_at) if exact_time else prompt_stamp(hit.created_at)
         lines.append(
-            f"- [{_stamp(hit.created_at)}] {where} {label} #{hit.id}"
+            f"- [{when}] {where} {label} #{hit.id}"
             f"（命中第 {hit.offset} 字）：{hit.snippet}"
         )
     return "\n".join(lines)

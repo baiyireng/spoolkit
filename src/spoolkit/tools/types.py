@@ -3,6 +3,16 @@
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+# 出路话术的标记行。循环硬拦「原样重试」时把这一行原样端回给模型——
+# 复用既有的工具输出通道（trace / --events 的 tool 事件），不新造一套事件。
+#
+# 放在这一层（`types`）而不是 `tools/edit.py`：写下这一行的有两个地方
+# ——编辑工具的拒绝话术，和**参数校验**的拒绝话术（`tools/registry.py`）。
+# 后者要是从 `edit` 里 import，工具注册表就为了一个字符串常量拖上整个
+# 编辑模块；而两处各抄一份字面量，改一处漏一处时症状是「硬拦时那一行
+# 端不回去」，最难查。所以常量只有这一份，`edit.py` 从这儿取。
+NEXT_STEP_MARKER = "照做的下一步："
+
 
 @dataclass(frozen=True)
 class Fact:

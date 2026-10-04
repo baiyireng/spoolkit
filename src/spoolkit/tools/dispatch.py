@@ -14,6 +14,7 @@
 **子智能体拿不到这个工具**（角色工具表里没有它），所以不存在自我派发的递归。
 """
 
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,11 @@ from spoolkit.tools.types import ToolResult, ToolSpec
 # dispatch_history），所以留着比丢掉划算——但也别无限长。
 LOG_LIMIT = 20
 HISTORY_LIMIT = 5
+
+
+# 派发战绩的行首时刻（`record_dispatch` 写的 `- MM-DD HH:MM [通过] …`）。
+# 剥它的理由见 `dispatch_history`：日志留精确时刻，注入到提示的那一份不留。
+_LOG_STAMP = re.compile(r"^-\s*\d{2}-\d{2}\s+\d{2}:\d{2}\s+")
 
 
 def _log_path(root: Path) -> Path:
@@ -82,6 +88,11 @@ def dispatch_history(root: Path, limit: int = HISTORY_LIMIT) -> str:
     只在两个时刻取用：模型问 `tool_help("dispatch")` 时（那正是它准备派的
     时刻），以及拆解前收集环境时（那正是它决定「谁来做」的时刻）。
     常驻提示词里一个字都不放——那是每个请求的税。
+
+    **注入时把那行分钟级的实际时刻剥掉**（`_LOG_STAMP`）：这份文本要进模型
+    上下文，同一份日志在不同时刻重跑会给出不同的提示——那正是「温度 0 也不
+    可复现」那一条的成因形状。日志文件自己保留精确时刻（给人看的记录不动），
+    进提示的这一份只留「[通过] 2 次调用…」那几行，次序仍然说明新旧。
     """
     path = _log_path(root)
     try:
@@ -90,7 +101,7 @@ def dispatch_history(root: Path, limit: int = HISTORY_LIMIT) -> str:
         return ""
     if not lines:
         return ""
-    recent = lines[-limit:]
+    recent = [_LOG_STAMP.sub("- ", line, count=1) for line in lines[-limit:]]
     counts: dict[str, int] = {}
     for line in lines:
         for kind in ("通过", "未通过", "没结论", "太大", "失败"):

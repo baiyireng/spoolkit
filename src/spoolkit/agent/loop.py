@@ -19,6 +19,8 @@ from spoolkit.agent.audit import (
     Audit,
     AuditLog,
     audit,
+    boundary_write,
+    load_protected,
 )
 from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
@@ -44,6 +46,7 @@ from spoolkit.llm.gateway import ModelGateway
 from spoolkit.llm.retry import chat_with_escalation
 from spoolkit.llm.tokenizer import TokenCounter
 from spoolkit.llm.types import ChatRequest, Message
+from spoolkit.memory.transcript import set_run_origin
 from spoolkit.paths import resolve_readable
 from spoolkit.tools.edit import (
     CONFIRM_TOOL,
@@ -811,6 +814,11 @@ class AgentLoop:
         状态块里又原样重复了一遍（"目标: <整段提示词>"）——每一次调用都付
         两份。分开之后状态块里是那句短目标，读起来也更像"我做到哪儿了"。
         """
+        # 本次运行的时间起点：注入到上下文里的时间一律按它归一化
+        # （`memory/transcript.prompt_stamp`）。不标定的话，同一份内容在
+        # 不同时刻重跑会给出不同的提示——一次 t=0 复跑里，`search_history`
+        # 输出里那 6 分钟的差被放大成了两条完全不同的轨迹。
+        set_run_origin()
         checkpoint = self.config.task_path(task_id)
 
         # 恢复未完成的检查点。之前这里只写不读，等于「崩溃可恢复」这句
@@ -1476,6 +1484,10 @@ class AgentLoop:
                             # 清掉之后，同一个 read_file 的重提会被放行成
                             # 「刷新读取」，而不是被硬拦在一份过期内容上。
                             self._forget_read(path)
+                            # 越界写闸门：这次改动落在受保护路径上就当场报一条
+                            # 高严重度发现（事件流 + trace + 收尾报告都看得见，
+                            # **不阻断**）。现场见 agent/audit.boundary_write。
+                            self._note_boundary_write(path)
                     elif not result.ok and call.name in COMMIT_TOOLS and not blocked:
                         # 被硬拦的不计进「连续失败」：它没执行，也不是格式错误，
                         # 而且拦它的话术本身已经给了照做的下一步。
@@ -1817,6 +1829,9 @@ class AgentLoop:
         if not changed:
             return final
         facts = self._file_state_line(changed)
+        # 越界写那类高危发现要进收尾报告：它回答的是「这次运行动了不该动的
+        # 东西没有」，而收尾报告是人真的会读的那一份文本（见 `_boundary_report`）。
+        boundary = self._boundary_report()
         # 刚刚验过的**就是同一批内容**时不再起第二次进程：验证是起子进程跑
         # 测试，重复一遍只是让运行更慢，结论一字不差。要求是「收手时报出真实
         # 的最终验证结果」，不是「每收一次手就多跑一次测试」。
@@ -1848,7 +1863,7 @@ class AgentLoop:
                     "detail": " ".join(body.split())[:200],
                 },
             )
-            return f"{final}\n本次运行共落成 {len(changed)} 处改动。{facts} {outcome}"
+            return f"{final}\n本次运行共落成 {len(changed)} 处改动。{facts} {outcome}{boundary}"
         if self.verify is not None:
             report, passed = self._run_verification(list(changed))
             outcome = ("最终验证：通过。" if passed else "最终验证：未通过。") + report
@@ -1866,7 +1881,7 @@ class AgentLoop:
         else:
             outcome = "最终验证：本次运行没有挂验证器，未跑。"
         landed = f"本次运行共落成 {len(changed)} 处改动"
-        return f"{final}\n{landed}。{facts} {outcome}"
+        return f"{final}\n{landed}。{facts} {outcome}{boundary}"
 
     def _run_facts(
         self, *, edits: int = 0, changed: tuple[str, ...] = ()
@@ -2076,6 +2091,56 @@ class AgentLoop:
                 content=(note + "如果它没有帮你推进，就换一种做法。\n" + result.content),
             )
         return result
+
+    def _note_boundary_write(self, path: str) -> None:
+        """这次写入落在受保护路径上时，当场报一条高严重度发现。
+
+        判据与文案在 `agent/audit.py`（`boundary_write`）——这一层只负责把
+        **两个事实**喂给它：改的是哪个路径、这个文件是不是本次运行自己创建的。
+        后者问 `PendingChanges`（磁盘上改动之前有没有它），不是猜的。
+
+        可见性走三条路，**都不进模型上下文**：事件流（`note` / `kind=audit`，
+        探针与人都数得出来）、trace（督导看的）、收尾报告（`_with_final_state`）。
+        不进模型上下文是有意的：这一层是给人看的证据，而每改一个既有文件就往
+        对话里塞一段提醒，会挤掉真正要它读的东西。
+        """
+        if self.pending is None or not path:
+            return
+        try:
+            stored = self.pending.path_of(path)
+            created = not self.pending.disk_path(stored).exists()
+        except (PathOutsideProjectError, OSError, ValueError):
+            return
+        finding = boundary_write(
+            path=stored,
+            created=created,
+            config=load_protected(self.config.project_root),
+        )
+        if finding is None:
+            return
+        # 同一个文件只报一次：每一次改动都报一遍，等于把这条判据变成噪声。
+        if any(
+            item.kind == finding.kind and item.summary == finding.summary
+            for item in self.audit_log.findings
+        ):
+            return
+        self.audit_log.add(finding)
+        self._emit(
+            "note",
+            {"text": finding.render(), "ok": True, "kind": AUDIT_KIND},
+        )
+        self._log(f"自动审查：{finding.render()}")
+
+    def _boundary_report(self) -> str:
+        """收尾报告里那一段高危发现（没有就返回空串）。
+
+        「**必须可见**」这条要求的落点：发现不能只躺在 `audit_log` 里，
+        收尾那一份人真的会读的文本里要有它。
+        """
+        lines = self.audit_log.high_lines()
+        if not lines:
+            return ""
+        return "\n本次运行的自动审查发现：\n" + "\n".join(f"- {line}" for line in lines)
 
     def _log(self, line: str) -> None:
         """往本轮的 trace 上追加一行（给人和督导看的那一份）。

@@ -203,6 +203,9 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
             titles,
             cross_session=cross_session,
             scope_said=scope.description,
+            # 这一份是**给人看的**：保留精确到分钟的实际时刻（进提示的那一份
+            # 才要归一化，见 transcript.prompt_stamp 那一段）。
+            exact_time=True,
         )
     )
     return 0

@@ -67,7 +67,7 @@ from spoolkit.memory.timeline.db import (
 from spoolkit.memory.timeline.models import Event
 from spoolkit.memory.timeline.reduce import reduce_events
 from spoolkit.memory.timeline.registry import resolve_key
-from spoolkit.memory.transcript import MessageHit, search_messages
+from spoolkit.memory.transcript import MessageHit, prompt_stamp, search_messages
 
 # ---- §6.7 的机械判据：什么算"可变数量类问题" ---------------------------------
 
@@ -886,14 +886,25 @@ def _event_line(event: Event) -> str:
 
     `time_precision='unknown'`（`at_abs is None`）的行带 `?` 标记——它排在已解析
     事件之后（`_event_order`），且**不许**被当成链首或链尾的端点。
+
+    **时间那一段分两种来源**，因为它们漂不漂不是一回事：
+
+    - `at_source='turn'`：这个时刻是**这一轮的真实钟点**（`session.started_at`
+      + 本轮 turn），同一份内容换个时刻重跑就不同——它会进模型上下文，所以
+      按运行起点归一化（`prompt_stamp`）。一次 t=0 的复跑里，这一类绝对时刻
+      正是被贪心解码放大成两条轨迹的东西（见 `memory/transcript.py` 那一段）。
+    - 其余（`explicit` / `relative`）：时刻是从**消息正文里读出来的内容**，
+      同一句话到哪天重跑都是同一个渲染——那就不该动它，改了反而是丢信息。
     """
     unknown = event.at_abs is None or event.time_precision == "unknown"
     if event.at_abs is None:
         stamp = "?（时间未知）"
+    elif event.at_source == "turn":
+        stamp = prompt_stamp(float(event.at_abs))
     else:
         stamp = local_dt(event.at_abs, event.tz_offset_min).strftime("%Y-%m-%d %H:%M")
-        if event.time_precision == "unknown":
-            stamp = f"?{stamp}"
+    if event.at_abs is not None and event.time_precision == "unknown":
+        stamp = f"?{stamp}"
     unit = f" {event.unit}" if event.unit else ""
     speaker = event.speaker or "未标注"
     return (

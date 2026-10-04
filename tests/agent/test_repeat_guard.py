@@ -399,3 +399,68 @@ def test_步数预算随目标文件规模放大(tmp_path: Path) -> None:
     assert result.finished is True
     # 11 步编辑 + 收尾那一步 = 12；旧行为在第 10 步就撞墙了（收不了尾）。
     assert result.steps == 12, "放大后的预算没让它多走那几步"
+
+
+def test_参数校验失败的原样重提把修正后的形状端回去(tmp_path: Path) -> None:
+    """现场：`search_code` 带着不支持的参数 `source` 连发 3 次，被拦 2 次后放弃。
+
+    第一次是**参数校验**拦的（`tools/registry.py` 的拒绝话术，里面带一行
+    「照做的下一步：… search_code(pattern="pricing")」）；它一字不改地又发一次时，
+    循环的硬拦认的正是那个前缀，于是把**同一个形状**端回去。两处给的是同一句
+    话——模型不会从两个地方拿到两种说法。
+    """
+    from spoolkit.tools.types import NEXT_STEP_MARKER, ToolResult, ToolSpec
+
+    registry = ToolRegistry()
+    calls: list[dict] = []
+
+    def handler(args):
+        calls.append(args)
+        return ToolResult(ok=True, content="")
+
+    registry.register(
+        ToolSpec(
+            name="search_code",
+            description="按正则在代码里搜",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "搜索用的正则"},
+                    "path": {"type": "string", "description": "在哪个子目录里找"},
+                },
+                "required": ["pattern"],
+                "additionalProperties": False,
+            },
+            handler=handler,
+        )
+    )
+    bad = {"name": "search_code", "arguments": {"pattern": "pricing", "source": "p.html"}}
+    loop = AgentLoop(
+        gateway=FakeModel(
+            script=[
+                _turn("搜一下导航在哪", [bad]),
+                _turn("原样再来", [bad]),
+                _turn("算了", final="结束"),
+            ],
+            tokenizer=OfflineTokenCounter(),
+        ),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=Config(
+            project_root=tmp_path, context_window=4096, max_steps=6, supervise=False
+        ),
+    )
+
+    result = loop.run("把 pricing 的导航并进 index")
+
+    assert calls == [], "带不支持参数的调用一次都不该真的跑起来"
+    prompt = _last_prompt(loop)
+    assert "完全相同" in prompt and "没有执行" in prompt
+    assert NEXT_STEP_MARKER in prompt
+    # 端回去的是那个**能照抄**的形状：工具名 + 留下的合法值，没有 source。
+    shape = [
+        line for line in prompt.splitlines() if NEXT_STEP_MARKER in line
+    ]
+    assert any('search_code(pattern="pricing")' in line for line in shape), prompt
+    assert all("source=" not in line for line in shape)
+    assert result.finished is True

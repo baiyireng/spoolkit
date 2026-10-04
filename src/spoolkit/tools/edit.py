@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 from spoolkit import limits
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable, resolve_within
-from spoolkit.tools.types import ToolResult, ToolSpec
+from spoolkit.tools.types import NEXT_STEP_MARKER, ToolResult, ToolSpec
 from spoolkit.check.constraints import check_source, format_violations
 from spoolkit.tools.view import WorkspaceView
 
@@ -101,9 +101,10 @@ DELETE_REASON_PARAM = "reason"
 # 模型需要从话术里认出「这是一次被拦下的调用，不是执行失败」。
 DELETED_NOT_FOUND = "文件不存在"
 
-# 出路话术的标记行。循环硬拦「原样重试」时把这一行原样端回给模型——
-# 复用既有的工具输出通道（trace / --events 的 tool 事件），不新造一套事件。
-NEXT_STEP_MARKER = "照做的下一步："
+# 出路话术的标记行。**从 `tools/types.py` 取**：写下这一行的有两个地方——编辑
+# 工具的拒绝话术，和参数校验的拒绝话术（`tools/registry.py`）；字面量只留一份。
+# 这里是转出，老调用方 `from spoolkit.tools.edit import NEXT_STEP_MARKER`
+# 一个字都不用改。
 
 _SKIP_DIRS = frozenset({".agent", ".git", ".venv", "__pycache__", "node_modules"})
 

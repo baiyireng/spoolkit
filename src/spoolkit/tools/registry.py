@@ -6,9 +6,10 @@
 properties / additionalProperties / enum。不使用完整实现，以免引入依赖。
 """
 
+import json
 from typing import Any
 
-from spoolkit.tools.types import ToolCall, ToolResult, ToolSpec
+from spoolkit.tools.types import NEXT_STEP_MARKER, ToolCall, ToolResult, ToolSpec
 
 OTHER_GROUP = "其它"
 
@@ -37,30 +38,134 @@ def _describe(key: str, rule: dict[str, Any]) -> str:
     return f"{key}（{purpose}）" if purpose else key
 
 
-def _validate(args: dict[str, Any], schema: dict[str, Any]) -> str | None:
-    """校验通过返回 None，否则返回中文错误说明。"""
+def _literal(value: Any) -> str:
+    """把参数值写成**能照抄进调用里**的样子（JSON 字面量，中文不转义）。"""
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):  # pragma: no cover - 模型给不出这类值
+        return '"…"'
+
+
+def _fits(value: Any, rule: dict[str, Any]) -> bool:
+    """这个值放得进这个参数吗（与校验同一套判据，不另立一份）。"""
+    expected = _TYPE_MAP.get(rule.get("type", ""))
+    if expected is not None and not isinstance(value, expected):
+        return False
+    return "enum" not in rule or value in rule["enum"]
+
+
+def _placeholder(rule: dict[str, Any]) -> str:
+    """必填但这次没给（或给错了）的参数，用它的类型写一个占位值。"""
+    if "enum" in rule:
+        return _literal(rule["enum"][0])
+    return {
+        "integer": "0",
+        "number": "0",
+        "boolean": "false",
+        "array": "[]",
+        "object": "{}",
+    }.get(rule.get("type", ""), '"…"')
+
+
+def _call_shape(
+    name: str,
+    properties: dict[str, Any],
+    required: list[str],
+    args: dict[str, Any],
+    wrong: set[str],
+) -> str:
+    """这次调用**改对之后**的形状，模型可以整段照抄。
+
+    三条规则，都是为了「照抄之后真的能跑」：
+
+    - 这次给对的值**原样留着**（不是让它重填一遍，那等于把参数含义再讲一次）；
+    - 不认识的、类型不对的**去掉或换成占位符**（`search_code(pattern=…,
+      source=…)` → `search_code(pattern=…)`：`source` 不属于这个工具）；
+    - 必填而这次没给的换成占位符（缺哪个补哪个，一眼看得出还差什么）。
+    """
+    parts: list[str] = []
+    for key, rule in properties.items():
+        if key in args and key not in wrong and _fits(args[key], rule):
+            parts.append(f"{key}={_literal(args[key])}")
+        elif key in required:
+            parts.append(f"{key}={_placeholder(rule)}")
+    return f"{name}({', '.join(parts)})"
+
+
+def _reject(
+    problem: str,
+    name: str,
+    properties: dict[str, Any],
+    required: list[str],
+    args: dict[str, Any],
+    wrong: set[str] | None = None,
+) -> str:
+    """把一次参数校验失败渲染成**能照着改**的话术。
+
+    三样都必须给，缺哪一样都会让模型原地打转：
+
+    1. 错在哪（未知参数 / 缺必填 / 类型不对）；
+    2. 这个工具**支持哪些参数、各自是干什么的**——工具之间的参数名有重叠
+       （path / pattern / query），只说「不认识 source」，模型下一轮很可能
+       再搬一个别的工具的参数过来。实测 `search_code` 带 `source` 连发三次，
+       被拦两次后放弃，任务就停在那儿了；
+    3. 一个**把这次调用改对之后的形状**。这是这一版新增的那一样：只列参数
+       仍然要模型自己拼一次，而它拼错的概率正是刚才那三次。
+       这一行以 `NEXT_STEP_MARKER` 开头是有意的——循环硬拦「原样重提」时
+       认的就是这个前缀，会把**修正后的形状**原样端回去（`loop.py` 的
+       `_retry_block_message`），所以「第一次被拦」与「重提被硬拦」两处
+       给的是同一句话。
+    """
+    allowed = "、".join(
+        _describe(key, rule) for key, rule in sorted(properties.items())
+    ) or "（本工具不接受参数）"
+    shape = _call_shape(name, properties, required, args, wrong or set())
+    return "\n".join(
+        (
+            problem,
+            f"可用参数: {allowed}",
+            f"{NEXT_STEP_MARKER}把这次调用改成这个形状再发一次：{shape}",
+        )
+    )
+
+
+def _validate(
+    args: dict[str, Any], schema: dict[str, Any], name: str = "工具"
+) -> str | None:
+    """校验通过返回 None，否则返回中文错误说明（含可用参数与照抄形状）。"""
     if not isinstance(args, dict):
         return "参数必须是 JSON 对象"
 
     properties = schema.get("properties", {})
+    required = list(schema.get("required", ()))
 
     if schema.get("additionalProperties", True) is False:
-        unknown = set(args) - set(properties)
+        unknown = sorted(set(args) - set(properties))
         if unknown:
-            # 必须带上可用参数：只说「有个参数不认识」，模型唯一能做的就是
-            # 猜。实测里它会在同一个调用上连续撞四次，把预算烧光——
+            # 必须带上可用参数与照抄形状：只说「有个参数不认识」，模型唯一能做
+            # 的就是猜。实测里它会在同一个调用上连续撞四次，把预算烧光——
             # 小模型的上下文经不起这种消耗。
             #
             # 带上每个参数是干什么的：工具之间的参数名有重叠（path / pattern），
             # 实测模型会把 A 工具的写法搬到 B 工具上，只报名字它仍然对不上号。
-            allowed = "、".join(_describe(key, rule) for key, rule in sorted(properties.items()))
-            if not allowed:
-                allowed = "（本工具不接受参数）"
-            return f"存在未知参数: {', '.join(sorted(unknown))}；可用参数: {allowed}"
+            return _reject(
+                f"存在未知参数: {', '.join(unknown)}",
+                name,
+                properties,
+                required,
+                args,
+                wrong=set(unknown),
+            )
 
-    for key in schema.get("required", []):
+    for key in required:
         if key not in args:
-            return f"缺少必填参数: {key}"
+            return _reject(
+                f"缺少必填参数: {key}",
+                name,
+                properties,
+                required,
+                args,
+            )
 
     for key, value in args.items():
         rule = properties.get(key)
@@ -68,9 +173,24 @@ def _validate(args: dict[str, Any], schema: dict[str, Any]) -> str | None:
             continue
         expected = _TYPE_MAP.get(rule.get("type", ""))
         if expected is not None and not isinstance(value, expected):
-            return f"参数 {key} 类型应为 {rule['type']}"
+            return _reject(
+                f"参数 {key} 类型应为 {rule['type']}（这次给的是 {type(value).__name__}）",
+                name,
+                properties,
+                required,
+                args,
+                wrong={key},
+            )
         if "enum" in rule and value not in rule["enum"]:
-            return f"参数 {key} 取值不在允许范围内"
+            choices = "、".join(_literal(one) for one in rule["enum"])
+            return _reject(
+                f"参数 {key} 取值不在允许范围内（只能是 {choices}）",
+                name,
+                properties,
+                required,
+                args,
+                wrong={key},
+            )
 
     return None
 
@@ -99,7 +219,7 @@ class ToolRegistry:
         if spec is None:
             return ToolResult(ok=False, content=f"未知工具: {call.name}")
 
-        error = _validate(call.arguments, spec.parameters)
+        error = _validate(call.arguments, spec.parameters, spec.name)
         if error is not None:
             return ToolResult(ok=False, content=f"参数校验失败: {error}")
 

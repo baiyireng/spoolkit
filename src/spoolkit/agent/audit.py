@@ -24,13 +24,21 @@
   原始版本更短**（删逻辑最常见的形状）。高严重度，但只说事实、不阻断——
   合法的大改（合并、去重、删死代码）也会变短，所以它是一条**要人看的证据**，
   而不是一次拒绝。
+- **越界写**（`boundary_write`）：这次改动落在了**受保护路径**上。判据同样
+  机械：数据/资产类扩展名（`.csv` / `.xlsx` / `.db` / `.sqlite` …）或工作区
+  配置里点名的路径，**并且**这个文件不是本次运行自己创建的。现场是
+  `add-feature` 在 t=0 那一次改掉了 `data/expenses.csv`（哈希变）：探针侧抓到了
+  （guard_hashes 报下限红），系统侧却什么都没说——这一条补的就是系统侧那一声。
+  高严重度，**不阻断**（改数据文件也可能是任务本身），但要看得见。
 
 刻意不铺大：不做 LLM 语义审查、不做风险分级放行、不写证据账本。这一层只把
 判据、严重度与输出行做出来，升级挂点见 `escalate`。
 """
 
+import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # 严重度。只有两档：这一轮要做的是「检测 + 报出来」，
 # 分级放行（T1–T12 那一套）是后面几层的事，这里不假装有。
@@ -189,6 +197,143 @@ def tampering_suspected(
     )
 
 
+# ---- 受保护路径 / 越界写（T6 那一类的机械闸门）-----------------------------
+#
+# 判据的形状（两条都要成立才报）：
+#
+#   1. 命中受保护路径：数据/资产类扩展名，**或**工作区配置里点名的路径；
+#   2. 这个文件**不是本次运行自己创建的**——本次新建的文件是它的产出，
+#      不该被当成越界写。
+#
+# 第 2 条是**必要条件**。它是「本次运行没有创建的文件」那句直白的落地：
+# 一个运行自己造出来的东西不算越界；别人（或上一轮）留下的东西才算。
+# 想要更严的口径（**凡是本次没创建过的一律受保护**，包括既有源码）也支持：
+# 配置里把 `all_existing` 打开。默认关——那样一来每一次「改既有代码」都是
+# 高危，高危泛化之后就没有人看了，而这一层的全部价值就在于那条线还认得出。
+
+#: 工作区级配置的位置（与 `.agent/policy.json` / `.agent/limits.json` 同一层）。
+PROTECTED_CONFIG = ".agent/protected.json"
+
+#: 数据/资产类扩展名。挑它们的理由不是「危险」，是**不可复核**：数据文件被就地
+#: 改写没有 diff 可读，二进制资产连「改了什么」都说不出来，而这两类恰恰是
+#: 一次「改代码」的运行最容易顺手改坏、也最难事后核对的东西。
+PROTECTED_SUFFIXES: tuple[str, ...] = (
+    ".csv", ".tsv", ".xlsx", ".xls", ".db", ".sqlite", ".sqlite3",
+    ".parquet", ".pkl", ".npy", ".npz", ".jsonl",
+    ".zip", ".tar", ".gz", ".7z",
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf",
+    ".woff", ".woff2", ".ttf", ".mp3", ".mp4", ".mov",
+)
+
+#: 这些前缀下的东西由 harness 自己写（授权、检查点、索引、记忆库），
+#: 不是模型的产出，也不该进这条闸门——报它们只会淹掉真正的越界写。
+_NEVER_PROTECTED = (".agent/",)
+
+
+@dataclass(frozen=True)
+class ProtectedConfig:
+    """工作区级的受保护路径配置（读不到配置时用这里的默认值）。"""
+
+    suffixes: tuple[str, ...] = PROTECTED_SUFFIXES
+    #: 配置里点名的路径（相对工作区的 posix 形状；给目录就按前缀匹配）。
+    paths: tuple[str, ...] = ()
+    #: 打开之后，**本次运行没有创建的文件**一律受保护（不只数据/资产类）。
+    all_existing: bool = False
+    #: 打开之后，连本次运行自己新建的文件也算受保护（默认关：自己造的产出不算越界）。
+    protect_created: bool = False
+
+
+def load_protected(root: Path) -> ProtectedConfig:
+    """读工作区级配置 `.agent/protected.json`；读不到/写坏了就用默认值。
+
+    写坏时**不抛异常**：这一层是附加的可见性，不该因为一个手改坏的 JSON 让
+    整次运行起不来。认得出的键：
+
+        {"suffixes": [".csv", ".parquet"], "paths": ["data/账本.csv", "assets/"],
+         "all_existing": false, "protect_created": false}
+    """
+    path = Path(root) / PROTECTED_CONFIG
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return ProtectedConfig()
+    if not isinstance(raw, dict):
+        return ProtectedConfig()
+
+    def _strings(key: str) -> tuple[str, ...] | None:
+        value = raw.get(key)
+        if not isinstance(value, list):
+            return None
+        return tuple(str(one).strip() for one in value if str(one).strip())
+
+    suffixes = _strings("suffixes")
+    paths = _strings("paths")
+    return ProtectedConfig(
+        suffixes=suffixes if suffixes is not None else PROTECTED_SUFFIXES,
+        paths=paths or (),
+        all_existing=bool(raw.get("all_existing", False)),
+        protect_created=bool(raw.get("protect_created", False)),
+    )
+
+
+def _protected_reason(path: str, config: ProtectedConfig) -> str:
+    """命中受保护路径的理由；没命中返回空串。`path` 是工作区内的 posix 形状。"""
+    said = str(path or "").replace("\\", "/")
+    # 只剥一层 `./`：`lstrip("./")` 会把 `.agent/…` 的前导点也吃掉，
+    # 于是 harness 自己写的那些文件（`.agent/index.db`）会掉进扩展名判据里。
+    if said.startswith("./"):
+        said = said[2:]
+    said = said.lstrip("/")
+    if not said or any(said.startswith(one) for one in _NEVER_PROTECTED):
+        return ""
+    for one in config.paths:
+        if said == one or said.startswith(one.rstrip("/") + "/"):
+            return "工作区配置里点名的受保护路径"
+    lowered = said.lower()
+    for suffix in config.suffixes:
+        if lowered.endswith(str(suffix).lower()):
+            return f"数据/资产类扩展名（{suffix}）"
+    if config.all_existing:
+        return "本次运行没有创建的文件（工作区开了 all_existing）"
+    return ""
+
+
+def boundary_write(
+    *,
+    path: str,
+    created: bool,
+    config: ProtectedConfig | None = None,
+) -> Finding | None:
+    """这次改动是不是一次「越界写」。判据见上面那一段注释。
+
+    `created` = 这个文件是**本次运行自己创建的**（调用方按磁盘上改动之前有没有
+    它判，`PendingChanges.baseline()` 给的就是这个事实）。
+
+    报出来的是高严重度发现（`escalate=True` 就是升级挂点：以后接「先请示后落盘」
+    时拦的就是这一条）。**不阻断**：任务本身就是「把这份 csv 修好」的时候，改了
+    才是对的——所以它是一条要人看的证据，不是一次拒绝。
+    """
+    rules = config or ProtectedConfig()
+    reason = _protected_reason(path, rules)
+    if not reason:
+        return None
+    if created and not rules.protect_created:
+        # 自己造出来的产出不算越界：这条判据管的是「动了不该动的东西」。
+        return None
+    return Finding(
+        kind="protected_write",
+        severity=HIGH,
+        summary=f"这次改动了受保护路径 {path}（{reason}）",
+        detail=(
+            "数据/资产类文件被就地改写没有 diff 可读、也常常不可逆。"
+            "先确认这处改动是有意的（任务就是要改它，或者用户点名要改）；"
+            "不是的话，用 revert 把它退回去。"
+        ),
+        # 升级挂点：以后接「先请示后落盘」时，这里就是拦下那次写入的位置。
+        escalate=True,
+    )
+
+
 # 回退原因那句话里「从哪个范围退回来」的形状：`verify.scope_fallback` 写的
 # 就是「范围 tests 里测试导不进项目根（…）」。解析它比再传一个字段省事，
 # 也让「文案即接口」这件事只有一处（`SCOPE_FALLBACK_MARKER` 那一段）。
@@ -232,6 +377,14 @@ class AuditLog:
 
     def high(self) -> list[Finding]:
         return [item for item in self.findings if item.severity == HIGH]
+
+    def high_lines(self) -> list[str]:
+        """高危发现**逐行**（带 `ESCALATION_MARKER`）：收尾报告引用的就是这一段。
+
+        与 `render()` 分开是因为用途不同：`render()` 是给模型看的一句话摘要
+        （验证失败时回灌），这一段是给人看的收尾报告——一行一条，标记醒目。
+        """
+        return [item.render() for item in self.high()]
 
     def render(self) -> str:
         return "; ".join(item.summary for item in self.high())
