@@ -303,5 +303,13 @@ def test_改弱测试一次真循环里三条出口都看得见(tmp_path: Path) 
     assert any("自动审查" in line for line in result.trace)
     # ③ 收尾报告：人真的会读的那一份，带 file:line。
     assert "tests/test_merge.py:5" in result.final
-    # P0 的纪律：只报不阻断，结局一个字都没改。
-    assert result.finished is True
+    # ---- P1 把这条结局**有根据地改了**（这是本轮唯一一处改动 P0 纪律的断言）----
+    #
+    # P0 的纪律是「只报不阻断」，所以那时这里断言 `finished is True`。P1 接的
+    # 正是「不许静默放行」（设计稿 §3.1 第 1 条：**L1 有任一高严重度发现** →
+    # 不许宣称完成），所以删掉一条用例、还在结论里说「测试都过了」时必须
+    # `finished=False`。**这仍然不是「成果不许落盘」**：改动照旧在盘上、
+    # 回退命令照旧给得出（下面两条就是那两件事的断言）。
+    assert result.finished is False
+    assert "未完成（被审查拦下）" in result.final
+    assert "spool revert --run" in result.final

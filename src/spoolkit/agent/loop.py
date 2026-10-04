@@ -15,14 +15,19 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from spoolkit.agent.audit import (
+    ACTION_BLOCK_KIND,
     AUDIT_KIND,
     Audit,
     AuditLog,
+    BLOCKED_REVIEW_HARD_KIND,
+    BLOCKED_REVIEW_KIND,
     CANNOT,
+    ESCALATE_KIND,
     EVIDENCE_GAPS_KIND,
     FAIL,
     Finding,
     HIGH,
+    INFO,
     NOT_RUN,
     PASS,
     ReviewLedger,
@@ -34,6 +39,15 @@ from spoolkit.agent.audit import (
 )
 from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
+from spoolkit.agent.review_gate import (
+    PENDING as ESCALATION_PENDING,
+    EscalationDecision,
+    EscalationGate,
+    EscalationRequest,
+    parse_reply,
+    render_decisions,
+    render_summary,
+)
 from spoolkit.agent.state import TaskState, clear_state, load_state, save_state
 from spoolkit import limits as _limits
 from spoolkit.agents.supervisor import (
@@ -76,7 +90,12 @@ from spoolkit.tools.edit import (
 )
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import ToolCall, ToolResult
-from spoolkit.tools.verify import ENVIRONMENT_MARKER, SCOPE_FALLBACK_MARKER, pending_renames
+from spoolkit.tools.verify import (
+    CANNOT_CHECK,
+    ENVIRONMENT_MARKER,
+    SCOPE_FALLBACK_MARKER,
+    pending_renames,
+)
 from spoolkit.tools.view import WorkspaceView
 
 SYSTEM_PROMPT = T.SYSTEM
@@ -724,6 +743,7 @@ class AgentLoop:
         on_event: Callable[[str, dict], None] | None = None,
         from_channel: bool = False,
         pending: Any | None = None,
+        escalation_review: Callable[[EscalationRequest, str], tuple[str, str]] | None = None,
     ) -> None:
         self.gateway = gateway
         self.tokenizer = tokenizer
@@ -747,6 +767,38 @@ class AgentLoop:
         self.persona = persona
         self.on_event = on_event
         self.from_channel = from_channel
+        # ---- 风险分级放行（P1，§3.2）----------------------------------------
+        #
+        # `escalation_review(request, text) -> (批复词, 通道)` 是**注入的批复通道**：
+        # 终端/网页壳/聊天通道各自注入自己的那一份，测试注入一份脚本化的回答。
+        # **不给就是无人值守**：不弹问题、把动作挂起为待批、成果照落盘（§3.2.3）。
+        # 这一层刻意不直接读 stdin：`--events` 模式下读 stdin 会把网页壳/桥的
+        # 协议搞乱（它们已经有一条 `--ask-on-stdin` 的通道，别在这里再开一条）。
+        self.escalation_review = escalation_review
+        self.escalation_gate = EscalationGate(
+            config.project_root,
+            limit=config.limit,
+            run_id=getattr(pending, "run_id", "") or "",
+            # 挂起清单只放在**会话目录**里：跨结算要保留的只有「还没执行的动作」，
+            # 成果已经在工作区里了（§2.5）。
+            pending_path=config.state_dir / "review" / "pending-actions.json",
+        )
+        # 自动修有限轮：命中「不许宣称完成」时先回灌发现让它自己修，轮数用完
+        # 才按 §3.1 报「未完成 + 逐条 file:line」。**默认 0（关）**：自动修要
+        # 再花一轮模型调用，短预算的运行（探针 8 步、用例 2–4 步）付不起，
+        # 而它是可覆盖的标定值（`.agent/limits.json` 的 `review_fix_rounds`）。
+        self._review_fix_limit = int(config.limit("review_fix_rounds"))
+        self._review_fix_rounds = 0
+        self._review_blocked = False
+        self._review_block_note = ""
+        # 这一次被拦下的东西**有没有可修的**（高严重度发现才有）。纯规模条件
+        # 再问一次也修不掉，所以不浪费那一轮自动修。
+        self._review_fixable = False
+        # 「不许宣称完成」这条 note 本次运行发过没有。**一次运行只发一条**：
+        # 自动修几轮就发几条的话，`blocked_by_review` 会等于轮数，而它与
+        # `check_ok` 一起派生的 `blocked_but_ok`（「被阻断但验收绿」）就变成
+        # 误报源——那个字段量的是**运行**，不是「判了几次」（§6 字段表）。
+        self._review_note_sent = False
         # 失败过的调用（指纹 → 次数 / 上次的失败话术）。用来硬拦原样重试，
         # 并把它失败时看过的「照做的下一步」端回去。每次 run() 开始时清空。
         self._failed_calls: dict[str, int] = {}
@@ -952,6 +1004,20 @@ class AgentLoop:
         # 的那几条不该把这一次的同类发现压掉。
         self._reviewed_notes.clear()
         self._evidence_gaps = 0
+        # 风险分级放行的状态同样是**本次运行**的（§3.2 的打扰预算按运行算）：
+        # 上一次 run() 请示过的触发条件不该把这一次的那一次压掉，被拦下的
+        # 动作清单也只能属于同一轮。
+        self.escalation_gate.reset()
+        self._review_fix_rounds = 0
+        self._review_blocked = False
+        self._review_block_note = ""
+        self._review_fixable = False
+        self._review_note_sent = False
+        # 本次运行「已经产出过多少处编辑」的镜像，以及上一轮被拦下时那份
+        # 「逐条发现」的原文。两者一起回答「它被拦下之后有没有再动手」——
+        # 同一批发现连着报两次就不回灌（见 run() 的 done 分支）。
+        self._edits_made_now = 0
+        self._review_last_block = ""
         # 上一轮诊断回来的报告：一开局就摆到面前，模型不用记得去查。
         if self.incoming is not None:
             report = self.incoming()
@@ -1453,6 +1519,7 @@ class AgentLoop:
                     )
             history.append(Message(role="assistant", content=response.text))
 
+            edits_before_step = edits_made
             blocked_all = False
             edited = False
             if turn.tool_calls:
@@ -1549,6 +1616,9 @@ class AgentLoop:
                         # 验证只能报「没有需要验证的改动」，那是一句假通过。
                         edited = True
                         edits_made += 1
+                        # 给收尾闸门一个可读的读数：报告与 trace 里要能回答
+                        # 「它做到第几处、被拦下时已经产出过多少」。
+                        self._edits_made_now = edits_made
                         edit_fail_streak = 0
                         # 文件真的变了：失败表清零——旧参数可能重新有意义。
                         self._clear_failures()
@@ -1567,6 +1637,36 @@ class AgentLoop:
                             # 清掉之后，同一个 read_file 的重提会被放行成
                             # 「刷新读取」，而不是被硬拦在一份过期内容上。
                             self._forget_read(path)
+                            # 风险分级放行：先记下这个文件**改动前**的公开符号
+                            # 快照（T1 的对照），再登记这次编辑命中的路径条件
+                            # （T2/T3/T4/T6）。**两者都只记录、不拦**——文件
+                            # 编辑是成果，成果照落盘（§3.2.0）。
+                            #
+                            # 取的是**磁盘原文**、不是 `read_file` 那个叠加了
+                            # pending 的视图：走到这一行时 `propose()` 已经
+                            # 把新正文放进待确认清单，视图给的是**改之后**的
+                            # 内容——拿它当「改动前」，每个删掉的函数都判不出来
+                            # （T1 的冒烟一开始就是这么漏的）。
+                            self.escalation_gate.snapshot_symbols(
+                                path, self._disk_text(path)
+                            )
+                            for record in self.escalation_gate.record_edit(call):
+                                self._log(
+                                    f"风险分级放行（只记录不拦）：{record.trigger} "
+                                    f"{record.path}——{record.detail}"
+                                )
+                                self._emit(
+                                    "note",
+                                    {
+                                        "text": (
+                                            f"命中 {record.trigger}"
+                                            f"（{record.detail}）：成果照落盘"
+                                        ),
+                                        "ok": True,
+                                        "kind": AUDIT_KIND,
+                                        "trigger": record.trigger,
+                                    },
+                                )
                             # 越界写闸门：这次改动落在受保护路径上就当场报一条
                             # 高严重度发现（事件流 + trace + 收尾报告都看得见，
                             # **不阻断**）。现场见 agent/audit.boundary_write。
@@ -1782,18 +1882,74 @@ class AgentLoop:
                 save_state(state, checkpoint)
                 state_seconds += time.time() - _state_started
 
+            # 这一步开始时已经产出过多少处编辑。自动修那一关要看「拦住它的
+            # 那一步有没有产出」（同一步里既改东西又宣告完成的不给自动修：
+            # 那一轮它已经动过了，判词进的是运行报告）。
             if turn.done:
                 trace.append(f"step{state.step}: 完成")
                 # 它自己宣告完成时也一样要报最终状态：用户点名的第 7 条
                 # （收手与落盘抢跑）不区分「谁收的手」。已经落成的改动、
                 # 最终文件的真实行数与指纹，都附在结论后面。
+                #
+                # `gate=True`：**宣称完成那一刻判「许不许宣称」**（§2.6 第 2 条，
+                # `turn.done` 之前那一处）。判出高严重度发现时先**自动修有限轮**
+                # （轮数走标定值），修不掉才报「未完成 + 逐条 file:line」。
                 final_text = self._with_final_state(
-                    turn.final or "", state, trace, changed_paths
+                    turn.final or "",
+                    state,
+                    trace,
+                    changed_paths,
+                    gate=True,
+                    announce_block=True,
                 )
+                # ---- 自动修有限轮（§3.1 的处理顺序第 1 条）--------------------
+                #
+                # 「先按 §3.1 的处理顺序自动修 N 轮，修不掉才升级」：这里是那
+                # N 轮。**轮数有上限**（`_review_fix_limit`），而且只在有东西
+                # 可修时（高严重度发现逐条带 `file:line`）才给——纯规模条件
+                # 再问一次也修不掉。
+                #
+                # 给哪一次？**这一轮的发现与上一轮不一样**的那一次
+                # （`same_again` 为假）。两次报的是同一批发现 = 它被拦下之后
+                # 什么都没动，再回灌一遍只是复读，会一路烧到步数上限（实测
+                # 见过）；发现变了才说明它在按发现逐条修，值得再给一轮。
+                same_again = self._review_block_note == self._review_last_block
+                if (
+                    self._review_fix_limit > 0
+                    and self._review_blocked
+                    and self._review_fixable
+                    and not same_again
+                    and self._review_fix_rounds < self._review_fix_limit
+                ):
+                    self._review_fix_rounds += 1
+                    findings = self._review_block_note
+                    self._review_last_block = findings
+                    self._review_blocked = False
+                    self._review_block_note = ""
+                    ask = (
+                        f"审查拦下了「完成声明」（第 {self._review_fix_rounds}/"
+                        f"{self._review_fix_limit} 轮自动修）。这些发现必须先处理掉，"
+                        "或者给出机械可核对的理由说明它们不成立：\n"
+                        + _flat_line(findings)[:900]
+                        + "\n**注意**：这一轮的改动已经落在工作区里，不用重做；"
+                        "要修就按上面的 `文件:行` 逐条修。"
+                    )
+                    feedback = ask
+                    trace.append(
+                        f"step{state.step}: 完成被审查拦下，回灌逐条发现让它自动修"
+                        f"（{self._review_fix_rounds}/{self._review_fix_limit}）"
+                    )
+                    history.append(Message(role="user", content=ask))
+                    continue
                 self._archive(state, "success", trace, turn.final or "")
                 clear_state(checkpoint)
+                # **有动作没执行**（挂起待批）时不许宣称完成：`finished=False`
+                # 在这里的含义是「有动作在等批复」，**不是**「成果没落盘」——
+                # 成果已经按 §2.5 落在工作区里了（§6 P1 验收口径明确反向过
+                # 旧判据：`settled != "auto"` 只表示有动作没执行）。
+                settled_clean = not self.escalation_gate.pending_actions
                 return LoopResult(
-                    finished=True,
+                    finished=not self._review_blocked and settled_clean,
                     final=final_text,
                     state=state,
                     steps=state.step,
@@ -1825,7 +1981,9 @@ class AgentLoop:
         # 甚至已经写进用户的工作区（`--policy auto`）。所以这里对最终文件跑
         # 一次验证并把真实结果附在结论后面：已经落成的改动不许被判词抹掉，
         # 文件变好了也要如实说。
-        final = self._with_final_state(final, state, trace, changed_paths)
+        final = self._with_final_state(
+            final, state, trace, changed_paths, gate=True, announce_block=False
+        )
         return LoopResult(
             finished=False,
             final=final,
@@ -1950,6 +2108,21 @@ class AgentLoop:
         """
         undo = self._undo_command()
         head = ""
+        if undo:
+            # **回退能力要能被机械地读到**，不只是写在报告正文里（§6 字段表：
+            # `revert_available` 判「这一轮给不给得出一条可执行的整轮回退命令」）。
+            # 事件流是探针唯一能机械读的出口，所以这里单独发一条带
+            # `revert_command` 字段的 note。**它不是发现、也不是阻断**：
+            # 只是「有退路」这件事的读数。
+            self._emit(
+                "note",
+                {
+                    "text": f"回退这一轮（可直接复制）：{undo}",
+                    "ok": True,
+                    "kind": "revert_available",
+                    "revert_command": undo,
+                },
+            )
         if passed is False:
             head = (
                 "⚠ 最终验证：未通过——这一轮的改动没有通过验收。\n"
@@ -1957,10 +2130,20 @@ class AgentLoop:
                 + (f"撤销这一轮（可直接复制）：{undo}\n" if undo else "")
                 + "（上面是结论与退路，下面才是本次运行的结论与文件状态。）\n"
             )
+        # 「不许宣称完成」的判词必须排在模型那段之前：模型那段常常就是一份
+        # 大 diff，埋在下面等于没说什么（与最终验证未通过同一处理由）。
+        if self._review_blocked:
+            head = self._review_block_note + (f"\n{head}" if head else "")
         tail = f"{final}\n本次运行共落成 {len(changed)} 处改动。{facts} {outcome}"
         if ledger:
             tail += f"\n{ledger}"
         tail += boundary
+        # 每一处升级都记进审计：谁批的（通道）+ 批复词 + 触发条件 id + 五件摘要
+        # 指纹（§3.2.3 的「批复与审计」）。指纹变了说明批复针对的不是眼前这个
+        # 动作，批复作废、重新请示。
+        attention = self._escalation_note()
+        if attention:
+            tail += attention
         if undo and passed is not False:
             tail += f"\n撤销这一轮（可直接复制）：{undo}"
         return head + tail
@@ -1971,6 +2154,9 @@ class AgentLoop:
         state: TaskState,
         trace: list[str],
         changed: Sequence[str],
+        *,
+        gate: bool = False,
+        announce_block: bool = False,
     ) -> str:
         """给收尾结论补上「最终文件真实验证结果 + 真实状态」。
 
@@ -2027,6 +2213,8 @@ class AgentLoop:
             )
             self._final_verify = (passed, body)
             self._note_verification(passed, body)
+            if gate and changed:
+                self._apply_completion_gate(changed, announce=announce_block)
             return self._collect_report(
                 final,
                 changed,
@@ -2058,6 +2246,16 @@ class AgentLoop:
             self._note_verification(passed, report)
         else:
             outcome = "最终验证：本次运行没有挂验证器，未跑。"
+        # ---- 风险分级放行 + 不许宣称完成（§3.1 / §3.2）------------------------
+        # 位置在这里是必须的：最终验证结论刚刚拿到（T8 的判据要它），而收尾
+        # 报告还没拼（那一段要排在报告前面）。**这一步不回滚任何东西**：成果
+        # 已经落在工作区里，这里拦的只是那句「完成」（§2.5）。
+        #
+        # **两条出口都要过这一关**（上面那条「内容未变、沿用上次验证」的
+        # 捷径也一样）：那条捷径原先在这之前就 return 了，于是「上一步刚验过
+        # 同一批内容」的运行会绕开闸门——实测第三个冒烟场景就是这么漏过去的。
+        if gate and changed:
+            self._apply_completion_gate(changed, announce=announce_block)
         return self._collect_report(
             final,
             changed,
@@ -2067,6 +2265,57 @@ class AgentLoop:
             passed=passed,
             body=body,
             ledger=self._evidence_ledger(changed, passed).downgrade_note(),
+        )
+
+    def _apply_completion_gate(
+        self, changed: Sequence[str], *, announce: bool = True
+    ) -> None:
+        """判一次「许不许宣称完成」，并把它记进 trace 与事件流（§3.1）。
+
+        `announce=False` 是**自动修那一轮**：判据照跑（触发条件照样请示、账本
+        照样记），但那句「⚠ 未完成（被审查拦下）」不拼进这一轮的正文——
+        它会被回灌给模型，而模型看到「未完成」会去补做已经做完的事（实测：
+        rename 由 7 步涨到 10 步、最后撞上步数上限）。**只在真正收尾那一刻
+        宣告**，这正是 §3.1「不许宣称完成」要拦的那句话。
+        """
+        blocked = self._completion_blocked(changed)
+        if not blocked:
+            return
+        self._review_blocked = True
+        self._review_block_note = blocked if announce else ""
+        trace = self._trace
+        if trace is not None:
+            trace.append("收尾: 审查拦下了「完成声明」——" + _flat_line(blocked)[:160])
+        # **一次运行只发一条**：自动修的每一轮都会重算这件事，每轮发一条的话
+        # `blocked_by_review` 会等于轮数（rename 那条实测 3），而它与 `check_ok`
+        # 一起派生的 `blocked_but_ok` 就变成误报源——那个字段量的是「被阻断
+        # 但验收绿」的**运行**数，不是「判了几次」（§6 字段表）。
+        if self._review_note_sent:
+            return
+        self._review_note_sent = True
+        # 探针按这个 kind 数 `blocked_by_review`。**它量的是「结论被降级」，
+        # 不是「成果没落盘」**：那两件事在本设计里已经分开
+        # （§6 字段表对 `blocked_by_review` 的括注）。
+        self._emit(
+            "note",
+            {
+                "text": blocked,
+                "ok": False,
+                # **两条 kind 分开**：`blocked_by_review` 记「拦了一次」，
+                # `..._finding` 记「拦它的理由是 L1/L2 真的报了高严重度发现」。
+                # 探针用后者算 `blocked_but_ok`（误报代价）：只把它算在
+                # **机械判据报了真缺陷**的那一类上，否则「验收判据看不见、
+                # 而机械判据看见了」的真缺陷会被记成误报，那个数字永远非零。
+                "kind": (
+                    BLOCKED_REVIEW_HARD_KIND
+                    if self._review_fixable
+                    else BLOCKED_REVIEW_KIND
+                ),
+                "triggers": sorted(
+                    {item.trigger for item in self.escalation_gate.all_actions}
+                ),
+                "has_finding": bool(self._review_fixable),
+            },
         )
 
     def _note_verification(self, passed: bool, summary: str) -> None:
@@ -2210,6 +2459,44 @@ class AgentLoop:
         否则「不断被拦」+ 硬拦退还预算就成了无限预算。
         """
         signature = call_signature(call)
+        # ---- 风险分级放行：**动作执行口之前的拦截**（§2.6 第 2 条）------------
+        #
+        # 位置就在这里（`registry.invoke` 与刷新放行都在它后面）：判据是
+        # 「命中 T1–T13 → 在执行那个动作前拦下并请示」（§3.2.2）。文件编辑
+        # 不会走到这里——`action_triggers` 对写工具**永远**返回空表，它们是
+        # 成果，成果照落盘（§3.2.0）。
+        for request in self.escalation_gate.action_triggers(call):
+            self._emit(
+                "note",
+                {
+                    "text": f"危险动作进入请示：{request.action}（{request.trigger}）",
+                    "ok": False,
+                    "kind": ACTION_BLOCK_KIND,
+                    "trigger": request.trigger,
+                    "gated": True,
+                    "fingerprint": request.fingerprint,
+                },
+            )
+            decided = self._escalate(request)
+            decision = self.escalation_gate.decisions.get(decided.fingerprint)
+            if decision is None or not decision.execute:
+                return ToolResult(
+                    ok=False,
+                    content=(
+                        f"{BLOCKED_PREFIX}这个动作被风险分级放行拦下了（触发条件 "
+                        f"{request.trigger}，{request.note}）。**成果不受影响**——"
+                        "这一轮已经落盘的改动仍在工作区里，回退命令见收尾报告。"
+                        "被拦的是**这一次动作**，不是「不许这样改文件」；"
+                        "**更不是「不许删文件、不许精简」**：删死代码、合并重复"
+                        "实现、删已被替代的文件都是正常编辑，照样落盘、照样可回退"
+                        "（§2.5 的反向条款）。"
+                        "要往下做就换一条不需要该动作的路（改代码而不是跑那条命令、"
+                        "小步改而不是批量删），或者等人批复。"
+                        + (
+                            f"\n{_intent_clause(call)}" if call.intent else ""
+                        )
+                    ),
+                )
         failures = self._failed_calls.get(signature, 0)
         block_at = max(int(self.config.limit("failed_repeat_block_at")), 2)
         if failures and failures >= block_at - 1:
@@ -2326,6 +2613,315 @@ class AgentLoop:
             {"text": finding.render(), "ok": True, "kind": AUDIT_KIND},
         )
         self._log(f"自动审查：{finding.render()}")
+
+    # ---- 风险分级放行（P1，§3.2）------------------------------------------
+
+    def _note_escalation_finding(self, request: EscalationRequest) -> None:
+        """把一条触发条件记进审查账本（它同时是收尾报告的一段）。
+
+        **严重度刻意是「提示」而不是「高危」**（这条不是洁癖）：高严重度发现
+        会喂给 `completion_triggers` 的 T12，于是「升级」自己会把升级
+        再触发一次——那是自激振荡，不是判据。升级是一次**请示**，它该看见的
+        地方是事件流、trace 与收尾报告那一段（`render_decisions`），
+        而不是「高危发现」那张表（那张表列的是**问题**）。
+        """
+        finding = Finding(
+            kind=f"escalation_{request.trigger.lower()}",
+            severity=INFO,
+            summary=(
+                f"触发条件 {request.trigger}（{request.note}）：{request.detail}"
+            ),
+            detail="拦的是动作，不是成果：这一轮的产出照落盘，可回退（§2.5）",
+            escalate=True,
+            path=request.paths[0] if request.paths else "",
+            line=0,
+        )
+        self.audit_log.add(finding)
+
+    def _escalate(self, request: EscalationRequest) -> EscalationRequest:
+        """请示一次。**五件一次给全**，然后按批复通道拿回答。
+
+        返回值上的 `summary` 已经填好五件的第 ①②③④⑤ 四条半（回退由这里
+        按 `pending` 现算），调用方拿它去渲染。**同一触发条件不重复打扰**：
+        第二次命中只记一条发现，不再问一遍（§3.2.4 的打扰预算）。
+        """
+        gate = self.escalation_gate
+        revert = self._revert_command()
+        conclusion = self._escalation_conclusion(request)
+        summary = gate.summary_for(
+            request, conclusion=conclusion, revert_command=revert
+        )
+        filled = EscalationRequest(
+            trigger=request.trigger,
+            action=request.action,
+            detail=request.detail,
+            summary=summary,
+            paths=request.paths,
+            before_action=request.before_action,
+            fingerprint=request.fingerprint,
+        )
+        # **同一个动作 / 同一件事在同一轮里只请示一次**（§3.2.4 的打扰预算）：
+        # 自动修 N 轮的每一轮都会重算触发条件，不在指纹上收口的话，一次运行
+        # 会把同一件事问 N 遍——`escalation_rate` 直接越过失败线，而用户被问的
+        # 还是同一个问题。指纹是内容算出来的，所以「同一个动作」判得准：
+        # 换了动作（另一条命令、另一处删除）指纹就变，照问。
+        answered = next(
+            (
+                item
+                for item in gate.all_actions
+                if item.fingerprint == filled.fingerprint
+            ),
+            None,
+        )
+        if answered is not None:
+            refreshed = gate.refresh(filled)
+            self._note_escalation_finding(refreshed)
+            return refreshed
+        if request.trigger not in gate.escalated_triggers:
+            gate.escalated_triggers.append(request.trigger)
+        self._note_escalation_finding(filled)
+        text = render_summary(filled)
+        # 事件流：探针按 `escalate` 数 `escalations`，并读五件齐不齐与摘要指纹。
+        # `blocked=False` 表示这一次没有拦下动作（纯结论级升级）——它同样是
+        # 「该问就问」，所以照样算一次请示。
+        self._emit(
+            "note",
+            {
+                "text": text,
+                "ok": False,
+                "kind": ESCALATE_KIND,
+                "trigger": filled.trigger,
+                "action": filled.action,
+                "blocked": bool(filled.action),
+                "before_action": bool(filled.before_action),
+                "summary_complete": bool(filled.complete),
+                "fingerprint": filled.fingerprint,
+            },
+        )
+        self._log(f"风险分级放行：{text.splitlines()[0]}")
+        if filled.action:
+            # 动作事件与请示事件分开记：探针要能核对「先请示、后考虑执行」
+            # （`escalated_before_action == escalations`）。
+            self._emit(
+                "note",
+                {
+                    "text": f"拦下动作（执行前）：{filled.action}（{filled.trigger}）",
+                    "ok": False,
+                    "kind": ACTION_BLOCK_KIND,
+                    "trigger": filled.trigger,
+                    "fingerprint": filled.fingerprint,
+                },
+            )
+        gate.hold(filled)
+        word, channel = self._review_word(filled, text)
+        approved = parse_reply(word) if word else "revert"
+        if not word:
+            decision_channel = "unattended"
+            approved = "revert"
+        else:
+            decision_channel = channel or "terminal"
+        if filled.action and approved in ("approve", "partial"):
+            # 批复「批准」→ 这个动作**不再挂起**：待批清单的定义是「还没执行的
+            # 动作」，把批过的留在里面会让收尾报「有动作等批复」而实际已经执行
+            # （工具层的批准对它没有意义——它只认 y/n）。「只批准其中几处」按
+            # 保守口径留在待批里：那个粒度是**动作**，P1 不假装知道该批哪几处。
+            if approved == "approve":
+                self.escalation_gate.release(filled)
+        decision = EscalationDecision(
+            approved=approved,
+            word=word,
+            channel=decision_channel,
+            fingerprint=filled.fingerprint,
+        )
+        gate.remember(decision)
+        self._emit(
+            "note",
+            {
+                "text": (
+                    f"批复（{decision_channel}）：{word or '（没人回答）'} → "
+                    f"{approved}；不执行这个动作不等于回滚成果，要退成果用回退命令"
+                ),
+                "ok": approved == "approve",
+                "kind": "escalation_reply",
+                "trigger": filled.trigger,
+                "word": word,
+                "channel": decision_channel,
+                "approved": (
+                    ESCALATION_PENDING if not word else approved == "approve"
+                ),
+                "fingerprint": filled.fingerprint,
+            },
+        )
+        self._log(
+            f"批复来源 {decision_channel}：{word or '（无人值守，不执行该动作）'}"
+        )
+        return filled
+
+    def _review_word(
+        self, request: EscalationRequest, text: str
+    ) -> tuple[str, str]:
+        """拿一次批复。**注入的通道优先**，没有注入就当无人值守。
+
+        无人值守**不弹问题、也不静默放行**：返回空词，调用方按
+        「不执行这个动作、挂起待批」处理（§3.2.3）。
+        """
+        if self.escalation_review is None:
+            return "", ""
+        try:
+            answer = self.escalation_review(request, text)
+        except Exception as exc:  # noqa: BLE001 - 通道坏了按「不执行」处理
+            self._log(f"批复通道不可用（{type(exc).__name__}），按不执行处理")
+            return "", ""
+        if isinstance(answer, tuple) and len(answer) == 2:
+            return str(answer[0] or ""), str(answer[1] or "")
+        return str(answer or ""), "channel"
+
+    def _escalation_conclusion(self, request: EscalationRequest) -> str:
+        """五件的第 ② 件：结论 + 证据（`file:line` / 退出码 / 测试摘要），**不贴 diff**。"""
+        bits: list[str] = [request.detail or request.note]
+        for finding in self.audit_log.high()[:5]:
+            spot = finding.where or "（未给位置）"
+            bits.append(f"{spot} {finding.summary}")
+        if self._final_verify is not None:
+            ok, body = self._final_verify
+            bits.append(
+                f"最终验证 {'通过' if ok else '未通过'}：{_flat_line(body)[:160]}"
+            )
+        lines = "；".join(" ".join(item.split()) for item in bits if item)
+        return lines[:600]
+
+    def _revert_command(self) -> str:
+        """五件的第 ⑤ 件：一条**可直接执行**的整轮回退命令（没有就空串）。
+
+        **按 `run_id` 给，不检查「现在还有没有待退的东西」**：收尾报告是在
+        落盘**之前**拼的（落盘在 `settle` 里），那一刻 `pending` 还是满的；
+        而报告落到人手上时改动已经写进工作区了。给一条「现在看起来没东西可退」
+        的命令，等于把「有回退」这件事说反——`spool revert --run <id>` 在
+        真的没有记录时只会报一句「没有这条运行记录」，那比不给命令安全得多
+        （用户至少知道该敲什么）。
+        """
+        if self.pending is None:
+            return ""
+        run_id = str(getattr(self.pending, "run_id", "") or "")
+        if not run_id:
+            return ""
+        try:
+            has_work = bool(len(self.pending)) or bool(
+                getattr(self.pending, "landed", lambda: [])()
+            )
+        except TypeError:  # pragma: no cover - pending 不是清单时按无回退处理
+            return ""
+        if not has_work:
+            return ""
+        return f"spool revert --run {run_id}"
+
+    def _escalation_note(self) -> str:
+        """收尾报告里那一段（没有升级就返回空串）。"""
+        return render_decisions(self.escalation_gate)
+
+    def _completion_blocked(self, changed: Sequence[str]) -> str:
+        """收尾这一刻判「许不许宣称完成」（§3.1）。
+
+        返回空串表示放行；非空表示那句话就是**降级后的结论**（逐条带
+        `file:line`）。**这一步不动落盘、不回滚任何东西**：成果已经在
+        工作区里，这里拦的只是那句「完成」（§2.5）。
+        """
+        self._review_fixable = False
+        if not changed:
+            return ""
+        if self.pending is None:
+            # **没有待确认清单就没有回退能力可言**：这一层挂在「落盘的每一处都
+            # 配一份 Baseline」之上（§2.5 第 2 条），而 Baseline 由 `PendingChanges`
+            # 攒。清单都没接上时，能诚实说的只有「这一轮没有可退的东西」，
+            # 不能凭空判一条 T11——那会把每一次没有 pending 的运行都判成未完成。
+            return ""
+        files = list(dict.fromkeys(changed))
+        lines = 0
+        # 这些路径**将要**变成什么（待确认清单里的新正文）：T1 的符号快照要拿
+        # 它当「之后」——收尾判这一刻改动还没落盘，读磁盘只会拿到改动前那一份。
+        written: dict[str, str] = {}
+        for path in files:
+            change = None
+            if self.pending is not None:
+                change = next(
+                    (item for item in self.pending.items() if item.path == path), None
+                )
+            if change is not None:
+                lines += len(str(change.new_text).splitlines())
+                written[path] = str(change.new_text)
+            else:
+                lines += self._disk_lines(path)
+        regression = (
+            self._final_verify is not None and self._final_verify[0] is False
+        )
+        # ---- T11/T13 的前置条件：**这一轮给不给得出回退**（§2.5 第 2 条）----
+        #
+        # **判据是机械的一件事实**：每个待落盘的路径，改动前的内容读不读得出来
+        # （`pending.baseline()` 给不出条目就是这个意思，`apply()` 里那几处会被
+        # `refused()` 挡下、不落盘）。判的**不是**「磁盘上有没有这个文件」——
+        # 新建文件当然在磁盘上找不到，而它的回退就是「删回不存在」，那是
+        # 有回退（§2.5 第 2 条明说了这一条）。
+        #
+        # 口径写错过一次（实测抓出来的）：一开始拿「磁盘上有没有这个文件」
+        # 当判据，于是**每一次改既有文件**都命中 T11、收尾一律判「未完成」——
+        # 升级率直接翻倍，而它拦的东西根本退得回去（`spool revert` 给的正是
+        # 改动前的原文）。
+        revert_command = self._revert_command()
+        baseline_ok = True
+        if self.pending is not None and len(self.pending):
+            try:
+                refused = self.pending.unbaselined()
+            except (OSError, ValueError, AttributeError):
+                refused = None
+            baseline_ok = not refused
+        elif not revert_command:
+            # 没有待确认改动、也没有已经落成的改动：这一轮没有可退的产出，
+            # 也就没有「给不出回退」这回事，不打扰（§3.2.1 的默认路径）。
+            baseline_ok = True
+        requests = self.escalation_gate.completion_triggers(
+            self.audit_log.findings,
+            files=files,
+            lines=lines,
+            regression=regression,
+            # 「测试红了却说做完了」才是 T8 要拦的形状；单是红一次不算（见
+            # `completion_triggers` 里 T8 那段：改测试的任务开头必然先红一次）。
+            blocking_failure=bool(self.audit_log.high()),
+            has_baseline=baseline_ok and bool(revert_command),
+            revert_command=revert_command,
+            written=written,
+        )
+        if not requests:
+            # 没有触发条件（这一轮清清白白）：清掉上一轮留下的拦下判词，
+            # 否则收尾报告会搬一句过期的「未完成」出来。
+            self._review_blocked = False
+            self._review_block_note = ""
+            self._review_fixable = False
+            return ""
+        # **同一件事每一轮都重算一遍**（不是只算第一次）：`_escalate` 对已经
+        # 请示过的那些只做记录、不再打扰（§3.2.4 的打扰预算），而这一段判词
+        # 必须**每一轮都拿得到**——自动修那一关与收尾报告都要它。写成「第一次
+        # 才算」的话，第二轮就拿到空串，于是自动修一轮都不给、`_review_fixable`
+        # 也跟着判错（实测抓出来的）。
+        for request in requests:
+            self._escalate(request)
+        high = self.audit_log.high()
+        # 「自动修有限轮」只在**有东西可修**时才修：高严重度发现逐条带
+        # `file:line`，模型照着改得动；而纯规模条件（T7 这类）里模型改什么都
+        # 不会让那条线消失，再问一次只会白烧一轮。两种情形都照 §3.1 报
+        # 「未完成 + 逐条 file:line」，区别只是要不要先给它一次补救机会。
+        self._review_fixable = bool(high)
+        listed = "\n".join(
+            f"  - {item.where or '（未给位置）'}：{item.summary}" for item in high
+        ) or "  - （没有高严重度发现，升级来自规模/回归条件）"
+        triggers = "、".join(sorted({item.trigger for item in requests}))
+        return (
+            "⚠ 未完成（被审查拦下）："
+            f"命中触发条件 {triggers}。这一轮的改动**已经落在工作区里**"
+            "（拦的是「完成声明」与危险动作，不是成果），要退用下面的回退命令。\n"
+            "逐条发现：\n"
+            f"{listed}\n"
+            "被拦下、等批复的动作见「风险分级放行」那一段。"
+        )
 
     def _boundary_report(self) -> str:
         """收尾报告里那一段高危发现（没有就返回空串）。
@@ -2459,6 +3055,21 @@ class AgentLoop:
         """
         if self._trace is not None:
             self._trace.append(line)
+
+    def _disk_text(self, path: str) -> str:
+        """这个路径**磁盘上的**原文（读不到给空串）。
+
+        与 `_text_of` 的区别是**不叠加待确认改动**：判「改动前是什么」必须用
+        磁盘那一份，而 `read_file` 看到的、护栏比对的、验证器验的都是叠加后的
+        视图。两件事各有各的用处，别混。
+        """
+        try:
+            target = Path(path)
+            if not target.is_absolute():
+                target = self.config.project_root / path
+            return target.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            return ""
 
     def _text_of(self, path: str) -> str | None:
         """这个路径现在的内容（**叠加待确认改动之后**的视图）。取不到返回 None。
@@ -2666,6 +3277,15 @@ class AgentLoop:
             )
         self.audit_log.extend(found)
         self._last_findings = found.findings
+        # ---- T10 的原料：这次验证里有哪些「查不了」 --------------------------
+        #
+        # 判据是**机械的**：结论里出现与 `tools/verify.py` 同一个字面标记
+        # （`CANNOT_CHECK`，这里按同一个词认，不另造一套）。记下来之后，
+        # T10 只在「同一批改动另有 T1–T7 命中」时才成立——不是每一句
+        # 「查不了」都升级（那样每条 HTML 运行都会升级，见 `completion_triggers`）。
+        for line in result.content.splitlines():
+            if CANNOT_CHECK in line:
+                self.escalation_gate.note_cannot_check(line)
         if found.findings:
             # 发现也要进 trace：调试时「这一步判出了什么」是唯一能看到的信号，
             # 而高危那条（迎合测试）本来就该在人读的轨迹里留一行。

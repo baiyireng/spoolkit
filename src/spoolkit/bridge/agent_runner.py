@@ -248,6 +248,21 @@ class AgentRunner:
 
     def _pending_text(self, snapshot: dict) -> str:
         detail = snapshot.get("awaiting_detail") or {}
+        if detail.get("escalation"):
+            # 风险分级放行的请示（§3.2.3）：**一条消息给五件 + 撤销命令**，
+            # 按四档词批复。被请示的是那个**动作**，不是成果——成果已经在
+            # 工作区里，所以这里绝不能说「要不要写入」。
+            lines = [
+                f"⚠ 一个动作被拦下、等你批复（触发条件 {detail['escalation']}）",
+                f"① 影响：{detail.get('impact') or '（未填）'}",
+                f"② 结论：{detail.get('conclusion') or '（未填）'}",
+                f"③ 建议：{detail.get('advice') or '（未填）'}",
+                f"④ 选项：{detail.get('options') or '（未填）'}",
+                f"⑤ 回退：{detail.get('rollback') or '（未填）'}",
+                "这一轮的成果**已经落在工作区里**，这里批的只是那个动作：",
+                "回 y 批准这个动作、p 只批准其中几处、n 撤销（不执行）、r 改方案。",
+            ]
+            return "\n".join(lines)
         if detail.get("command"):
             # 命令授权和"改动要落盘"是两件事，话得分开说：一个是在问"能不能跑"，
             # 一个是在问"要不要写入"。混成一句话，用户点 y 之前不知道在批什么。

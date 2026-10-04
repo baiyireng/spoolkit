@@ -2048,6 +2048,20 @@ class PendingChanges:
         """上一次 `apply()` 因为给不出基线而被扣掉的那几处。"""
         return list(self._refused)
 
+    def unbaselined(self) -> list["RefusedChange"]:
+        """**现在**这几处待落盘的改动，哪些给不出基线（`apply` 会扣掉它们）。
+
+        与 `refused()` 的区别是时机：`refused()` 是「上一次 apply **已经**扣掉
+        了什么」，这个是「下一次 apply **将要**扣掉什么」。收尾闸门（T11/T13）
+        要的是后者——它判在落盘之前，那时 `_refused` 还是空的。
+        """
+        out: list[RefusedChange] = []
+        for change in self._changes.values():
+            entry, why = self._baseline_entry(change)
+            if entry is None:
+                out.append(RefusedChange(path=change.path, reason=why))
+        return out
+
     def baseline(self) -> "Baseline":
         """把当前待写入的修改转成可持久化的基线。
 

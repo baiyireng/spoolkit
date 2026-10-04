@@ -66,6 +66,24 @@ TESTS_WEAKENED_KIND = "tests_weakened"
 #: 「完成声明没有证据」这一类 note 的 kind（探针的 `evidence_gaps` 字段）。
 EVIDENCE_GAPS_KIND = "evidence_gaps"
 
+# ---- P1：风险分级放行的两个 kind ---------------------------------------------
+#
+# 两者分开是因为**探针按 kind 数的是不同的东西**（§6 字段表）：
+#   - `ESCALATE_KIND`：主动请示了一次（`escalations`），带触发条件 id 与摘要指纹；
+#   - `ACTION_BLOCK_KIND`：拦下了一个**危险动作**（`blocked_actions`），
+#     拦的是那个动作，不是成果。
+#: 「该拦的没拦」也用它 —— 带 `blocked=False` 时是**缺陷证据**（recall 的读法）。
+ESCALATE_KIND = "escalate"
+ACTION_BLOCK_KIND = "action_block"
+#: 「不许宣称完成」那一次判定（§3.1）。它**不是**「成果不许落盘」：探针按它
+#: 数 `blocked_by_review`，并与 `check_ok` 一起派生出 `blocked_but_ok`。
+BLOCKED_REVIEW_KIND = "blocked_by_review"
+#: 同上，但**拦下的理由是「L1/L2 真的报了高严重度发现」**（不是纯规模/回归）。
+#: 探针据此把「有理由的阻断」与「误报」分开：`blocked_but_ok` 量的是
+#: 「被阻断但验收绿」的那一类**误报代价**（§4），把「验收判据看不见、
+#: 而机械判据看见了」的真缺陷也算进去，那个数字就永远非零、也永远没人看。
+BLOCKED_REVIEW_HARD_KIND = "blocked_by_review_finding"
+
 #: 判据名 → 事件流里的 note kind。**探针按 kind 数，不读散文**。
 _WEAKENED_KINDS = frozenset(
     {

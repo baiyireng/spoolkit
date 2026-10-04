@@ -36,7 +36,12 @@ from spoolkit.cli.runtime import (
     settle_lessons,
     show_history,
 )
-from spoolkit.cli.settle import settle, undo_command, verification_header
+from spoolkit.cli.settle import (
+    pending_actions_note,
+    settle,
+    undo_command,
+    verification_header,
+)
 from spoolkit.cli.events import EventWriter, settle_with_events
 from spoolkit.kernel.target import resolve_target
 from spoolkit.llm.tokenizer import OfflineTokenCounter
@@ -168,6 +173,83 @@ def _events_approver(writer: EventWriter, reader=None):
     return approver
 
 
+def _events_escalation_reviewer(writer: EventWriter, reader=None):
+    """events 模式下风险分级放行的批复通道（§3.2.3 的「网页壳 / 聊天通道」）。
+
+    两个事件、一条回答，与 §3.2.3 的落点一一对应：
+
+    - `AWAIT` + `escalation` 短字段：网页壳/桥**复用既有的等待通道**
+      （`web/runner.py` 的 `awaiting` / `awaiting_detail`）与确认卡片；
+      MCP 那侧复用 `status.awaiting > 0` 这个既有信号，不新增通道。
+    - `NOTE`：五件摘要的**逐行**文本（人真的能读，`--events` 下它也只是一行
+      JSON 的 text，不会污染 stdout 的协议）。
+    - 回答从 stdin 读一行，四档批复词（批准 / 只批几处 / 撤销 / 改方案）。
+
+    **没有 `--ask-on-stdin` 就不注入这一份**——那就是无人值守：不弹问题、
+    把动作挂起为待批、成果照落盘（绝不静默放行，也不一律拒绝）。
+    """
+    source = reader if reader is not None else sys.stdin
+
+    def review(request, text: str) -> tuple[str, str]:
+        # `escalation` 的**字段**与 `count` 平级塞进 AWAIT：网页壳把它整份
+        # 存进 `awaiting_detail`（`web/runner.py:_absorb`），页面与桥都按
+        # 字段名取——套一层嵌套的话，两边都得先知道有这个壳。
+        writer.emit(
+            AWAIT,
+            count=1,
+            escalation=request.trigger,
+            action=request.action,
+            impact=request.summary.get("impact", ""),
+            conclusion=request.summary.get("conclusion", ""),
+            advice=request.summary.get("advice", ""),
+            options=request.summary.get("options", ""),
+            rollback=request.summary.get("rollback", ""),
+            fingerprint=request.fingerprint,
+        )
+        writer.emit(NOTE, text=text, ok=False, kind="escalation")
+        answer = ""
+        try:
+            answer = (source.readline() or "").strip()
+        except (OSError, ValueError):  # pragma: no cover - 流关了就当没人回答
+            answer = ""
+        writer.emit(CONFIRM, applied=bool(answer), count=1)
+        return answer, "web"
+
+    return review
+
+
+def _terminal_escalation_reviewer(out=print, ask=input, tty=None):
+    """终端上的批复通道（§3.2.3 的「终端」那一栏）。
+
+    五件各一行 + 一条撤销命令，默认答案是**「不执行这个动作」**（沿用现有
+    `[y/N]` 的默认 N）。注意默认不再是「不落盘」——成果已经落在工作区里了；
+    这里批的只是那个动作的执行权。
+
+    `tty` 是「有人在不在」的判据。行首给的不是 TTY（管道、无人值守的调度器）
+    时**不弹问题**：返回空词，由主循环按「挂起待批」处理。不加这道判断，
+    一个没人回答的 `input()` 会把运行挂在原地——那是最坏的一种无人值守。
+    """
+    import sys as _sys
+
+    if tty is None:
+        try:
+            tty = bool(_sys.stdin and _sys.stdin.isatty())
+        except (ValueError, OSError):  # pragma: no cover - 流坏了就当没人
+            tty = False
+
+    def review(request, text: str) -> tuple[str, str]:
+        if not tty:
+            return "", ""
+        out(text)
+        try:
+            answer = ask("执行这个动作吗？[y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        return answer, "terminal"
+
+    return review
+
+
 def _events_mode(args, project_root, gateway, window, pending) -> int:
     """`--events` 模式：stdout 上只有 JSON 行。
 
@@ -223,6 +305,13 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             # 作为事件发出去、从 stdin 读回答（用户那边就是"回 y 允许这一次"）。
             # 不给就保持原样——无人值守一律拒绝，绝不在没有人的地方等。
             approver=_events_approver(writer) if getattr(args, "ask_on_stdin", False) else None,
+            # 风险分级放行的批复通道与命令授权共用同一个开关：都要能在
+            # stdin 上问一句、把回答读回来。不给开关就是无人值守（§3.2.3）。
+            escalation_review=(
+                _events_escalation_reviewer(writer)
+                if getattr(args, "ask_on_stdin", False)
+                else None
+            ),
             grants=Grants(project_root / ".agent" / "grants.json")
             if getattr(args, "ask_on_stdin", False)
             else None,
@@ -268,6 +357,9 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             result.verified, result.verify_summary, undo_command(pending)
         ),
     )
+    # 挂起待批的动作清单（§3.2.3）：它在**落盘之后**才说得准（哪些动作真的
+    # 被拦下、哪些成果真的落了盘），所以走在这条通道的最后、FINAL 之前。
+    _settle_pending(args, project_root, pending, result, writer=writer)
     writer.emit(FINAL, ok=result.finished, text=result.final or "", settled=outcome)
     return 0 if result.finished else 1
 
@@ -309,6 +401,9 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             pending=pending,
             approver=approver,
             grants=grants,
+            # 终端上的批复通道：有 TTY 才弹问题，没有就按挂起待批处理
+            # （§3.2.3 的超时与无人值守行为）。
+            escalation_review=_terminal_escalation_reviewer(),
             lessons=build_lessons(memory) if memory is not None else None,
             read_roots=read_roots,
             web=web_access(args, project_root),
@@ -547,12 +642,23 @@ def _report_numbers(loop, result, writer: EventWriter | None = None) -> None:
     print(render_numbers(claims, wrong))
 
 
-def _settle_pending(args, project_root, pending, result=None) -> None:
+def _settle_pending(args, project_root, pending, result=None, writer=None) -> None:
+    # 挂起待批的动作清单：**成果已经落盘**，挂起的只是那些没执行的动作
+    # （§3.2.3）。所以它必须在 `settle` 的 early-return **之前**说一次——
+    # 一条「有动作在等批复」的话被漏掉，用户就以为这一轮是普通收工。
+    actions = pending_actions_note(project_root)
+    if actions:
+        if writer is not None:
+            writer.emit(NOTE, text=actions, ok=False, kind="pending_actions")
+        else:
+            print("---")
+            print(actions)
     # 只有整份改动都落完、暂存也空了才真的没话说：暂存里那几份正文同样需要
     # 一句交代（`settle` 会替它说话），否则进程一退出就是静默丢弃。
     if not len(pending) and not pending.staged_count():
         return
-    print("---")
+    if writer is None:
+        print("---")
     settle(
         pending,
         resolve_policy(args, project_root),

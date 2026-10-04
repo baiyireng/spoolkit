@@ -7,6 +7,7 @@
 
 from pathlib import Path
 from typing import Callable, Sequence
+import json
 
 from spoolkit.agents.plan import out_of_scope
 from spoolkit.cli.approval import apply_with_audit, review_and_apply
@@ -140,15 +141,57 @@ def refused_note(pending: PendingChanges) -> str:
     「每一处落成改动都必须有 baseline」是那条不变量；**给不出 baseline 的
     改动不许落盘**是它允许的唯一一种「扣成果」。扣掉必须有声音——否则用户
     看到的是一个「安静地少做了一处」的运行，而他会以为那处改好了。
+
+    **这就是 T13**（§3.2.2：给不出 Baseline 或整轮回退命令）。它与
+    `pending_actions_note` 那一类**不是一回事**，两句必须分开说：
+    这里扣的是**成果**（东西没写出来），那里拦的是**动作**（成果已经在盘上）。
+    把它们记成一个数，正是设计稿点名不许混的那两种状态（§6 对
+    `blocked_by_review` 的括注）。
     """
     refused = pending.refused()
     if not refused:
         return ""
     return (
-        f"有 {len(refused)} 处改动**没有落盘**，因为给不出回滚用的基线"
+        f"有 {len(refused)} 处改动**没有落盘**（T13：给不出回退），因为给不出回滚用的基线"
         "（不许留下一个退不回去的改动）：\n"
         + "".join(f"  - {item.path}：{item.reason}\n" for item in refused)
         + "这几处要写的内容仍在这次运行的正文里，但工作区没有被它改动。"
+    )
+
+
+def pending_actions_note(root: Path) -> str:
+    """挂起待批的动作清单（没有就返回空串）。
+
+    **它落在会话目录里，不是工作区里**（`config.state_dir` 按会话分），
+    所以这里按「哪个会话」去找，而不是 `.agent/` 下一个固定名字——两个
+    会话共用一份挂起清单会让 A 的批复去执行 B 的动作。
+    """
+    from spoolkit.config import Config
+
+    path = Config(project_root=Path(root)).state_dir / "review" / "pending-actions.json"
+    if not path.is_file():
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    actions = payload.get("pending_actions") or []
+    if not actions:
+        return ""
+    lines = []
+    for item in actions:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"  - {item.get('trigger', '?')}：{item.get('action') or '（结论级）'}"
+            f"（摘要指纹 {item.get('fingerprint', '?')}）"
+        )
+    return (
+        f"有 {len(lines)} 个动作**没执行、挂起待批**（成果已经在工作区里，"
+        "拦的是动作不是成果）：\n"
+        + "\n".join(lines)
+        + f"\n挂起清单：{path.name}（批复后从挂起点续跑；"
+        "要退掉已落盘的成果，用上面的 spool revert 命令——那是两件事）"
     )
 
 

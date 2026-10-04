@@ -307,10 +307,24 @@ INTENT_KNOBS: tuple[tuple[str, float], ...] = (
 )
 
 
+# 「不许宣称完成」那一轮（自动审查层 P1）补登的旋钮：命中高严重度发现时
+# **先自动修几轮**（设计稿 §3.1 处理顺序第 1 条）。默认 0 = 关——自动修要再花
+# 一轮模型调用，短预算运行付不起；它是可覆盖的标定值（`.agent/limits.json`）。
+# 单列的理由同上：它不属于 P1 记忆架构那一批登记。
+REVIEW_KNOBS: tuple[tuple[str, float], ...] = (
+    ("review_fix_rounds", 0),  # 「不许宣称完成」时先自动修几轮（0 = 关）
+)
+
+
 def test_p1_旋钮全部登记且可覆盖() -> None:
     """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
     for name, default in (
-        P1_NEW_KNOBS + T11_GAP_KNOBS + WALL_KNOBS + CONFIRM_KNOBS + INTENT_KNOBS
+        P1_NEW_KNOBS
+        + T11_GAP_KNOBS
+        + WALL_KNOBS
+        + CONFIRM_KNOBS
+        + INTENT_KNOBS
+        + REVIEW_KNOBS
     ):
         entry = limits.knob(name)
         assert entry is not None, f"{name} 没登记"
@@ -358,6 +372,7 @@ def test_旋钮没有重名() -> None:
         + len(WALL_KNOBS)
         + len(CONFIRM_KNOBS)
         + len(INTENT_KNOBS)
+        + len(REVIEW_KNOBS)
     )
 
 

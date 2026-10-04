@@ -128,6 +128,12 @@ class LoopWiring:
     search: object | None = None
     # 远程聊天通道：默认只碰当前工作区；已关联目录仍会写进工作方式。
     from_channel: bool = False
+    # 风险分级放行的批复通道（§3.2.3）。签名：
+    #   (request, 五件渲染文本) -> (批复词, 通道名)
+    # **不给就是无人值守**：不弹问题、把动作挂起为待批、成果照落盘、可续跑。
+    # 三条通道（终端 / 网页壳 / 聊天）各注入自己那一份；MCP 复用
+    # `status.awaiting` 那个既有信号，不新增通道（§3.2.3）。
+    escalation_review: object | None = None
 
 
 def resolve_provider_args(args) -> dict[str, str]:
@@ -556,6 +562,7 @@ def assemble_loop(
         # 看到的是同一个视图（叠加待确认改动）。不传的话，护栏会拿磁盘内容
         # 去比，把「文件已经改过」判成没变——该放行的刷新读取被拦死。
         pending=parts.pending,
+        escalation_review=parts.escalation_review,
     )
 
 
