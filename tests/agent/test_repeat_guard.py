@@ -6,13 +6,19 @@
 """
 
 import json
+import sys
 from pathlib import Path
 
 from spoolkit.agent.loop import REPEAT_BLOCK_AT, AgentLoop, call_signature
 from spoolkit.config import Config
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
-from spoolkit.tools.edit import PendingChanges, write_file_spec
+from spoolkit.tools.edit import (
+    PendingChanges,
+    replace_text_spec,
+    write_file_spec,
+)
+from spoolkit.tools.exec import run_command_spec
 from spoolkit.tools.fs import list_dir_spec, read_file_spec
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import ToolCall
@@ -73,7 +79,14 @@ def test_参数顺序不同仍算同一次调用() -> None:
     )
 
 
-def test_第二次相同调用会提醒但仍然执行(tmp_path: Path) -> None:
+def test_第二次相同调用被判成无用重复并被硬拦(tmp_path: Path) -> None:
+    """**参数一字未改 + 内容指纹没变 + 上一次结果还在上下文里** → 第一次就拦。
+
+    这条以前是「提醒一句、照常执行」。实测的代价很具体：探针 merge-html 与
+    fix-bug 各出现一次「护栏只提醒、没拦」的重复，那一次真的又跑了一遍，
+    白烧一次完整的模型生成与工具执行，而探针把它记在**空转**账上
+    （`repeat_blocks_unblocked`）。判据的细节见 `_guard_repeat_decision`。
+    """
     (tmp_path / "a.txt").write_text("内容\n", encoding="utf-8")
     loop = _build(
         tmp_path,
@@ -93,10 +106,71 @@ def test_第二次相同调用会提醒但仍然执行(tmp_path: Path) -> None:
     loop.registry.invoke = counting
     loop.run("看看 a.txt")
 
-    assert len(executed) == 2, "第二次应当照常执行"
-    # 钉要点：提醒必须说实话——这里上一步就是同一个调用，所以它该说的是
-    # 「与上一步完全相同」，而不是那句「最近几步里做过」。
-    assert "这一步与上一步完全相同" in _last_prompt(loop)
+    assert executed == ["read_file"], "无用重复不该真的跑第二遍"
+    prompt = _last_prompt(loop)
+    # 拦下的话术必须说清「为什么这次不一样」，并且带 §2.5 的反向条款。
+    assert "参数一字未改" in prompt
+    assert "没有执行" in prompt
+    assert "一字未变" in prompt
+    assert "§2.5 反向条款" in prompt
+
+
+def test_判据二成立时放行并标注理由(tmp_path: Path) -> None:
+    """**中间有改动真的落成** → 有理由的重取：放行，并写进 trace（不算空转）。
+
+    这就是「刚写完再读一遍」那一类合法重取：旧结果描述的是旧文件。判据不许
+    为了压指标把正常路径拦死，所以它必须真的执行，而且要留下理由。
+    """
+    (tmp_path / "a.txt").write_text("旧内容\n", encoding="utf-8")
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path, pending))
+    registry.register(replace_text_spec(tmp_path, pending))
+    loop = AgentLoop(
+        gateway=FakeModel(
+            script=[
+                _turn("先看", [_read()]),
+                _turn(
+                    "改它",
+                    [
+                        {
+                            "name": "replace_text",
+                            "arguments": {
+                                "path": "a.txt",
+                                "old": "旧内容",
+                                "new": "新内容",
+                            },
+                        }
+                    ],
+                ),
+                _turn("再看一遍确认", [_read()]),
+                _turn("好了", final="改完了"),
+            ],
+            tokenizer=OfflineTokenCounter(),
+        ),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=Config(
+            project_root=tmp_path, context_window=4096, max_steps=8, supervise=False
+        ),
+        pending=pending,
+    )
+    reads: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        if call.name == "read_file":
+            reads.append(call.name)
+        return real(call)
+
+    loop.registry.invoke = counting
+    result = loop.run("改一下 a.txt 再看一遍")
+
+    assert len(reads) == 2, "内容变了的重取必须放行"
+    assert any("重复调用放行" in line for line in result.trace), result.trace
+    assert any("这中间有改动真的落成了" in line for line in result.trace), result.trace
+    # 放行的话术必须进模型可见文本：它得知道这次为什么被允许。
+    assert "⟳ 重复调用放行：" in _last_prompt(loop)
 
 
 def test_连续第三次不再执行(tmp_path: Path) -> None:
@@ -119,38 +193,53 @@ def test_连续第三次不再执行(tmp_path: Path) -> None:
         return real(call)
 
     loop.registry.invoke = counting
-    result = loop.run("看看 a.txt")
+    loop.run("看看 a.txt")
 
     assert REPEAT_BLOCK_AT == 3
-    assert len(executed) == 2
+    # 第二次起就是无用重复（判据见 _guard_repeat_decision），所以只有第一次执行。
+    assert executed == ["read_file"]
     assert "没有执行" in _last_prompt(loop)
-    assert any("重复调用第 3 次" in line for line in result.trace)
 
 
-def test_中间插入别的调用后计数清零(tmp_path: Path) -> None:
-    """读文件 → 看目录 → 再读同一个文件，是正常的，不该被拦。"""
-    (tmp_path / "a.txt").write_text("内容\n", encoding="utf-8")
-    loop = _build(
-        tmp_path,
-        [
-            _turn("读", [_read()]),
-            _turn("列目录", [{"name": "list_dir", "arguments": {"path": "."}}]),
-            _turn("再读", [_read()]),
-            _turn("完成", final="好"),
-        ],
+def test_中间的调用改过文件时重读被放行(tmp_path: Path) -> None:
+    """读文件 → **改文件** → 再读同一个文件：内容变了，不许拦。
+
+    这是「不许为了压指标把正常路径拦死」那条硬要求的用例：判据只认事实
+    （内容指纹变了 / 中间有改动真的落成），不认「连续几次」。
+    """
+    (tmp_path / "a.txt").write_text("旧\n", encoding="utf-8")
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path, pending))
+    registry.register(write_file_spec(tmp_path, pending))
+    loop = AgentLoop(
+        gateway=FakeModel(
+            script=[
+                _turn("读", [_read()]),
+                _turn("改", [{"name": "write_file", "arguments": {"path": "a.txt", "content": "新\n"}}]),
+                _turn("再读", [_read()]),
+                _turn("完成", final="好"),
+            ],
+            tokenizer=OfflineTokenCounter(),
+        ),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=Config(project_root=tmp_path, context_window=4096, max_steps=8, supervise=False),
+        pending=pending,
     )
-    executed: list[str] = []
+    reads: list[str] = []
     real = loop.registry.invoke
 
     def counting(call):
-        executed.append(call.name)
+        if call.name == "read_file":
+            reads.append(call.name)
         return real(call)
 
     loop.registry.invoke = counting
-    loop.run("看看 a.txt")
+    loop.run("改完再看一眼")
 
-    assert len(executed) == 3
-    # 中间那一步是别的调用，所以不许出现「与上一步完全相同」这个说法。
+    assert len(reads) == 2
+    # 中间那一步是写，不是「同一件事又来一遍」，所以不许出现「与上一步完全相同」。
     assert "这一步与上一步完全相同" not in _last_prompt(loop)
 
 
@@ -176,7 +265,7 @@ def test_交替打转也会被拦住(tmp_path: Path) -> None:
     loop.registry.invoke = counting
     result = loop.run("来回看")
 
-    # 12 轮里每个文件最多真正读 2 次，第三次起被拦
+    # 每个文件最多真正读 2 次，第三次起被拦（本轮起第二次即判无用重复）
     assert executed.count("a.txt") <= 2
     assert any("重复调用" in line for line in result.trace)
 
@@ -213,6 +302,159 @@ def test_阈值可以按工作区覆盖(tmp_path: Path) -> None:
     assert executed.count("a.txt") == 2
 
 
+# ---- guard_refresh 的**实测归类**：有理由的重取 vs 无理由的重复 ----------------
+#
+# 这一组是用户点名要的：`guard_refresh` 不许停留在「判断」上。两条用例各跑
+# 一遍真正的循环，然后从**事件流**（`on_event` 收到的东西）里读读数——
+# 不是从模型的自述里读，也不是从内部标志里读。
+
+
+def _collect_events(loop: AgentLoop) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    loop.on_event = lambda kind, data: events.append((kind, data))
+    return events
+
+
+def test_有理由的重取走guard_refresh且不算空转(tmp_path: Path) -> None:
+    """内容/状态真的变了 → 事件流里是 `guard_refresh`，不是「又跑了一遍」。
+
+    判据：同一条事件流里 `guard_refresh` 至少一条，而**没有任何一条**工具输出
+    带「注意：这一步与上一步完全相同」——那句才是「护栏只提醒、没拦」的标记。
+    """
+    (tmp_path / "a.txt").write_text("旧内容\n", encoding="utf-8")
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path, pending))
+    registry.register(replace_text_spec(tmp_path, pending))
+    loop = AgentLoop(
+        gateway=FakeModel(
+            script=[
+                _turn("先看", [_read()]),
+                _turn(
+                    "改它",
+                    [
+                        {
+                            "name": "replace_text",
+                            "arguments": {
+                                "path": "a.txt",
+                                "old": "旧内容",
+                                "new": "新内容",
+                            },
+                        }
+                    ],
+                ),
+                _turn("再看一遍确认", [_read()]),
+                _turn("好了", final="改完了"),
+            ],
+            tokenizer=OfflineTokenCounter(),
+        ),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=Config(
+            project_root=tmp_path, context_window=4096, max_steps=8, supervise=False
+        ),
+        pending=pending,
+    )
+    events = _collect_events(loop)
+    loop.registry.invoke = loop.registry.invoke  # 不改执行路径，只读事件
+    loop.run("改一下 a.txt 再看一遍")
+
+    refresh = [data for kind, data in events if data.get("kind") == "guard_refresh"]
+    assert refresh, f"没有 guard_refresh 事件：{[k for k, _ in events]}"
+    assert any(item.get("decision") == "refresh" for item in refresh), refresh
+    # 放行的调用真的执行了（内容变了就该重取），而且**不是**「只提醒没拦」。
+    assert not any(
+        "注意：这一步与上一步完全相同" in str(data.get("detail") or "")
+        for kind, data in events
+        if kind == "tool"
+    )
+
+
+def test_无理由的重复被判成无用重复并硬拦(tmp_path: Path) -> None:
+    """内容一字未变 + 参数逐字相同 → 第一次重复就硬拦 + 换路。
+
+    判据：工具事件里出现 `⛔ 未执行`（拦的是「这一次动作」，带反向条款），
+    而且**没有** `guard_refresh`——它不是有理由的重取。
+    """
+    (tmp_path / "a.txt").write_text("内容\n", encoding="utf-8")
+    loop = _build(
+        tmp_path,
+        [
+            _turn("读", [_read()]),
+            _turn("再读一次", [_read()]),
+            _turn("算了", final="结束"),
+        ],
+    )
+    events = _collect_events(loop)
+    loop.run("看看 a.txt")
+
+    tools = [data for kind, data in events if kind == "tool"]
+    assert any("⛔ 未执行" in str(item.get("detail") or "") for item in tools), tools
+    assert not [d for _, d in events if d.get("kind") == "guard_refresh"]
+    # 话术必须点明「参数一字未改」，并带 §2.5 反向条款（不许被读成「禁止删除」）。
+    # 反向条款在 prompt 里核（事件流的 detail 只留 80 字，尾句会被截掉）。
+    assert any("参数一字未改" in str(item.get("detail") or "") for item in tools), tools
+    prompt = _last_prompt(loop)
+    assert "§2.5 反向条款" in prompt
+    assert "参数一字未改" in prompt
+
+
+def test_判不出时如实记录而且不硬拦(tmp_path: Path) -> None:
+    """拿不到可比对象时：**如实记成判不出，而且保留提醒路径（不硬拦）**。
+
+    这一条钉两件事，缺一不可：
+    - 事件流里必须看见「这次判不出」（不许把「没判」记成「判过」）；
+    - 它必须**照常执行**——判不出就没有理由拦，拦了就是拿猜测当判据。
+
+    现场形状：`run_command` 既不带正文、也不带可读路径，两条指纹都取不到；
+    中间没有任何改动落成。旧口径（把判不出当判过）会让第二次调用被硬拦，
+    而那条命令本来完全可能给出新结果（时间、外部状态）。
+    """
+    (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
+    (tmp_path / "test_gate.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(run_command_spec(tmp_path, pending))
+    command = {"name": "run_command", "arguments": {"command": ["pytest", "-q", "test_gate.py"]}}
+    loop = _edit_loop(
+        tmp_path,
+        [
+            _turn("先跑一遍", [command]),
+            _turn("再跑一遍", [command]),
+            _turn("好了", final="跑完了"),
+        ],
+        registry=registry,
+        pending=pending,
+        max_steps=6,
+    )
+    events: list[tuple[str, dict]] = []
+    loop.on_event = lambda kind, data: events.append((kind, data))
+    ran: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        if call.name == "run_command":
+            ran.append(call.name)
+        return real(call)
+
+    loop.registry.invoke = counting
+    result = loop.run("跑两遍测试")
+
+    assert ran == ["run_command", "run_command"], "判不出时必须保留提醒路径（照常执行）"
+    undecided = [
+        data for kind, data in events if data.get("kind") == "guard_repeat_undecided"
+    ]
+    assert undecided, f"判不出的事件没有记下来：{[k for k, _ in events]}"
+    assert any(item.get("decision") == "undecided" for item in undecided), undecided
+    assert not any(item.get("capped") for item in undecided), "这条不是被上限挡住的"
+    # 没有任何硬拦：判不出就不拦。
+    tools = [data for kind, data in events if kind == "tool"]
+    assert not any("⛔ 未执行" in str(item.get("detail") or "") for item in tools), tools
+    assert "结果不会改变" in _last_prompt(loop)
+
+
 # ---- 「三道墙」之二：失败过的调用原样重提必须硬拦 ---------------------------
 
 _TWO_DOCS = "\n".join(
@@ -240,10 +482,15 @@ _TWO_DOCS = "\n".join(
 _MERGED = "<html>\n<script>\nconst canvas = 1;\n</script>\n</html>\n"
 
 
-def _edit_loop(tmp_path: Path, script: list, **kwargs) -> AgentLoop:
-    pending = PendingChanges(tmp_path)
-    registry = ToolRegistry()
-    registry.register(write_file_spec(tmp_path, pending))
+def _edit_loop(
+    tmp_path: Path, script: list, registry=None, pending=None, **kwargs
+) -> AgentLoop:
+    if pending is None:
+        pending = PendingChanges(tmp_path)
+    if registry is None:
+        registry = ToolRegistry()
+        registry.register(write_file_spec(tmp_path, pending))
+    settings = {"max_steps": 12, **kwargs}
     return AgentLoop(
         gateway=FakeModel(script=script, tokenizer=OfflineTokenCounter()),
         tokenizer=OfflineTokenCounter(),
@@ -251,10 +498,10 @@ def _edit_loop(tmp_path: Path, script: list, **kwargs) -> AgentLoop:
         config=Config(
             project_root=tmp_path,
             context_window=4096,
-            max_steps=12,
             supervise=False,
-            **kwargs,
+            **settings,
         ),
+        pending=pending,
     )
 
 
@@ -463,4 +710,141 @@ def test_参数校验失败的原样重提把修正后的形状端回去(tmp_pat
     ]
     assert any('search_code(pattern="pricing")' in line for line in shape), prompt
     assert all("source=" not in line for line in shape)
+    assert result.finished is True
+
+
+# ---- 两条真病态的回归靶（闸门 1 最新读数里扣分的全部原因）-------------------
+#
+# 现场（`benchmarks/probes/stability/set7-t0-l3.json` 与
+# `set9-t07-s2-l3.json`）：
+#
+#   merge-html r0 @t=0 ：`repeat_blocks_unblocked=1`、`blocked=2`，判据绿；
+#   fix-bug   r1 @t=0.7：`repeat_blocks_unblocked=1`，判据绿。
+#
+# 两条都不是「任务做不成」，而是**护栏只提醒、没拦住的那一次真的又跑了一遍**
+# ——白烧一次完整的模型生成与工具执行。所以这两条用例的读数是**两个**：
+# ① 那次重复不再执行（未拦的重复归零）；② 任务仍然能完成（不许为了压指标
+# 把正常路径拦死）。
+
+
+def test_回归靶_merge_html的重复写入不再白跑一遍(tmp_path: Path) -> None:
+    """现场形状：write_file 暂存了正文 → 同一个调用一字不改地又发一遍。
+
+    第一次的正文进了暂存区（`STAGE_MARKER`），它**不是失败**，所以第二次不是
+    「失败重提」那条闸能拦的；旧行为只提醒一句、照常执行，结果第二次拿到的是
+    「内容与现有完全一致，没有产生改动」——一次纯空转。新行为按无效重复硬拦。
+
+    正文规模刻意贴近原文件：远大于原文件的整份重写走的是另一条闸
+    （`⚠ 拒绝整文件重写`，砍半护栏），那会把这条用例测成别的东西。
+    """
+    (tmp_path / "index.html").write_text(
+        "<html>\n<head><title>首页</title></head>\n<body>\n"
+        + "\n".join(f"<p>老内容 {i}</p>" for i in range(40))
+        + "\n</body>\n</html>\n",
+        encoding="utf-8",
+    )
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(write_file_spec(tmp_path, pending))
+    body = (
+        "<html>\n<head><title>首页</title></head>\n<body>\n"
+        + "\n".join(f"<p>价格方案 {i}</p>" for i in range(40))
+        + "\n</body>\n</html>\n"
+    )
+    same = {
+        "name": "write_file",
+        "arguments": {"path": "index.html", "content": body, "rewrite_reason": "并入价格页"},
+    }
+    loop = _edit_loop(
+        tmp_path,
+        [
+            _turn("整份重写", [same]),
+            _turn("原样再发一遍", [same]),
+            _turn("算了", final="先这样"),
+        ],
+        registry=registry,
+        pending=pending,
+        max_steps=8,
+    )
+    executed: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        if call.name == "write_file":
+            executed.append(call.name)
+        return real(call)
+
+    loop.registry.invoke = counting
+    loop.run("把价格页并进首页")
+
+    assert executed == ["write_file"], "暂存过的那次写入不该再跑一遍（那就是空转）"
+    assert "没有执行" in _last_prompt(loop)
+    # 任务仍然完成：暂存的正文还在，收尾报告里有可回退的改动。
+    assert pending.items(), "第一次的正文必须已经进了暂存区"
+
+
+def test_回归靶_fix_bug的重跑测试被判成有理由的重取(tmp_path: Path) -> None:
+    """现场形状：跑测试（红）→ 改文件 → **同一条**测试命令再跑一次（绿）。
+
+    参数逐字相同，第二次却是**有理由的重取**：中间有改动真的落成了，重跑才能
+    看到 1→0 的退出码变化。所以它必须放行，并被标注成「判过」而不是「空转」。
+    这条用例就是「不许为了压指标把正常路径拦死」那一条的回归靶。
+    """
+    (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
+    (tmp_path / "test_gate.py").write_text(
+        "import pathlib\n\n\ndef test_文件还在():\n"
+        "    assert pathlib.Path('a.py').exists()\n",
+        encoding="utf-8",
+    )
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path, pending))
+    registry.register(replace_text_spec(tmp_path, pending))
+    registry.register(list_dir_spec(tmp_path, pending))
+    registry.register(run_command_spec(tmp_path, pending))
+    # 真跑一条白名单命令（pytest），而且**第一次是绿的**：只有成功执行过的
+    # 调用才有「上一次的结果仍在上下文里」这件事可谈。第二次才是被判的那一次。
+    command = {"name": "run_command", "arguments": {"command": ["pytest", "-q", "test_gate.py"]}}
+    loop = _edit_loop(
+        tmp_path,
+        [
+            _turn("先跑一遍看现状", [command]),
+            _turn(
+                "修掉",
+                [
+                    {
+                        "name": "replace_text",
+                        "arguments": {"path": "a.py", "old": "x = 0", "new": "x = 1"},
+                    }
+                ],
+            ),
+            _turn("再跑一遍确认", [command]),
+            _turn("好了", final="修完了"),
+        ],
+        registry=registry,
+        pending=pending,
+        max_steps=8,
+    )
+    events: list[tuple[str, dict]] = []
+    loop.on_event = lambda kind, data: events.append((kind, data))
+    ran: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        if call.name == "run_command":
+            ran.append(call.name)
+        return real(call)
+
+    loop.registry.invoke = counting
+    result = loop.run("修一下 a.py，测试要全过")
+
+    assert ran == ["run_command", "run_command"], "中间改过文件，重跑必须放行"
+    assert any("重复调用放行" in line for line in result.trace), result.trace
+    # 放行的事实进事件流（`guard_refresh`），而不是「只提醒没拦」那一句。
+    assert any(data.get("kind") == "guard_refresh" for _, data in events)
+    assert not any(
+        "注意：这一步与上一步完全相同" in str(data.get("detail") or "")
+        for kind, data in events
+        if kind == "tool"
+    )
     assert result.finished is True

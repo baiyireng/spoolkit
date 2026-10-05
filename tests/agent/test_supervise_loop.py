@@ -473,21 +473,46 @@ def test_短环续期后还会再叫督导(tmp_path: Path) -> None:
     把短环压成 0/1 再加倍，1>=2 会永远为假——write_file↔run_command
     换参回路只能叫醒一次。连续计数（像 no_edit_steps）才能在续期后
     再次越阈。
+
+    脚本要按**督导吃哪几条**排：主循环每步吃 1 条，督导每被叫一次也吃 1 条
+    （实测这条形状下是第 4、9 条）。所以续期与收手的结论必须正好压在那两个
+    位置上；夹在中间的每一步都用**不同签名**的调用（换目录 / 换文件），
+    免得被重复护栏拦下——那会把短环的连续计数打断，测的就不是这条判据了。
+    每一步都必须**成功**：失败会走「同一个动作连续失败」那条升级路径，
+    把督导的位置挪走。门槛每叫一次就 `max(streak*2, at*2)` 加倍：1 → 4，
+    所以第二次越阈要多走满一圈，这里给足了。
     """
-    loop = _build(
-        tmp_path,
-        [
-            _turn("看", [_look()]),
-            _turn("读", [_read()]),
-            _turn("看", [_look()]),
-            _turn("读", [_read()]),
-            _verdict("extend", steps=10, reason="先给几步看它能不能自己停"),
-            _turn("看", [_look()]),
-            _turn("读", [_read()]),
-            _verdict("stop", reason="还在短环里，收手"),
-        ],
-        max_steps=20,
-    )
+    for name in ("d0", "d1", "d2", "d3", "d4", "d5", "d6"):
+        (tmp_path / name).mkdir(exist_ok=True)
+    for name in ("b0.py", "b1.py", "b2.py", "b3.py", "b4.py", "b5.py", "b6.py"):
+        (tmp_path / name).write_text("y = 1\n", encoding="utf-8")
+    slots = {
+        4: _verdict("extend", steps=10, reason="先给几步看它能不能自己停"),
+        9: _verdict("stop", reason="还在短环里，收手"),
+    }
+    dirs = [".", "d0", "d1", "d2", "d3", "d4", "d5", "d6"]
+    files = ["b0.py", "b1.py", "b2.py", "b3.py", "b4.py", "b5.py", "b6.py"]
+    script: list[str] = []
+    for index in range(16):
+        if index in slots:
+            script.append(slots[index])
+        elif index % 2 == 0:
+            step = index // 2
+            script.append(
+                _turn(
+                    "看",
+                    [{"name": "list_dir", "arguments": {"path": dirs[step % len(dirs)]}}],
+                )
+            )
+        else:
+            step = index // 2
+            script.append(
+                _turn(
+                    "读",
+                    [{"name": "read_file", "arguments": {"path": files[step % len(files)]}}],
+                )
+            )
+    loop = _build(tmp_path, script, max_steps=20, supervise=True, step_ceiling=40)
     result = loop.run("做点什么")
     asked = [line for line in result.trace if "叫督导" in line and "短环" in line]
     assert len(asked) >= 2, result.trace

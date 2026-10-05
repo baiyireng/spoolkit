@@ -273,6 +273,47 @@ GUARD_REFRESH_PREFIX = "⟳ 刷新读取："
 # 预算变成无限。上限与 blocked_refund_limit 同一口径，只放行前几次。
 _REFRESH_LIMIT = 3
 
+#: 「放行一次有理由的重取」这条事件在事件流里的 kind。
+#:
+#: 它必须与「护栏只提醒、没拦、那一次真的又跑了一遍」分开：后者是**空转**
+#: （探针的 `repeat_blocks_unblocked` 判的就是它），前者是护栏**判过**之后
+#: 有意放行的。两者都让调用真的执行了一次，光看 `ok` 与工具名分不出来。
+GUARD_REFRESH_KIND = "guard_refresh"
+
+#: 「这一次判不出该不该拦」的事件 kind。判据见 `_guard_repeat_decision`。
+#:
+#: 与 `guard_refresh` 分开是因为它回答的是另一个问题：`guard_refresh` 说
+#: 「我知道为什么允许」，这一条说「我**没有**判出来」——不许把没判成判过
+#: （那会让「空转归零」变成一个说法，而不是一个读数）。放行行为一样，
+#: 理由字段不一样。
+GUARD_UNDECIDED_KIND = "guard_repeat_undecided"
+
+#: 「重复调用但**已经判明有理由**」时进工具输出的前缀。
+#:
+#: 与 `GUARD_REFRESH_PREFIX` 同一个位置（都进模型可见文本），单独一个前缀是
+#: 因为它承载的是一句**判据结论**：内容指纹变了。理由也写在同一行里。
+REPEAT_REFRESH_PREFIX = "⟳ 重复调用放行："
+
+# ---- 重复调用的三种归类（`_guard_repeat_decision` 的返回值）------------------
+#
+# 这一组是本轮的核心：**第一次重复**不再一律「只提醒」，也不再一律硬拦，
+# 而是先用机械判据把两种重复分开。三种归类各有各的处置，一个都不许省：
+#
+#   `REPEAT_USELESS`    参数完全相同 + 该对象自上次调用以来**没有可观察变化**
+#                       + 上一次结果**还在上下文里** → **第一次就硬拦**，
+#                       并走既有的换路那一套（`_refuse` → `combo_disabled` →
+#                       替代清单）。它不占步数预算、不计入「未被拦的重复」。
+#   `REPEAT_REFRESH`    内容指纹变了，或上下文版本推进导致原结果已被压掉
+#                       → **放行**，并把「为什么允许」写进 trace 与事件流
+#                       （`kind=guard_refresh`）。它不是空转。
+#   `REPEAT_UNDECIDED`  拿不到指纹、也没有可观察变化可比较（`run_command`
+#                       这类没有路径的调用）→ 保留「提醒」路径，并**记录
+#                       「这次判不出」**（`kind=guard_repeat_undecided`）。
+#                       不许假装判过：假装判过等于把「空转归零」变成一个说法。
+REPEAT_USELESS = "useless"
+REPEAT_REFRESH = "refresh"
+REPEAT_UNDECIDED = "undecided"
+
 
 def _content_fingerprint(text: str) -> str:
     """一段内容的指纹：sha1 前 12 位 + 行数。
@@ -945,14 +986,16 @@ class AgentLoop:
         # 主循环下一轮**先叫督导**再让模型说话：模型对同一句话是免疫的
         # （实测同参被拦 3 次），这件事该给判断，不该让它空转到预算上限。
         self._reroute_evidence = ""
-        # ---- 重复调用护栏的两个判据（见 _invoke_guarded）----------------------
-        # ① 上一份结果还在不在上下文里：装配时的历史版本号。
+        # ---- 重复调用护栏的三条判据（见 _guard_repeat_decision）----------------
+        # ① 上一次结果还在不在上下文里：装配时的历史版本号。
         self._context_revision = 0
         self._seen_at_revision: dict[str, int] = {}
-        # ② 文件变没变：路径 → 读它时的内容指纹（叠加 pending 之后的视图）。
-        self._read_fingerprints: dict[str, str] = {}
-        # 放行过的刷新读取次数（有上限，见 _REFRESH_LIMIT）。
-        self._refreshes_used = 0
+        # ② ③ **这中间有没有可观察的变化**：每个签名上一次真的执行时的两条指纹
+        # ——调用对象的状态 + 待确认清单。缺这个键 = 它从没执行过。
+        #
+        # 用指纹而不是「改动次数」：次数分不出「同一个调用的两次之间什么都没
+        # 发生」（暂存本身就会把它推上去），而指纹直接回答「对象变了没有」。
+        self._observed_state: dict[str, tuple[str, str]] = {}
         # 最近一次自动验证的结论与它覆盖过的路径。收尾时要报「最终文件的验证
         # 结果」，而刚刚验过**同一批内容**时不该再跑一遍——验证是起子进程，
         # 重复跑只是让运行更慢，结论一模一样（见 _with_final_state）。
@@ -1144,12 +1187,12 @@ class AgentLoop:
         redirect: str | None = None
         resets = 0
         trace: list[str] = []
-        # 本轮运行重置护栏状态：上一次 run() 的读取指纹与上下文版本不能带过来
-        # （带了的话，第一次重复读就会拿着旧 run 的文件状态做判断）。
+        # 本轮运行重置护栏状态：上一次 run() 看到的调用对象/清单指纹与上下文版本
+        # 不能带过来（带了的话，第一次重复调用就会拿着旧 run 的状态做判断）。
         self._trace = trace
         self._context_revision = 0
         self._seen_at_revision.clear()
-        self._read_fingerprints.clear()
+        self._observed_state.clear()
         self._refreshes_used = 0
         # 「组合停用」的计数与留给督导的证据同样是**本次运行**的：
         # 上一次 run() 停用过的组合不该把这一次的第一个同名调用直接拒掉。
@@ -1579,7 +1622,8 @@ class AgentLoop:
                 feedback = None
                 resets += 1
                 # 历史被整个丢掉：此前所有工具结果的**内容**都不在上下文里了。
-                # 版本号 +1，重复调用护栏据此放行刷新读取（见 _refresh_reason）。
+                # 版本号 +1，重复调用护栏据此放行刷新读取（见
+                # `_guard_repeat_decision` 的第一条判据）。
                 self._context_revision += 1
                 trace.append(f"step{state.step}: 上下文重置（第 {resets} 次）")
                 _assemble_started = time.time()
@@ -2690,18 +2734,24 @@ class AgentLoop:
         未改的失败调用不会因为重发而改变结果，所以第一次重提就拦住，并把
         上一步的「照做的下一步」端回去。
 
-        **重复调用的硬拦还要看两件事实**（这一轮用户点名的死锁就在这里）：
+        **重复调用按机械判据分成三类**（判据全部在 `_guard_repeat_decision`，
+        这里只说处置）——这一轮用户点名的两条真病态就死在第一条上：
 
-        - 上一份结果**还在不在上下文里**：循环在软/硬触发时会砍历史
-          （`_context_revision` 在那两处 +1），砍掉之后那个签名虽然还在
-          `recent` 窗口里，内容却已经不在了——模型手上什么都没有，
-          再拦一次就是「只有一个被拦的 read、别的啥也没有」的死锁。
-        - **文件变没变**：它刚改过这个文件（或改动还没落盘、但已经在
-          待确认清单里），旧结果描述的是旧文件。
+        - **无用重复**（参数逐字相同 + 该对象没有可观察变化 + 上一次结果还在
+          上下文里）：**第一次重复就硬拦 + 换路**。以前这里只是「提醒一句、
+          照常执行」，那一次真的又跑了一遍、白烧一次完整的模型生成与工具执行
+          ——它记在「空转」账上（探针的 `repeat_blocks_unblocked`）。
+          注意判据是**两件事都成立**才拦：刚写完再读一遍那种合法的重取，
+          内容指纹已经变了，走的是下面那一条，不会被误拦。
+        - **有理由的重取**：内容指纹变了，或上下文版本推进导致原结果已被压掉
+          → **放行**，并把理由写进 trace 与事件流（`kind=guard_refresh`）。
+          它不是空转：模型没有别的办法拿到新内容。
+        - **判不出**（拿不到指纹、无法比较，例如 `run_command`）：保留「提醒」
+          路径放行，但**记下「这次判不出」**（`kind=guard_repeat_undecided`）
+          ——不许假装判过。
 
-        两者任一不成立 → **照常执行，但把「为什么允许再来一次」写进 trace
-        与事件流**（`GUARD_REFRESH_PREFIX`）。放行有上限：`_REFRESH_LIMIT`，
-        否则「不断被拦」+ 硬拦退还预算就成了无限预算。
+        放行有上限：`_REFRESH_LIMIT`，否则「不断被拦」+ 硬拦退还预算就成了
+        无限预算。
         """
         signature = call_signature(call)
         # ---- T6：写工具的目标越过工作区根（§3.2.2 的分流）--------------------
@@ -2775,59 +2825,97 @@ class AgentLoop:
                 _remedies(failure),
             )
         level = max(repeats, seen)
-        if level >= self.config.limit("repeat_block_at"):
-            reason = self._refresh_reason(signature, call)
-            if reason:
-                self._refreshes_used += 1
-                trace_line = (
-                    f"{GUARD_REFRESH_PREFIX}同一个调用第 {level} 次，"
-                    f"但{reason}，因此重新执行一次"
-                    f"（已放行 {self._refreshes_used}/{_REFRESH_LIMIT}）"
+        # 「无用重复第一次就拦」这条只在**阈值没被重新标定过**时生效。
+        #
+        # 理由：`repeat_block_at` 是**能力标定值**——标定过它的工作区（或命令行）
+        # 明确表达了「这个阈值我用别的数」，那它就该是唯一的线。默认值
+        # （3 = 连续第三次不再执行）是按本机小模型实测出来的，而实测表明
+        # 它在「第一次重复」这一档上留了一次白跑（两条真病态就是这么来的），
+        # 所以默认口径下把机械判据提到第一次重复；显式改过阈值的人拿到的
+        # 仍是他要的那个数，不被这条顺带收紧。
+        _value, _source = _limits.resolve(
+            "repeat_block_at", getattr(self.config, "overrides", None)
+        )
+        threshold_untouched = _value == _limits.resolve("repeat_block_at")[0]
+        gate = level > 1 if threshold_untouched else level >= int(
+            self.config.limit("repeat_block_at")
+        )
+        if gate:
+            # ---- 第一次重复就在**判据**上分开（见 _guard_repeat_decision）------
+            #
+            # 这里以前是「第一次只提醒、第三次才硬拦」。实测的代价是：第一次
+            # 重复**真的又跑了一遍**，白烧一次完整的模型生成与工具执行，而它
+            # 记在「空转」账上（merge-html 与 fix-bug 各一次，两条真病态）。
+            # 现在改成先用机械判据归三类，再按类处置：
+            #   无用 → 第一次就硬拦 + 换路；有理由 → 放行并写明理由；
+            #   判不出 → 保留提醒路径，但记下「这次判不出」。
+            #
+            # 判据不许无脑拦：刚写完再读一遍、文件真的变了之后再查一遍，
+            # 都是合法的重取（判据二成立 → 有理由的重取）。
+            decision, reason = self._guard_repeat_decision(signature, call)
+            if decision == REPEAT_USELESS:
+                return self._refuse(
+                    call,
+                    signature,
+                    (
+                        f"{BLOCKED_PREFIX}这个调用与上一次**完全相同**"
+                        f"（工具 {call.name}，参数一字未改），"
+                        f"而且{reason}，所以这一次没有执行。"
+                        "你这次重发的参数（与上一次逐字相同）："
+                        f"{_render_args(call)}"
+                        "上一步的输出仍在你的上下文里：换一种做法：换一个工具、"
+                        "换一组参数，或者先查别的地方；如果上一步的输出已经够了，"
+                        "就基于它往下做（提改动 / 给结论），不要再查一遍。"
+                        "下一步的意图要写清「这一次想拿到什么、拿到之后做什么」——"
+                        "只重复一句「再看一遍文件」不算下一步。"
+                        + _reverse_clause()
+                        + (f"\n{_intent_clause(call)}" if call.intent else "")
+                    ),
+                    _remedies(self._failed_output.get(signature, "")),
                 )
-                self._log(trace_line)
-                self._emit(
-                    "note",
-                    {
-                        "text": trace_line,
-                        "ok": True,
-                        "kind": "guard_refresh",
-                    },
+            if decision == REPEAT_REFRESH and self._refreshes_used < _REFRESH_LIMIT:
+                return self._guard_allow_repeat(
+                    call, signature, level, reason, REPEAT_REFRESH
                 )
-                result = self.registry.invoke(call)
-                self._note_guard_result(call, result)
-                # 这次放行后就地更新「它看过什么」：不更新的话，下一次同签名
-                # 进来时第一条判据（版本过期）仍然成立，会连着放行到上限——
-                # 那是把刷新当成了常规通道，而它只是一次性的补救。
-                self._seen_at_revision[signature] = self._context_revision
-                intent = _intent_clause(call)
+            # 剩下的两类都退回「提醒」路径（照常执行），区别只在事件流与 trace
+            # 里留下的**理由**：一类是「判不出」，一类是「判得出有理由但放行
+            # 额度用满了」。两者混成一句话，就等于把「没判」说成「判过」。
+            if decision == REPEAT_UNDECIDED:
+                line = f"⟳ 重复调用判不出：{reason}（保留提醒路径）"
+                note_kind = GUARD_UNDECIDED_KIND
+                extra: dict = {"decision": decision, "tool": call.name}
+                warn_note = (
+                    "注意：这一步与上一步完全相同，该调用已经执行过一次，"
+                    "结果不会改变。"
+                )
+            else:
+                line = (
+                    f"⟳ 重复调用判得出有理由（{reason}），但放行已到上限"
+                    f"（{self._refreshes_used}/{_REFRESH_LIMIT}）："
+                    "本次只提醒、不再额外放行"
+                )
+                note_kind = GUARD_UNDECIDED_KIND
+                extra = {"decision": decision, "tool": call.name, "capped": True}
+                warn_note = (
+                    "注意：这个调用在最近几步里已经执行过；"
+                    "它这次确实可能拿到新内容，但同一处已经放过几次了。"
+                )
+            self._log(line)
+            self._emit("note", {"text": line, "ok": True, "kind": note_kind, **extra})
+            result = self.registry.invoke(call)
+            self._note_guard_result(call, result)
+            if not result.ok:
+                self._remember_failure(signature, result.content)
+            if repeats >= self.config.limit("repeat_warn_at"):
                 return ToolResult(
                     ok=result.ok,
                     content=(
-                        f"{GUARD_REFRESH_PREFIX}{reason}，所以这一次重新取了一遍"
-                        f"（上面那份已经不在你的上下文里或已经过期）。"
-                        f"{self._file_state_note(call)}"
-                        + (f"\n{intent}" if intent else "")
-                        + f"\n{result.content}"
+                        warn_note
+                        + "如果它没有帮你推进，就换一种做法。\n"
+                        + result.content
                     ),
                 )
-            return self._refuse(
-                call,
-                signature,
-                (
-                    f"{BLOCKED_PREFIX}这个调用在最近几步里已经做过 {level - 1} 次，"
-                    "结果不会改变，因此没有执行。"
-                    "你这次重发的参数（与上一次逐字相同）："
-                    f"{_render_args(call)}"
-                    "上一步的输出仍在你的上下文里：换一种做法：换一个工具、"
-                    "换一组参数，或者先查别的地方；如果上一步的输出已经够了，"
-                    "就基于它往下做（提改动 / 给结论），不要再查一遍。"
-                    "下一步的意图要写清「这一次想拿到什么、拿到之后做什么」——"
-                    "只重复一句「再看一遍文件」不算下一步。"
-                    + _reverse_clause()
-                    + (f"\n{_intent_clause(call)}" if call.intent else "")
-                ),
-                _remedies(self._failed_output.get(signature, "")),
-            )
+            return result
         result = self.registry.invoke(call)
         self._note_guard_result(call, result)
         if not result.ok:
@@ -2837,16 +2925,66 @@ class AgentLoop:
             # 运行里最贵的一种浪费（输出预算就是卡在这里的）。所以也记进失败表：
             # 原样重提会被硬拦，拦下的话术里带着 confirm_rewrite 的调用形状。
             self._remember_failure(signature, result.content)
-        if level >= self.config.limit("repeat_warn_at"):
-            if repeats >= self.config.limit("repeat_warn_at"):
-                note = "注意：这一步与上一步完全相同，该调用已经执行过一次，结果不会改变。"
-            else:
-                note = "注意：这个调用在最近几步里已经执行过，结果不会改变。"
-            return ToolResult(
-                ok=result.ok,
-                content=(note + "如果它没有帮你推进，就换一种做法。\n" + result.content),
-            )
+        # 第一次执行（level == 1）不加任何提醒话术：它本来就不是重复。
         return result
+
+    def _guard_allow_repeat(
+        self, call: ToolCall, signature: str, level: int, reason: str, decision: str
+    ) -> ToolResult:
+        """判明「有理由的重取」之后放行一次，并把理由留在三处可见的地方。
+
+        三处缺一不可：
+        - **模型可见文本**：前缀 `REPEAT_REFRESH_PREFIX` + 理由——它得知道自己
+          这一次为什么被允许，否则同一个调用会一路发到上限；
+        - **事件流**（`kind=guard_refresh`）：探针据此把它与「护栏只提醒、没拦」
+          分开——前者是护栏判过的放行，后者才是空转；
+        - **trace**：督导看的日志。
+
+        「放行过就要更新它看过什么」这条同样重要：不更新的话，下一次同签名进来
+        时判据仍然成立，会连着放行到上限——那是把一次性补救当成了常规通道。
+        """
+        self._refreshes_used += 1
+        trace_line = (
+            f"{REPEAT_REFRESH_PREFIX}同一个调用第 {level} 次，"
+            f"但{reason}，因此重新执行一次"
+            f"（已放行 {self._refreshes_used}/{_REFRESH_LIMIT}）"
+        )
+        self._log(trace_line)
+        self._emit(
+            "note",
+            {
+                "text": trace_line,
+                "ok": True,
+                "kind": GUARD_REFRESH_KIND,
+                "decision": decision,
+                "reason": reason,
+                "level": level,
+                "tool": call.name,
+            },
+        )
+        self._emit(
+            "note",
+            {
+                "text": f"{REPEAT_REFRESH_PREFIX}{reason}",
+                "ok": True,
+                "kind": GUARD_REFRESH_KIND,
+                "decision": decision,
+            },
+        )
+        result = self.registry.invoke(call)
+        self._note_guard_result(call, result)
+        self._seen_at_revision[signature] = self._context_revision
+        intent = _intent_clause(call)
+        return ToolResult(
+            ok=result.ok,
+            content=(
+                f"{REPEAT_REFRESH_PREFIX}{reason}，所以这一次重新取了一遍"
+                f"（{decision}：已放行 {self._refreshes_used}/{_REFRESH_LIMIT}）。"
+                f"{self._file_state_note(call)}"
+                + (f"\n{intent}" if intent else "")
+                + f"\n{result.content}"
+            ),
+        )
 
     def _note_boundary_write(self, path: str) -> None:
         """这次写入落在受保护路径上时，当场报一条高严重度发现。
@@ -3605,36 +3743,141 @@ class AgentLoop:
             # 残留报告是给人看的旁证，它自己出问题不该毁掉一次成功的写入。
             return ""
 
-    def _file_changed(self, call: ToolCall) -> bool:
-        """这次要读的文件，与上次读它时相比变了没有。"""
+    def _pending_state_key(self) -> str:
+        """待确认清单的指纹：**「已提出、还没落盘的改动」这一集合**长什么样。
+
+        它是「世界变了没有」的廉价且准确的代理，重复调用护栏用它：清单变了，
+        重发一次可能拿到新结果；清单一字未动，同参数的第二次拿到的还是同一份。
+        取不到（没有 pending 这一层）就返回空串——那等于「判不出」，由调用方
+        退回「提醒」路径。
+
+        为什么不用「改动落成的次数」：那一条**分不出**「同一个调用的第一次与
+        第二次之间什么都没发生」——暂存本身就会把它推上去，于是每一个重复都看
+        起来「有变化」（实测 merge-html r0 的第二次 write_file 就是这么被放行的）。
+
+        每个条目的指纹取「路径 + 新正文的字符数 + 行数」：重复护栏要判的是
+        「这一集合动过没有」，不是「一个字有没有改」，而哈希整份正文在大文件上
+        要按 MB 算，每次重复调用都算一遍不值。精确到字节的是**调用对象**那一侧
+        （`_call_state`），那里本来就有整份内容可哈希。
+        """
+        if self.pending is None:
+            return ""
+        try:
+            items = sorted(
+                f"{str(getattr(item, 'path', ''))}:"
+                f"{len(str(getattr(item, 'new_text', '') or ''))}:"
+                f"{len(str(getattr(item, 'new_text', '') or '').splitlines())}"
+                for item in self.pending.items()
+            )
+        except Exception:  # pragma: no cover - pending 自己坏了不该毁掉护栏
+            return ""
+        return hashlib.sha1("|".join(items).encode("utf-8")).hexdigest()[:12]
+
+    def _call_state(self, call: ToolCall) -> str:
+        """**这次调用看的那个对象**现在长什么样；拿不到就返回空串。
+
+        两种调用两种对象，这不是特例，而是「它到底在问什么」：
+        - 读类（`read_file` / `find_symbol` …）：它问的是盘上/暂存区那一版内容，
+          所以指纹取 `_text_of(path)`；
+        - 写类（`write_file` / `replace_text` …）：它问的是**自己要交出去的那份
+          正文**，所以指纹取参数里的 `content`。取盘上内容会把「暂存之后盘上还
+          是旧的」读成「变了」，于是同一个暂存再发一遍永远被放行。
+        """
+        if call.name in WRITE_TOOLS:
+            body = call.arguments.get("content")
+            if not isinstance(body, str):
+                return ""
+            return _content_fingerprint(body)
         path = call.arguments.get("path")
         if not isinstance(path, str) or not path:
-            return False
-        expected = self._read_fingerprints.get(path)
-        if expected is None:
-            return False
+            return ""
         text = self._text_of(path)
-        return text is not None and _content_fingerprint(text) != expected
+        return "" if text is None else _content_fingerprint(text)
+
+    def _guard_repeat_decision(
+        self, signature: str, call: ToolCall
+    ) -> tuple[str, str]:
+        """把一次「重复调用」机械地归成三类之一，返回（归类, 理由）。
+
+        这是整条护栏**唯一**的判据点：`_invoke_guarded` 的第一次重复与第 N 次
+        重复、以及 `_refresh_reason`（它只是包一层放行上限），走的都是这里——
+        两处各判一套的话，「第一次提醒、第三次硬拦」就会开始互相打架。
+
+        判据只看能证伪的事实，不看它看起来像不像在打转：
+
+        1. **上一次结果还在不在上下文里**（`_seen_at_revision`）。护栏在软/硬
+           触发时会砍历史（`_context_revision` 在那两处 +1），砍掉之后那个签名
+           虽然还在 `recent` 窗口里算「重复」，内容却不在模型手上了。这一条
+           不成立就必须放行——硬拦的后果是模型手上只剩一份被拦的输出，
+           什么都读不到，也走不出去。
+        2. **这中间有没有可观察的变化**，两条独立证据：
+           - 待确认清单变过（`_pending_state_key`）：那种「已提出、还没落盘」
+             的改动也算数——`run_command` 会在试跑副本上带着它们跑，所以中间
+             改过文件时重跑测试是有理由的（fix-bug 现场：先红后绿正是这条）；
+           - 这次调用看的那个对象变了（`_call_state`）：内容指纹不等，旧结果
+             描述的是旧内容，行号也可能已经漂了。
+        3. **能不能判**：签名从没执行过、或这次调用根本没有可比较的对象
+           （没有 `content`、也没有可读的 `path`）→ 判不出。
+
+        剩下的情况（执行过 + 参数逐字相同 + 结果还在 + 两条证据都没变）就是
+        **无用重复**：再跑一遍拿到的必然还是同一份结果，而它要付一次完整的
+        模型生成与一次工具执行。这一类在**第一次重复**就要硬拦。
+        """
+        mark = self._seen_at_revision.get(signature)
+        if mark is not None and mark < self._context_revision:
+            return (
+                REPEAT_REFRESH,
+                "上一次的结果已经被上下文压缩丢弃（它不在你手上了）",
+            )
+        if signature not in self._observed_state:
+            # 它从没真的执行过（比如上一次这一条被别的闸拦下了）：没有「上一次
+            # 的结果」可以复用，谈不上重复。
+            return REPEAT_UNDECIDED, "这个签名没有执行过的记录，判不出能不能复用上一次的结果"
+        observed_state, observed_pending = self._observed_state[signature]
+        if self._pending_state_key() != observed_pending:
+            return (
+                REPEAT_REFRESH,
+                "这中间有改动真的落成了（待确认清单与上次不同），"
+                "重发一次可能拿到不同的结果",
+            )
+        current = self._call_state(call)
+        if not current or not observed_state:
+            # 拿不到可比的对象（`run_command` 这类既没有正文、也没有可读路径的
+            # 调用）：**如实记成判不出**，不假装判过。注意「当时拿不到」也算——
+            # 两个空指纹互相「相等」，那种相等什么也证明不了。
+            return (
+                REPEAT_UNDECIDED,
+                f"这个调用（{call.name}）没有可比较的内容对象"
+                "（既不带正文、也不带可读路径），护栏判不出这次重复有没有意义",
+            )
+        if current == observed_state:
+            path = call.arguments.get("path")
+            what = (
+                f"{path} 的内容"
+                if isinstance(path, str) and path
+                else "这次要交出去的正文"
+            )
+            return (
+                REPEAT_USELESS,
+                f"{what}自上次调用以来一字未变（指纹 {current}），"
+                "上一次的结果仍在你的上下文里，待确认清单也没有动过",
+            )
+        return (
+            REPEAT_REFRESH,
+            "这次要看的对象与上次执行时不一样了，旧结果描述的是旧内容",
+        )
 
     def _refresh_reason(self, signature: str, call: ToolCall) -> str:
         """重复调用该不该放行。放行返回**理由**，该拦返回空串。
 
-        两个判据都只看事实，不看它看起来是否在打转：
-
-        - 内容已被压掉：装配历史被砍过（`_context_revision` 变了），那个签名
-          虽然还在 `recent` 窗口里算「重复」，内容却不在上下文里。硬拦的后果
-          是模型手上只剩一份被拦的 read——什么都读不到，也走不出去。
-        - 文件变了：它读完之后这个文件被改过（含还在待确认清单里的改动），
-          旧结果描述的是旧文件；行号也可能已经漂了。
+        判据全部落在 `_guard_repeat_decision` 里（一处判据、一个口径）：
+        只有它判成「有理由的重取」才返回理由，判成「无用重复」或「判不出」
+        都返回空串——前者的处置是硬拦，后者的处置是保留提醒路径。
         """
         if self._refreshes_used >= _REFRESH_LIMIT:
             return ""
-        mark = self._seen_at_revision.get(signature)
-        if mark is not None and mark < self._context_revision:
-            return "上一次的结果已经被上下文压缩丢弃"
-        if self._file_changed(call):
-            return "这个文件在读取之后已经改过，旧结果描述的是旧内容"
-        return ""
+        decision, reason = self._guard_repeat_decision(signature, call)
+        return reason if decision == REPEAT_REFRESH else ""
 
     def _file_state_note(self, call: ToolCall) -> str:
         """紧凑的文件状态摘要：行数 + 指纹。
@@ -3652,23 +3895,40 @@ class AgentLoop:
         return f"{path} 现在是 {lines} 行，指纹 {_content_fingerprint(text)}。"
 
     def _note_guard_result(self, call: ToolCall, result: ToolResult) -> None:
-        """记下这次读文件的结果指纹，供下一次重复调用比对「文件变没变」。"""
-        if not result.ok or call.name != "read_file":
+        """记下这次调用当时的**两条指纹**，供下一次重复调用判「该不该拦」。
+
+        - `_call_state(call)`：这次调用看的那个对象长什么样（读类看盘上/暂存区
+          内容，写类看它自己要交出去的正文）。
+        - `_pending_state_key()`：当时的待确认清单长什么样。
+
+        两条都只在这次调用**真的执行了**（`result.ok`）时才记：没执行的调用没有
+        「上一次的结果」可复用。两条都取不到（`run_command` 这类没有内容的调用）
+        时记空串——下一次进来会如实归成「判不出」，而不是假装判过。
+
+        以前这里只认 `read_file` 的文件指纹，于是写类调用的重复永远拿不到可比
+        对象，全落到「判不出」。现在两种调用各看各的对象，判据本身没变。
+        """
+        if not result.ok:
             return
-        path = call.arguments.get("path")
-        if not isinstance(path, str) or not path:
-            return
-        text = self._text_of(path)
-        if text is not None:
-            self._read_fingerprints[path] = _content_fingerprint(text)
+        signature = call_signature(call)
+        self._observed_state[signature] = (
+            self._call_state(call),
+            self._pending_state_key(),
+        )
 
     def _forget_read(self, path: str) -> None:
-        """这个文件被改过：清掉它的读取指纹，下一次重复读必须能重新取。
+        """这个文件被改过：清掉它的「读于哪个上下文版本」。
 
-        顺带把它的「读于哪个上下文版本」也清掉——留着它，重复调用的第二条
-        判据（内容还在不在）会拿到一个描述旧文件的时间戳。
+        留着它，重复调用的第一条判据（上一次的结果还在不在上下文里）会拿到一个
+        描述旧文件的时间戳——文件已经变了，那份旧结果不该再被当成「还在手上」。
+        `write_file` 提交/落盘那条路会走到这里。
+
+        调用对象的指纹（`_observed_state`）**不清**：它记的是一个真实发生过的
+        事实（这个签名确实在某一次执行时看到过那一版内容）。下一轮判据改用
+        `_call_state(call)` 重新算一遍当前值，与它比就足够——清掉反而会让同一个
+        调用在文件被改之后退化成「这个签名没有执行过的记录」，把「有理由的重取」
+        错记成「判不出」。
         """
-        self._read_fingerprints.pop(path, None)
         for signature in [
             one for one in self._seen_at_revision if f'"{path}"' in one
         ]:

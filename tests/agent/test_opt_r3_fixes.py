@@ -21,6 +21,7 @@ from pathlib import Path
 
 from spoolkit.agent.loop import (
     GUARD_REFRESH_PREFIX,
+    REPEAT_REFRESH_PREFIX,
     AgentLoop,
     call_signature,
 )
@@ -99,7 +100,12 @@ def patch_guard(monkeypatch, loop: AgentLoop, hook) -> None:
 
 
 def test_第三次重复读被拦是因为结果还在上下文里(tmp_path: Path) -> None:
-    """基线行为不变：内容还在时，第三次照样硬拦（护栏没有整体松掉）。"""
+    """基线行为不变：内容还在时照样硬拦（护栏没有整体松掉）。
+
+    本轮把这条线**前移**到第一次重复：参数一字未改 + 内容指纹没变 +
+    上一次结果还在上下文里，就是无用重复，第二次进来就该拦，不必等第三次。
+    第三次进来仍然是被拦（判据没变，只是更早生效）。
+    """
     (tmp_path / "a.txt").write_text("内容\n", encoding="utf-8")
     loop = _build(
         tmp_path,
@@ -116,8 +122,11 @@ def test_第三次重复读被拦是因为结果还在上下文里(tmp_path: Pat
     loop.registry.invoke = counting
     result = loop.run("看看 a.txt")
 
-    assert executed.count("read_file") == 2, "内容还在上下文里时第三次应当被拦"
-    assert any("结果不会改变" in line for line in result.trace)
+    assert executed.count("read_file") == 1, "内容还在上下文里时第二次起就该被拦"
+    assert (
+        any("一字未变" in line for line in result.trace)
+        or "一字未变" in _last_prompt(loop)
+    )
     assert not any(GUARD_REFRESH_PREFIX in line for line in result.trace)
 
 
@@ -127,9 +136,12 @@ def test_内容被压缩掉之后再读同一个文件不被硬拦(
     """用户点名的死锁现场：读 → 上下文被压掉 → 再读，第三次不该被硬拦。
 
     判据不是签名计数，而是事实：上一份结果**已经不在上下文里**了
-    （`_context_revision` 变过）。变异：去掉 loop.py 里
-    `_refresh_reason` 的第一条判据，这条会红——第三次读又变成「没有执行」，
-    而模型手上什么都没有。
+    （`_context_revision` 变过）。变异：去掉 `_guard_repeat_decision` 的
+    第一条判据，这条会红——第三次读又变成「没有执行」，而模型手上什么都没有。
+
+    读数要说准：第二次（内容没变、什么都没落成）是**无用重复**，现在就在
+    那一次硬拦；第三次因为版本推进而被判成有理由的重取，所以真的执行。
+    两次执行的差别正是这一轮修的东西。
     """
     (tmp_path / "a.txt").write_text("内容\n", encoding="utf-8")
     loop = _build(
@@ -158,11 +170,16 @@ def test_内容被压缩掉之后再读同一个文件不被硬拦(
     loop.registry.invoke = counting
     result = loop.run("看看 a.txt")
 
-    assert executed.count("read_file") == 3, "内容已被压掉时第三次必须能再取一次"
-    assert any(GUARD_REFRESH_PREFIX in line for line in result.trace), result.trace
+    # 第一次执行 + 第三次（版本推进 → 有理由的重取）执行；第二次被硬拦。
+    assert executed.count("read_file") == 2, "内容已被压掉时第三次必须能再取一次"
+    assert any(REPEAT_REFRESH_PREFIX in line for line in result.trace) or any(
+        GUARD_REFRESH_PREFIX in line for line in result.trace
+    ), result.trace
     assert any("已经被上下文压缩丢弃" in line for line in result.trace)
-    # 不是硬拦：那一步照常执行，也没有「没有执行」那句话。
-    assert "没有执行" not in _last_prompt(loop)
+    # 第三次不是硬拦：它的回执是「放行 + 重取了一遍」，而不是「没有执行」。
+    # （不能拿整份 prompt 找「没有执行」——第二步那次硬拦的话术还在历史里，
+    # 那是上一轮的记录，不是这一轮的处置。）
+    assert "这一次重新取了一遍" in _last_prompt(loop)
 
 
 def test_刷新读取会给出紧凑的文件状态(tmp_path: Path, monkeypatch) -> None:
@@ -207,21 +224,24 @@ def test_版本判据单独成立也放行(tmp_path: Path, monkeypatch) -> None:
         calls["n"] += 1
         if calls["n"] == 3:
             # **不改文件、只推版本**：这样只有第一条判据能成立，
-            # 第二条（`_file_changed`）在这条用例里恰好为假。
+            # 第二条（调用对象指纹）在这条用例里恰好为假。
             loop._context_revision += 1
 
     patch_guard(monkeypatch, loop, hook)
     result = loop.run("看看 a.txt")
 
-    assert any(GUARD_REFRESH_PREFIX in line for line in result.trace), result.trace
+    assert any(REPEAT_REFRESH_PREFIX in line for line in result.trace) or any(
+        GUARD_REFRESH_PREFIX in line for line in result.trace
+    ), result.trace
     assert any("已经被上下文压缩丢弃" in line for line in result.trace)
 
 
 def test_文件改过_内容判据不成立时也能放行(tmp_path: Path, monkeypatch) -> None:
     """只有文件变了、上下文没变时，也要放行。
 
-    这条单独钉住第二条判据（`_file_changed`）：变异时把 `_refresh_reason` 里
-    第二条删掉，上一条用例仍会因为版本判据而绿，这一条必红。
+    这条单独钉住第二条判据（内容指纹）：变异时把
+    `_guard_repeat_decision` 里那一条删掉，上一条用例仍会因为版本判据而绿，
+    这一条必红。
     """
     target = tmp_path / "a.txt"
     target.write_text("第一版\n", encoding="utf-8")
@@ -240,8 +260,10 @@ def test_文件改过_内容判据不成立时也能放行(tmp_path: Path, monke
 
     patch_guard(monkeypatch, loop, hook)
     result = loop.run("看看 a.txt")
-    assert any(GUARD_REFRESH_PREFIX in line for line in result.trace), result.trace
-    assert any("已经改过" in line for line in result.trace)
+    assert any(REPEAT_REFRESH_PREFIX in line for line in result.trace) or any(
+        GUARD_REFRESH_PREFIX in line for line in result.trace
+    ), result.trace
+    assert any("与上次执行时不一样" in line for line in result.trace), result.trace
 
 
 def test_刷新读取有上限(tmp_path: Path, monkeypatch) -> None:
@@ -257,7 +279,11 @@ def test_刷新读取有上限(tmp_path: Path, monkeypatch) -> None:
     patch_guard(monkeypatch, loop, hook)
     result = loop.run("一直读")
 
-    refreshes = [line for line in result.trace if GUARD_REFRESH_PREFIX in line]
+    refreshes = [
+        line
+        for line in result.trace
+        if REPEAT_REFRESH_PREFIX in line or GUARD_REFRESH_PREFIX in line
+    ]
     # 上界要**真的被用到**才算测到：只断言 `<= 3` 的话，把放行逻辑整个删掉
     # （一次都不放行）也是绿的——那是「上界生效」与「功能没了」分不清。
     assert refreshes, "刷新读取一次都没发生，上界这条断言就没有意义"
@@ -591,8 +617,8 @@ def test_意图口径写进失败话术(tmp_path: Path) -> None:
     """拦下重提时必须把「想拿什么 + 接下来怎么做」这个口径说出来。
 
     意图取自它自己写的 why（这里走 `thought` 的退路：只有一个调用时会退到
-    它）。所以第三次那个「再看一遍文件」会被回显，并明确告诉它这个意图
-    不够用——口径是「想拿到什么 + 拿到之后做什么」。
+    它）。本轮把硬拦前移到**第一次重复**，所以被回显的是第二次那句「再读」；
+    口径仍然要一字不差地出现——那是模型照做的那部分。
     """
     (tmp_path / "a.txt").write_text("内容\n", encoding="utf-8")
     loop = _build(
@@ -602,7 +628,7 @@ def test_意图口径写进失败话术(tmp_path: Path) -> None:
     )
     loop.run("看看 a.txt")
     prompt = _last_prompt(loop)
-    assert "你写的意图是「再看一遍文件」" in prompt
+    assert "你写的意图是「再读」" in prompt
     assert "口径：想拿到什么 + 拿到之后接下来怎么做" in prompt
     assert "拿到之后做什么" in prompt
 
