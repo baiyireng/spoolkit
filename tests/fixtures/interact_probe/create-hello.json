@@ -1,0 +1,195 @@
+{
+  "_note": "互动面探针 create-hello 快照（裁剪版）：只留判据用得到的字段。重新生成：python scripts/interact_probe.py --scenario create-hello --out .probe_runs/snapshot-create-hello.json && python scripts/rejudge_snapshots.py",
+  "scenario": "create-hello",
+  "goal": "帮我在当前目录创建一个文本文件，上面写上 Hello Word",
+  "provider": "llamacpp",
+  "outcome": {
+    "applied_rounds": 2,
+    "steps": 3,
+    "final_ok": true,
+    "event_count": 20,
+    "reached_await": true
+  },
+  "final_report": "已在当前目录创建 hello.txt，内容为 Hello Word。\n本次运行共落成 1 处改动。最终文件状态：hello.txt：1 行，指纹 44d3a83db52a/1行。 最终验证：通过。（上一步验过之后这些文件的内容一字未变，所以沿用那一次的结果）这次改的是 .txt，没有对应的自动验证器。\n本次运行的 L2 行为回归读数：\n- 【查不了】行为回归（L2.2）：找不到可跑的对照：项目 README 里没有「python <脚本> <输入文件>」这样一条能跑的用法示例（或它点名的输入文件不在项目里）。不猜一条命令去跑——猜出来的差异说明不了行为变了没有\n（拦的是「完成声明」与危险动作，**不是成果**：改动照落盘、可回退、报告逐条列出；删死代码、合并重复实现、删已被替代的文件都是正常编辑。）\n撤销这一轮（可直接复制）：spool revert --run 20261005-220133-393239",
+  "events": [
+    {
+      "seq": 1,
+      "type": "start"
+    },
+    {
+      "seq": 2,
+      "n": 0,
+      "type": "step"
+    },
+    {
+      "seq": 3,
+      "count": 1,
+      "command": "pwd",
+      "type": "await"
+    },
+    {
+      "seq": 4,
+      "applied": true,
+      "count": 1,
+      "command": "pwd",
+      "type": "confirm"
+    },
+    {
+      "seq": 5,
+      "name": "run_command",
+      "ok": true,
+      "detail": "退出码 0（成功） $ pwd /d/workSpace/agents_dev/.probe_runs/20261005-220132-3c2cfb-create-hello/ws",
+      "type": "tool"
+    },
+    {
+      "seq": 6,
+      "n": 1,
+      "type": "step"
+    },
+    {
+      "seq": 7,
+      "name": "write_file",
+      "ok": false,
+      "detail": "⛔ 没有执行：D:/d/workSpace/agents_dev/.probe_runs/20261005-220132-3c2cfb-create-hello/ws/hello.txt 既不在工作区里、也不在任何一个已关联的目录里。这种路径**连一次都不问**——它没有任何可批准的正当情形（既不是工作区身份，也没有人显式授过权），请示只会白花一次打扰预算（§3.2.4）。 **怎么才能做**：在",
+      "type": "tool"
+    },
+    {
+      "seq": 8,
+      "n": 2,
+      "type": "step"
+    },
+    {
+      "seq": 9,
+      "name": "write_file",
+      "ok": true,
+      "detail": "已生成新建预览（尚未写入，需用户确认）： --- /dev/null +++ b/hello.txt +Hello Word 结构约束检查发现以下问题，请修正： - 语法错误：第 1 行 invalid syntax",
+      "type": "tool"
+    },
+    {
+      "seq": 10,
+      "name": "自动验证",
+      "ok": true,
+      "detail": "系统自动跑了一遍测试：通过（这次改的是 .txt，没有对应的自动验证器。）。这说的是这次改的地方通过了。任务整体做完没有由你判断：还有未完成的接着做，确实都做完再给出结论。",
+      "type": "tool"
+    },
+    {
+      "seq": 11,
+      "n": 3,
+      "type": "step"
+    },
+    {
+      "seq": 12,
+      "type": "wait"
+    },
+    {
+      "seq": 13,
+      "name": "最终验证",
+      "ok": true,
+      "detail": "这次改的是 .txt，没有对应的自动验证器。",
+      "type": "tool"
+    },
+    {
+      "seq": 14,
+      "text": "回退这一轮（可直接复制）：spool revert --run 20261005-220133-393239",
+      "ok": true,
+      "kind": "revert_available",
+      "revert_command": "spool revert --run 20261005-220133-393239",
+      "type": "note"
+    },
+    {
+      "seq": 15,
+      "type": "wait"
+    },
+    {
+      "seq": 16,
+      "type": "usage"
+    },
+    {
+      "seq": 17,
+      "text": "--- /dev/null\n+++ b/hello.txt\n+Hello Word",
+      "type": "diff"
+    },
+    {
+      "seq": 18,
+      "count": 1,
+      "type": "await"
+    },
+    {
+      "seq": 19,
+      "applied": true,
+      "count": 1,
+      "type": "confirm"
+    },
+    {
+      "seq": 20,
+      "ok": true,
+      "text": "已在当前目录创建 hello.txt，内容为 Hello Word。\n本次运行共落成 1 处改动。最终文件状态：hello.txt：1 行，指纹 44d3a83db52a/1行。 最终验证：通过。（上一步验过之后这些文件的内容一字未变，所以沿用那一次的结果）这次改的是 .txt，没有对应的自动验证器。\n本次运行的 L2 行为回归读数：\n- 【查不了】行为回归（L2.2）：找不到可跑的对照：项目 README 里没有「python <脚本> <输入文件>」这样一条能跑的用法示例（或它点名的输入文件不在项目里）。不猜一条命令去跑——猜出来的差异说明不了行为变了没有\n（拦的是「完成声明」与危险动作，**不是成果**：改动照落盘、可回退、报告逐条列出；删死代码、合并重复实现、删已被替代的文件都是正常编辑。）\n撤销这一轮（可直接复制）：spool revert --run 20261005-220133-393239",
+      "type": "final"
+    }
+  ],
+  "judge": [
+    {
+      "id": 1,
+      "title": "撤销提示排在「等你确认/已应用」之前",
+      "reproduced": true,
+      "evidence": [
+        "撤销提示在第 8 行",
+        "等你确认/已应用在第 9 行",
+        "回退这一轮（可直接复制）：spool revert --run 20261005-220133-393239",
+        "等你确认：1 处改动"
+      ]
+    },
+    {
+      "id": 2,
+      "title": "同一条撤销信息出现两次",
+      "reproduced": true,
+      "evidence": [
+        "用户可见的撤销行共 2 条",
+        "回退这一轮（可直接复制）：spool revert --run 20261005-220133-393239",
+        "撤销这一轮（可直接复制）：spool revert --run 20261005-220133-393239"
+      ]
+    },
+    {
+      "id": 3,
+      "title": "没拦动作却打了 §2.5 反向条款",
+      "reproduced": true,
+      "evidence": [
+        "（拦的是「完成声明」与危险动作，**不是成果**：改动照落盘、可回退、报告逐条列出；删死代码、合并重复实现、删已被替代的文件都是正常编辑。）"
+      ]
+    },
+    {
+      "id": 4,
+      "title": "内部账漏进用户报告（沿用那一次的结果）",
+      "reproduced": true,
+      "evidence": [
+        "本次运行共落成 1 处改动。最终文件状态：hello.txt：1 行，指纹 44d3a83db52a/1行。 最终验证：通过。（上一步验过之后这些文件的内容一字未变，所以沿用那一次的结果）这次改的是 .txt，没有对应的自动验证器。"
+      ]
+    },
+    {
+      "id": 5,
+      "title": "验证叙述自相矛盾（自动验证成功 vs 没有验证器）",
+      "reproduced": true,
+      "evidence": [
+        "自动验证 → 成功：系统自动跑了一遍测试：通过（这次改的是 .txt，没有对应的自动验证器。）。这说的是这次改的地方通过了。任务整体做完没有由你判断：还有未完成的接着做，确实都做完再给出结论。",
+        "本次运行共落成 1 处改动。最终文件状态：hello.txt：1 行，指纹 44d3a83db52a/1行。 最终验证：通过。（上一步验过之后这些文件的内容一字未变，所以沿用那一次的结果）这次改的是 .txt，没有对应的自动验证器。"
+      ]
+    },
+    {
+      "id": 6,
+      "title": "L2「查不了」那一段过长",
+      "reproduced": true,
+      "evidence": [
+        "- 【查不了】行为回归（L2.2）：找不到可跑的对照：项目 README 里没有「python <脚本> <输入文件>」这样一条能跑的用法示例（或它点名的输入文件不在项目里）。不猜一条命令去跑——猜出来的差异说明不了行为变了没有"
+      ]
+    },
+    {
+      "id": 7,
+      "title": "真正的答案被埋（结论不在首位）",
+      "reproduced": false,
+      "evidence": [
+        "用户那一句：已在当前目录创建 hello.txt，内容为 Hello Word。",
+        "有没有独立的一句：True"
+      ]
+    }
+  ]
+}
