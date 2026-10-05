@@ -288,7 +288,16 @@ WALL_KNOBS: tuple[tuple[str, float], ...] = (
     ("failed_repeat_block_at", 2),  # 失败过的调用第一次原样重提即硬拦
     ("step_lines_per_bonus", 60),  # 每 60 行目标产出给 1 步额外预算
     ("step_lines_bonus_cap", 12),  # 最多补 12 步
-    ("blocked_refund_limit", 3),  # 被拦的编辑动作最多退还 3 步
+    ("blocked_refund_limit", 3),  # 一步里「一个都没跑」时最多退还 3 步
+)
+
+
+# 「被拦的尝试不该烧掉机会 + 拦截要真的换路」那一轮补登的旋钮：同一个
+# （工具 + 参数）组合被拦到阈值就停用，并把替代清单与轨迹交给督导。
+# 单列的理由同上：它不属于 P1 的登记批次，混进去会把「P1 Task 1 登记了 22 项」
+# 这个出处弄脏。
+REROUTE_KNOBS: tuple[tuple[str, float], ...] = (
+    ("reroute_block_at", 1),  # 同一组合第 1 次被拦后即停用（下一次直接拒）
 )
 
 
@@ -333,6 +342,7 @@ def test_p1_旋钮全部登记且可覆盖() -> None:
         P1_NEW_KNOBS
         + T11_GAP_KNOBS
         + WALL_KNOBS
+        + REROUTE_KNOBS
         + CONFIRM_KNOBS
         + INTENT_KNOBS
         + REVIEW_KNOBS
@@ -373,7 +383,8 @@ def test_旋钮没有重名() -> None:
     总数 = P0 的 62 + P1 Task 1 的 22 + T11 补缺轮的 2（`T11_GAP_KNOBS`）
     + 「三道墙」那一轮的 4（`WALL_KNOBS`）
     + 「确认清单拆成独立小回合」那一轮的 5（`CONFIRM_KNOBS`）
-    + 「意图与可评估的建议」那一轮的 4（`INTENT_KNOBS`）。
+    + 「意图与可评估的建议」那一轮的 4（`INTENT_KNOBS`）
+    + 「被拦的尝试不该烧掉机会 + 拦截要真的换路」那一轮的 1（`REROUTE_KNOBS`）。
     """
     assert len(limits.KNOBS) == len(limits._BY_NAME)
     assert len(limits.KNOBS) == (
@@ -381,6 +392,7 @@ def test_旋钮没有重名() -> None:
         + len(P1_NEW_KNOBS)
         + len(T11_GAP_KNOBS)
         + len(WALL_KNOBS)
+        + len(REROUTE_KNOBS)
         + len(CONFIRM_KNOBS)
         + len(INTENT_KNOBS)
         + len(REVIEW_KNOBS)

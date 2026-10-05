@@ -91,6 +91,8 @@ REQUIRED_RECORD_KEYS = (
     "verifier_ok",
     "repeat_blocks",
     "read_blocks",
+    "blocked_refunds",
+    "combo_disabled",
     "supervisor_interventions",
     "supervisor_false_claims",
     "file_changed",
@@ -161,6 +163,12 @@ READ_TOOLS = frozenset(
 )
 SUPERVISOR_PREFIX = "督导："
 GUARD_REFRESH_KIND = "guard_refresh"
+#: 「被拦下、没有执行」的一步退还了步数预算（`loop.py` 的 `blocked_refund`）。
+#: 它是可覆盖上限内的退还，报告里要能看见——否则「这次为什么没吃预算」只能猜。
+BLOCKED_REFUND_KIND = "blocked_refund"
+#: 同一个（工具 + 参数）被拦到阈值之后停用（`loop.py` 的 `combo_disabled`）。
+#: 它量的是「拦截换路了没有」，与上面的拦截计数分开数。
+COMBO_DISABLED_KIND = "combo_disabled"
 FACT_CONFLICT_KIND = "supervisor_fact_conflict"
 
 # ---- 自动审查层 P0：事件流里的审查 note kind ---------------------------------
@@ -718,6 +726,13 @@ def parse_events(text):
         "read_blocks": 0,
         "rewrite_refusals": 0,
         "guard_refreshes": 0,
+        # 「被拦下、没有执行」的一步退还了几步（`blocked_refund` 事件里的次数）。
+        # 它是**可见性**读数：退还有上限，报告与事件流里都要能看出「这次因被拦
+        # 而退还」。它不是「拦截次数」——拦截次数看上面的 `blocked_total`。
+        "blocked_refunds": 0,
+        # 同一个（工具 + 参数）被拦到阈值之后**停用**了几次（`combo_disabled`）。
+        # 这一条量的是「拦截有没有真的换路」，而不是「拦了几次」。
+        "combo_disabled": 0,
         "supervisor_interventions": 0,
         "supervisor_false_claims": 0,
         # 自动审查层 P0 的读数（见 §6 字段表）。全部按事件流的 note kind 数，
@@ -816,6 +831,14 @@ def parse_events(text):
             note_text = str(payload.get("text") or "")
             if note_kind == GUARD_REFRESH_KIND:
                 counters["guard_refreshes"] += 1
+            if note_kind == BLOCKED_REFUND_KIND:
+                # 取最大值而不是累加：事件里带的是「已退还 n/上限」，一条 note
+                # 就是一次退还，但重复发出同一条不该把它数成两次。
+                counters["blocked_refunds"] = max(
+                    counters["blocked_refunds"], int(payload.get("count") or 1)
+                )
+            if note_kind == COMBO_DISABLED_KIND:
+                counters["combo_disabled"] += 1
             if note_kind == FACT_CONFLICT_KIND:
                 counters["supervisor_false_claims"] += 1
             if note_kind in REVIEW_NOTE_KINDS:
@@ -1055,6 +1078,9 @@ def skipped_record(probe, options, repeat_index, repeat_total, budget, elapsed):
         "verifier_ok": None,
         "repeat_blocks": 0,
         "read_blocks": 0,
+        # 两条可见性读数：跳过的那一次没跑，所以都是 0（字段仍要齐）。
+        "blocked_refunds": 0,
+        "combo_disabled": 0,
         "supervisor_interventions": 0,
         "supervisor_false_claims": 0,
         # 跳过的那一次什么都没跑，读数是 0（字段仍要齐：聚合与对照都按它取）。
@@ -1216,6 +1242,11 @@ def run_one(
         "verifier_ok": counters["verifier_ok"],
         "repeat_blocks": counters["repeat_blocks"],
         "read_blocks": counters["read_blocks"],
+        # 拦下之后的两条**可见性**读数（不是判定下限的计数）：
+        # `blocked_refunds` = 因「整步都没执行」退还了几步（上限内）；
+        # `combo_disabled` = 同参被拦到阈值后停用了几次（拦截换路了没有）。
+        "blocked_refunds": counters["blocked_refunds"],
+        "combo_disabled": counters["combo_disabled"],
         "supervisor_interventions": counters["supervisor_interventions"],
         "supervisor_false_claims": counters["supervisor_false_claims"],
         # 自动审查层 P0 的五个必填读数（判据口径见 design 的 §6 字段表）：
@@ -1451,6 +1482,13 @@ def build_notes(record, probe):
         parts.append(f"原样重试被拦 {record['repeat_blocks']} 次")
     if record["read_blocks"]:
         parts.append(f"读取被拦 {record['read_blocks']} 次（可能死锁）")
+    if record.get("blocked_refunds"):
+        parts.append(
+            f"因被拦退还步数 {record['blocked_refunds']} 次"
+            "（拦下的调用没有执行，不算有效推进）"
+        )
+    if record.get("combo_disabled"):
+        parts.append(f"组合停用 {record['combo_disabled']} 次（同参被拦到阈值）")
     if record["rewrite_refusals"]:
         parts.append(f"整文件重写被拒 {record['rewrite_refusals']} 次")
     if record["supervisor_interventions"]:
@@ -1719,7 +1757,8 @@ def render_table(records):
     header = (
         f"{'探针':<18}{'形状':<18}{'结局':<10}{'步':>3}{'调用':>5}"
         f"{'输入tok':>9}{'输出tok':>9}{'墙钟s':>8}{'验证器':>8}"
-        f"{'重试':>5}{'拦读':>5}{'督导':>5}{'督导错':>7}{'判据':>6}{'下限':>6}"
+        f"{'重试':>5}{'拦读':>5}{'退还':>5}{'停用':>5}{'督导':>5}"
+        f"{'督导错':>7}{'判据':>6}{'下限':>6}"
     )
     lines = [header, "-" * len(header)]
     for record in records:
@@ -1728,7 +1767,7 @@ def render_table(records):
                 f"{record['id']:<18}{_cell(record.get('shape'), 18):<18}"
                 f"{'跳过':<10}{'—':>3}{'—':>5}{'—':>9}{'—':>9}"
                 f"{record.get('wall_seconds', 0):>8.1f}{'—':>8}{'—':>5}{'—':>5}"
-                f"{'—':>5}{'—':>7}{'—':>6}{'—':>6}"
+                f"{'—':>5}{'—':>5}{'—':>5}{'—':>5}{'—':>7}{'—':>6}{'—':>6}"
             )
             continue
         outcome = ("完成" if record["final_ok"] else "未完成") + (
@@ -1746,6 +1785,8 @@ def render_table(records):
             f"{_cell(record['completion_tokens'], 9):>9}"
             f"{record['wall_seconds']:>8.1f}{verifier:>8}"
             f"{record['repeat_blocks']:>5}{record['read_blocks']:>5}"
+            f"{_cell(record.get('blocked_refunds', 0), 5):>5}"
+            f"{_cell(record.get('combo_disabled', 0), 5):>5}"
             f"{record['supervisor_interventions']:>5}"
             f"{record['supervisor_false_claims']:>7}"
             f"{'绿' if record['check_ok'] else '红':>6}"

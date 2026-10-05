@@ -193,15 +193,25 @@ NO_EDIT_INTERVENE_AT = int(_limits.knob("no_edit_intervene_at").default)
 # 就是「同一个失败动作反复重试」，而不是「它好几步没写代码」这种含糊信号。
 FAILED_REPEAT_AT = int(_limits.knob("failed_repeat_at").default)
 
-# 硬拦（没有执行）时**退还步数预算**的工具类别。
+# 硬拦（没有执行）时**退还步数预算**的判据。
 #
-# 查询类的硬拦原先不退：理由是「查询被拦是在打转，退预算等于延长打转」。
-# 那条理由对「同一查询重发」成立，对「同一个失败动作重试」不成立——后者
-# 的出路是换做法，而不是让它把预算花在复读上。dogfood 那条轨迹里它第 3 步
-# 原样重提 survey、被拦、照样吃掉一步（4 步预算是上限，再撞一次就收手）。
-# 编辑类退还一直是对的（dogfood：两次被拒的 write_file 白吃 2 步），
-# 这里只是把同一条账算到查询类上。
-_REFUND_TOOLS = WRITE_TOOLS + (CONFIRM_TOOL, "read_file", "list_dir", "search_code", "survey")
+# 口径只有一条，与工具名无关：**这一步里的每一个调用都没有真正执行**
+# （全部被护栏拦下）→ 这一步没有产出、也没有换来任何新信息 → 不占步数预算。
+#
+# 这里原先是一张工具名白名单（编辑类 + 几个查看类）。白名单的毛病是漏写一个
+# 名字不会有任何报错，症状是隐性的：实测 `find_symbol` 不在名单里，它带着未知
+# 参数被硬拦之后照旧吃掉 1 步（探针 l5-set3 的 `rename-cross-file-r0`，第 1 步
+# 被拦、trace 里连退还那一行都没有，8 步预算少一步）。判断依据从「工具是不是
+# 查看类」换成「这一次有没有真的执行」，名单就不用维护了，也不会再出现
+# 「同一件事在两个地方两个口径」。
+_BLOCKED_STEP_KIND = "blocked_refund"
+
+# 「同一个（工具 + 参数）被拦到阈值 → 该组合停用」这件事的**事件种类**。
+#
+# 停用必须看得见：报告与事件流里要能回答「这一次为什么突然换说法了」，
+# 否则调这块时只能从散文里猜（`_refuse` 里发，探针按 kind 计数）。
+COMBO_DISABLED_KIND = "combo_disabled"
+
 
 # 空回合连续出现到这个次数就收尾。
 #
@@ -372,6 +382,46 @@ def _intent_clause(call: ToolCall) -> str:
     )
 
 
+def _render_args(call: ToolCall) -> str:
+    """把这次重发的参数**逐字**写出来。
+
+    为什么必须有这一行：实测（探针 l5-set3 的 `rename-cross-file-r1`）模型把
+    同一条 `search_code` 连着原样发了三次，而它三轮写的意图是「去掉多余参数」
+    「严格按督导建议的形状发」——它**以为自己改了**。护栏原来的话术只解释了
+    「为什么不能重发」，从没把「你这次发的到底是什么」摆到它面前，于是它手上
+    有一个假事实：它改的是脑子里的形状，发出来的是同一串字节。
+    """
+    try:
+        return json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):  # pragma: no cover - 模型给不出这类值
+        return repr(call.arguments)
+
+
+def _reverse_clause() -> str:
+    """§2.5 的反向条款：把「拦的是这一次动作」与「不许删文件」切开。
+
+    用户点名过两次：这段话术被读成「一律不许删 / 不许精简」时，模型会把正常的
+    合并、删死代码当成违规动作而不敢做，任务反而做不完。所以每条拦截话术都要
+    带上这一句，而且是**同一句**（两处说法不一等于两套语义）。
+    """
+    return (
+        "拦的是**这一次动作**，不是「不许删文件 / 不许精简代码」：删死代码、"
+        "合并重复实现、删已被替代的文件都是正常编辑，改动照落盘、照样可回退"
+        "（§2.5 反向条款）。"
+    )
+
+
+def _remedies(failure: str) -> list[str]:
+    """从失败话术里抽出「照做的下一步」那几行（能照抄的调用形状）。"""
+    return list(
+        dict.fromkeys(
+            line.strip()
+            for line in (failure or "").splitlines()
+            if line.strip().startswith(NEXT_STEP_MARKER)
+        )
+    )
+
+
 def _retry_block_message(call: ToolCall, failure: str) -> str:
     """原样重提一个失败过的调用时的话术：**给出能照做的下一步**。
 
@@ -382,11 +432,7 @@ def _retry_block_message(call: ToolCall, failure: str) -> str:
     暂存那一种要分开说：它**不是失败**（正文收下了），但把同一份正文再发
     一遍是这次运行里最贵的一种浪费——输出预算正是卡在这里的。
     """
-    remedy = [
-        line.strip()
-        for line in failure.splitlines()
-        if line.strip().startswith(NEXT_STEP_MARKER)
-    ]
+    remedy = _remedies(failure)
     staged = failure.lstrip().startswith(STAGE_MARKER)
     intent = _intent_clause(call)
     if staged:
@@ -403,6 +449,8 @@ def _retry_block_message(call: ToolCall, failure: str) -> str:
             f"{BLOCKED_PREFIX}这个调用与上一次**完全相同**（工具 {call.name}，"
             "参数一字未改），而上一次它失败了：失败的原因不会因为再发一遍而改变，"
             "所以这次没有执行。",
+            f"你这次重发的参数（与上一次逐字相同，问题就在这串参数里）："
+            f"{_render_args(call)}",
             f"上一次的结论：{' '.join(failure.split())[:300]}",
         ]
     if intent:
@@ -419,14 +467,54 @@ def _retry_block_message(call: ToolCall, failure: str) -> str:
             "上一次已经给出了能照做的下一步：" if not staged
             else "照做的下一步是这几条（正文已经收下）："
         )
-        parts.extend(dict.fromkeys(remedy))
+        parts.extend(remedy)
     elif not staged:
-        parts.append(
-            "换一种做法，三选一：换参数（行号区间、先多带几行上下文）；"
-            "换工具（write_file / replace_lines / replace_text）；"
-            "先 read_file 确认原文再动手。任务确实已经完成时，直接给出结论。"
-        )
+        parts.append(_generic_remedies())
+    parts.append(_reverse_clause())
     return "\n".join(parts)
+
+
+def _generic_remedies() -> str:
+    """给不出具体形状时的替代动作清单（四条，都能照着做）。"""
+    return (
+        "换一种做法，四选一：① 换参数（换行号区间、先多带几行上下文）；"
+        "② 换工具（read_file 先看原文 / write_file / replace_lines / "
+        "replace_text）；③ 先看别的（读另一个文件、换一个检索词）；"
+        "④ 直接给结论（任务确实已经做完时）。"
+    )
+
+
+def _combo_disabled_message(
+    call: ToolCall, count: int, remedies: Sequence[str], original: str
+) -> str:
+    """同一个（工具 + 参数）组合被拦到阈值之后的话术：**停用这个组合**。
+
+    只递一句「为什么不能重发」拦不住它：实测同一条调用被拦了三次，模型每一轮
+    的意图都写着「按要求改好了」，发出来的参数一字未改。所以这里换个做法——
+    **不再讨论这次调用**，而是宣告这个组合停用，并把它能走的路列成清单；
+    下一个动作必须从清单里选一条（`loop.py` 主循环还会把这条轨迹交给督导，
+    附上「已被拦几次 + 已经给过哪些替代方案」，不让它自己空转到上限）。
+
+    这条话术与常规那条必须**不是同一句话**：模型对同一句话是免疫的
+    （实测重复提醒、拦截说明都照发不误），换的必须是它读到的东西。
+    """
+    alts = list(remedies) or [_generic_remedies()]
+    lines = [
+        f"{BLOCKED_PREFIX}（工具 {call.name} + 同一组参数）这个组合已经**停用**："
+        f"它已经被硬拦 {count} 次，每一次的参数都**完全相同**，"
+        "再发一次不会有别的结果，所以从这里起直接拒。",
+        f"停用的组合参数：{_render_args(call)}",
+        "替代动作清单（下一条必须从这里选，选哪条都行）：",
+    ]
+    lines.extend(f"  · {one}" for one in alts)
+    lines.append(
+        "  · 这条组合里的东西你已经拿到过：直接用已有的输出往下做"
+        "（提改动 / 给结论）。"
+    )
+    lines.append(_reverse_clause())
+    if original:
+        lines.append(f"上一次的原话（备查）：{' '.join(original.split())[:220]}")
+    return "\n".join(lines)
 
 
 def scaled_step_bonus(config: Config, lines: int) -> int:
@@ -848,6 +936,15 @@ class AgentLoop:
         # 并把它失败时看过的「照做的下一步」端回去。每次 run() 开始时清空。
         self._failed_calls: dict[str, int] = {}
         self._failed_output: dict[str, str] = {}
+        # 同一个（工具 + 参数）组合被**硬拦**了几次（指纹 → 次数）。到
+        # `reroute_block_at` 次之后这个组合停用，下一个动作必须换成别的路。
+        # 与失败表同生共死（有改动真的落成时一起清零）：文件变了，同一组参数
+        # 可能重新有意义——否则「停用」会变成一个永远不会解除的禁令。
+        self._blocked_combos: dict[str, int] = {}
+        # 停用发生时留给督导的证据（"已被拦几次 + 已经给过哪些替代方案"）。
+        # 主循环下一轮**先叫督导**再让模型说话：模型对同一句话是免疫的
+        # （实测同参被拦 3 次），这件事该给判断，不该让它空转到预算上限。
+        self._reroute_evidence = ""
         # ---- 重复调用护栏的两个判据（见 _invoke_guarded）----------------------
         # ① 上一份结果还在不在上下文里：装配时的历史版本号。
         self._context_revision = 0
@@ -1054,6 +1151,10 @@ class AgentLoop:
         self._seen_at_revision.clear()
         self._read_fingerprints.clear()
         self._refreshes_used = 0
+        # 「组合停用」的计数与留给督导的证据同样是**本次运行**的：
+        # 上一次 run() 停用过的组合不该把这一次的第一个同名调用直接拒掉。
+        self._blocked_combos.clear()
+        self._reroute_evidence = ""
         # 机械审查的去重集合与证据缺口计数也是**本次运行**的：上一次 run() 发过
         # 的那几条不该把这一次的同类发现压掉。
         self._reviewed_notes.clear()
@@ -1214,6 +1315,13 @@ class AgentLoop:
             stuck_on_query = (
                 self.config.supervise and report.same_query >= same_query_at
             )
+            # 同一个组合刚被停用（`_refuse`）：这件事**不再让它自己试**。
+            # 机械层已经把参数逐字摆到它面前过，模型对同一句话是免疫的
+            # （实测同参连拦 3 次），所以这里直接把轨迹交给督导，带上
+            # 「已被拦几次 + 已经给过哪些替代方案」，让它给判断——而不是让它
+            # 自己空转到步数上限。
+            reroute = self._reroute_evidence
+            stuck_on_reroute = self.config.supervise and bool(reroute)
             if (
                 state.step >= limit
                 or stuck_on_repeat
@@ -1223,6 +1331,7 @@ class AgentLoop:
                 or stuck_on_oscillation
                 or stuck_on_query
                 or stuck_on_failed_repeat
+                or stuck_on_reroute
             ):
                 # 两个触发点，同一件事：机械层已经说了有事，而模型自己没纠正。
                 # 这是**要判断**的点，不是失败点——原先的处理是停下来提示用户
@@ -1230,6 +1339,16 @@ class AgentLoop:
                 exhausted = state.step >= limit
                 if exhausted:
                     asking = "这一轮的步数预算用完了，任务还没结束"
+                elif stuck_on_reroute:
+                    # 这条问题与下面几条都不同：这里已经**不是**「它会不会换」
+                    # 的问题——机械层把参数逐字端回去了，它还是原样发。所以要
+                    # 问的是「这个组合停用之后，这件事还该不该做、怎么做」。
+                    asking = (
+                        f"同一个（工具 + 参数）组合已经被硬拦并停用——{reroute}。"
+                        "它仍然在这一步上反复，机械层已经不再接受这个组合；"
+                        "请判断：这件事还该不该做、该换哪条路，或者该收尾。"
+                    )
+                    self._reroute_evidence = ""
                 elif stuck_on_cycle:
                     asking = (
                         f"短环：工具路径在 {report.cycle} 打转，"
@@ -1933,23 +2052,45 @@ class AgentLoop:
             # （dogfood：两次被拒的 write_file 白吃了 2 步）。退还必须有上限，
             # 否则「不断被拦」就成了无限预算；上限也是可覆盖的标定值。
             #
-            # 退还范围包括**查看类**（read_file / list_dir / search_code / survey）。
-            # 原先只退编辑类，理由写的是「查询被拦是在打转，退预算等于延长打转」；
-            # 那条理由对**同一查询重发**成立，对**同一失败动作重试**不成立——
-            # 后者的出路是换个做法，而不是让它把预算花在复读上。用户那条轨迹里
-            # 第 3 步原样重提 survey 被拦、照样吃掉一步，4 步预算直接见底、
-            # 来不及做任何改动。退还仍有上限，所以「靠被拦换无限预算」不成立。
+            # 判据是**整步**的：这一步里的每一个调用都没执行（`blocked_all`），
+            # 才叫「没有推进」。工具名一律不看——名单漏一个名字不会有报错，
+            # 只会让某个工具的被拦动作继续白吃预算（这正是改前
+            # `find_symbol` 的形状）。空调用的一步不算（`turn.tool_calls`
+            # 非空才可能「全部被拦」）。
+            #
+            # 退还必须**看得见**：trace 给督导看，事件流给探针与人看
+            # （`kind=blocked_refund`，带次数与上限），否则「这次因被拦而退还」
+            # 只在内存里发生过。退还到上限之后照常计预算。
             refund_cap = int(self.config.limit("blocked_refund_limit"))
-            blocked_repeat = blocked_all and any(
-                call.name in _REFUND_TOOLS for call in turn.tool_calls
-            )
-            if blocked_repeat and refunds_used < refund_cap:
+            blocked_step = blocked_all and bool(turn.tool_calls)
+            refunded = False
+            if blocked_step and refunds_used < refund_cap:
                 refunds_used += 1
-                trace.append(
+                refunded = True
+                line = (
                     f"step{state.step}: 这一步的调用全部被硬拦（没有执行），"
                     f"不占步数预算（已退还 {refunds_used}/{refund_cap}）"
                 )
-            else:
+                trace.append(line)
+                self._emit(
+                    "note",
+                    {
+                        "text": line
+                        + f"；被拦的组合：{', '.join(sorted({c.name for c in turn.tool_calls}))}",
+                        "ok": True,
+                        "kind": _BLOCKED_STEP_KIND,
+                        "count": refunds_used,
+                        "limit": refund_cap,
+                        "tools": sorted({c.name for c in turn.tool_calls}),
+                    },
+                )
+            elif blocked_step:
+                # 上限用完了也要如实说：不然「这一步为什么又开始吃预算」看不出来。
+                trace.append(
+                    f"step{state.step}: 这一步同样全部被硬拦，但退还给到上限"
+                    f"（{refunds_used}/{refund_cap}），照常计一步预算"
+                )
+            if not refunded:
                 state.step_forward()
                 _state_started = time.time()
                 save_state(state, checkpoint)
@@ -2577,6 +2718,10 @@ class AgentLoop:
         for kind, label in boundary:
             if kind == OUTSIDE:
                 self._log(f"T6 域外写直接拒绝：{label}")
+                # 这一条**不进**「组合停用」的计数（`_refuse`）：它的原始话术
+                # 里那段「怎么才能做」是这条路的全部价值，换成清单式说法会把它
+                # 挤掉。而且它是**策略**拒绝（这件事不允许），与「重复没有意义」
+                # 不是同一个问题——两者混在一起，停用清单会开始说错理由。
                 return ToolResult(ok=False, content=outside_write_refusal(label))
         # ---- 风险分级放行：**动作执行口之前的拦截**（§2.6 第 2 条）------------
         #
@@ -2604,16 +2749,14 @@ class AgentLoop:
             decided = self._escalate(request)
             decision = self.escalation_gate.decisions.get(decided.fingerprint)
             if decision is None or not decision.execute:
-                return ToolResult(
-                    ok=False,
-                    content=(
+                return self._refuse(
+                    call,
+                    signature,
+                    (
                         f"{BLOCKED_PREFIX}这个动作被风险分级放行拦下了（触发条件 "
                         f"{request.trigger}，{request.note}）。**成果不受影响**——"
                         "这一轮已经落盘的改动仍在工作区里，回退命令见收尾报告。"
-                        "被拦的是**这一次动作**，不是「不许这样改文件」；"
-                        "**更不是「不许删文件、不许精简」**：删死代码、合并重复"
-                        "实现、删已被替代的文件都是正常编辑，照样落盘、照样可回退"
-                        "（§2.5 的反向条款）。"
+                        f"{_reverse_clause()}"
                         "要往下做就换一条不需要该动作的路（改代码而不是跑那条命令、"
                         "小步改而不是批量删），或者等人批复。"
                         + (
@@ -2624,11 +2767,12 @@ class AgentLoop:
         failures = self._failed_calls.get(signature, 0)
         block_at = max(int(self.config.limit("failed_repeat_block_at")), 2)
         if failures and failures >= block_at - 1:
-            return ToolResult(
-                ok=False,
-                content=_retry_block_message(
-                    call, self._failed_output.get(signature, "")
-                ),
+            failure = self._failed_output.get(signature, "")
+            return self._refuse(
+                call,
+                signature,
+                _retry_block_message(call, failure),
+                _remedies(failure),
             )
         level = max(repeats, seen)
         if level >= self.config.limit("repeat_block_at"):
@@ -2666,18 +2810,23 @@ class AgentLoop:
                         + f"\n{result.content}"
                     ),
                 )
-            return ToolResult(
-                ok=False,
-                content=(
+            return self._refuse(
+                call,
+                signature,
+                (
                     f"{BLOCKED_PREFIX}这个调用在最近几步里已经做过 {level - 1} 次，"
                     "结果不会改变，因此没有执行。"
+                    "你这次重发的参数（与上一次逐字相同）："
+                    f"{_render_args(call)}"
                     "上一步的输出仍在你的上下文里：换一种做法：换一个工具、"
                     "换一组参数，或者先查别的地方；如果上一步的输出已经够了，"
                     "就基于它往下做（提改动 / 给结论），不要再查一遍。"
                     "下一步的意图要写清「这一次想拿到什么、拿到之后做什么」——"
                     "只重复一句「再看一遍文件」不算下一步。"
+                    + _reverse_clause()
                     + (f"\n{_intent_clause(call)}" if call.intent else "")
                 ),
+                _remedies(self._failed_output.get(signature, "")),
             )
         result = self.registry.invoke(call)
         self._note_guard_result(call, result)
@@ -3535,9 +3684,61 @@ class AgentLoop:
             self._failed_output.pop(oldest, None)
 
     def _clear_failures(self) -> None:
-        """有改动真的落成了，就清空失败表：文件变了，旧参数可能重新有意义。"""
+        """有改动真的落成了，就清空失败表：文件变了，旧参数可能重新有意义。
+
+        「组合停用」的计数一起清：停用是**临时**的（用户的要求就是「暂时禁用」），
+        解除条件与失败表同一个事实——盘上的东西变过了。
+        """
         self._failed_calls.clear()
         self._failed_output.clear()
+        self._blocked_combos.clear()
+        self._reroute_evidence = ""
+
+    def _refuse(
+        self,
+        call: ToolCall,
+        signature: str,
+        message: str,
+        remedies: Sequence[str] = (),
+    ) -> ToolResult:
+        """一次「没有执行」的拦截：记账 → 到阈值就换成**停用 + 替代清单**。
+
+        为什么必须记账：护栏原来只说不许，不数次数——同一条调用被拦 1 次还是
+        3 次，在护栏眼里是同一件事，于是它每次都给同一句「换一种做法」，
+        而模型对同一句话免疫（实测同参连拦 3 次，它的意图每次都写着「已经改好
+        了」）。数到阈值之后，这个组合**停用**，话术也换成清单式的
+        （`_combo_disabled_message`），并把这条轨迹留给督导。
+
+        阈值 `reroute_block_at` 是可覆盖的标定值：默认 1 = 第一次被拦之后，
+        这个组合的第二次发起就直接拒（不再陪着它复读一轮）。
+        """
+        count = self._blocked_combos.get(signature, 0) + 1
+        self._blocked_combos[signature] = count
+        block_at = int(self.config.limit("reroute_block_at"))
+        if block_at <= 0 or count <= block_at:
+            return ToolResult(ok=False, content=message)
+        text = _combo_disabled_message(call, count, remedies, message)
+        evidence = (
+            f"同一个（工具 {call.name} + 同一组参数）的组合已经被硬拦 {count} 次，"
+            "该组合已停用；已经给过的替代方案："
+            + "；".join(remedies or ("换参数 / 换工具 / 先看别的 / 直接给结论",))
+        )
+        self._reroute_evidence = evidence
+        self._log(f"组合停用：{call.name}（第 {count} 次被拦）——{evidence}")
+        self._emit(
+            "note",
+            {
+                "text": f"组合停用：{call.name}（第 {count} 次被拦）",
+                "ok": False,
+                "kind": COMBO_DISABLED_KIND,
+                "tool": call.name,
+                "count": count,
+                "limit": block_at,
+                "signature": signature,
+            },
+        )
+        return ToolResult(ok=False, content=text)
+
 
     def _run_verification(self, changed: list[str] | None = None) -> tuple[str, bool]:
         """替模型跑一遍项目测试，把结果整理成它看得懂的一段话。

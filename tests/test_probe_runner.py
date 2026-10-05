@@ -105,6 +105,31 @@ CANNED_EVENTS = "\n".join(
             {"type": "note", "text": "⟳ 刷新读取：文件已经变了", "ok": True, "kind": "guard_refresh"},
             ensure_ascii=False,
         ),
+        # 「被拦下、没有执行」的一步退还了步数预算：退还有上限，这件事必须
+        # 在事件流里看得见（不然「这一步为什么没吃预算」只能猜）。
+        json.dumps(
+            {
+                "type": "note",
+                "text": "step2: 这一步的调用全部被硬拦（没有执行），不占步数预算（已退还 3/3）",
+                "ok": True,
+                "kind": "blocked_refund",
+                "count": 3,
+                "limit": 3,
+            },
+            ensure_ascii=False,
+        ),
+        # 同一个（工具 + 参数）被拦到阈值之后**停用**：量的是「拦截换路了没有」。
+        json.dumps(
+            {
+                "type": "note",
+                "text": "组合停用：search_code（第 2 次被拦）",
+                "ok": False,
+                "kind": "combo_disabled",
+                "tool": "search_code",
+                "count": 2,
+            },
+            ensure_ascii=False,
+        ),
         # 督导介入，而且被核出事实不符
         json.dumps({"type": "note", "text": "督导：续 6 步——还有活没干", "ok": True}, ensure_ascii=False),
         json.dumps(
@@ -368,6 +393,9 @@ def test_事件解析数得清各类拦截与督导():
     assert counters["read_blocks"] == 1
     assert counters["rewrite_refusals"] == 1
     assert counters["guard_refreshes"] == 1
+    # 两条**可见性**读数：因被拦而退还了几步（上限内）、同参被拦到阈值后停用了几次。
+    assert counters["blocked_refunds"] == 3
+    assert counters["combo_disabled"] == 1
     assert counters["supervisor_interventions"] == 1
     assert counters["supervisor_false_claims"] == 1
     assert counters["verifier_ran"] == 2
@@ -419,6 +447,8 @@ def test_记录字段齐全且不改种子(tmp_path):
     assert record["verifier_ok"] is True, "verifier_ok 取最后一次判定"
     assert record["repeat_blocks"] == 2
     assert record["read_blocks"] == 1
+    assert record["blocked_refunds"] == 3
+    assert record["combo_disabled"] == 1
     assert record["supervisor_interventions"] == 1
     assert record["supervisor_false_claims"] == 1
     assert record["notes"]
