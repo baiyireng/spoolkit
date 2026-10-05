@@ -91,6 +91,13 @@ REQUIRED_RECORD_KEYS = (
     "verifier_ok",
     "repeat_blocks",
     "read_blocks",
+    # 拆分后的四个量（护栏落地后新增）：总数里的「被拦未执行」与「未被拦」。
+    # 必填是为了让老记录缺字段这件事**当场露出来**，而不是在下限判定里
+    # 静默退化成「未被拦 = 总数」。
+    "repeat_blocks_blocked",
+    "repeat_blocks_unblocked",
+    "read_blocks_blocked",
+    "read_blocks_unblocked",
     "blocked_refunds",
     "combo_disabled",
     "supervisor_interventions",
@@ -157,6 +164,16 @@ BLOCKED_PREFIX = "⛔ 未执行："
 REFUSAL_MARKER = "⚠ 拒绝整文件重写"
 IDENTICAL_RETRY_MARK = "完全相同"
 REPEAT_GUARD_MARK = "已经做过"
+#: 「重复**真的执行了**」的两个开头（`loop.py` 只提醒、没有拦的那条路）。
+#:
+#: 为什么要它与上面那组分开：护栏自己就是拦截者之后，`⛔ 未执行` 意味着这一次
+#: 调用**根本没有跑**——那是护栏在干活，不是空转。真空转是「同一个调用又跑了一
+#: 遍、结果不会变」：护栏只提醒不拦的那种。两者混在一个数里，就会出现
+#: 「任务判据全绿、分却是自己人扣的」。
+REPEAT_EXECUTED_MARKS = (
+    "注意：这一步与上一步完全相同",
+    "注意：这个调用在最近几步里已经执行过",
+)
 VERIFIER_NAMES = ("自动验证", "最终验证")
 READ_TOOLS = frozenset(
     {"read_file", "list_dir", "search_code", "dir_stats", "read_diagnosis"}
@@ -281,7 +298,14 @@ def load_manifest(path=None):
         if not isinstance(guards, dict):
             raise ManifestError(f"{where}.guard_hashes 必须是对象")
         _validate_variants(where, probe)
-    return {"version": payload.get("version", 1), "defaults": defaults, "probes": probes}
+    return {
+        "version": payload.get("version", 1),
+        "defaults": defaults,
+        "probes": probes,
+        # 清单自己的口径说明（`_limits_note`）：下限为什么这样定，写在清单里
+        # 而不是只写在代码注释里——读清单的人看不到 `probe.py` 的注释。
+        "limits_note": list(payload.get("_limits_note") or []),
+    }
 
 
 def _validate_variants(where, probe):
@@ -708,6 +732,11 @@ def _blocked(detail):
     return detail.startswith(BLOCKED_PREFIX) or REFUSAL_MARKER in detail
 
 
+def _repeat_executed(detail):
+    """这一次「同一个调用又发了一遍」是不是**真的执行了**（护栏只提醒没拦）。"""
+    return any(mark in detail for mark in REPEAT_EXECUTED_MARKS)
+
+
 def parse_events(text):
     """把 `--events` 的 JSON 行折成一组计数。
 
@@ -723,7 +752,12 @@ def parse_events(text):
         "tool_failures": 0,
         "blocked_total": 0,
         "repeat_blocks": 0,
+        # 「被硬拦下、**没有执行**」的那一部分。`repeat_blocks` 是**总数**
+        # （被拦的 + 护栏只提醒没拦的），这两个数分开之后，
+        # 「我们扣的分（被拦）」与「真病态（未被拦的重复）」才分得开。
+        "repeat_blocks_blocked": 0,
         "read_blocks": 0,
+        "read_blocks_blocked": 0,
         "rewrite_refusals": 0,
         "guard_refreshes": 0,
         # 「被拦下、没有执行」的一步退还了几步（`blocked_refund` 事件里的次数）。
@@ -824,6 +858,14 @@ def parse_events(text):
                     counters["rewrite_refusals"] += 1
                 if IDENTICAL_RETRY_MARK in detail or REPEAT_GUARD_MARK in detail:
                     counters["repeat_blocks"] += 1
+                    counters["repeat_blocks_blocked"] += 1
+                if name in READ_TOOLS:
+                    counters["read_blocks"] += 1
+                    counters["read_blocks_blocked"] += 1
+            elif _repeat_executed(detail):
+                # 护栏只提醒、没有拦：**这一次真的又跑了一遍**，是真空转。
+                # 它计入总数、不计入 blocked——下限就是拿它判的。
+                counters["repeat_blocks"] += 1
                 if name in READ_TOOLS:
                     counters["read_blocks"] += 1
         elif kind == "note":
@@ -1078,6 +1120,11 @@ def skipped_record(probe, options, repeat_index, repeat_total, budget, elapsed):
         "verifier_ok": None,
         "repeat_blocks": 0,
         "read_blocks": 0,
+        # 拆分的两个量：跳过的那一次什么都没跑，四个读数都是 0（字段仍要齐）。
+        "repeat_blocks_blocked": 0,
+        "repeat_blocks_unblocked": 0,
+        "read_blocks_blocked": 0,
+        "read_blocks_unblocked": 0,
         # 两条可见性读数：跳过的那一次没跑，所以都是 0（字段仍要齐）。
         "blocked_refunds": 0,
         "combo_disabled": 0,
@@ -1242,6 +1289,21 @@ def run_one(
         "verifier_ok": counters["verifier_ok"],
         "repeat_blocks": counters["repeat_blocks"],
         "read_blocks": counters["read_blocks"],
+        # ---- 拆分（护栏落地后的口径）：总数 vs 其中被硬拦未执行的 --------------
+        #
+        # `repeat_blocks` 是**总数**（保持原义：检测到的原样重复调用次数）；
+        # `repeat_blocks_blocked` 是其中**被护栏拦下、未真正执行**的次数；
+        # `repeat_blocks_unblocked` 是两者之差，也就是**真正的空转**，
+        # 下限 `max_repeat_blocks_unblocked` 判的就是它。
+        # 读取类同口径。被拦的次数不套 0 线，但仍逐条记录。
+        "repeat_blocks_blocked": counters["repeat_blocks_blocked"],
+        "repeat_blocks_unblocked": (
+            counters["repeat_blocks"] - counters["repeat_blocks_blocked"]
+        ),
+        "read_blocks_blocked": counters["read_blocks_blocked"],
+        "read_blocks_unblocked": (
+            counters["read_blocks"] - counters["read_blocks_blocked"]
+        ),
         # 拦下之后的两条**可见性**读数（不是判定下限的计数）：
         # `blocked_refunds` = 因「整步都没执行」退还了几步（上限内）；
         # `combo_disabled` = 同参被拦到阈值后停用了几次（拦截换路了没有）。
@@ -1390,16 +1452,52 @@ def changes_on_disk(change, sandbox):
     return len(counted)
 
 
+def _unblocked_count(record, total_key, blocked_key, derived_key):
+    """「未被拦的重复」读数：优先用记录里显式的派生字段，没有就现算。
+
+    老记录（拆分之前）只有裸计数，构造出来的假记录也可能只给裸计数——
+    那就按 `总数 - 被拦` 现算，缺 `blocked` 时当 0（= 全都没被拦，最严的读法）。
+    """
+    if record.get(derived_key) is not None:
+        return record[derived_key]
+    return record.get(total_key, 0) - record.get(blocked_key, 0)
+
+
+#: 旧下限键 → 新下限键。**旧键保留、同义同线**：护栏引入之前，
+#: `max_repeat_blocks` 的意思是「原样重试被拦 ≤ 0」；护栏自己就是拦截者之后，
+#: 这条线**只对未被拦的重复生效**（被拦的那些是护栏在干活，不是空转）。
+#: 读旧清单的工具不必改；新清单显式写 `*_unblocked`，口径写在名字里。
+LEGACY_LIMIT_ALIASES = {
+    "max_repeat_blocks": "max_repeat_blocks_unblocked",
+    "max_read_blocks": "max_read_blocks_unblocked",
+}
+
+
 def evaluate_bounds(probe, record):
     """对照清单里的「预期下限」。命中不了的写清楚，不吞。"""
-    expect = probe.get("expect") or {}
+    expect = dict(probe.get("expect") or {})
+    # 旧键折进新键：显式写了新键就按新键（它是口径的正式名字）。
+    for legacy, current in LEGACY_LIMIT_ALIASES.items():
+        if legacy in expect and current not in expect:
+            expect[current] = expect[legacy]
     failed = []
     # 清单里的键（`max_*`）与记录里的键（裸计数）不是一个名字，这里显式对上。
     # 顺手写错过一次：直接拿 `max_read_blocks` 去 record 里取，取到 None，
     # 于是「拦读超上限」永远判成达标——单测把这条抓出来了。
+    #
+    # 两条「重复」线判的是**未被拦的**那部分（`*_unblocked`），不是总数：
+    # 口径与理由写在 `benchmarks/probes/probes.json` 的 `_limits_note` 里。
     for record_key, expect_key, message in (
-        ("repeat_blocks", "max_repeat_blocks", "原样重试被拦次数超上限"),
-        ("read_blocks", "max_read_blocks", "读取被拦次数超上限"),
+        (
+            "repeat_blocks_unblocked",
+            "max_repeat_blocks_unblocked",
+            "未被拦的原样重试次数超上限",
+        ),
+        (
+            "read_blocks_unblocked",
+            "max_read_blocks_unblocked",
+            "未被拦的读取被拦次数超上限",
+        ),
         (
             "supervisor_false_claims",
             "max_supervisor_false_claims",
@@ -1422,7 +1520,16 @@ def evaluate_bounds(probe, record):
         if expect_key not in expect:
             continue
         limit = expect[expect_key]
-        value = record.get(record_key, 0)
+        if record_key == "repeat_blocks_unblocked":
+            value = _unblocked_count(
+                record, "repeat_blocks", "repeat_blocks_blocked", record_key
+            )
+        elif record_key == "read_blocks_unblocked":
+            value = _unblocked_count(
+                record, "read_blocks", "read_blocks_blocked", record_key
+            )
+        else:
+            value = record.get(record_key, 0)
         if value > limit:
             failed.append(f"{message}：{value} > {limit}")
     # §2.5 的三个字段走两条线：`workspace_not_empty` / `revert_available`
@@ -1479,9 +1586,18 @@ def build_notes(record, probe):
     else:
         parts.append("自动验证一次都没跑")
     if record["repeat_blocks"]:
-        parts.append(f"原样重试被拦 {record['repeat_blocks']} 次")
+        # 两个数一起报：被护栏拦下的（我们扣的分）与未被拦的（真病态）。
+        parts.append(
+            f"原样重复 {record['repeat_blocks']} 次"
+            f"（被护栏拦下未执行 {record.get('repeat_blocks_blocked', 0)} 次，"
+            f"未被拦 {record.get('repeat_blocks_unblocked', 0)} 次）"
+        )
     if record["read_blocks"]:
-        parts.append(f"读取被拦 {record['read_blocks']} 次（可能死锁）")
+        parts.append(
+            f"读取类重复 {record['read_blocks']} 次"
+            f"（被拦未执行 {record.get('read_blocks_blocked', 0)} 次，"
+            f"未被拦 {record.get('read_blocks_unblocked', 0)} 次；被拦次数高不必然是死锁）"
+        )
     if record.get("blocked_refunds"):
         parts.append(
             f"因被拦退还步数 {record['blocked_refunds']} 次"
@@ -1753,11 +1869,17 @@ def _cell(value, width=None):
 
 
 def render_table(records):
-    """一行一个探针的汇总表。列就是报告里要念的那些数字。"""
+    """一行一个探针的汇总表。列就是报告里要念的那些数字。
+
+    「重复 / 拦读」两组各给三个数：**总数**、其中**被护栏拦下未执行**、
+    其中**未被拦**（真正的空转，下限判的就是它）。前两个数合起来才看得清
+    「分是我们扣的」还是「它真的在打转」。
+    """
     header = (
         f"{'探针':<18}{'形状':<18}{'结局':<10}{'步':>3}{'调用':>5}"
         f"{'输入tok':>9}{'输出tok':>9}{'墙钟s':>8}{'验证器':>8}"
-        f"{'重试':>5}{'拦读':>5}{'退还':>5}{'停用':>5}{'督导':>5}"
+        f"{'重复':>5}{'被拦':>5}{'未拦':>5}{'拦读':>5}{'被拦':>5}{'未拦':>5}"
+        f"{'退还':>5}{'停用':>5}{'督导':>5}"
         f"{'督导错':>7}{'判据':>6}{'下限':>6}"
     )
     lines = [header, "-" * len(header)]
@@ -1766,8 +1888,8 @@ def render_table(records):
             lines.append(
                 f"{record['id']:<18}{_cell(record.get('shape'), 18):<18}"
                 f"{'跳过':<10}{'—':>3}{'—':>5}{'—':>9}{'—':>9}"
-                f"{record.get('wall_seconds', 0):>8.1f}{'—':>8}{'—':>5}{'—':>5}"
-                f"{'—':>5}{'—':>5}{'—':>5}{'—':>5}{'—':>7}{'—':>6}{'—':>6}"
+                f"{record.get('wall_seconds', 0):>8.1f}{'—':>8}{'—':>5}{'—':>5}{'—':>5}"
+                f"{'—':>5}{'—':>5}{'—':>5}{'—':>5}{'—':>5}{'—':>5}{'—':>7}{'—':>6}{'—':>6}"
             )
             continue
         outcome = ("完成" if record["final_ok"] else "未完成") + (
@@ -1784,7 +1906,12 @@ def render_table(records):
             f"{_cell(record['prompt_tokens'], 9):>9}"
             f"{_cell(record['completion_tokens'], 9):>9}"
             f"{record['wall_seconds']:>8.1f}{verifier:>8}"
-            f"{record['repeat_blocks']:>5}{record['read_blocks']:>5}"
+            f"{record['repeat_blocks']:>5}"
+            f"{_cell(record.get('repeat_blocks_blocked', 0), 5):>5}"
+            f"{_cell(record.get('repeat_blocks_unblocked', 0), 5):>5}"
+            f"{record['read_blocks']:>5}"
+            f"{_cell(record.get('read_blocks_blocked', 0), 5):>5}"
+            f"{_cell(record.get('read_blocks_unblocked', 0), 5):>5}"
             f"{_cell(record.get('blocked_refunds', 0), 5):>5}"
             f"{_cell(record.get('combo_disabled', 0), 5):>5}"
             f"{record['supervisor_interventions']:>5}"
@@ -1804,6 +1931,10 @@ def render_listing(manifest):
         for item in probe.get("lower_bounds") or []:
             lines.append(f"    · {item}")
         lines.append("")
+    note = manifest.get("limits_note") or []
+    if note:
+        lines.append("下限口径说明（清单里的 _limits_note）：")
+        lines.extend(f"  · {item}" for item in note)
     return "\n".join(lines)
 
 
@@ -2022,14 +2153,31 @@ def main(argv=None, runner=run_spool):
         "model_calls": sum(item.get("model_calls") or 0 for item in records),
         "prompt_tokens": sum(item.get("prompt_tokens") or 0 for item in records),
         "completion_tokens": sum(item.get("completion_tokens") or 0 for item in records),
+        # ---- 拦截拆分：让「我们扣的分」与「真病态」在同一行里可分辨 ----------
+        # `blocked_*` 是护栏拦下、**没有执行**的次数（它由护栏自己的上限约束）；
+        # `unblocked_*` 是护栏没拦住的重复，也就是真正的空转——下限判的是它。
+        "repeat_blocked": sum(item.get("repeat_blocks_blocked") or 0 for item in records),
+        "repeat_unblocked": sum(item.get("repeat_blocks_unblocked") or 0 for item in records),
+        "read_blocked": sum(item.get("read_blocks_blocked") or 0 for item in records),
+        "read_unblocked": sum(item.get("read_blocks_unblocked") or 0 for item in records),
+        # 失分构成：只输在「未被拦的重复」这一条上的尝试数（真病态）。
+        "attempts_unblocked_repeat": sum(
+            1
+            for item in records
+            if not item.get("skipped")
+            and (item.get("repeat_blocks_unblocked") or 0) > 0
+        ),
     }
     summary_line = (
         "合计：记录 {probes} 条，真跑的采样 {attempts} 次，"
         "「判据绿 且 下限过」{passed} 次；完成 {finished}/{probes}，"
         "验收绿 {check_ok}/{probes}，下限达标 {bounds_ok}/{probes}，跳过 {skipped} 条，"
         "步数 {steps}，模型调用 {model_calls}，"
-        "token 输入 {prompt_tokens} / 输出 {completion_tokens}".format(**totals)
-    )
+        "token 输入 {prompt_tokens} / 输出 {completion_tokens}\n"
+        "拦截拆分：重复 {repeat_blocked} 次被拦（未执行）+ {repeat_unblocked} 次未被拦，"
+        "读取类 {read_blocked} 次被拦 + {read_unblocked} 次未被拦；"
+        "未被拦重复非零的尝试 {attempts_unblocked_repeat} 次（下限只看未被拦的那部分）"
+    ).format(**totals)
     wall_line = f"整批墙钟：{total_wall}s" + (f"（预算上限 {budget}s）" if budget else "")
     setting_line = (
         f"设置：温度 {options['temperature']}，"

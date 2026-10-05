@@ -109,3 +109,23 @@ def test_工具说明里写清只对目录生效(tmp_path: Path) -> None:
     assert "必须是**目录**" in text
     assert "read_file" in text
     assert "list_dir" in text
+
+
+def test_读不了的文件要明说没给(tmp_path: Path, monkeypatch) -> None:
+    """「跳过」必须可见：这一处该看的东西少了一件，就得说出来是哪一件。"""
+    from spoolkit.tools.view import WorkspaceView
+
+    _dir(tmp_path)
+    real_read = WorkspaceView.read_text
+
+    def fake_read(self, path):
+        if Path(path).name == "notes.md":
+            raise PermissionError(5, "拒绝访问")
+        return real_read(self, path)
+
+    monkeypatch.setattr(WorkspaceView, "read_text", fake_read)
+    result = _spec(tmp_path).handler({"path": "13_case"})
+
+    assert result.ok is True
+    assert "跳过 1 个读不了的路径" in result.content
+    assert "notes.md" in result.content

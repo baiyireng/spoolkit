@@ -74,7 +74,29 @@ def _list_dir(root: Path, args: dict, pending=None, read_roots=()) -> ToolResult
     if not target.is_dir():
         return ToolResult(ok=False, content=f"目标不是目录: {args['path']}")
 
-    entries = [f"{c.name}/" if c.is_dir() else c.name for c in sorted(target.iterdir())]
+    # 读不了的目录要给人话，不许抛出去（本机沙箱里 0o700 建出来的目录就是这样：
+    # 目录本身存在、`is_dir()` 也为真，但一列举就 PermissionError）。
+    # 「空目录」与「读不了」是两件事，混成一件模型会以为这里真的什么都没有。
+    try:
+        children = sorted(target.iterdir())
+    except OSError as exc:
+        return ToolResult(
+            ok=False,
+            content=(
+                f"目录读不了（{exc.strerror or exc}）: {args['path']}"
+                "——这是权限/IO 问题，**不是「空目录」**；"
+                "换一个可读的目录，或者先把它的权限修好。"
+            ),
+        )
+
+    entries: list[str] = []
+    unreadable: list[str] = []
+    for child in children:
+        try:
+            entries.append(f"{child.name}/" if child.is_dir() else child.name)
+        except OSError:
+            # 读不了的**单个条目**也要留痕：静默跳过等于告诉模型「这里没有它」。
+            unreadable.append(child.name)
     # 待确认改动里新建的文件在磁盘上还不存在，但模型应该看得到它们；
     # 反过来，待确认删除的文件不该再被列出来——列出来它就会以为没删掉。
     view = WorkspaceView(root, pending)
@@ -89,7 +111,20 @@ def _list_dir(root: Path, args: dict, pending=None, read_roots=()) -> ToolResult
     for name in view.overlay_children(target):
         if name not in known:
             entries.append(name)
+    if unreadable:
+        entries.append(_unreadable_note(unreadable))
     return ToolResult(ok=True, content="\n".join(entries))
+
+
+def _unreadable_note(unreadable: list[str]) -> str:
+    """跳过的条目要可见（改名/改名残留类判断全靠这份列表可信）。"""
+    shown = unreadable[:5]
+    more = len(unreadable) - len(shown)
+    return (
+        f"（跳过 {len(unreadable)} 个读不了的条目：{'、'.join(shown)}"
+        + (f"，还有 {more} 个" if more else "")
+        + "）"
+    )
 
 
 def read_file_spec(root: Path, pending=None, read_roots=()) -> ToolSpec:

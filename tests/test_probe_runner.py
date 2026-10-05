@@ -462,10 +462,20 @@ def test_记录字段齐全且不改种子(tmp_path):
     assert probe_runner.fingerprint_tree(seed) == seed_before
     assert record["policy_file_ok"] is True
     assert record["policy_in_run"] == "auto"
-    # 假 runner 什么都没修好，验收必须是红的，下限也必须是「未过」
+    # 假 runner 什么都没修好，验收必须是红的，下限也必须是「未过」——这次红的
+    # 理由是督导说错事实（下面是另一条线）。
     assert record["check_ok"] is False
     assert record["bounds_ok"] is False
-    assert any("原样重试" in item for item in record["bounds_failed"])
+    assert any("督导说错事实" in item for item in record["bounds_failed"])
+    # 而**被护栏硬拦下来的重复不再算失分**（口径见 probes.json 的 `_limits_note`）：
+    # 那两次原样重试与那次读取都被拦在门外、一步都没执行，落在 blocked 里；
+    # 未被拦的重复是 0，所以这两条下限都不再报红。
+    assert record["repeat_blocks"] == 2 and record["repeat_blocks_blocked"] == 2
+    assert record["repeat_blocks_unblocked"] == 0
+    assert record["read_blocks"] == 1 and record["read_blocks_blocked"] == 1
+    assert record["read_blocks_unblocked"] == 0
+    assert not any("原样重试" in item for item in record["bounds_failed"])
+    assert not any("读取被拦" in item for item in record["bounds_failed"])
 
 
 def test_命令行不传policy且真的走events(tmp_path):
@@ -529,6 +539,239 @@ def test_下限判定会红():
 
     wrong_policy = dict(base, policy_in_run="ask")
     assert any("auto" in item for item in probe_runner.evaluate_bounds(probe, wrong_policy))
+
+
+# --------------------------------------------------------------------------
+# 重复拦截的拆分：**被拦的**与**未被拦的**不是一个东西
+#
+# 口径与理由写在 `benchmarks/probes/probes.json` 的 `_limits_note` 里：
+# 护栏自己就是拦截者之后，`⛔ 未执行：...完全相同` 意味着那一次调用根本没跑，
+# 把它算成失分等于自己人扣自己人的分；真正的空转是「护栏只提醒、没有拦，
+# 那一次真的又跑了一遍」。
+# --------------------------------------------------------------------------
+
+
+def _event(payload):
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _blocked_repeat_events(repeats=3, reads=2):
+    """护栏**拦下、没有执行**的重复：N 次原样重试 + M 次读取重复。"""
+    lines = [
+        _event(
+            {
+                "type": "start",
+                "session": "probe",
+                "goal": "g",
+                "policy": "auto",
+                "window": 8192,
+            }
+        )
+    ]
+    for index in range(repeats):
+        lines.append(
+            _event(
+                {
+                    "type": "tool",
+                    "name": "write_file",
+                    "ok": False,
+                    "detail": (
+                        "⛔ 未执行：这个调用与上一次**完全相同**"
+                        f"（工具 write_file，参数一字未改）（第 {index + 1} 次）"
+                    ),
+                }
+            )
+        )
+    for index in range(reads):
+        lines.append(
+            _event(
+                {
+                    "type": "tool",
+                    "name": "read_file",
+                    "ok": False,
+                    "detail": (
+                        "⛔ 未执行：这个调用在最近几步里已经做过 2 次，结果不会改变"
+                        f"（第 {index + 1} 次）"
+                    ),
+                }
+            )
+        )
+    lines.append(
+        _event(
+            {
+                "type": "note",
+                "text": "step2: 这一步的调用全部被硬拦（没有执行），不占步数预算（已退还 3/3）",
+                "ok": True,
+                "kind": "blocked_refund",
+                "count": 3,
+                "limit": 3,
+            }
+        )
+    )
+    lines.append(
+        _event({"type": "usage", "steps": 4, "calls": 4, "prompt_tokens": 100, "completion_tokens": 20})
+    )
+    lines.append(_event({"type": "final", "ok": True, "text": "做完了", "settled": "auto"}))
+    return "\n".join(lines)
+
+
+def _executed_repeat_events():
+    """护栏**只提醒、没有拦**的重复：这一次真的又跑了一遍 = 真空转。"""
+    return "\n".join(
+        [
+            _event(
+                {
+                    "type": "start",
+                    "session": "probe",
+                    "goal": "g",
+                    "policy": "auto",
+                    "window": 8192,
+                }
+            ),
+            _event(
+                {
+                    "type": "tool",
+                    "name": "read_file",
+                    "ok": True,
+                    "detail": (
+                        "注意：这一步与上一步完全相同，该调用已经执行过一次，结果不会改变。"
+                        "如果它没有帮你推进，就换一种做法。\n（文件内容）"
+                    ),
+                }
+            ),
+            _event(
+                {
+                    "type": "tool",
+                    "name": "write_file",
+                    "ok": True,
+                    "detail": (
+                        "注意：这个调用在最近几步里已经执行过，结果不会改变。"
+                        "如果它没有帮你推进，就换一种做法。\n（写入结果）"
+                    ),
+                }
+            ),
+            _event({"type": "usage", "steps": 3, "calls": 3, "prompt_tokens": 80, "completion_tokens": 10}),
+            _event({"type": "final", "ok": True, "text": "做完了", "settled": "auto"}),
+        ]
+    )
+
+
+def _runner_writing(events, edits=True):
+    """假 runner：把这串事件流写进 `--events` 的落点。"""
+
+    def runner(command, *, cwd, timeout, stdout_path, stderr_path, env):
+        Path(stdout_path).write_text(events + "\n", encoding="utf-8", newline="\n")
+        Path(stderr_path).write_text("", encoding="utf-8")
+        if edits:
+            target = Path(cwd) / "README.md"
+            if target.is_file():
+                target.write_text(
+                    target.read_text(encoding="utf-8") + "\n（探针假 runner 改过）\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+        return {"exit_code": 0, "timed_out": False, "spawn_error": "", "wall_seconds": 0.5}
+
+    return runner
+
+
+def _run_probe(tmp_path, probe_id, events):
+    probe = probe_by_id(probe_id)
+    options = probe_runner.resolve_options(
+        MANIFEST,
+        probe_runner.build_parser().parse_args(
+            ["--probe", probe_id, "--root", str(tmp_path)]
+        ),
+    )
+    return probe_runner.run_one(
+        probe,
+        MANIFEST,
+        options,
+        tmp_path,
+        runner=_runner_writing(events),
+        python=sys.executable,
+    )
+
+
+def test_被拦的重复_记录分开两个量且下限通过(tmp_path):
+    """护栏拦下 N 次：blocked>0，而**未被拦**的重复是 0 → 下限必须过。
+
+    这条就是「我们扣的分」与「真病态」的分界线：被拦的那 5 次一步都没执行，
+    下限不再对它设 0 线（它由护栏自己的 `blocked_refund_limit` /
+    `reroute_block_at` 约束），但仍要逐条记下来。
+    """
+    counters = probe_runner.parse_events(_blocked_repeat_events(3, 2))
+    # `repeat_blocks` 是**总数**（原义，含读取类；读取类另有一个子计数）。
+    assert counters["repeat_blocks"] == 5, "总数（原义）"
+    assert counters["repeat_blocks_blocked"] == 5, "其中被硬拦未执行的"
+    assert counters["read_blocks"] == 2
+    assert counters["read_blocks_blocked"] == 2
+
+    record = _run_probe(tmp_path, "merge-html", _blocked_repeat_events(3, 2))
+    assert record["repeat_blocks"] == 5
+    assert record["repeat_blocks_blocked"] == 5
+    assert record["repeat_blocks_unblocked"] == 0
+    assert record["read_blocks"] == 2
+    assert record["read_blocks_blocked"] == 2
+    assert record["read_blocks_unblocked"] == 0
+    assert record["bounds_ok"] is True, record["bounds_failed"]
+    assert not any("原样重试" in item for item in record["bounds_failed"])
+    assert not any("读取被拦" in item for item in record["bounds_failed"])
+    # 被拦的这件事仍然看得见：记录里有，notes 里也念出来。
+    assert "被护栏拦下未执行 5 次" in record["notes"]
+    assert "未被拦 0 次" in record["notes"]
+
+
+def test_未被拦的重复_下限仍然判红(tmp_path):
+    """护栏只提醒、没有拦：那一次真的又跑了一遍 —— 下限必须红。
+
+    这是「空转」的原始语义，也是这次拆分**唯一**允许放宽的那条线之外的
+    东西：放宽的是「被拦」，不是「打转」。
+    """
+    counters = probe_runner.parse_events(_executed_repeat_events())
+    assert counters["repeat_blocks"] == 2
+    assert counters["repeat_blocks_blocked"] == 0
+    assert counters["read_blocks"] == 1 and counters["read_blocks_blocked"] == 0
+
+    record = _run_probe(tmp_path, "merge-html", _executed_repeat_events())
+    assert record["repeat_blocks_unblocked"] == 2
+    assert record["read_blocks_unblocked"] == 1
+    assert record["bounds_ok"] is False
+    assert any("未被拦的原样重试" in item for item in record["bounds_failed"])
+
+
+def test_旧下限键保留且口径同一个():
+    """旧键（`max_repeat_blocks` / `max_read_blocks`）仍然认，且同样只看未被拦的。
+
+    保留它的理由是「读旧清单、旧记录的工具不必改」；口径必须与新键一致，
+    否则改名就变成了偷偷放宽或偷偷收紧。
+    """
+    probe = dict(
+        probe_by_id("fix-bug"),
+        expect={"max_repeat_blocks": 0, "max_read_blocks": 0},
+    )
+    base = {
+        "supervisor_false_claims": 0,
+        "timed_out": False,
+        "spawn_error": "",
+        "seed_unchanged": True,
+        "policy_file_ok": True,
+        "guards_ok": True,
+        "guard_failures": [],
+        "policy_in_run": "auto",
+    }
+    # 老记录的形状：只有裸计数与 blocked；全被拦 → 不报。
+    blocked = dict(base, repeat_blocks=4, repeat_blocks_blocked=4, read_blocks=2, read_blocks_blocked=2)
+    assert probe_runner.evaluate_bounds(probe, blocked) == []
+    # 同一份记录里漏了一次没被拦的 → 旧键照样报红，而且报的是「未被拦」。
+    leaked = dict(blocked, repeat_blocks=5)
+    failed = probe_runner.evaluate_bounds(probe, leaked)
+    assert any("未被拦的原样重试" in item for item in failed), failed
+    # 缺 blocked 字段的老记录按「全都没被拦」读（最严那一边），不许当 0。
+    legacy = dict(base, repeat_blocks=1, read_blocks=1, supervisor_false_claims=0)
+    legacy_failed = probe_runner.evaluate_bounds(probe, legacy)
+    assert any("未被拦的原样重试" in item for item in legacy_failed)
+    assert any("未被拦的读取被拦" in item for item in legacy_failed)
 
 
 def test_汇总表把一条跳过也画得出来():

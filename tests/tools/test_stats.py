@@ -28,6 +28,28 @@ def test_给出总量与子项分布(tmp_path: Path) -> None:
     assert result.content.index("big") < result.content.index("small")
 
 
+def test_读不了的路径要跳过并报告而不是静默(tmp_path: Path, monkeypatch) -> None:
+    """静默跳过会让「这个目录有多少东西」看起来是完整的，而它其实少了一块。"""
+    import os
+
+    from spoolkit.tools import stats
+
+    root = _tree(tmp_path)
+    real_scandir = os.scandir
+
+    def fake_scandir(path):
+        if Path(path).name == "small":
+            raise PermissionError(5, "拒绝访问")
+        return real_scandir(path)
+
+    monkeypatch.setattr(stats.os, "scandir", fake_scandir)
+    result = dir_stats_spec(tmp_path).handler({"path": str(root)})
+
+    assert result.ok is True
+    assert "2 个文件" in result.content, "读不了的那一块不在合计里"
+    assert "读不了" in result.content and "small" in result.content
+
+
 def test_按类型与最大文件(tmp_path: Path) -> None:
     root = _tree(tmp_path)
     content = dir_stats_spec(tmp_path).handler({"path": str(root)}).content

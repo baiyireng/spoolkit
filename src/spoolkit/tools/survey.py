@@ -34,15 +34,23 @@ def _is_test(name: str) -> bool:
     return name.startswith("test_") or name.endswith(("_test.py", "_test.ts"))
 
 
-def _entries(base: Path, view: WorkspaceView) -> list[tuple[str, int]]:
+def _entries(base: Path, view: WorkspaceView, skipped: list[str]) -> list[tuple[str, int]]:
     found: list[tuple[str, int]] = []
-    for item in sorted(base.iterdir()):
+    try:
+        children = sorted(base.iterdir())
+    except OSError:
+        # 目录本身读不了：记下来，由调用方给人话（不许抛出去，也不许当空目录）。
+        skipped.append(str(base))
+        children = []
+    for item in children:
         try:
             if item.is_dir():
                 found.append((item.name + "/", -1))
             elif item.is_file():
                 found.append((item.name, item.stat().st_size))
         except OSError:
+            # 读不了的条目要留痕：静默跳过等于告诉模型「这里没有它」。
+            skipped.append(str(item))
             continue
     known = {name.rstrip("/") for name, _ in found}
     for name in view.overlay_children(base):
@@ -51,20 +59,45 @@ def _entries(base: Path, view: WorkspaceView) -> list[tuple[str, int]]:
     return found
 
 
-def _files_to_read(base: Path) -> list[Path]:
+def _files_to_read(base: Path, skipped: list[str]) -> list[Path]:
     """先契约（测试），再小的先给——预算不够时先保最要紧的。"""
     candidates: list[Path] = []
-    for item in sorted(base.iterdir()):
+    try:
+        children = sorted(base.iterdir())
+    except OSError:
+        skipped.append(str(base))
+        return candidates
+    for item in children:
         try:
             if not item.is_file():
                 continue
         except OSError:
+            skipped.append(str(item))
             continue
         if item.suffix.lower() not in _TEXT_SUFFIXES:
             continue
         candidates.append(item)
     candidates.sort(key=lambda p: (not _is_test(p.name), p.stat().st_size))
     return candidates
+
+
+def _skipped_note(skipped: list[str], limit: int = 5) -> str:
+    """跳过的东西必须可见（静默跳过＝假装这一处已经收齐了）。
+
+    同一个路径可能被两条路各记一次（列举失败 + 读失败），这里按首次出现去重：
+    把一处报成两处，读数就不是「如实」了。
+    """
+    unique: list[str] = []
+    for item in skipped:
+        if item not in unique:
+            unique.append(item)
+    shown = unique[:limit]
+    more = len(unique) - len(shown)
+    return (
+        f"（跳过 {len(unique)} 个读不了的路径：{'、'.join(shown)}"
+        + (f"，还有 {more} 个" if more else "")
+        + "）"
+    )
 
 
 def survey_spec(
@@ -109,7 +142,8 @@ def survey_spec(
         budget = int(args.get("budget") or default_budget)
         budget = max(200, min(budget, 4000))
 
-        entries = _entries(base, view)
+        skipped: list[str] = []
+        entries = _entries(base, view, skipped)
         lines = [f"== {raw} 里有什么 =="]
         lines += [
             f"{name + '/' if size < 0 else f'{name} ({size}B)'}" for name, size in entries[:40]
@@ -118,26 +152,30 @@ def survey_spec(
             lines.append(f"…（还有 {len(entries) - 40} 项）")
 
         used = tokenizer.count("\n".join(lines))
-        skipped: list[str] = []
-        for item in _files_to_read(base):
+        skipped_budget: list[str] = []
+        for item in _files_to_read(base, skipped):
             try:
                 text = view.read_text(item)
             except (OSError, UnicodeDecodeError):
+                # 读不了的文件要留痕（它是「这一处该看的东西」，没给就得说清）。
+                skipped.append(str(item))
                 continue
             head = "测试（契约）" if _is_test(item.name) else "代码"
             block = f"\n== {head}: {item.name} ==\n{text.rstrip()}"
             cost = tokenizer.count(block)
             if used + cost > budget:
-                skipped.append(item.name)
+                skipped_budget.append(item.name)
                 continue
             lines.append(block)
             used += cost
 
-        if skipped:
+        if skipped_budget:
             lines.append(
-                f"\n（预算 {budget} 用完，这些没给：{'、'.join(skipped)}"
+                f"\n（预算 {budget} 用完，这些没给：{'、'.join(skipped_budget)}"
                 "——要用就用 read_file 单独取）"
             )
+        if skipped:
+            lines.append(_skipped_note(skipped))
         return ToolResult(ok=True, content="\n".join(lines))
 
     return ToolSpec(
