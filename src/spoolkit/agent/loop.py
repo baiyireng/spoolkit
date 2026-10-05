@@ -107,6 +107,7 @@ from spoolkit.tools.types import ToolCall, ToolResult
 from spoolkit.tools.verify import (
     CANNOT_CHECK,
     ENVIRONMENT_MARKER,
+    NO_CHECKER,
     SCOPE_FALLBACK_MARKER,
     pending_renames,
 )
@@ -211,6 +212,13 @@ _BLOCKED_STEP_KIND = "blocked_refund"
 # 停用必须看得见：报告与事件流里要能回答「这一次为什么突然换说法了」，
 # 否则调这块时只能从散文里猜（`_refuse` 里发，探针按 kind 计数）。
 COMBO_DISABLED_KIND = "combo_disabled"
+
+# 「这一步没有验证器可跑」的**事件种类**（问题⑤）。
+#
+# 它不是发现、也不是失败：验证器如实说「这次改的是 .txt，没有对应的自动验证器」，
+# 那是一个读数。单独成一类是为了让它**不再冒充**「自动验证 → 成功」——探针要能
+# 机械地分开「验过并通过」与「压根没验」，靠读散文分不开。
+NO_CHECKER_KIND = "verifier_no_checker"
 
 
 # 空回合连续出现到这个次数就收尾。
@@ -329,6 +337,83 @@ def _content_fingerprint(text: str) -> str:
 def _flat_line(text: str) -> str:
     """压成一行。收尾报告里「失败要点」只有一行的位置，换行会把后面挤没。"""
     return " ".join((text or "").split())
+
+
+#: 「这一轮压根没有验证器」的识别字面量（问题⑤）。
+#:
+#: 两处都要认：`tools/verify.py::lazy_file_verify`（按扩展名分派那条路，原话
+#: 「这次改的是 .txt，没有对应的自动验证器。」）与 `NO_CHECKER` 标记
+#: （`verify_file` 那条路）。**它不是失败**（`ok=True`），但它也**不是
+#: 「验证通过」**——两句话同时出现在一份报告里就是自相矛盾。
+_NO_CHECKER_MARKS = ("没有对应的自动验证器", NO_CHECKER)
+
+
+def _says_no_checker(text: str) -> bool:
+    """这段验证正文是不是「这次没有验证器」那一声。"""
+    body = str(text or "")
+    return any(mark in body for mark in _NO_CHECKER_MARKS)
+
+
+def _no_checker_note(body: str) -> str:
+    """「没有校验器」那一句的统一说法（报告、回灌、事件流三处共用）。
+
+    验证器的原话里带着「没有对应的自动验证器」这半句，而它在同一份文本里与
+    「自动验证 → 成功」摆在一起就是自相矛盾（问题⑤）。所以这一档统一说
+    「没有校验器（不是失败）」，后面接上验证器给的具体内容（改的是哪一类文件）。
+    """
+    text = _flat_line(str(body or "").replace("没有对应的自动验证器", ""))
+    # 去掉替下来之后剩下的那个标点：原话是「这次改的是 .txt，没有对应的自动
+    # 验证器。」，直接删短语会留下「这次改的是 .txt，。」这种半句话。
+    text = text.strip().strip("。").rstrip("，,、；;：:").strip()
+    return "没有校验器（不是失败）" + (f"：{text}。" if text else "。")
+
+
+def _verify_event_detail(body: str, limit: int = 200) -> str:
+    """事件流里那条验证细节：没有校验器时用统一说法（问题⑤）。"""
+    text = _no_checker_note(body) if _says_no_checker(body) else str(body or "")
+    return " ".join(text.split())[:limit]
+
+
+#: 「行为面」：改到这些类型才谈得上行为回归（L2）。一次只写了个 `.txt` 的运行
+#: 不该为「行为回归查不了」铺一整段（问题⑥）。
+_BEHAVIOR_SUFFIXES = frozenset(
+    {
+        ".py", ".pyi", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx",
+        ".html", ".htm", ".css", ".scss", ".sass", ".vue", ".svelte",
+        ".java", ".kt", ".go", ".rs", ".c", ".h", ".cc", ".cpp", ".hpp",
+        ".rb", ".php", ".cs", ".swift", ".sh", ".ps1", ".bat", ".cmd", ".sql",
+    }
+)
+
+
+def _has_behavior_surface(changed: Sequence[str]) -> bool:
+    """这一批改动里有没有「会改变行为」的产出类型。"""
+    return any(Path(str(item)).suffix.lower() in _BEHAVIOR_SUFFIXES for item in changed)
+
+
+def _verify_brief(body: str, limit: int = 60) -> str:
+    """③ 验证那一句的要点：一行、有上限。
+
+    验证正文常常是「退出码 0 $ python -m pytest -q …[100%] … 警告若干」——
+    整段搬进报告就把人读的那一份变成了日志。要点留在这里，全文进事件流的
+    `最终验证` 那条细节与 trace。
+    """
+    text = _flat_line(body)
+    if not text:
+        return ""
+    if len(text) > limit:
+        return text[:limit].rstrip("，,。;； ") + "…"
+    return text
+
+
+def _undo_action_line(command: str) -> str:
+    """⑤ 可做的动作：**一次**，写成动作而不是「请复制这条命令」。
+
+    命令本身照旧逐字给出来（既有验收里有用例把它抄下来真执行），但那句话
+    的主语从「你去复制」变成「这里有一个动作」：网页壳把它做成可点的按钮
+    （`POST /revert`），桥里回一个 `y` 就走同一条路。
+    """
+    return f"撤销这一轮：{command} （网页里可直接点，桥里回 y）"
 
 
 def _is_blocked(result: ToolResult) -> bool:
@@ -2015,22 +2100,47 @@ class AgentLoop:
                             changed_paths.append(_path)
                     scope_paths = list(dict.fromkeys([*changed, *changed_paths]))
                     report, passed = self._run_verification(scope_paths)
+                    # **没有验证器 ≠ 验证成功**（问题⑤）：那一句是「这次压根没有
+                    # 可跑的判据」，把它报成「自动验证 → 成功」，用户读到的就是
+                    # 「验过了」——而实际上什么都没验。所以这一档单独发一条 note
+                    # （不进 `自动验证` 那条工具事件），措辞与报告里那一句一致。
+                    #
+                    # 判据取**验证器的原话**（`_last_verify` 的第 0 项），不是
+                    # `report`：后者是回灌给模型的那段话，它已经把「没有对应的
+                    # 自动验证器」改写成「没有校验器（不是失败）」，拿它判会永远
+                    # 判不出来（这一步曾经踩过：整档退回「自动验证 → 成功」）。
+                    no_checker = _says_no_checker(
+                        self._last_verify[0] if self._last_verify else report
+                    )
                     # 验证单独计一笔：它是**起子进程跑测试**，优化方向
                     # （换更快的测试、只跑相关文件）与工具那条完全不同。
                     verify_seconds += time.time() - _verify_started
                     trace.append(
-                        f"step{state.step}: 自动验证 -> {'通过' if passed else '失败'}"
+                        f"step{state.step}: 自动验证 -> "
+                        f"{'没有校验器（不是失败）' if no_checker else ('通过' if passed else '失败')}"
                         f"（累计 {len(scope_paths)} 处改动，"
                         f"{time.time() - started:.1f}s）"
                     )
-                    self._emit(
-                        "tool",
-                        {
-                            "name": "自动验证",
-                            "ok": passed,
-                            "detail": " ".join(report.split())[:200],
-                        },
-                    )
+                    if no_checker:
+                        self._emit(
+                            "note",
+                            {
+                                # 正文本身就是「没有校验器（不是失败）：…」那一句
+                                # 回话，所以这里不再加前缀（加了会叠两遍）。
+                                "text": " ".join(report.split())[:200],
+                                "ok": True,
+                                "kind": NO_CHECKER_KIND,
+                            },
+                        )
+                    else:
+                        self._emit(
+                            "tool",
+                            {
+                                "name": "自动验证",
+                                "ok": passed,
+                                "detail": " ".join(report.split())[:200],
+                            },
+                        )
                     # 发现（回退 / 中间态 / 迎合测试）单独走一类 note 事件：
                     # 「高危信号出现过几次」要能机械地数出来，不能靠读自然语言。
                     # `_run_verification` 会把**这一次新加的那几条**放在
@@ -2360,61 +2470,92 @@ class AgentLoop:
         body: str,
         ledger: str = "",
     ) -> str:
-        """拼收尾报告。**验证未通过时把结论与撤销命令挪到最前**。
+        """拼收尾报告：**固定五段、结论第一**。
 
-        顺序是有理由的，不是排版洁癖：大 diff 抢眼，而「最终验证：未通过」
-        原先只排在模型那段结论之后——模型那段经常就是一份大 diff，于是判词
-        被埋在下面。用户「接受了一份没通过验证的改动、事后才发现」正是这么来的。
+        五段（顺序就是这条要求本身，问题①②③④⑤⑥⑦都落在这里）：
 
-        所以未通过时：**结论 + 失败要点 + 撤销命令在最前**，模型那段（常常带着
-        diff）退到其后；通过时顺序不动，只在末尾补上撤销命令。
+            ① 结论 —— 模型那一句（做了什么 / 结果），独立成行
+            ② 改动 —— 文件 + 行数 / 指纹（`facts`）
+            ③ 验证 —— 一句：通过 / 未通过 / **没有校验器（不是失败）**
+            ④ 风险 / 被拦 —— **只在真的命中时出现**（L2 发现、高危发现、请示）
+            ⑤ 可做的动作 —— **一次**，且写成动作（撤销那条命令照旧逐字给出，
+               既有验收里有用例把它抄下来真执行）
 
-        `ledger` 是证据账本的降级那一句（没有缺口时为空串）：它紧跟最终验证
-        结论，因为「通过 / 未通过 / 未验证」是同一句话的三个取值（P0 里第三
-        个取值只写在报告上，不改 `finished`）。
+        **小改动成功时压到三行**（含模型那一句）：②③ 并成一行，其余细节进
+        trace 与事件流。读报告的人要的只是「做成了没有 / 动了什么 / 验没验 /
+        有事没有 / 我能做什么」，不是实现账本。
+
+        `passed is False` 时**判词、失败要点与退路回到最前面**（既有验收）：
+        大 diff 抢眼，判词排在它后面等于没说。
+
+        `ledger` 是证据账本的降级那一句（没有缺口时为空串）：它紧跟验证
+        结论，因为「通过 / 未通过 / 未验证」是同一句话的三个取值。
         """
         undo = self._undo_command()
+        no_checker = _says_no_checker(body)
         head = ""
-        if undo:
-            # **回退能力要能被机械地读到**，不只是写在报告正文里（§6 字段表：
-            # `revert_available` 判「这一轮给不给得出一条可执行的整轮回退命令」）。
-            # 事件流是探针唯一能机械读的出口，所以这里单独发一条带
-            # `revert_command` 字段的 note。**它不是发现、也不是阻断**：
-            # 只是「有退路」这件事的读数。
-            self._emit(
-                "note",
-                {
-                    "text": f"回退这一轮（可直接复制）：{undo}",
-                    "ok": True,
-                    "kind": "revert_available",
-                    "revert_command": undo,
-                },
-            )
         if passed is False:
+            # ③ 未通过那一句 + 失败要点 + ⑤ 退路：三者一起挪到最前，而且**只在
+            # 这里出现一次**（下面正文里不再重复「最终验证：未通过」与撤销命令）。
             head = (
                 "⚠ 最终验证：未通过——这一轮的改动没有通过验收。\n"
                 f"失败要点：{_flat_line(body)[:300]}\n"
-                + (f"撤销这一轮（可直接复制）：{undo}\n" if undo else "")
-                + "（上面是结论与退路，下面才是本次运行的结论与文件状态。）\n"
+                + (f"{_undo_action_line(undo)}\n" if undo else "")
+                + "（上面是判词与退路，下面才是这一轮的结论与文件状态。）\n"
             )
         # 「不许宣称完成」的判词必须排在模型那段之前：模型那段常常就是一份
         # 大 diff，埋在下面等于没说什么（与最终验证未通过同一处理由）。
+        # 判词末尾**必须留一个换行**：不留的话模型那一句会挂在判词的末行上，
+        # 「文件建好没有」这个答案就跟「被拦下、等批复…」糊成同一行（问题⑦
+        # 那种"答案被埋"的形状之一）。
         if self._review_blocked:
-            head = self._review_block_note + (f"\n{head}" if head else "")
-        tail = f"{final}\n本次运行共落成 {len(changed)} 处改动。{facts} {outcome}"
-        if ledger:
-            tail += f"\n{ledger}"
-        tail += self._behavior_report_section()
-        tail += boundary
-        # 每一处升级都记进审计：谁批的（通道）+ 批复词 + 触发条件 id + 五件摘要
-        # 指纹（§3.2.3 的「批复与审计」）。指纹变了说明批复针对的不是眼前这个
-        # 动作，批复作废、重新请示。
+            head = self._review_block_note + "\n" + head
+        # ---- ② 改动（逐条：文件 + 行数 / 指纹）--------------------------------
+        facts_line = facts or "最终文件状态：这次运行没有改过任何文件。"
+        if changed:
+            facts_line = f"本次运行共落成 {len(changed)} 处改动。{facts_line}"
+        # ---- ③ 验证一句 -------------------------------------------------------
+        if passed is None:
+            # 没挂验证器：`_with_final_state` 给的就是那一句，原样用。
+            verify_line = outcome
+        elif no_checker:
+            verify_line = "没有校验器（不是失败）。"
+        else:
+            brief = _verify_brief(body)
+            verify_line = (
+                ("最终验证：通过" if passed else "最终验证：未通过")
+                + (f"——{brief}" if brief else "。")
+            )
+        # ---- ④ 风险 / 被拦（**仅命中时**出现）--------------------------------
+        risk = self._behavior_report_section(changed)
+        if boundary:
+            risk += boundary
         attention = self._escalation_note()
         if attention:
-            tail += attention
+            risk += attention
+        # ---- 小改动成功：②③ 并成一行（长度上限）------------------------------
+        small = (
+            len(set(changed)) <= 2
+            and passed is not False
+            and not risk
+            and not ledger
+        )
+        lines: list[str] = [str(final or "")]
+        if small:
+            lines.append(facts_line + verify_line)
+        else:
+            lines.append(facts_line)
+            if passed is not False:
+                # 未通过那一句已经在最前面说过一次了：同一信息不出现两次。
+                lines.append(verify_line)
+        if ledger:
+            lines.append(ledger)
+        if risk:
+            lines.append(risk)
+        # ---- ⑤ 可做的动作（一次）---------------------------------------------
         if undo and passed is not False:
-            tail += f"\n撤销这一轮（可直接复制）：{undo}"
-        return head + tail
+            lines.append(_undo_action_line(undo))
+        return head + "\n".join(lines)
 
     def _with_final_state(
         self,
@@ -2482,14 +2623,13 @@ class AgentLoop:
             body, passed = (
                 self._last_verify if self._last_verify else ("（无记录）", False)
             )
-            outcome = (
-                ("最终验证：通过。" if passed else "最终验证：未通过。")
-                + "（上一步验过之后这些文件的内容一字未变，"
-                "所以沿用那一次的结果）"
-                + body
-            )
+            # 「沿用那一次的结果」是**内部账**（问题④）：它是实现细节（为什么
+            # 这一次没有重跑），用户读的那一份里不需要它——报告只说结论。
+            # 它在 trace 与 `最终验证` 那条事件里照旧留着，排错时能查到。
+            outcome = ("最终验证：通过。" if passed else "最终验证：未通过。") + body
             trace.append(
-                f"收尾: 报出最终文件的验证结果 -> {'通过' if passed else '未通过'}"
+                "收尾: 报出最终文件的验证结果 -> "
+                f"{'没有校验器（不是失败）' if _says_no_checker(body) else ('通过' if passed else '未通过')}"
                 "（内容未变，沿用最近一次）"
             )
             self._emit(
@@ -2497,7 +2637,11 @@ class AgentLoop:
                 {
                     "name": "最终验证",
                     "ok": passed,
-                    "detail": " ".join(body.split())[:200],
+                    # 「没有校验器」是第三档状态：`ok=True` 说的是「没有发现问题」，
+                    # 不是「验过了」（问题⑤）。网页壳据此渲染成
+                    # 「最终验证 → 没有校验器（不是失败）」而不是「成功」。
+                    "no_checker": _says_no_checker(body),
+                    "detail": _verify_event_detail(body),
                 },
             )
             self._final_verify = (passed, body)
@@ -2518,17 +2662,27 @@ class AgentLoop:
         body = ""
         if self.verify is not None:
             report, passed = self._run_verification(list(changed))
-            body = report
-            outcome = ("最终验证：通过。" if passed else "最终验证：未通过。") + report
+            # 报告那一段用**验证器的原话**（`self._last_verify`），不是回灌给
+            # 模型的那层壳（「系统自动跑了一遍测试：通过（…）」）：两者只差
+            # 外面那句解释，而报告里不需要解释给模型听。这也让「沿用」那条
+            # 捷径与这里用的是同一种正文（那条给的就是 `_last_verify`）。
+            body = self._last_verify[0] if self._last_verify else report
+            outcome = ("最终验证：通过。" if passed else "最终验证：未通过。") + body
             trace.append(
-                f"收尾: 对最终文件跑了一次验证 -> {'通过' if passed else '未通过'}"
+                f"收尾: 对最终文件跑了一次验证 -> "
+                f"{'没有校验器（不是失败）' if _says_no_checker(body) else ('通过' if passed else '未通过')}"
             )
             self._emit(
                 "tool",
                 {
                     "name": "最终验证",
                     "ok": passed,
-                    "detail": " ".join(report.split())[:200],
+                    # 与上面那条「沿用」的出口同一个口径：没有校验器是第三档。
+                    "no_checker": _says_no_checker(body),
+                    # 事件流那一份给的是**回灌给模型的那段正文**：它是"这次验证
+                    # 到底跑了什么"的完整叙述（原始正文可能是空串——按类型分派
+                    # 的检查器在没有问题时不产生正文），排错要看的是前者。
+                    "detail": _verify_event_detail(report),
                 },
             )
             self._final_verify = (passed, report)
@@ -3559,17 +3713,31 @@ class AgentLoop:
         """
         return any(item.severity == HIGH for item in self.behavior_findings())
 
-    def _behavior_report_section(self) -> str:
-        """收尾报告里的 L2 那一段（没跑过就返回空串）。
+    def _behavior_report_section(self, changed: Sequence[str] = ()) -> str:
+        """收尾报告里的 L2 那一段（没跑过、或这一轮谈不上行为就返回空串）。
 
         **这一段是人真的会读的那一份文本**（模型那段结论之后），所以它要把
         判据原话、实测读数与**回退能力**三样摆在一起：只写一句「行为变了」
-        会让人以为成果被扣住了。§2.5 的反向条款必须一起进——**拦的是完成
+        会让人以为成果被扣住了。§2.5 的反向条款随这一段一起出——**拦的是完成
         声明与危险动作，不是成果**：删死代码、合并重复实现、删已被替代的文件
         都是正常编辑，照样落盘、照样可回退、照样逐条列出。
+
+        **它按需出现**（问题③⑥）：这里既没有 L2 的实测读数、这一轮改的又是
+        `.txt` 这类没有行为面的产出时，整段一个字都不出——一次「建一个文本
+        文件」的运行不需要被告知「行为回归查不了」，那是无关样板（反向条款
+        自己就带着「删死代码」那半句，会把人读糊涂）。
         """
         report = self._behavior_report
         if report is None:
+            return ""
+        material = bool(
+            report.findings
+            or report.checked
+            or report.interface_changes
+            or report.cli_checked is not None
+            or report.optimization
+        )
+        if not material and not _has_behavior_surface(changed):
             return ""
         lines = [f"- {report.render()}"]
         if report.cli_checked is not None:
@@ -4088,6 +4256,20 @@ class AgentLoop:
             # 而高危那条（迎合测试）本来就该在人读的轨迹里留一行。
             self.audit_trace(found)
         if result.ok:
+            # **没有验证器的那一档不许说成「跑了一遍测试：通过」**（问题⑤）：
+            # 那句回话是模型判断「我这个地方验过了」的唯一依据，而 `.txt` 这类
+            # 产出根本没有判据可跑。如实说「没有校验器（不是失败）」——它既不
+            # 挫伤模型，也不给它一个不成立的通过。
+            if _says_no_checker(body):
+                return (
+                    for_prompt(
+                        _no_checker_note(body)
+                        + "这次改动没有可跑的机械判据。"
+                        "任务整体做完没有由你判断：还有未完成的接着做，"
+                        "确实都做完再给出结论。"
+                    ),
+                    True,
+                )
             # 成功那句**不能请它收尾**。验证只覆盖「这次改动的地方」，
             # 任务整体做完没有它并不知道；而一句「没有别的要改就收尾」，
             # 实测在 20 道题的铺盘里做完 5 道就让它宣布完成——

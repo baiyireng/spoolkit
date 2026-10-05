@@ -110,6 +110,9 @@ class AgentRunner:
         reply = self._confirmation_answer(message)
         if reply is not None:
             return reply
+        reply = self._undo_answer(message)
+        if reply is not None:
+            return reply
         # **按目标复用同一个 Runner**。原先每条消息都新建一个：`start()` 里那句
         # "已有运行在跑就拒绝"只认自己那一个实例，于是你连着发两条，第二个
         # agent 会在同一个工作区里同时跑起来（记忆、检查点、进度文件一起写）。
@@ -231,6 +234,53 @@ class AgentRunner:
         if runner is None:
             return "现在没有待确认的改动。"
         return self._confirm(runner, apply)
+
+    def _undo_answer(self, message: str) -> str | None:
+        """**没有待确认、而上一轮留了退路时，`y` 是「撤销这一轮」**（问题④）。
+
+        为什么这条要在聊天里存在：收尾报告写着「撤销这一轮：spool revert --run
+        …（桥里回 y）」，而聊天里的人不会去抄命令。所以那一轮回一个 `y` 就等于
+        点了网页壳上那枚按钮——两边走**同一份实现**（`Runner.revert`）。
+
+        两条边界都必须守住：
+        ① **有改动在等确认时，`y` 永远是「应用」**（那条路排在前面，见 `run()`）；
+        ② 上一轮没有退路（没有 `revert_run_id` / 没有回退命令）时，`y` 照旧是
+           一句普通的话，不能被这条吃掉——`tests/bridge` 里那条用例钉的就是它。
+        """
+        word = message.strip().lower()
+        if word not in YES_WORDS:
+            return None
+        runner = self._undo_runner()
+        if runner is None:
+            return None
+        final = runner.snapshot().get("final") or {}
+        code, said = runner.revert(str(final.get("revert_run_id") or ""))
+        if code == 0:
+            return said
+        return f"{said}（要强行退，用报告里那条 spool revert 命令。）"
+
+    def _undo_runner(self) -> Runner | None:
+        """上一轮**已经结束、而且给了回退命令**的那个 runner（没有就 None）。"""
+        candidates: list[Runner] = []
+        if self._runner is not None:
+            candidates.append(self._runner)
+        for key in [self._current, *self._runners]:
+            runner = self._runners.get(key)
+            if runner is not None and runner not in candidates:
+                candidates.append(runner)
+        for runner in candidates:
+            if not callable(getattr(runner, "revert", None)):
+                continue
+            try:
+                snapshot = runner.snapshot()
+            except Exception:  # noqa: BLE001 - 快照拿不到就当它没有退路
+                continue
+            if snapshot.get("awaiting") or snapshot.get("running"):
+                continue
+            final = snapshot.get("final") or {}
+            if final.get("revert_run_id") or final.get("revert_command"):
+                return runner
+        return None
 
     def _confirm(self, runner: Runner, apply: bool) -> str:
         if not runner.confirm(apply):

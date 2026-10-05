@@ -1,27 +1,34 @@
 """互动面：把用户在网页壳里真实遇到的七个报告问题固化成回归断言。
 
-## 为什么这一组现在是红的，而且**必须**是红的
+## 这一组现在是绿的（六个问题都已修掉）
 
-它钉的是"收尾报告该长什么样"，而那七个问题这一轮**只做复现与取证、不做修复**
-（`src/spoolkit/agent/loop.py` 与 `src/spoolkit/cli/settle.py` 正由另一个写者动）。
-所以每条断言挂 `xfail(strict=True)`：
+它钉的是"收尾报告该长什么样"。七个问题先在网页壳里被逐条指出，再在这一组里
+**逐条落成断言**（断言本身一个字没动过：先前挂 `xfail(strict=True)` 是因为
+问题还在，而 `strict=True` 会让"问题被修掉"变成 XPASS 失败——那正是
+"该把 xfail 拆掉、让它转绿"的信号）。现在标记已拆，六条都是普通断言：
 
-* 问题还在 → 报 **xfail**（不算失败，基线不动）；
-* 问题被修掉 → 变成 **XPASS**，而 `strict=True` 会让它**失败**——那就是
-  "该把 xfail 拆掉、让它转绿"的信号。这就是"不许为了让测试绿而放宽断言"的落点。
+1. 撤销提示排在「等你确认/已应用」之前 → `test_撤销提示在文件层确认之后`（快照那条腿）
+2. 同一条撤销信息出现两次 → `test_撤销提示只出现一次`
+3. 无关样板：没拦动作却打 §2.5 反向条款 → `test_没拦动作时不出现反向条款`
+4. 内部账漏进用户报告 → `test_不出现沿用那一次的结果`
+5. 验证叙述自相矛盾 → `test_无验证器时不自相矛盾`
+6. L2「查不了」铺一整段 → `test_查不了那一段不过长`
+
+**判据一律不动**：每条钉的都是用户看得见的那份文本，判什么、阈值多少，
+与修复前逐字一致（详见各条用例里保留的说明）。
 
 ## 两条腿
 
 1. **假模型那条腿**（`_FakeRun`）：真循环 + `llm.fake.FakeModel` + 注入的验证器，
    **一次性进程内跑完**，拿 `LoopResult.final`（= 网页壳助手卡片里那一整段）。
    **单测绝不调模型**：假模型只按写死的脚本回放。
-   实测复现：②③④⑤⑥（见每条用例的 `reason`）。
+   实测复现：②③④⑤⑥（见每条用例里保留的 `reason` 文本）。
 2. **快照那条腿**（`_load_snapshot`）：`scripts/interact_probe.py` 走 `spool mcp`
    真跑出来的快照。①（撤销提示排在「等你确认/已应用」之前）只在 CLI 结算那一段
    出现（`cli/commands/run.py` 先发 `revert_available` note、再由 `settle` 发
    `await`/`confirm`），进程内的假跑到不了那里；⑦（真正的答案被埋）要看真模型的
    结论怎么与结算叙述糊在一起。快照是**本地取证产物**（`.probe_runs/`，gitignored），
-   没有它就 `xfail` 说明怎么生成——用不存在的东西当判据比红更坏。
+   没有它就 `fail` 说明怎么生成——用不存在的东西当判据比红更坏。
 
 ## 这个文件该放哪儿（重要）
 
@@ -36,8 +43,12 @@
         --out .probe_runs/snapshot-create-hello.json
     python scripts/rejudge_snapshots.py      # 重新判一遍七条
 
-再把快照裁剪成 `tests/fixtures/interact_probe/create-hello.json`（只留
-`goal` / `final_report` / `events` / `outcome` 四个字段就够了）。
+再把快照裁剪成 `tests/fixtures/interact_probe/create-hello.json`
+（`--fixture-out` 那一步就是它：只留 `goal` / `final_report` / `events` / `outcome`）：
+
+    python scripts/interact_probe.py --scenario create-hello \\
+        --out .probe_runs/snapshot-create-hello.json \\
+        --fixture-out tests/fixtures/interact_probe/create-hello.json
 """
 
 from __future__ import annotations
@@ -181,10 +192,10 @@ def load_snapshot() -> dict:
     for path in SNAPSHOT_CANDIDATES:
         if path.is_file():
             return json.loads(path.read_text(encoding="utf-8"))
-    pytest.xfail(
+    pytest.fail(
         "没有互动面快照（先跑 `python scripts/interact_probe.py --scenario "
-        "create-hello`，再 `python scripts/rejudge_snapshots.py`）：这一条判据的"
-        "材料在快照里，没有材料就只能标 xfail，不假装通过。"
+        "create-hello --fixture-out tests/fixtures/interact_probe/create-hello.json`）："
+        "这一条判据的材料在快照里，没有材料就如实红，不假装通过。"
     )
     raise AssertionError("unreachable")
 
@@ -240,12 +251,13 @@ def _is_file_level_wait(line: str) -> bool:
 
 # ---- 七个问题 ---------------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="问题①：撤销提示排在「等你确认/已应用」之前（快照实测：撤销在第 8 行、"
-           "文件层确认在第 9 行）。修好后这条必须转绿。",
-)
 def test_撤销提示在文件层确认之后() -> None:
+    """问题①：撤销提示必须排在「等你确认/已应用」之后。
+
+    修复前的实测：撤销在第 8 行、文件层确认在第 9 行——用户先看到退路、
+    后看到结果。现在撤销那一行落在收尾报告（`final` 事件）里，而 `final`
+    是这条通道最后发的一条，所以它天然排在 `await` / `confirm` 之后。
+    """
     snapshot = load_snapshot()
     lines = snapshot_lines(snapshot)
     undo_pos = next((i for i, line in enumerate(lines) if REVERT_MARK in line), -1)
@@ -259,12 +271,12 @@ def test_撤销提示在文件层确认之后() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="问题②：同一条撤销信息出现两次（事件流一条 `revert_available` note + "
-           "报告尾部一条）。修好后这条必须转绿。",
-)
 def test_撤销提示只出现一次(fake_run: _FakeRun) -> None:
+    """问题②：同一条撤销信息只许出现一次。
+
+    修复前：事件流一条 `revert_available` note + 报告尾部一条，同一件事说两遍。
+    现在撤销提示**只有报告里那一行**（⑤ 可做的动作），事件流不再另发一条。
+    """
     body = fake_run.final
     note_hits = fake_run.undo_records()
     report_hits = [
@@ -278,12 +290,13 @@ def test_撤销提示只出现一次(fake_run: _FakeRun) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="问题③：什么都没拦，却打了 §2.5 反向条款（`L2 行为回归读数` 那一段固定"
-           "带「…**不是成果**：改动照落盘…删死代码…」）。修好后这条必须转绿。",
-)
 def test_没拦动作时不出现反向条款(fake_run: _FakeRun) -> None:
+    """问题③：什么都没拦时，§2.5 的反向条款一个字都不该出现。
+
+    修复前：`L2 行为回归读数` 那一段固定带「…**不是成果**：改动照落盘…
+    删死代码…」，而这一轮什么都没拦——那是无关样板。现在那一段**按需出现**：
+    既没有 L2 实测读数、改的又是 `.txt` 这类没有行为面的产出时，整段不出。
+    """
     body = fake_run.final
     blocked = "被审查拦下" in body
     escalated = "【待批复】" in body or "触发条件" in body
@@ -297,12 +310,12 @@ def test_没拦动作时不出现反向条款(fake_run: _FakeRun) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="问题④：内部账漏进用户报告（`（上一步验过之后…所以沿用那一次的结果）`）。"
-           "修好后这条必须转绿。",
-)
 def test_不出现沿用那一次的结果(fake_run: _FakeRun) -> None:
+    """问题④：内部账只进 trace/事件，不进用户读的那一份报告。
+
+    修复前那一句是「（上一步验过之后这些文件的内容一字未变，所以沿用那一次
+    的结果）」——它是"为什么这次没重跑"的实现细节，报告只说结论。
+    """
     assert "沿用那一次的结果" not in fake_run.final, (
         "报告里出现了内部账「（上一步验过之后这些文件的内容一字未变，所以沿用"
         "那一次的结果）」——那是实现细节，不该出现在用户读的那一份里。\n"
@@ -311,12 +324,13 @@ def test_不出现沿用那一次的结果(fake_run: _FakeRun) -> None:
     assert "沿用最近一次" not in fake_run.final
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="问题⑤：先「自动验证 → 成功」，后又说\"没有对应的自动验证器\"。"
-           "修好后这条必须转绿。",
-)
 def test_无验证器时不自相矛盾(fake_run: _FakeRun) -> None:
+    """问题⑤：先「自动验证 → 成功」、后又说"没有对应的自动验证器"。
+
+    同一个 `.txt` 上跑不出机械判据，而验证器如实说了这一点——把它报成
+    「成功」等于告诉用户"验过了"。现在这一档说「没有校验器（不是失败）」，
+    事件流里也不再发一条 `自动验证 → 成功`。
+    """
     auto = [item for item in fake_run.tools() if item[0] == "自动验证"]
     says_none = "没有对应的自动验证器" in fake_run.final
     assert not (auto and says_none), (
@@ -327,12 +341,13 @@ def test_无验证器时不自相矛盾(fake_run: _FakeRun) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="问题⑥：L2「查不了」铺了一整段（对 `.txt` 而言过长：实测那一句 114 字）。"
-           "修好后这条必须转绿。",
-)
 def test_查不了那一段不过长(fake_run: _FakeRun) -> None:
+    """问题⑥：L2「查不了」最多一行、且不超过 100 字。
+
+    修复前对一次只写了一个 `.txt` 的运行铺了 114 字一整段。现在它按需出现
+    （没有行为面就不出现），真的要说时也压成一行、且保留「找不到可跑的对照」
+    这个理由。
+    """
     lines = [line for line in fake_run.final.splitlines() if "【查不了】" in line]
     assert not lines or (len(lines) == 1 and len(lines[0]) <= 100), (
         "L2 的「查不了」占了 "

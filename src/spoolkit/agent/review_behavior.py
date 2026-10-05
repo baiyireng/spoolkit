@@ -728,10 +728,11 @@ def review(
         return report
     entry = entry_point(root)
     if entry is None:
+        # 这一句会原样进收尾报告（`BehaviorReport.render()` 给它加上判据名那
+        # 个前缀），所以它是**一行**、有上限：对一次只写了个小文件的运行来说，
+        # 铺一整段「查不了」就是无关样板（问题⑥）。理由本身一个字不少。
         report.cannot_check = (
-            "找不到可跑的对照：项目 README 里没有「python <脚本> <输入文件>」"
-            "这样一条能跑的用法示例（或它点名的输入文件不在项目里）。"
-            "不猜一条命令去跑——猜出来的差异说明不了行为变了没有"
+            "找不到可跑的对照（README 里没有能跑出同一份输入的用法示例）"
         )
         return report
     report.command = " ".join(entry.command)

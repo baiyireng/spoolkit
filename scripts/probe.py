@@ -845,6 +845,11 @@ def parse_events(text):
             if not ok:
                 counters["tool_failures"] += 1
             if name in VERIFIER_NAMES:
+                # 「没有校验器」那一档**什么都没验**（问题⑤）：它既不进
+                # `verifier_ran`，也不算「通过」——把「没验」数成「验过且通过」
+                # 会让读数说一件不成立的事（`no_checker` 由循环发出来）。
+                if payload.get("no_checker"):
+                    continue
                 counters["verifier_ran"] += 1
                 if name == "自动验证":
                     counters["verifier_auto_ran"] += 1
@@ -989,6 +994,13 @@ def parse_events(text):
             counters["final_ok"] = bool(payload.get("ok"))
             counters["final_text"] = str(payload.get("text") or "")
             counters["settled"] = str(payload.get("settled") or "")
+            # 「有退路」这件事现在的**结构化**读数是 FINAL 上的字段（收尾报告
+            # 里那条撤销提示落在 FINAL 正文的最后一行，所以它自然排在
+            # 「等你确认 / 已应用」之后——问题①）。旧的那条 `revert_available`
+            # note 已不再发：同一件事说两遍正是问题②。
+            command = str(payload.get("revert_command") or "")
+            if command and command not in counters["revert_commands"]:
+                counters["revert_commands"].append(command)
 
     counters["verifier_ok"] = verdicts[-1] if verdicts else None
     # **打扰次数** = 有几组（= 做了几次收尾判定 / 问了几次）：同一轮里

@@ -112,6 +112,9 @@ WRITE_PATHS = (
     "/run",
     "/run/stop",
     "/confirm",
+    # 「撤销这一轮」（问题④的动作化）：它会**写工作区**（把那一轮的成果退回去），
+    # 所以和 /confirm 一样进这张表——远程只读那条边界不许在它身上漏一个口子。
+    "/revert",
     "/session/delete",
     "/session/restore",
     "/session/new",
@@ -979,6 +982,25 @@ def _handler_for(state: WebState):
                     self._json(409, {"error": "当前没有待确认的改动"})
                     return
                 self._json(200, {"ok": True})
+                return
+
+            if self.path == "/revert":
+                # ⑤ 「撤销这一轮」的可点动作（问题④）：网页壳直接执行，用户不必
+                # 去抄那条命令。回退逻辑**只有一份**（`runlog.revert_run`，
+                # 与 `spool revert --run` 同一条路），这里只是把结论说成人话。
+                payload = self._body()
+                _version, runner = state.current()
+                if runner is None:
+                    self._json(
+                        409,
+                        {"error": "还没有选工作区，没有可撤销的一轮。"},
+                    )
+                    return
+                code, message = runner.revert(str(payload.get("run") or ""))
+                if code != 0:
+                    self._json(409, {"error": message})
+                    return
+                self._json(200, {"ok": True, "message": message})
                 return
 
             self._json(404, {"error": "没有这个路径"})

@@ -215,7 +215,11 @@ def verification_header(
     if passed is not False:
         return ""
     line = " ".join((summary or "（验证器没有给出细节）").split())[:300]
+    # 与收尾报告里那一行同一个说法（问题④的动作化）：撤销是**一次动作**，
+    # 不是"请你复制这条命令"。命令本身照旧逐字给出来（既有验收里有用例把它
+    # 抄下来真执行），所以 `（网页里可直接点，桥里回 y）` 只是补上动作那条路。
     return (
         "⚠ 最终验证：未通过——下面这些改动没有通过验收，先看这一行再往下看 diff。\n"
-        f"失败要点：{line}\n" + (f"撤销这一轮（可直接复制）：{undo}\n" if undo else "")
+        f"失败要点：{line}\n"
+        + (f"撤销这一轮：{undo} （网页里可直接点，桥里回 y）\n" if undo else "")
     )

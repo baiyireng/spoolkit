@@ -493,6 +493,38 @@ def run_scenario(name: str, out_path: Path, *, provider: str, base_url: str,
 
 # ---- 把快照翻成"用户会看到的文本" -------------------------------------------
 
+# ---- 把快照裁成**进仓库的那一份夹具** ---------------------------------------
+
+#: 夹具留下的字段（判据只用得到这几个）。
+FIXTURE_FIELDS = ("scenario", "goal", "provider", "outcome", "final_report")
+#: 事件上留下的字段：`render_user_text` 与 `tests/test_interact_probe.py` 里的
+#: `snapshot_lines` 都是按这几个键渲染的，多留的字段没人读。
+FIXTURE_EVENT_FIELDS = (
+    "seq", "type", "n", "text", "name", "ok", "detail", "command", "count",
+    "applied", "escalation", "action",
+)
+
+FIXTURE_NOTE = (
+    "互动面探针 create-hello 快照（裁剪版）：只留判据用得到的字段。重新生成："
+    "python scripts/interact_probe.py --scenario create-hello "
+    "--out .probe_runs/snapshot-create-hello.json "
+    "--fixture-out tests/fixtures/interact_probe/create-hello.json"
+)
+
+
+def fixture_payload(snapshot: dict) -> dict:
+    """把一次真实跑的快照裁成夹具（**判据一个字不改**：只去字段，不去内容）。"""
+    payload: dict = {"_note": FIXTURE_NOTE}
+    for key in FIXTURE_FIELDS:
+        if key in snapshot:
+            payload[key] = snapshot[key]
+    payload["events"] = [
+        {key: event[key] for key in FIXTURE_EVENT_FIELDS if key in event}
+        for event in snapshot.get("events") or []
+    ]
+    return payload
+
+
 def render_user_text(snapshot: dict) -> str:
     """按事件流的**到达次序**拼出用户在壳里真的会读到的那些行。
 
@@ -576,6 +608,9 @@ def judge(snapshot: dict) -> list[dict]:
         body = {k: v for k, v in event.items() if k not in ("seq", "type")}
         if kind == "note":
             records.append({"seq": seq, "type": "note",
+                            # `kind` 要留着：问题③的「真的拦下了没有」按它判，
+                            # 不按散文判（见下面那一段）。
+                            "kind": str(body.get("kind") or ""),
                             "text": str(body.get("text") or "")})
         elif kind == "tool":
             detail = str(body.get("detail") or "")
@@ -593,7 +628,8 @@ def judge(snapshot: dict) -> list[dict]:
                 text = f"等你确认：风险分级放行：{body.get('action', '')}"
             else:
                 text = f"等你确认：{body.get('count', 1)} 处改动"
-            records.append({"seq": seq, "type": "await", "text": text})
+            records.append({"seq": seq, "type": "await", "text": text,
+                            "escalation": str(body.get("escalation") or "")})
         elif kind == "confirm":
             applied = bool(body.get("applied"))
             text = (f"{'已应用' if applied else '已拒绝'} "
@@ -656,19 +692,23 @@ def judge(snapshot: dict) -> list[dict]:
 
     # ③ 无关样板：什么都没拦，却打了 §2.5 的反向条款
     # 判据分两步，缺一不可：
-    #   ① **这一轮真的没有任何东西被拦下**（没有「未完成（被审查拦下）」那一类判词、
-    #      也没有任何一条带 escalation 的请示）；
+    #   ① **这一轮真的没有任何东西被拦下**；
     #   ② 报告里却出现了 §2.5 的反向条款。
-    # 只判 ② 会把「真拦下了、所以打这句」的正常情形算进去；而带反向条款的那条
-    # 请示记录（escalation）**不能**算成"被拦"——它自己就带这句样板。
-    blocked = any("被审查拦下" in r["text"] or "未完成（被审查拦下）" in r["text"]
-                  for r in records)
-    escalated = any(r["type"] == "await" and "触发条件" in r["text"]
-                    for r in records)
-    # 带「不是成果」的那条请示正文（escalation 的五件摘要）**不算被拦**：
-    # 它自己就带着这句样板，拿它当"真被拦"会把无关样板判成正常。
-    blocked = blocked and not any(
-        "被审查拦下" in r["text"] and "不是成果" in r["text"] for r in records
+    # ① 用**机械可读的两个字段**判，不靠读散文：
+    #   - note 的 `kind`（`blocked_by_review` / `blocked_by_review_finding`）——
+    #     探针的 `blocked_by_review` 字段数的就是它；
+    #   - await 的 `escalation`（风险分级放行请示了一次，那就是拦下了一个动作）。
+    # 为什么不能按「正文里有『被审查拦下』」判：那条收尾判词**自己就带着**
+    # §2.5 的反向条款（「拦的是完成声明与危险动作，不是成果」），于是
+    # 「真拦下了、所以打了这句」会被判成复现——改名 / 改码那两个场景实测就是
+    # 这么被误报的。判据要认的是"拦没拦"，不是"谁说了那句话"。
+    blocked_kinds = {"blocked_by_review", "blocked_by_review_finding"}
+    blocked = any(
+        r["type"] == "note" and r.get("kind") in blocked_kinds for r in records
+    )
+    escalated = any(
+        r["type"] == "await" and (r.get("escalation") or "触发条件" in r["text"])
+        for r in records
     )
     # 反向条款的指纹认法：出现「不是成果」这个短语，且同时提到「删死代码」
     # 或「照落盘」——A 分支用的是完整模板、L2 那段用了「**不是成果**：改动照落盘…」。
@@ -772,6 +812,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="跑哪个场景")
     parser.add_argument("--list", action="store_true", help="列出全部场景")
     parser.add_argument("--out", default="", help="快照 JSON 落点（默认在 .probe_runs 里）")
+    parser.add_argument(
+        "--fixture-out", default="",
+        help="另外写一份**裁剪过的**夹具（进仓库的那一份：只留判据用得到的字段）",
+    )
     parser.add_argument("--provider", default="llamacpp",
                         choices=("llamacpp", "gemini", "fake"))
     parser.add_argument("--base-url", default="http://127.0.0.1:8080",
@@ -852,6 +896,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"[probe] 结局：{json.dumps(snapshot['outcome'], ensure_ascii=False)}")
     print(f"[probe] 快照：{out}")
+    if args.fixture_out:
+        fixture = Path(args.fixture_out)
+        try:
+            fixture.parent.mkdir(parents=True, exist_ok=True)
+            fixture.write_text(
+                json.dumps(fixture_payload(snapshot), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            # 夹具写不进去**不该把这一轮取证弄丢**：快照已经落盘了，那才是
+            # 主产物。本机受限时 `tests/` 对子进程是只读的（实测踩过），
+            # 所以这里退化成"先把裁剪版写到一份临时文件，再自己搬过去"。
+            fallback = out.with_name(out.stem + ".fixture.json")
+            fallback.write_text(
+                json.dumps(fixture_payload(snapshot), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"[probe] 夹具写不进 {fixture}（{type(exc).__name__}）："
+                  f"已写到 {fallback}，把它搬到那个位置即可。")
+        else:
+            print(f"[probe] 夹具：{fixture}")
     text_path = out.with_suffix("")
     text_path = text_path.with_name(text_path.name + TEXT_SNAPSHOT_SUFFIX)
     print(f"[probe] 逐字文本：{text_path}")

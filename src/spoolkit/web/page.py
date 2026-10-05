@@ -483,6 +483,19 @@ HTML = """<!DOCTYPE html>
              color:var(--text-dim); background:var(--panel-2); }
   .ask-row.ok { border-left-color:var(--ok); color:var(--ok); }
   .ask-row.bad { border-left-color:var(--bad); color:var(--bad); }
+  /* ── 「撤销这一轮」：一个**真能点**的动作，不是一条要抄的命令（问题④） ──
+     它是这一轮成果的退路，所以做成对话流里的一行 + 一枚按钮；点完那行就地
+     变成结论，不留一个还能再点的按钮（同一件事点两次会去撞已退过的记录）。 */
+  .undo-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+              align-self:stretch; border-left:3px solid var(--line);
+              border-radius:0 8px 8px 0; padding:6px 10px; font-size:13px;
+              color:var(--text-dim); background:var(--panel-2); }
+  .undo-row button { padding:5px 12px; border-radius:8px; border:1px solid var(--line);
+                     background:transparent; color:var(--text); cursor:pointer;
+                     font-size:13px; }
+  .undo-row button:disabled { opacity:.5; cursor:default; }
+  .undo-row.ok { border-left-color:var(--ok); color:var(--ok); }
+  .undo-row.bad { border-left-color:var(--bad); color:var(--bad); }
   .diff { border:1px solid var(--line); border-radius:10px; padding:8px 10px;
           margin:6px 0 0; background:var(--code-bg); overflow-x:auto;
           font:12.5px/1.55 var(--mono); }
@@ -1803,6 +1816,44 @@ function add(text, cls) {
   updateToBottom();
 }
 
+/* ── 「撤销这一轮」：把退路做成动作，不是一条要抄的命令（问题④） ──
+   服务端在 `final` 事件上只增地给出 `revert_run_id` / `revert_command`
+   （`run.py`），页面据此摆一枚按钮，点一下 POST /revert——**与
+   `spool revert --run <id>` 走同一份实现**，用户不需要复制命令。
+   幂等：同一个 run_id 只摆一次（事件与快照各来一次也只摆一条）。 */
+let undoRow = null;
+let undoRunId = '';
+
+function showUndo(final) {
+  const runId = String((final && final.revert_run_id) || '');
+  if (!runId || runId === undoRunId) { return; }
+  if (undoRow && undoRow.parentNode) { undoRow.parentNode.removeChild(undoRow); }
+  undoRunId = runId;
+  const stick = atBottom();
+  const row = document.createElement('div');
+  row.className = 'undo-row';
+  const label = document.createElement('span');
+  label.textContent = '这一轮的成果可以退回去：';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = '撤销这一轮';
+  button.onclick = async function () {
+    if (button.disabled) { return; }
+    button.disabled = true;
+    const next = await post('/revert', {run: runId});
+    if (next === null) { button.disabled = false; return; }
+    row.className = 'undo-row ok';
+    row.replaceChildren(document.createTextNode(
+      String((next && next.message) || '已撤销这一轮')));
+  };
+  row.appendChild(label);
+  row.appendChild(button);
+  appendNode(row);
+  undoRow = row;
+  if (stick) { scrollDown(); }
+  updateToBottom();
+}
+
 /* ── 顶上的目标选择（原来是两条下拉，现在是左栏两段） ──
    「我在哪个工作区」必须直接可读：批次一出现过绑错工作区、把 __init__.py 写空的故障，
    而机器级壳服务的是整台机器（设计 §3.3）。 */
@@ -2521,6 +2572,10 @@ function applyState(state) {
   // 哪张卡片该被认领。**认领之后再补实时卡片**，它的节点才会落在对话流最后。
   drawHistory(state.messages);
   restoreLive(state);
+  // ⑤ 可做的动作（问题④）：这一轮有可退的成果时，摆一枚**真能点**的
+  // 「撤销这一轮」。刷新 / 切走再切回也照旧——它读的是快照里 `final` 上那个
+  // 只增的 `revert_run_id`（服务端在 `final` 事件上给的，见 `run.py`）。
+  showUndo(state.final);
   showPairings(state.pairings);
   showHealth(state.health);
   showElsewhere(state);
@@ -2807,6 +2862,9 @@ function onEvent(event) {
       }
     }
     clearPending();
+    // 这一轮有回退命令：把那个动作用**可点**的形式摆出来（用户不必去抄
+    // 命令）。幂等：同一个 run_id 只摆一次（事件与快照各来一次也只摆一条）。
+    showUndo(data);
     return;
   }
   if (data.type === 'error') {

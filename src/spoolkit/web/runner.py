@@ -159,7 +159,17 @@ def trace_line(event: Event) -> dict | None:
     if kind == TOOL:
         name = str(data.get("name") or "工具")
         ok = bool(data.get("ok"))
-        line = {"type": TOOL, "ok": ok, "text": f"{name} → {'成功' if ok else '失败'}"}
+        if data.get("no_checker"):
+            # 第三档状态（问题⑤）：`ok=True` 只是「没有发现问题」，不是
+            # 「验过了」。渲染成「成功」会让用户读到一个不成立的通过。
+            line = {
+                "type": TOOL,
+                "ok": ok,
+                "text": f"{name} → 没有校验器（不是失败）",
+            }
+        else:
+            line = {"type": TOOL, "ok": ok,
+                    "text": f"{name} → {'成功' if ok else '失败'}"}
         detail = str(data.get("detail") or "").strip()
         # 成功那行只报状态，失败那行**必须带原因**：排错要的就是这一句。
         if detail and not ok:
@@ -407,6 +417,50 @@ class Runner:
             self._process.stdin.flush()
             self._awaiting = 0
             return True
+
+    def revert(self, run_id: str = "") -> tuple[int, str]:
+        """把某一轮的成果退回去（网页壳上那个可点的「撤销这一轮」）。
+
+        走的是与 `spool revert --run <id>` **同一份实现**（`runlog.revert_run`）：
+        壳里再写一套回退逻辑，两条路的差异只会在最需要它的时候（用户反悔时）
+        暴露出来。返回（退出码, 一句人话），与那条命令的退出码口径一致
+        （0 = 全退回去了，非 0 = 没全退成）。
+
+        `run_id` 留空时退**这一轮**（`final` 事件上那个字段）；两者都没有就
+        如实说没有可退的，不猜一个 id 去撞。
+        """
+        from spoolkit import runlog
+
+        rid = str(run_id or "").strip()
+        if not rid:
+            rid = str((self._final or {}).get("revert_run_id") or "").strip()
+        if not rid:
+            return 2, "没有可撤销的一轮：这一轮没有给出过回退命令。"
+        result = runlog.revert_run(self.project_root, rid)
+        if result is None:
+            known = runlog.run_ids(self.project_root)
+            hint = "现有的是：" + "、".join(known[:5]) if known else "还没有任何运行记录。"
+            return 2, f"没有这条运行记录：{rid}。{hint}"
+        done = result.count(runlog.DONE)
+        conflict = result.count(runlog.CONFLICT)
+        failed = result.count(runlog.FAILED)
+        skipped = result.count(runlog.SKIPPED)
+        message = (
+            f"已撤销这一轮（{rid}）：共 {len(result.steps)} 处，"
+            f"恢复/删除 {done}、跳过 {skipped}、冲突 {conflict}"
+            + (f"、失败 {failed}" if failed else "")
+            + "。"
+        )
+        if conflict:
+            # **冲突不静默**（与终端那条路同一条规矩）：没被覆盖的那几处要
+            # 逐条说出来，并给出人工怎么做。
+            listed = "；".join(f"{step.path}（{step.detail}）" for step in result.conflicts)
+            message += (
+                "这几处**没有被覆盖**（它们在那一轮之后又被改过）："
+                + listed
+                + "。人工处理：先把现在的版本备份出去，再决定保留哪一版。"
+            )
+        return (3 if conflict else 0), message
 
     # --- 事件分发 ---
 

@@ -345,6 +345,9 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
     )
+    # 落盘**之前**取一次撤销命令：`settle` 一跑，待确认清单就空了，
+    # 之后再问就只会拿到「没有可退的」。网页壳那个可点的撤销动作要的就是它。
+    undo = undo_command(pending)
     outcome = settle_with_events(
         pending,
         policy,
@@ -354,13 +357,23 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
         # 验证未通过时，结论与撤销命令必须**排在 diff 事件之前**发出去：
         # 网页壳按事件顺序渲染，diff 一大，埋在后面的判词就没人读到。
         header=verification_header(
-            result.verified, result.verify_summary, undo_command(pending)
+            result.verified, result.verify_summary, undo
         ),
     )
     # 挂起待批的动作清单（§3.2.3）：它在**落盘之后**才说得准（哪些动作真的
     # 被拦下、哪些成果真的落了盘），所以走在这条通道的最后、FINAL 之前。
     _settle_pending(args, project_root, pending, result, writer=writer)
-    writer.emit(FINAL, ok=result.finished, text=result.final or "", settled=outcome)
+    # 「撤销这一轮」这个动作的**结构化读数**（问题④）：网页壳据此摆一个真能点的
+    # 按钮，桥据此认「回 y 撤销」——两条通道都不必去正文里正则捞命令。
+    # 它在 FINAL 上（最后一条），所以那条动作提示落在「等你确认 / 已应用」之后。
+    writer.emit(
+        FINAL,
+        ok=result.finished,
+        text=result.final or "",
+        settled=outcome,
+        revert_command=undo,
+        revert_run_id=pending.run_id if undo else "",
+    )
     return 0 if result.finished else 1
 
 
