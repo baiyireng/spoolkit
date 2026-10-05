@@ -67,6 +67,14 @@ TESTS_WEAKENED_KIND = "tests_weakened"
 #: 「完成声明没有证据」这一类 note 的 kind（探针的 `evidence_gaps` 字段）。
 EVIDENCE_GAPS_KIND = "evidence_gaps"
 
+#: L2 行为回归（P2）两类发现的 note kind。与 L1 分开是因为探针要单独数它们
+#: （「这一轮有没有行为回归」与「残留引用几条」是两件事），而混在 `audit` 里
+#: 就只能靠读散文认。kind 名与 `agent/review_behavior.py` 的判据名逐字一致——
+#: 那边是产出处，这边是出口映射。
+BEHAVIOR_CHANGED_KIND = "behavior_changed"
+CLI_SURFACE_CHANGED_KIND = "cli_surface_changed"
+PERFORMANCE_REGRESSED_KIND = "performance_regressed"
+
 # ---- P1：风险分级放行的两个 kind ---------------------------------------------
 #
 # 两者分开是因为**探针按 kind 数的是不同的东西**（§6 字段表）：
@@ -109,6 +117,10 @@ _NOTE_KIND_BY_KIND = {
     STALE_REFERENCE_KIND: STALE_REFERENCES_KIND,
     DELETED_REFERENCE_KIND: STALE_REFERENCES_KIND,
     BROKEN_IMPORT_KIND: BROKEN_IMPORT_KIND,
+    # L2 的三条判据各自一个 kind（探针分开数）。
+    BEHAVIOR_CHANGED_KIND: BEHAVIOR_CHANGED_KIND,
+    CLI_SURFACE_CHANGED_KIND: CLI_SURFACE_CHANGED_KIND,
+    PERFORMANCE_REGRESSED_KIND: PERFORMANCE_REGRESSED_KIND,
 }
 
 

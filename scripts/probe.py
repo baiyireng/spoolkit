@@ -121,7 +121,8 @@ REQUIRED_RECORD_KEYS = (
     "revert_available",
     "blocked_actions",
     "blocked_by_review",
-    "blocked_but_ok",    "escalations",
+    "blocked_but_ok",
+    "escalations",
     "escalated_before_action",
     "escalation_summary_complete",
     "escalation_approved",
@@ -183,8 +184,25 @@ BLOCKED_REVIEW_KIND = "blocked_by_review"
 BLOCKED_REVIEW_HARD_KIND = "blocked_by_review_finding"
 #: 算「审查发现条数」的那几类 note（`evidence_gaps` 是账本读数，不算发现；
 #: 升级与阻断各自有专门的字段，也不混进发现条数）。
+#:
+#: L2 的三类（P2）也在这里：行为回归 / 命令行接口变化 / 性能倒退都是**发现**，
+#: 探针要按 kind 分开数（`review_findings_by_kind`），不能混进 `audit` 靠读散文认。
+BEHAVIOR_CHANGED_KIND = "behavior_changed"
+CLI_SURFACE_CHANGED_KIND = "cli_surface_changed"
+PERFORMANCE_REGRESSED_KIND = "performance_regressed"
+#: L2 的「查不了」读数（不是发现，不进 `review_findings`）：性能那一条在
+#: 耗时太短或落在噪声带里时**如实报「量不出来」**，不静默通过。
+BEHAVIOR_NOT_CHECKED_KIND = "behavior_not_checked"
 REVIEW_NOTE_KINDS = frozenset(
-    {AUDIT_KIND, STALE_REFERENCES_KIND, BROKEN_IMPORT_KIND, TESTS_WEAKENED_KIND}
+    {
+        AUDIT_KIND,
+        STALE_REFERENCES_KIND,
+        BROKEN_IMPORT_KIND,
+        TESTS_WEAKENED_KIND,
+        BEHAVIOR_CHANGED_KIND,
+        CLI_SURFACE_CHANGED_KIND,
+        PERFORMANCE_REGRESSED_KIND,
+    }
 )
 
 #: 落盘读数时**不算产出**的前缀：这些是 harness 自己写的东西（授权、检查点、

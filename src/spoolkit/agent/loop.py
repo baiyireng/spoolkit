@@ -40,6 +40,16 @@ from spoolkit.agent.audit import (
 )
 from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
+from spoolkit.agent.review_behavior import (
+    BEHAVIOR_CHANGED_KIND,
+    BEHAVIOR_NOT_CHECKED_KIND,
+    CLI_SURFACE_CHANGED_KIND,
+    PERFORMANCE_REGRESSED_KIND,
+    BehaviorReport,
+    cli_help_candidates,
+    compare_cli_help,
+    review as review_behavior,
+)
 from spoolkit.agent.review_gate import (
     PENDING as ESCALATION_PENDING,
     LINKED,
@@ -292,6 +302,17 @@ MECHANICAL_KINDS = frozenset(
         DELETED_REFERENCE_KIND,
         BROKEN_IMPORT_KIND,
         TESTS_WEAKENED_KIND,
+    }
+)
+
+#: L2（P2 行为回归）那几条判据产出的**发现类别**。收尾重判时要按同一份终态
+#: 内容重算，所以它们和 L1 一样整批作废（见 `_rejudge_mechanical`）。
+BEHAVIOR_KINDS = frozenset(
+    {
+        BEHAVIOR_CHANGED_KIND,
+        CLI_SURFACE_CHANGED_KIND,
+        PERFORMANCE_REGRESSED_KIND,
+        BEHAVIOR_NOT_CHECKED_KIND,
     }
 )
 
@@ -861,6 +882,15 @@ class AgentLoop:
         # 机械发现（残留 / 引用闭合 / 测试改弱）已经发过哪些：同一条在每个验证点
         # 会被重新算出来，不去重就会把日志灌满（设计稿 §4 的噪声控制）。
         self._reviewed_notes: set[tuple] = set()
+        # ---- L2 行为回归（P2，§5 L2）------------------------------------------
+        #
+        # 对照运行要起子进程、还要复制两棵「改动前/后」的树，所以**一次运行
+        # 只跑一遍**：收尾那条捷径与收尾本体都会走到这里，重跑只是更慢、
+        # 读数一模一样（缓存键是那一批改动的路径+内容指纹，内容变了就重跑）。
+        self._behavior_report: BehaviorReport | None = None
+        self._behavior_key: str = ""
+        #: 目标原文（L2.4 判「这次任务是不是优化/提速类」要用它）。
+        self._goal_text: str = ""
         # 本次运行里「没有证据的完成声明」条数（探针的 `evidence_gaps` 字段）。
         # **它只进报告与事件流，不改 `finished`**（P0 的纪律）。
         self._evidence_gaps: int = 0
@@ -1028,6 +1058,15 @@ class AgentLoop:
         # 的那几条不该把这一次的同类发现压掉。
         self._reviewed_notes.clear()
         self._evidence_gaps = 0
+        # L2 的对照运行读数同样是**本次运行**的：上一次那批改动的读数不能
+        # 当成这一次的（缓存键含内容指纹，但空键会让「这一轮没改动」命中旧报告）。
+        self._behavior_report = None
+        self._behavior_key = ""
+        # 目标原文（L2.4 判「优化类任务」要用它）。**必须放在这一轮的状态重置
+        # 之后**：写在前面的 `goal = state.goal` 那里会被下面这行清零，于是
+        # 「优化类任务」永远判不出来——实测就是这样漏掉的（探针里
+        # `vague-optimize` 的 L2.4 整条没跑，报告只说「入口跑不完」）。
+        self._goal_text = goal
         # 风险分级放行的状态同样是**本次运行**的（§3.2 的打扰预算按运行算）：
         # 上一次 run() 请示过的触发条件不该把这一次的那一次压掉，被拦下的
         # 动作清单也只能属于同一轮。
@@ -1309,7 +1348,17 @@ class AgentLoop:
                     # 第 7 条（收手与落盘抢跑）。已经落成（进待确认清单）的改动
                     # 是真实产出，结论里必须带上它的实际状态。
                     done_text = self._with_final_state(
-                        done_text, state, trace, changed_paths
+                        done_text,
+                        state,
+                        trace,
+                        changed_paths,
+                        # 督导判「已完成」也要过「不许宣称完成」那一关：这一条
+                        # 路径原先 `gate` 默认 False，于是**督导说完成就绕过了
+                        # 审查**——实测（探针 set5 的 `vague-optimize-r1`）L2 报出
+                        # 高严重度「变快但结果坏」，`final_ok` 仍是 True。机器
+                        # 拦的正是这句声明，谁说的都不例外（§3.1）。
+                        gate=True,
+                        announce_block=True,
                     )
                     self._archive(state, "success", trace, done_text)
                     clear_state(checkpoint)
@@ -2006,7 +2055,16 @@ class AgentLoop:
         # 一次验证并把真实结果附在结论后面：已经落成的改动不许被判词抹掉，
         # 文件变好了也要如实说。
         final = self._with_final_state(
-            final, state, trace, changed_paths, gate=True, announce_block=False
+            final,
+            state,
+            trace,
+            changed_paths,
+            gate=True,
+            # 收手那一刻也要把它宣告出来：这一条路径原先 `announce=False`，
+            # 于是「被审查拦下」这件事只进了账本、没进结论，而收手报告正是
+            # 人读的那一份（§3.1 第 2 条：未命中触发条件时同样 `finished=False`，
+            # 结论写成「未完成（被审查拦下）+ 每条发现 + file:line」）。
+            announce_block=True,
         )
         return LoopResult(
             finished=False,
@@ -2161,6 +2219,7 @@ class AgentLoop:
         tail = f"{final}\n本次运行共落成 {len(changed)} 处改动。{facts} {outcome}"
         if ledger:
             tail += f"\n{ledger}"
+        tail += self._behavior_report_section()
         tail += boundary
         # 每一处升级都记进审计：谁批的（通道）+ 批复词 + 触发条件 id + 五件摘要
         # 指纹（§3.2.3 的「批复与审计」）。指纹变了说明批复针对的不是眼前这个
@@ -2179,7 +2238,7 @@ class AgentLoop:
         trace: list[str],
         changed: Sequence[str],
         *,
-        gate: bool = False,
+        gate: bool = True,
         announce_block: bool = False,
     ) -> str:
         """给收尾结论补上「最终文件真实验证结果 + 真实状态」。
@@ -2194,6 +2253,12 @@ class AgentLoop:
         没改过任何文件」对一个只读角色（审查者）是纯粹的噪声，每一句结论后面
         都拖着它；② 更要紧的是它会被读成「系统在替我下结论」。真正要防的是
         「有落盘却被判词抹掉」，而那种情况必然有改动——所以只在有改动时段。
+
+        `gate` **默认开**：「不许宣称完成」那一关是收尾出口的**必须件**
+        （§3.1），任何一条收尾路径都不该靠「记得传这个参数」来保证它跑。
+        实测这条默认值踩过坑：督导说「已完成」的那条路径原先拿到的是默认关，
+        于是 L2 报出高严重度「变快但结果坏」时 `final_ok` 仍然是 True——机器
+        拦的正是那句声明，谁说的都不例外。
         """
         if not changed:
             return final
@@ -2206,6 +2271,16 @@ class AgentLoop:
         # 还挂在账本里，收尾报告与 T12（判据原话是「仍在」）就会拿一条**已经
         # 不成立**的判词去拦完成声明。所以先按终态内容重算，再拿它替换旧判词。
         self._rejudge_mechanical(list(changed))
+        # ---- L2 行为回归（P2，§5 L2）------------------------------------------
+        #
+        # 位置在这里是**必须的**：下面两条收尾出口（「内容未变、沿用上次验证」
+        # 的捷径与本体）都要过「不许宣称完成」那一关，而 L2 的发现是那一关的
+        # 输入之一。放在 `_apply_completion_gate` 之后，发现就进不了这一次判定。
+        #
+        # 它**不动落盘、不回滚任何东西**：成果已经（或即将）落在工作区里，
+        # 这里判的是「同一条命令、同一份输入，输出有没有变」与「优化类任务
+        # 是不是真的做到了又快又不变」（§2.5：拦的是完成声明，不是成果）。
+        self._behavior_review(list(changed))
         # 越界写那类高危发现要进收尾报告：它回答的是「这次运行动了不该动的
         # 东西没有」，而收尾报告是人真的会读的那一份文本（见 `_boundary_report`）。
         boundary = self._boundary_report()
@@ -2932,9 +3007,17 @@ class AgentLoop:
             files=files,
             lines=lines,
             regression=regression,
-            # 「测试红了却说做完了」才是 T8 要拦的形状；单是红一次不算（见
-            # `completion_triggers` 里 T8 那段：改测试的任务开头必然先红一次）。
-            blocking_failure=bool(self.audit_log.high()),
+            # T8 的判据由 L2 给出（P2 接上的就是这一半）：**对照运行输出逐字
+            # 不一致 / 优化类任务行为变了或没变快 / CLI 接口被删改签名**。
+            # 原先这里借的是「另有高危发现」那道门槛（那时还没有 L2），
+            # 而那条门槛的理由正是「改测试→改代码」类任务开头必然先红一次：
+            # 现在由 L2 直接回答「行为变了没有」。
+            #
+            # **两道判据取或**（不是替换）：门槛原来覆盖的那些形状（生成物
+            # 不存在、越界写这类高危发现）与 L2 回答的是不同问题，撤掉它等于
+            # 用一条新判据换掉一条旧覆盖——那不是接线，是丢覆盖。
+            blocking_failure=self._behavior_regression()
+            or bool(self.audit_log.high()),
             has_baseline=baseline_ok and bool(revert_command),
             revert_command=revert_command,
             written=written,
@@ -3077,6 +3160,159 @@ class AgentLoop:
                 self.audit_log.add(finding)
                 continue
             self._emit_review_finding(finding)
+
+    # ---- L2 行为回归（P2，§5 L2）------------------------------------------
+
+    def _behavior_key_for(self, changed: Sequence[str]) -> str:
+        """这一批改动的缓存键：**路径 + 内容指纹**。
+
+        只按路径集合会命中「中途那一版」（同一个 bug 形状在最终验证的缓存上
+        已经踩过一次，见 `_with_final_state` 那段注释）：对照运行的读数是对
+        **某一份内容**下的结论，内容变了就必须重跑。
+        """
+        parts: list[str] = []
+        for path in sorted(set(changed)):
+            change = next(
+                (item for item in (self.pending.items() if self.pending else [])
+                 if item.path == path),
+                None,
+            )
+            body = str(change.new_text) if change is not None else self._disk_text(path)
+            parts.append(f"{path}|{_content_fingerprint(body)}")
+        return "\n".join(parts)
+
+    def _behavior_review(self, changed: Sequence[str]) -> BehaviorReport:
+        """跑一遍 L2（对照运行 / 接口快照 / 性能不倒退），把发现送进账本与事件流。
+
+        三条出口与 L1 完全一样（账本 / 事件流 / 收尾报告），**处置也一样**：
+        高严重度只拦「完成声明」与危险动作，**不拦成果**（§2.5）。成果照落盘、
+        可回退、报告逐条列出；删死代码、合并重复实现、删已被替代的文件都是
+        正常编辑，这一层判的是「同一条命令、同一份输入，输出是否一字未变」。
+        """
+        key = self._behavior_key_for(changed)
+        if self._behavior_report is not None and key == self._behavior_key:
+            return self._behavior_report
+        # 旧判词先撤掉：判词是对某一版内容的结论，这一版可能已经改好了（与
+        # L1 的重判同一个理由）。
+        self.audit_log.forget_kind(BEHAVIOR_KINDS)
+        pending_items = list(self.pending.items()) if self.pending is not None else []
+        timeout = float(self.config.limit("behavior_entry_timeout"))
+        # **这一层不许把运行弄崩**：它挂在收尾出口上，一个判据里的意外异常
+        # （复制失败、解释器路径怪、README 编码坏）会让一次正常收尾变成崩溃。
+        # 出不了结论时如实报「查不了」——那是一个读数，不是通过（§5 L2 表）。
+        try:
+            report = review_behavior(
+                self.config.project_root,
+                pending_items,
+                goal=self._goal_text,
+                interface_changes=self.escalation_gate.changed_public_symbols(
+                    self._written_view(changed)
+                ),
+                timeout=timeout,
+            )
+            # L2.3 的另一半：CLI `--help` 快照（公开符号看不出子命令/参数被改名）。
+            cli_files = cli_help_candidates(self.config.project_root, changed)
+            if cli_files:
+                same, findings = compare_cli_help(
+                    self.config.project_root,
+                    pending_items,
+                    cli_files,
+                    timeout=timeout,
+                )
+                report.cli_checked = same
+                report.cli_files = tuple(cli_files)
+                report.findings.extend(findings)
+        except Exception as exc:  # noqa: BLE001 - 判据出不了结论不是运行失败
+            report = BehaviorReport(
+                cannot_check=(
+                    f"行为回归这一步没能得出结果（{type(exc).__name__}: {exc}）"
+                )
+            )
+        for finding in report.findings:
+            self._emit_review_finding(finding)
+        self._behavior_report = report
+        self._behavior_key = key
+        self._log(f"自动审查 L2：{report.render()}")
+        return report
+
+    def _written_view(self, changed: Sequence[str]) -> dict[str, str]:
+        """这些路径**将要**变成什么（收尾判这一刻改动还没落盘）。"""
+        out: dict[str, str] = {}
+        for path in changed:
+            change = next(
+                (item for item in (self.pending.items() if self.pending else [])
+                 if item.path == path),
+                None,
+            )
+            if change is not None:
+                out[path] = str(change.new_text)
+        return out
+
+    def behavior_findings(self) -> list[Finding]:
+        """本次运行 L2 报出的**真**发现（不含「查不了」那条读数）。"""
+        kinds = (
+            BEHAVIOR_CHANGED_KIND,
+            CLI_SURFACE_CHANGED_KIND,
+            PERFORMANCE_REGRESSED_KIND,
+        )
+        return [item for item in self.audit_log.findings if item.kind in kinds]
+
+    def _behavior_regression(self) -> bool:
+        """L2 判出**该拦完成声明**的行为回归没有（T8 的判据）。
+
+        判据是机械的一条：账本里有没有 L2 的**高严重度**发现。
+
+        - 「查不了」（`behavior_not_checked`）**不算**回归——把它算成回归等于
+          「测不出来就判失败」，那是另一种静默放行。
+        - 提示档（`INFO`）也不算：非优化类任务上的行为变化、公开符号被删改
+          签名都是**读数**——前者是任务本来就要求的改动，后者由 T1 那条既有
+          通道升级（同一批证据，不重复拦一次）。把它们算成回归会去拦一次
+          正确的完成声明（探针 `rename-cross-file` 上实测过：改名任务被 L2
+          再拦一次，`final_ok` 从「本来就红」变成「多红一条」）。
+        """
+        return any(item.severity == HIGH for item in self.behavior_findings())
+
+    def _behavior_report_section(self) -> str:
+        """收尾报告里的 L2 那一段（没跑过就返回空串）。
+
+        **这一段是人真的会读的那一份文本**（模型那段结论之后），所以它要把
+        判据原话、实测读数与**回退能力**三样摆在一起：只写一句「行为变了」
+        会让人以为成果被扣住了。§2.5 的反向条款必须一起进——**拦的是完成
+        声明与危险动作，不是成果**：删死代码、合并重复实现、删已被替代的文件
+        都是正常编辑，照样落盘、照样可回退、照样逐条列出。
+        """
+        report = self._behavior_report
+        if report is None:
+            return ""
+        lines = [f"- {report.render()}"]
+        if report.cli_checked is not None:
+            verdict = "一致" if report.cli_checked else "**不一致**"
+            files = "、".join(report.cli_files) or "（没有 CLI 入口）"
+            lines.append(f"- L2.3 命令行接口快照：`--help` 前后{verdict}（{files}）")
+        if report.interface_changes:
+            listed = "、".join(report.interface_changes[:5])
+            lines.append(f"- L2.3 公开符号快照：被删或改签名 —— {listed}")
+        if report.optimization:
+            speed = {
+                True: "有实测改善",
+                False: "**没有实测改善或性能倒退**",
+                None: "没测出快慢（耗时太短，噪声比差值大）",
+            }[report.faster]
+            lines.append(
+                f"- L2.4 优化类任务：行为"
+                f"{'未变' if report.same else '**已变**'}、{speed}"
+                "（行为变了就算更快也不通过）"
+            )
+        if report.cannot_check and report.checked:
+            # 「查不了」的理由在 `render()` 里已经带过一次；只有**比对跑成了**
+            # 但前置步骤（如造输入）没做成时才需要再补一句。
+            lines.append(f"- {CANNOT_CHECK}{report.cannot_check}")
+        return (
+            "\n本次运行的 L2 行为回归读数：\n"
+            + "\n".join(lines)
+            + "\n（拦的是「完成声明」与危险动作，**不是成果**：改动照落盘、可回退、"
+            "报告逐条列出；删死代码、合并重复实现、删已被替代的文件都是正常编辑。）"
+        )
 
     def _emit_review_finding(self, finding: Finding) -> None:
         """一条机械发现的三条出口：账本、事件流、trace。同一条只发一次。

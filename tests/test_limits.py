@@ -320,6 +320,10 @@ INTENT_KNOBS: tuple[tuple[str, float], ...] = (
 # 单列的理由同上：它不属于 P1 记忆架构那一批登记。
 REVIEW_KNOBS: tuple[tuple[str, float], ...] = (
     ("review_fix_rounds", 0),  # 「不许宣称完成」时先自动修几轮（0 = 关）
+    # 「L2 行为回归」（自动审查层 P2）补登：对照运行里一条入口命令的墙钟上限。
+    # 一次对照要跑两次子进程，而这个上限决定「跑不完」会不会把整条对照变成
+    # 「查不了」——所以它是标定值，按项目入口的轻重调（默认 60s）。
+    ("behavior_entry_timeout", 60),
 )
 
 
