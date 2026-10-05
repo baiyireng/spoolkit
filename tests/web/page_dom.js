@@ -1129,5 +1129,54 @@ async function extras2() {
   out.stop_settled = {
     mode: sendNode.dataset.mode, disabled: sendNode.disabled, title: sendNode.title,
   };
+
+  // ══ ⑥ 收尾报告的**分档**：结论段干净、详情与用量进「思考过程」 ══
+  // 现场：`tests/fixtures/interact_probe/web-real-reports.md`（用户在网页壳里真实
+  // 看到的第二次报告——结论段被内部账与用量糊住，过程区里还混进了一句系统对
+  // 模型说的话）。这一段的判据全在渲染档位上：气泡里只有结论段，`详情：` 那几行
+  // 与用量都在轨迹里，第三档说「跳过」而不是「成功」。
+  const REPORT = [
+    '已创建文件 hello.txt，内容为 Hello Word。',
+    '没有校验器（不是失败）。',
+    '详情：本次运行共落成 1 处改动。最终文件状态：hello.txt：1 行，指纹 44d3a83db52a/1行。',
+    '撤销这一轮：spool revert --run 20261006-022747-299732 （网页里可直接点，桥里回 y）',
+  ].join('\n');
+  ctx.resetView();
+  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, '')));
+  ctx.onEvent(event('start', { goal: '创建一个文本文件' }));
+  ctx.onEvent(event('step', { n: 1 }));
+  ctx.onEvent(event('tool', { name: 'write_file', ok: true }));
+  // 第三档（没有校验器）：`ok=true` 只说「没有发现问题」。渲染成「成功」就是
+  // 一个不成立的通过（问题⑤），而状态字与结论段那句一样则是"同一句说两遍"。
+  ctx.onEvent(event('tool', { name: '最终验证', ok: true, no_checker: true,
+    detail: '这次改的是 .txt。' }));
+  ctx.onEvent(event('final', { ok: true, text: REPORT }));
+  // 用量**在结局之后**到（真实那次就是这个次序）：它必须挂回刚画好的那张卡片，
+  // 不许另起一张只有一行用量的"幽灵卡片"。
+  const cardsBeforeUsage = ids.get('stream').querySelectorAll('.msg').length;
+  ctx.onEvent(event('usage', { steps: 3, calls: 3, prompt_tokens: 13025,
+    completion_tokens: 207 }));
+  out.report_tiers = {
+    ...cardInfo(lastCard()),
+    cards: ids.get('stream').querySelectorAll('.msg').length,
+    cards_before_usage: cardsBeforeUsage,
+    stream_text: streamText(),
+  };
+  // 展开「思考过程」：详情那几行与用量都在里面（收起时正文块一个节点都不建，
+  // 所以必须点开才读得到——那本身也是"默认收起"的判据）。
+  const tiersHead = lastCard() ? lastCard().querySelector('.trace-head') : null;
+  if (tiersHead) { tiersHead.onclick(); }
+  out.report_tiers_open = cardInfo(lastCard());
+
+  // 刷新 / 切走再切回：库里存的仍是**完整那份报告**，分档必须一样。
+  ctx.resetView();
+  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, [
+    { role: 'user', content: '创建一个文本文件', meta: '', created_at: 40 },
+    { role: 'assistant', content: REPORT, meta: '3 步，完成', created_at: 41,
+      trace: [{ type: 'step', text: '第 1 步' }] },
+  ]));
+  const historyHead = lastCard() ? lastCard().querySelector('.trace-head') : null;
+  if (historyHead) { historyHead.onclick(); }
+  out.report_tiers_history = cardInfo(lastCard());
 }
 

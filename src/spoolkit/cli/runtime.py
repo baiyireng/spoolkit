@@ -134,6 +134,10 @@ class LoopWiring:
     # 三条通道（终端 / 网页壳 / 聊天）各注入自己那一份；MCP 复用
     # `status.awaiting` 那个既有信号，不新增通道（§3.2.3）。
     escalation_review: object | None = None
+    # 「最终验证」那一条阶段行的**推迟出口**：给了列表就由调用方在结算之后发
+    # （`--events` 那条路：用户点过「应用」之后这一轮才算落地，阶段行排在它前面
+    # 就是阶段跑在自己前面）。不给就当场发（终端那条路）。
+    defer_final_verify: list | None = None
 
 
 def resolve_provider_args(args) -> dict[str, str]:
@@ -563,6 +567,7 @@ def assemble_loop(
         # 去比，把「文件已经改过」判成没变——该放行的刷新读取被拦死。
         pending=parts.pending,
         escalation_review=parts.escalation_review,
+        defer_final_verify=parts.defer_final_verify,
     )
 
 

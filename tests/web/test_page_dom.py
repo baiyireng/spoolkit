@@ -713,3 +713,67 @@ def test_点新建会话先建出来再切过去(dom: dict) -> None:
         f"请求两连发不对：{made['calls']}"
     )
     assert "web-new" in made["selected"], "建完没有切过去（或没点亮那一行）"
+
+
+# --- ⑥ 收尾报告的**分档**：结论段干净、详情与用量进「思考过程」 ---
+#
+# 现场是用户在网页壳里真实看到的那一屏：`tests/fixtures/interact_probe/web-real-reports.md`
+# （第二次运行，20261006-022747-299732）。那一屏的结论段里混着「本次运行共落成 1 处
+# 改动 / 最终文件状态 / 指纹」与「用量：…」，过程区里还混进了一句系统对模型说的话。
+# 下面这几条钉的是**渲染档位**（正文一个字不删，只是换个地方摆）。
+
+
+def test_结论段里没有内部账与用量(dom: dict) -> None:
+    """气泡里只留「做成了什么 + 验没验 + 我能做什么」。
+
+    证伪法：把 `fillReport` 退回 `fillReply(card, text)`（整份报告进气泡），
+    下面每一条都会红——这正是改之前的那一屏。
+    """
+    card = dom["report_tiers"]
+    bubble = card["bubble_text"]
+    assert "已创建文件 hello.txt，内容为 Hello Word。" in bubble
+    assert "没有校验器（不是失败）。" in bubble
+    assert "撤销这一轮：spool revert --run" in bubble
+    for banned in ("详情：", "指纹", "共落成", "最终文件状态", "用量："):
+        assert banned not in bubble, f"结论段里还混着内部账/内部量：{banned}——{bubble}"
+
+
+def test_详情与用量都进了思考过程(dom: dict) -> None:
+    """详情**没有被删掉**，只是折进了那块默认收起的轨迹里（信息一个字不丢）。"""
+    collapsed = dom["report_tiers"]
+    # 收起时正文块一个节点都不建——详情行照样算进了"几行"里。
+    assert collapsed["trace_nodes"] == 0, "轨迹默认就该是收起的"
+    assert "5 行" in collapsed["trace_head"], collapsed["trace_head"]
+
+    opened = dom["report_tiers_open"]
+    assert "详情：本次运行共落成 1 处改动" in opened["trace_text"], opened["trace_text"]
+    assert "指纹 44d3a83db52a/1行" in opened["trace_text"]
+    assert "用量：3 步 · 3 次调用 · 13025+207 token" in opened["trace_text"]
+    # 用量是在结局**之后**到的：它挂回了刚画好的那张卡片，没有另起一张空卡片。
+    assert collapsed["cards"] == 1, "用量另起了一张卡片（页面上多出一张幽灵回复卡）"
+    assert collapsed["cards_before_usage"] == 1, collapsed["cards_before_usage"]
+
+
+def test_第三档在过程区说跳过而不是成功(dom: dict) -> None:
+    """`ok=true` 只是「没有发现问题」，不是「验过了」（问题⑤）。
+
+    状态字与结论段那句**刻意不同**：结论段回答"验没验"，过程区这一行回答
+    "这一步真的跑了吗"。同一句话在两处出现两次，正是这一轮修掉的残渣。
+    """
+    opened = dom["report_tiers_open"]
+    assert "最终验证 → 跳过（不是失败）" in opened["trace_text"], opened["trace_text"]
+    assert "最终验证 → 成功" not in opened["trace_text"], "第三档冒充了「成功」"
+    assert "这次改的是 .txt。" in opened["trace_text"], "第三档没有给出理由"
+    assert "没有校验器（不是失败）" not in opened["trace_text"], (
+        "过程区把结论段那一句又说了一遍"
+    )
+
+
+def test_刷新之后报告的分档一样(dom: dict) -> None:
+    """库里存的仍是**完整那份报告**：认领与重画走同一条 `fillReport`，
+    所以刷新 / 切走再切回之后，结论段依旧是干净的那一段。"""
+    card = dom["report_tiers_history"]
+    assert "已创建文件 hello.txt" in card["bubble_text"]
+    assert "详情：" not in card["bubble_text"], card["bubble_text"]
+    assert "详情：本次运行共落成 1 处改动" in card["trace_text"], card["trace_text"]
+

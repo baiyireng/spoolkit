@@ -496,7 +496,10 @@ def test_历史也只追加不重画() -> None:
     assert "adoptMessage(" in body, "快照里那条已经画过的消息没有认领回来"
 
     card = _body("historyCard")
-    assert "fillRich(" in card
+    # 报告上屏那一处从 `fillRich` 换成了 `fillReport`：后者按 `详情：` 把报告
+    # 分成"结论段进气泡 / 详情进轨迹"两档。**同一个要求**（正文必须画出来）
+    # 一个字没放宽，量的落点跟着换了。
+    assert "fillReport(" in card and "item.content" in card, "历史正文没画出来"
 
     reset = _body("resetView")
     assert "drawn = 0" in reset, "换了目标要重新开始画"
@@ -1039,7 +1042,7 @@ def test_历史不加那句给用户看的说明() -> None:
     card = _body("historyCard")
     assert "makeMsg(" in card
     assert "'history'" in card, "历史没有可辨认的类（略淡那一档）"
-    assert "fillRich(bubble, item.content)" in card, "历史正文没画出来"
+    assert "fillReport(" in card and "item.content" in card, "历史正文没画出来"
     assert ".msg.history" in HTML, "没有略淡那一条样式"
 
 

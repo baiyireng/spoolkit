@@ -8,7 +8,7 @@ from spoolkit.cli.events import EventWriter, settle_with_events
 from spoolkit.policy import ASK, AUTO
 from spoolkit.tools.sources import SourceLog
 from spoolkit.tools.edit import PendingChanges, write_file_spec
-from spoolkit.web.protocol import AWAIT, CONFIRM, DIFF, NOTE
+from spoolkit.web.protocol import AWAIT, CONFIRM, DIFF, NOTE, TOOL
 
 
 def _stage(tmp_path: Path, path: str = "src/a.py") -> PendingChanges:
@@ -168,4 +168,44 @@ def test_落盘后的diff不在stdout上(tmp_path: Path, capsys) -> None:
     diff_lines = [line for line in _lines(buffer) if line["type"] == DIFF]
     assert len(diff_lines) == 1
     assert "x = 1" in diff_lines[0]["text"]
+
+
+# --- 「最终验证」那一条阶段行是**推迟**到结算之后发的（网页壳真实现场）--------
+
+
+def test_推迟的阶段行在已应用之后发出去(tmp_path: Path) -> None:
+    """现场（`tests/fixtures/interact_probe/web-real-reports.md`）：用户在网页壳里
+    看到的次序是「最终验证 → 成功 / 等你确认 / 已应用」——一个阶段跑在自己前面。
+
+    判据：推迟出口里的那一条，用 `handle` 发得出去（它带 `kind` 字段，走
+    `emit(**payload)` 会抛 `TypeError: got multiple values for argument 'kind'`，
+    整轮以「进程退出，退出码 1」收场），而且落点确实在 `已应用` 之后。
+    """
+    from spoolkit.cli.commands.run import _emit_deferred_verify
+
+    buffer = io.StringIO()
+    writer = EventWriter(buffer)
+    pending = _stage(tmp_path)
+    deferred = [{
+        "name": "最终验证",
+        "ok": True,
+        "no_checker": True,
+        "kind": "verifier_no_checker",
+        "detail": "这次改的是 .txt。",
+    }]
+
+    settle_with_events(pending, ASK, (), None, writer, io.StringIO("y\n"))
+    _emit_deferred_verify(writer, deferred)
+
+    lines = _lines(buffer)
+    kinds = [line["type"] for line in lines]
+    assert CONFIRM in kinds, f"没有那一条「已应用」：{kinds}"
+    assert kinds.index(CONFIRM) < kinds.index(TOOL), (
+        f"阶段行跑到「已应用」前面去了：{kinds}"
+    )
+    last = lines[-1]
+    assert last["type"] == TOOL and last["name"] == "最终验证", last
+    assert last["kind"] == "verifier_no_checker" and last["no_checker"] is True, last
+    # 一次性出口：发完清空，下一次调用不会重复发一遍。
+    assert deferred == []
 

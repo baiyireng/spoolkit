@@ -48,7 +48,7 @@ from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.transcript import ASSISTANT, USER, record_message
 from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.grant import Grants
-from spoolkit.web.protocol import AWAIT, CONFIRM, FINAL, NOTE, START, USAGE
+from spoolkit.web.protocol import AWAIT, CONFIRM, FINAL, NOTE, START, TOOL, USAGE
 
 
 def _overrides(args: argparse.Namespace, project_root: Path) -> dict[str, float]:
@@ -268,6 +268,27 @@ def _events_settle_header(result, undo: str) -> str:
     )
 
 
+def _emit_deferred_verify(writer: EventWriter, deferred: list[dict]) -> None:
+    """把循环攒下的「最终验证」那一条阶段行**在结算之后**发出去。
+
+    为什么非得推迟（现场见 `tests/fixtures/interact_probe/web-real-reports.md`）：
+    它验的是待确认清单里那批内容，而这条通道上用户要先点「应用」这一轮才算落地。
+    当场发的话，用户读到的次序是「最终验证 → … / 等你确认：1 处改动 / 已应用 1 处
+    改动」——一个阶段跑在自己前面。
+
+    为什么走 `handle` 而不是 `emit(TOOL, **payload)`：第三档那一条 payload 里带一个
+    `kind` 字段（`verifier_no_checker`），它与 `emit(self, kind, ...)` 的位置参数
+    重名，`emit` 会抛 `TypeError: got multiple values for argument 'kind'`——整轮
+    运行在收尾那一刻以「进程退出，退出码 1」收场（probe 的 create-hello 实测踩过）。
+    `EventWriter.handle(kind, data)` 就是为这种 payload 准备的。
+
+    发完清空：它是一次性的推迟出口，留着会让下一次调用重复发一遍。
+    """
+    for payload in deferred:
+        writer.handle(TOOL, payload)
+    deferred.clear()
+
+
 def _events_mode(args, project_root, gateway, window, pending) -> int:
     """`--events` 模式：stdout 上只有 JSON 行。
 
@@ -280,6 +301,11 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
     policy = resolve_policy(args, project_root)
     scope = resolve_scope(args)
     overrides = _overrides(args, project_root)
+    # 「最终验证」那一条阶段行的**推迟出口**：它验的是"待确认清单里那批内容"，
+    # 而这条通道上用户要先点「应用」这一轮才算落地。所以循环把它攒在这里，
+    # 由下面 `settle_with_events` 之后再发（阶段顺序是验收的一部分，现场见
+    # tests/fixtures/interact_probe/web-real-reports.md）。
+    deferred_verify: list[dict] = []
     writer.emit(
         START, session=args.session, goal=args.goal, policy=policy, window=window
     )
@@ -340,6 +366,7 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             search=web_search_backend(args, project_root),
             mcp=not getattr(args, "no_mcp", False),
             from_channel=getattr(args, "from_channel", False),
+            defer_final_verify=deferred_verify,
         ),
     )
     result = loop.run(args.goal, resume=args.resume, prompt=prompt)
@@ -376,6 +403,8 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
         # 渲染，diff 一大，埋在后面的判词就没人读到。
         header=_events_settle_header(result, undo),
     )
+    # 「最终验证」这一条阶段行**现在才发**（它验的正是刚刚被用户应用的那批内容）。
+    _emit_deferred_verify(writer, deferred_verify)
     # 挂起待批的动作清单（§3.2.3）：它在**落盘之后**才说得准（哪些动作真的
     # 被拦下、哪些成果真的落了盘），所以走在这条通道的最后、FINAL 之前。
     _settle_pending(args, project_root, pending, result, writer=writer)

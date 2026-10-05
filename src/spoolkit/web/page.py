@@ -1555,14 +1555,29 @@ function liveTraceLine(data) {
     const ok = Boolean(data.ok);
     const line = {
       type: 'tool', ok: ok,
-      text: String(data.name || '工具') + ' → ' + (ok ? '成功' : '失败'),
+      // 第三档（没有校验器）：`ok=true` 只是「没有发现问题」，不是「验过了」。
+      // 状态字与结论段那句「没有校验器（不是失败）」**刻意不同**——结论段回答
+      // "验没验"，这一行回答"这一步真的跑了吗"（与服务端 `runner.trace_line` 同口径）。
+      text: String(data.name || '工具') + ' → '
+        + (data.no_checker ? NO_CHECKER_STATE : (ok ? '成功' : '失败')),
     };
     // 失败那行**必须带原因**：只写"read_file → 失败"等于把排错要的那一句丢掉。
-    if (!ok && data.detail) { line.detail = String(data.detail); }
+    // 第三档同样带上——它给的是理由（"这次改的是 .txt。"）。
+    if (data.detail && (!ok || data.no_checker)) { line.detail = String(data.detail); }
     return line;
   }
   if (kind === 'note') {
     return {type: 'note', ok: Boolean(data.ok), text: String(data.text || '')};
+  }
+  if (kind === 'usage') {
+    // 用量是**详情**：它进「思考过程」这一档，不进对话流（现场夹具：它原先紧跟
+    // 在收尾报告后面，读起来像报告接着说的一句）。措辞与服务端
+    // `runner.trace_line` 同一份。
+    return {
+      type: 'usage', ok: true,
+      text: '用量：' + (data.steps || 0) + ' 步 · ' + (data.calls || 0) + ' 次调用 · '
+        + (data.prompt_tokens || 0) + '+' + (data.completion_tokens || 0) + ' token',
+    };
   }
   if (kind === 'wait') {
     let text = WAIT_PREFIX + ' ' + data.elapsed + 's';
@@ -1620,11 +1635,60 @@ function addTraceLine(line) {
   if (line === null || line === undefined) { return; }
   const stick = atBottom();
   const card = ensureLive();
+  pushTraceLine(card, line);
+  if (stick) { scrollDown(); }
+  updateToBottom();
+}
+
+// 往一张**已经画出来的**卡片上追加一行轨迹（不摆新卡片）。
+//
+// 为什么需要它：用量那条事件可能在结局**之后**才到（实测现场就是这样），
+// 那时 `live.done` 已经是 true，`ensureLive()` 会另起一张空占位卡——页面上于是
+// 多出一张只有一行用量的"幽灵回复卡"。往已有的那张追加就没有这个问题。
+function pushTraceLine(card, line) {
+  if (card === null || card === undefined || line === null || line === undefined) { return; }
   card.trace._lines.push(line);
   drawTraceHead(card.trace);
   if (traceOpen(card.trace)) { drawTraceBody(card.trace); }
-  if (stick) { scrollDown(); }
-  updateToBottom();
+}
+
+/* ══ 收尾报告的**分档**：结论段进气泡，详情行折进「思考过程」 ══
+   现场（tests/fixtures/interact_probe/web-real-reports.md）：结论段里混进了
+   「本次运行共落成 1 处改动 / 最终文件状态 / 指纹」这些内部账。它们是**详情**：
+   报告里带 `详情：` 的那些行折进上面那块默认收起的轨迹，气泡里只留
+   「做成了什么 + 验没验 + 我能做什么」。
+
+   两个标记与服务端同一个字面量（`web/runner.py::DETAIL_MARK` /
+   `NO_CHECKER_STATE`，后者同 `agent/loop.py::VERIFY_SKIPPED`）：这一层不引 python，
+   所以各写一遍，靠两边的断言防走散（tests/web/test_page_dom.py）。 */
+const DETAIL_MARK = '详情：';
+const NO_CHECKER_STATE = '跳过（不是失败）';
+
+// 按行首那个标记切开：不按内容猜（"看着像账目的行"那种判据会在模型自己写了
+// 一句"本次运行共落成…"时误伤），也不删内容——详情只是换个地方摆。
+function splitReport(text) {
+  const head = [];
+  const detail = [];
+  for (const line of String(text || '').split('\\n')) {
+    (line.indexOf(DETAIL_MARK) === 0 ? detail : head).push(line);
+  }
+  return {head: head.join('\\n'), detail: detail};
+}
+
+// 收尾报告上屏：结论段换掉气泡，详情行进轨迹。
+function fillReport(card, text) {
+  const parts = splitReport(text);
+  fillReply(card, parts.head);
+  for (const line of parts.detail) {
+    pushTraceLine(card, {type: 'note', ok: true, text: line});
+  }
+}
+
+// 对话流里最后一张**助手**卡片（用量在结局之后才到时，用它把那一行挂回去）。
+function lastAssistantCard() {
+  const card = lastCard();
+  if (card === null) { return null; }
+  return (' ' + String(card._cls || '') + ' ').indexOf(' assistant ') >= 0 ? card : null;
 }
 
 // 卡片里的气泡换成**真正的回复**。先清空再填：重复到达（事件与快照各来一次）
@@ -1643,8 +1707,9 @@ function finishLive(ok, text, extra, stopped) {
   card.done = true;
   if (ok) {
     // 成功：库里那条会写 `result.final or "（没有产出）"`，这里用同一个归一化，
-    // 后面认领时才对得上。
-    fillReply(card, text);
+    // 后面认领时才对得上。**正文一个字不删**：`详情：` 那几行只是折进轨迹
+    // （`fillReport`），认领比对的仍是完整那份报告。
+    fillReport(card, text);
     pendingReplies.push({card: card, text: String(text || '（没有产出）')});
     if (pendingReplies.length > 4) { pendingReplies.shift(); }
   } else if (stopped) {
@@ -1690,7 +1755,9 @@ function adoptMessage(item, isLast) {
   if (card === null) { return false; }
   if (item.trace && item.trace.length) { fillTrace(card.trace, item.trace); }
   if (!card.done) { card.done = true; }
-  fillReply(card, item.content);
+  fillReport(card, item.content);
+  // 详情行是在 `fillTrace` 之后追加的：**不许**把服务端那份轨迹盖掉
+  // （它是这一轮的完整过程，详情只是加在它后面）。
   return true;
 }
 
@@ -1701,8 +1768,9 @@ function historyCard(item) {
   const wrap = makeMsg(mine ? 'user' : 'assistant');
   wrap.classList.add('history');
   const lines = item.trace || [];
+  let trace = null;
   if (!mine && lines.length) {
-    const trace = makeTrace();
+    trace = makeTrace();
     wrap.appendChild(trace);
     fillTrace(trace, lines);
   }
@@ -1713,7 +1781,12 @@ function historyCard(item) {
   if (failed) {
     failIntoBubble(bubble, '失败：', failed.text, failed.error || null);
   } else {
-    fillRich(bubble, item.content);
+    // 报告的详情行要有地方落脚：这一条没有轨迹时就地建一个（默认收起）。
+    if (!mine && trace === null) {
+      trace = makeTrace();
+      wrap.insertBefore(trace, bubble);
+    }
+    fillReport({bubble: bubble, trace: trace}, item.content);
   }
   return wrap;
 }
@@ -2839,9 +2912,15 @@ function onEvent(event) {
   }
   if (data.type === 'usage') {
     setMeta(data.steps);
-    add('用量：' + (data.steps || 0) + ' 步 · ' + (data.calls || 0) + ' 次调用 · '
-        + (data.prompt_tokens || 0) + '+' + (data.completion_tokens || 0) + ' token',
-        'dim');
+    // 用量是**详情**：进「思考过程」那一档，不进对话流（现场夹具：它原先紧跟在
+    // 收尾报告后面，读起来像报告接着说的一句）。结局之后才到的那种，挂回刚刚
+    // 那张助手卡片上——`ensureLive()` 会另起一张空占位卡，那就成了幽灵卡片。
+    const usageLine = liveTraceLine(data);
+    if (live !== null) { pushTraceLine(live, usageLine); }
+    else {
+      const last = lastAssistantCard();
+      if (last !== null) { pushTraceLine(last, usageLine); }
+    }
     return;
   }
   if (data.type === 'final') {

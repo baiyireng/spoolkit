@@ -499,10 +499,22 @@ def run_scenario(name: str, out_path: Path, *, provider: str, base_url: str,
 FIXTURE_FIELDS = ("scenario", "goal", "provider", "outcome", "final_report")
 #: 事件上留下的字段：`render_user_text` 与 `tests/test_interact_probe.py` 里的
 #: `snapshot_lines` 都是按这几个键渲染的，多留的字段没人读。
+#:
+#: `no_checker` / `kind` 是第三档（没有校验器）的读数：少了它们，夹具里那一条
+#: `最终验证` 只能渲染成「成功」——而"没验"说成"验过了"正是问题⑤。
+#:
+#: `steps` / `calls` / `prompt_tokens` / `completion_tokens` 是**用量**那几个读数：
+#: 它是详情（`web/runner.py::trace_line` 的 USAGE 档），夹具少了它们就只能渲染成
+#: 「用量：0 步 · 0 次调用 · 0+0 token」——那不是一个可核对的读数。
 FIXTURE_EVENT_FIELDS = (
     "seq", "type", "n", "text", "name", "ok", "detail", "command", "count",
-    "applied", "escalation", "action",
+    "applied", "escalation", "action", "no_checker", "kind",
+    "steps", "calls", "prompt_tokens", "completion_tokens",
 )
+
+#: 第三档在过程区里的状态字。与 `web/runner.py::NO_CHECKER_STATE`、
+#: `agent/loop.py::VERIFY_SKIPPED` 同一个字面量（渲染层不引 python，各写一遍）。
+NO_CHECKER_STATE = "跳过（不是失败）"
 
 FIXTURE_NOTE = (
     "互动面探针 create-hello 快照（裁剪版）：只留判据用得到的字段。重新生成："
@@ -550,7 +562,13 @@ def render_user_text(snapshot: dict) -> str:
         if kind == "note":
             lines.append(f"[note] {body.get('text', '')}")
         elif kind == "tool":
-            state = "成功" if body.get("ok") else "失败"
+            # 第三档（没有校验器）**不许渲染成「成功」**：`ok=True` 只是「没有发现
+            # 问题」，不是「验过了」（问题⑤）。状态字与 `web/runner.py::trace_line`
+            # 同一份——这一份逐字文本就是"壳里那些人读的行"。
+            if body.get("no_checker"):
+                state = NO_CHECKER_STATE
+            else:
+                state = "成功" if body.get("ok") else "失败"
             detail = str(body.get("detail") or "")
             lines.append(f"[tool] {body.get('name', '?')} → {state}"
                          + (f"：{detail}" if detail else ""))

@@ -39,6 +39,39 @@ from spoolkit.web.protocol import (
 
 NOISE_LINES = 3
 
+#: 收尾报告里「详情」那一行的行首标记。
+#:
+#: 与 `agent/loop.py::DETAIL_MARK` 同一个字面量，**刻意各写一遍**：网页壳的渲染层
+#: 不引 `agent.loop` 那一整包（它连着工具、网关、装配器）。两边一旦走散，
+#: `tests/web/test_page_dom.py` 与 `tests/test_interact_probe.py` 里那两条断言会红。
+DETAIL_MARK = "详情："
+
+#: 第三档（这次没有可跑的判据）在过程区里的状态字。
+#:
+#: 同一句「没有校验器（不是失败）」属于**结论段**（`agent/loop.py::NO_CHECKER_LINE`）；
+#: 过程区这一档回答的是"这一步真的跑了吗"——跑不了就说「跳过」，绝不冒充「成功」。
+#: `ok=True` 只说「没有发现问题」，不成立的那个"通过"不许出现在这里（问题⑤）。
+NO_CHECKER_STATE = "跳过（不是失败）"
+
+
+def split_report(text: str) -> tuple[str, list[str]]:
+    """把收尾报告切成（结论段, 详情行）。
+
+    现场（`tests/fixtures/interact_probe/web-real-reports.md`）：结论段里混进了
+    「本次运行共落成 1 处改动 / 最终文件状态 / 指纹」这些内部账。它们属于**详情**——
+    页面把带标记的那几行折进「思考过程」（默认收起），结论气泡里只留
+    「做成了什么 + 验没验 + 我能做什么」。
+
+    **切法只有一条**：行首是不是 `详情：`。不按内容猜（"看着像账目的行"那种判据
+    会在模型自己写了一句"本次运行共落成…"时误伤），也不删内容——详情还在报告里，
+    终端那条路照样读得到。
+    """
+    head: list[str] = []
+    detail: list[str] = []
+    for line in str(text or "").splitlines():
+        (detail if line.startswith(DETAIL_MARK) else head).append(line)
+    return "\n".join(head), detail
+
 # 一轮的"思考轨迹"留多少行、留几轮。
 #
 # 为什么要有上限：这份轨迹随每一帧 `/state` 发给页面（页面每 3 秒轮一次），
@@ -162,17 +195,22 @@ def trace_line(event: Event) -> dict | None:
         if data.get("no_checker"):
             # 第三档状态（问题⑤）：`ok=True` 只是「没有发现问题」，不是
             # 「验过了」。渲染成「成功」会让用户读到一个不成立的通过。
+            #
+            # 状态字与结论段那句「没有校验器（不是失败）」**刻意不同**：结论段
+            # 回答"验没验"，这一行回答"这一步真的跑了吗"；同一句话在用户可见面
+            # 上出现两次，正是这一轮修掉的残渣之一。
             line = {
                 "type": TOOL,
                 "ok": ok,
-                "text": f"{name} → 没有校验器（不是失败）",
+                "text": f"{name} → {NO_CHECKER_STATE}",
             }
         else:
             line = {"type": TOOL, "ok": ok,
                     "text": f"{name} → {'成功' if ok else '失败'}"}
         detail = str(data.get("detail") or "").strip()
         # 成功那行只报状态，失败那行**必须带原因**：排错要的就是这一句。
-        if detail and not ok:
+        # 第三档（没有校验器）同样带上——它给的是理由（"这次改的是 .txt。"）。
+        if detail and (not ok or data.get("no_checker")):
             line["detail"] = detail
         return line
     if kind == NOTE:
@@ -198,6 +236,18 @@ def trace_line(event: Event) -> dict | None:
             "type": CONFIRM,
             "ok": applied,
             "text": f"{'已应用' if applied else '已拒绝'} {data.get('count', 0)} 处改动{where}",
+        }
+    if kind == USAGE:
+        # 用量是**详情**，不是结论段的一部分（现场夹具：它原先紧跟在收尾报告的
+        # 撤销那一行后面，读起来像报告接着说的一句）。它进「思考过程」那一档，
+        # 与结论段分开；`setMeta` 另有一行状态读数，信息不会丢。
+        return {
+            "type": USAGE,
+            "ok": True,
+            "text": (
+                f"用量：{data.get('steps', 0)} 步 · {data.get('calls', 0)} 次调用 · "
+                f"{data.get('prompt_tokens', 0)}+{data.get('completion_tokens', 0)} token"
+            ),
         }
     if kind == ERROR:
         return {"type": ERROR, "ok": False, "text": str(data.get("message") or "")}
