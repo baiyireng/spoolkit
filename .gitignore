@@ -21,6 +21,9 @@ __pycache__/
 scratch_lab/
 .tmp/
 
+# 互动面探针的沙箱副本与快照（scripts/interact_probe.py 的产物，不进仓库）
+.probe_runs/
+
 # 本地交接备忘（开发机用，不进仓库）
 docs/roadmap.md
 
