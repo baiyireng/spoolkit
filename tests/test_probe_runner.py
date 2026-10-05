@@ -899,3 +899,136 @@ def test_审查读数的上限旋钮接上了():
     assert all("超上限" in item for item in failed)
     # 清单里没写这几条时它们只是被记录，不参与判定。
     assert probe_runner.evaluate_bounds(probe, dict(base)) == []
+
+
+# ---- L3 语义审查（P2 后半）的读数 -------------------------------------------
+
+
+def _l3_events() -> str:
+    return "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "note",
+                    "text": "本次运行的 L3 语义审查读数…",
+                    "kind": "l3_readings",
+                    "ran": True,
+                    "trigger": "F1 L1/L2 有发现（2 条）",
+                    "unverified": 1,
+                    "conflicts": {"no_edit": 1},
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "type": "note",
+                    "text": "L3 语义审查发现（结构化）",
+                    "kind": "l3_detail",
+                    "findings": [
+                        {"file": "a.py", "line": 1, "severity": "high", "verified": True}
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"type": "note", "text": "高危", "kind": "semantic_finding"},
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"type": "note", "text": "拦下", "kind": "l3_blocked"},
+                ensure_ascii=False,
+            ),
+            # 触发条件不满足时也发一条读数，但 `ran=False`：**不许数成一次审查**。
+            json.dumps(
+                {
+                    "type": "note",
+                    "text": "没跑",
+                    "kind": "l3_readings",
+                    "ran": False,
+                    "trigger": "没有命中任何触发条件",
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+
+def test_L3读数按kind分开数():
+    counters = probe_runner.parse_events(_l3_events())
+
+    # `review_l3_ran` 只数**真的调用了模型**的那一次（第二条读数 ran=False）。
+    assert counters["review_l3_ran"] == 1
+    assert counters["l3_findings"] == 1
+    assert counters["l3_unverified"] == 1
+    assert counters["l3_blocked"] == 1
+    assert counters["l3_findings_by_severity"] == {"high": 1}
+    assert counters["l3_conflicts"] == {"no_edit": 1}
+    # L3 的发现也算**审查发现**（与 L1/L2 同一本账），但读数与结构化那两条不算。
+    assert counters["review_findings"] == 1
+    assert counters["review_findings_by_kind"] == {"semantic_finding": 1}
+
+
+def test_没有L3事件时三个读数都是零():
+    counters = probe_runner.parse_events(CANNED_EVENTS)
+
+    assert counters["review_l3_ran"] == 0
+    assert counters["l3_findings"] == 0
+    assert counters["l3_blocked"] == 0
+
+
+def test_记录里三个L3字段齐全且跳过记录也齐(tmp_path):
+    """三个 L3 字段是**必填**：缺了它，记录与以后对比时就少一层读数。
+
+    L3 的**值**由事件流解析（上面那两条用例），这里钉的是「字段在不在」：
+    `REQUIRED_RECORD_KEYS` 里有、组装点给了、跳过记录也带齐（`run_one` 那
+    一条与 P0/P1 的同类断言各自管自己那批字段；这里只钉 L3 这三个）。
+    """
+    for key in ("review_l3_ran", "l3_findings", "l3_blocked"):
+        assert key in probe_runner.REQUIRED_RECORD_KEYS, f"{key} 必须是必填字段"
+    probe = probe_by_id("merge-html")
+    options = probe_runner.resolve_options(
+        MANIFEST,
+        probe_runner.build_parser().parse_args(
+            ["--probe", "merge-html", "--root", str(tmp_path)]
+        ),
+    )
+
+    skipped = probe_runner.skipped_record(probe, options, 0, 1, 0, 0.0)
+    for key in ("review_l3_ran", "l3_findings", "l3_blocked"):
+        assert key in skipped, f"跳过记录缺字段 {key}"
+    # 跳过的那一次什么都没跑 → 读数是 0（不是缺失、也不是「没这回事」）。
+    assert skipped["review_l3_ran"] == 0
+    assert skipped["l3_findings"] == 0
+    assert skipped["l3_blocked"] == 0
+
+
+def test_L3的发现条数走上限旋钮():
+    probe = probe_by_id("fix-bug")
+    base = {
+        "repeat_blocks": 0,
+        "read_blocks": 0,
+        "supervisor_false_claims": 0,
+        "stale_references": 0,
+        "tests_weakened": 0,
+        "evidence_gaps": 0,
+        "review_findings": 0,
+        "l3_findings": 5,
+        "l3_unverified": 3,
+        "timed_out": False,
+        "spawn_error": "",
+        "seed_unchanged": True,
+        "policy_file_ok": True,
+        "guards_ok": True,
+        "guard_failures": [],
+        "policy_in_run": "auto",
+    }
+    limited = dict(
+        probe, expect={"max_l3_findings": 2, "max_l3_unverified": 1}
+    )
+
+    failed = probe_runner.evaluate_bounds(limited, base)
+
+    assert len(failed) == 2, failed
+    assert all("L3" in item for item in failed)
+    # 清单里没写这两条时它们只是被记录（先记录、后标定，§4 D8）。
+    assert probe_runner.evaluate_bounds(probe, dict(base)) == []

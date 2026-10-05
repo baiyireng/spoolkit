@@ -173,6 +173,15 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         help="超过几件就提醒「审查会吃力」（0 表示用默认值 5）",
     )
     parser.add_argument(
+        "--review",
+        action="store_true",
+        help=(
+            "显式要求跑一次语义审查（L3，设计稿 §5 的第 5 条触发条件）。"
+            "默认关：语义审查是一次模型调用，其余四条触发条件（L1/L2 有发现、"
+            "L2 回归、改动规模越线、有没有证据的完成声明）本来就会按需触发"
+        ),
+    )
+    parser.add_argument(
         "--subagent-steps",
         type=int,
         default=20,

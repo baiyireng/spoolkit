@@ -340,6 +340,8 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             # 能力标定：工作区的覆盖 + 命令行显式给的那两个
             overrides=overrides,
             session=args.session,
+            # `--review`：显式要求跑一次语义审查（L3 触发条件第 5 条）。
+            semantic_review=bool(getattr(args, "review", False)),
         ),
         wiring=LoopWiring(
             memory=memory,
@@ -452,6 +454,8 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             step_ceiling=args.step_ceiling,
             overrides=overrides,
             session=args.session,
+            # `--review`：显式要求跑一次语义审查（L3 触发条件第 5 条）。
+            semantic_review=bool(getattr(args, "review", False)),
         ),
         wiring=LoopWiring(
             memory=memory,

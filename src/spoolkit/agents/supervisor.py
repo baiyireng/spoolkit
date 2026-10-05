@@ -263,6 +263,11 @@ def fact_conflicts(text: str, facts: RunFacts) -> list[FactConflict]:
     返回**入参不是结论**：判据只看记录。宁可漏判（那句话照旧送出去），
     也不要误判——误判会把一条对的建议改写成一句莫名其妙的话。
     所以只认「明确否定且记录与之相反」这两种形状。
+
+    **自动审查层 L3 直接复用这一条**（`agent/review_semantic.py` 的
+    `ReviewFacts.as_run_facts()` 把共有的三项交回来），并在它之上加了第三种
+    形状（「某一处声称的改动在 diff 里找不到」）。判据本身在这里只有一份：
+    它正是被督导幻觉坑出来的那两条，复制一遍就等于埋第二个坑。
     """
     if not text:
         return []

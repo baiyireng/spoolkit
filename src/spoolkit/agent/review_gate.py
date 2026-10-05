@@ -33,7 +33,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Sequence
 
 from spoolkit.agent.audit import HIGH, Finding
-from spoolkit.tools.edit import DELETE_TOOL, looks_like_path
+from spoolkit.tools.capabilities import (
+    ACTION_TOOLS,
+    EDIT_TOOLS,
+    NETWORK_ENTRY_TOOLS,
+    NETWORK_TOOLS,
+)
+from spoolkit.tools.edit import looks_like_path
 
 # ---- 动作分类（§3.2.0 的那张表）--------------------------------------------
 
@@ -42,19 +48,17 @@ DANGEROUS = "dangerous"
 #: 只记录、不拦（文件编辑的成果一律照落盘）。
 RECORDED = "recorded"
 
-#: 「执行」类工具：跑命令 / 删文件 —— 这些是动作，不是成果。
-ACTION_TOOLS = frozenset({"run_command", DELETE_TOOL, "move_file", "rename_file"})
-
-#: 「出网」类工具：出网是环境副作用，不是「写在哪儿」的问题（§3.2.5）。
-NETWORK_TOOLS = frozenset({"web_fetch", "web_search"})
-
-#: 主循环里**真的会出网**的那一个动作（§3.2.2 T3 的「新增出网」那一面）。
-#:
-#: 为什么要点名 `research`：主循环的工具表里只有 `research` 会走到网络
-#: （`web_read` 只读本地缓存，`web_fetch`/`web_search` 只发给研究会话）。
-#: 不点它的话，T3 的联网那一面在主循环里**一个调用方都没有**——升级判据
-#: 写了却永远不触发，等于放行出网。
-NETWORK_ENTRY_TOOLS = frozenset({"research"})
+# 「执行」类工具（跑命令 / 删文件 —— 这些是动作，不是成果）、「出网」类工具、
+# 以及主循环里真的会出网的那一个入口，三档清单都从
+# `spoolkit.tools.capabilities` 的**能力元数据**派生：
+#   ACTION_TOOLS       ← `destructive=True`
+#   NETWORK_TOOLS      ← `network=True and not network_entry`
+#   NETWORK_ENTRY_TOOLS← `network_entry=True`（就是 `research`）
+# 这里只做转出，不手写第二份（手写清单会漂移：漏一个名字就是静默放开一类动作）。
+#
+# 为什么要点名 `research`：主循环的工具表里只有它会走到网络（`web_read` 只读本地
+# 缓存，`web_fetch`/`web_search` 只发给研究会话）。不点它的话，T3 的联网那一面
+# 在主循环里**一个调用方都没有**——升级判据写了却永远不触发，等于放行出网。
 
 # ---- T6：工作区外的两种落点（§3.2.2 的处置表 + §2.5）------------------------
 
@@ -70,7 +74,12 @@ OUTSIDE = "outside"
 WRITE_PATH_KEYS = ("path", "paths", "target", "src", "dst", "dest")
 
 #: 写工具：产出，永远只记录、不拦。
-WRITE_TOOLS = frozenset({"write_file", "replace_text", "replace_lines"})
+#:
+#: 这一档**就是 `capabilities.EDIT_TOOLS`**（交内容的那几把：`writes=True` 且
+#: 不破坏、也不是「确认入口」）。注意它与 `agent/loop.py` 里那个同名常量**不是**
+#: 同一个集合：loop 那一档还含 `delete_file`（它判「这一步有没有动工作区」），
+#: 而这里只收「成果」，多了删除就会把动作拦截漏出去。
+WRITE_TOOLS = EDIT_TOOLS
 
 #: 触发条件 id → 一句人读的判据（收尾报告与事件流里点名用）。
 TRIGGER_NOTES: dict[str, str] = {
@@ -82,7 +91,7 @@ TRIGGER_NOTES: dict[str, str] = {
     "T6": "工作区外路径（关联目录：拦下写、请示一次；域外：直接拒绝并说明怎么才能做）",
     "T7": "改动规模越线**且**（该批没被验证过 或 同批有高严重度发现）",
     "T8": "L2 行为回归",
-    "T9": "L3 高严重度发现未处理（P2 才接，本轮只留挂点）",
+    "T9": "L3 语义审查的高严重度发现未被处理（只降结论：成果照落盘）",
     "T10": "没有验证器可用的高风险改动",
     "T11": "回退能力还没把握（拦动作）",
     "T12": "L1/L2 高严重度未处理（自动修 N 轮后仍在）",
@@ -755,6 +764,7 @@ class EscalationGate:
         revert_command: str = "",
         written: dict[str, str] | None = None,
         verified: bool = False,
+        semantic: Sequence[Finding] = (),
     ) -> list[EscalationRequest]:
         """收尾这一刻命中的触发条件（纯规模 / 纯语义那一类）。
 
@@ -764,6 +774,12 @@ class EscalationGate:
 
         `blocking_failure` 是 T8 的**门槛**，`verified` 是 T7 的**充分条件**
         那一半，两段说明都在方法体里。
+
+        `semantic` 是 **L3 过了事实核对的高严重度发现**（P2 后半）。它与 `findings`
+        里那批分开传，是因为两者的处置不同（§3.2.2 的处置表）：
+        L1/L2 的高严重度接在 T12 上（「自动修 N 轮后**仍在**」），而 L3 单独接
+        T9（「L3 高严重度发现未被处理」）。**两条都只降结论**：成果照落盘、
+        可回退、报告逐条列出（§2.5 的硬不变量、§6 P2 验收第 7 条）。
         """
         out: list[EscalationRequest] = []
         high = [item for item in findings if item.severity == HIGH]
@@ -840,6 +856,30 @@ class EscalationGate:
                 self._completion(
                     "T12",
                     f"自动修 N 轮后高严重度发现仍在（{len(high)} 条）：{where}",
+                )
+            )
+        # ---- T9：L3 高严重度发现未被处理（P2 后半，§3.1 第 3 条）-------------
+        #
+        # 它与 T12 分开是因为**降级的理由不同**：T12 是「机械判据报过、自动修
+        # N 轮后仍在」，而 T9 是「语义审查报了、它没修也没给出机械可核对的
+        # 理由」。探针要按触发条件分档（`escalation_by_trigger`），两条混成
+        # 一条就查不出是哪一层在拦。
+        #
+        # **它只降结论、不碰成果**（§3.2.2 处置表把 T9 归在「纯语义」那一档）：
+        # 成果已经落盘、可回退、报告逐条列出（§6 P2 验收第 7 条明写：
+        # 「L3 发现不构成「成果不许落盘」的理由」，也**不构成「不许删文件」的
+        # 理由**）。
+        if semantic:
+            where = "；".join(
+                f"{item.where or '（未给位置）'} {item.summary}" for item in semantic[:5]
+            )
+            out.append(
+                self._completion(
+                    "T9",
+                    f"L3 语义审查的高严重度发现未被处理（{len(semantic)} 条）：{where}",
+                    paths=tuple(
+                        sorted({item.path for item in semantic if item.path})
+                    ),
                 )
             )
         if not has_baseline or not revert_command:

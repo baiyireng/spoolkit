@@ -333,6 +333,12 @@ REVIEW_KNOBS: tuple[tuple[str, float], ...] = (
     # 一次对照要跑两次子进程，而这个上限决定「跑不完」会不会把整条对照变成
     # 「查不了」——所以它是标定值，按项目入口的轻重调（默认 60s）。
     ("behavior_entry_timeout", 60),
+    # 「L3 语义审查」（自动审查层 P2 后半）补登的三个：L3 是一次模型调用，
+    # 所以三条都要可覆盖——触发线（改多大才值得审）、输出上限、发现条数上限。
+    # 默认值依据见 `limits.py` 里各自的 note 与设计稿 §4/§5。
+    ("review_trigger_files", 5),
+    ("review_max_tokens", 700),
+    ("review_max_findings", 12),
 )
 
 
@@ -384,7 +390,8 @@ def test_旋钮没有重名() -> None:
     + 「三道墙」那一轮的 4（`WALL_KNOBS`）
     + 「确认清单拆成独立小回合」那一轮的 5（`CONFIRM_KNOBS`）
     + 「意图与可评估的建议」那一轮的 4（`INTENT_KNOBS`）
-    + 「被拦的尝试不该烧掉机会 + 拦截要真的换路」那一轮的 1（`REROUTE_KNOBS`）。
+    + 「被拦的尝试不该烧掉机会 + 拦截要真的换路」那一轮的 1（`REROUTE_KNOBS`）
+    + 「不许宣称完成 / L2 / L3」那几轮的 5（`REVIEW_KNOBS`）。
     """
     assert len(limits.KNOBS) == len(limits._BY_NAME)
     assert len(limits.KNOBS) == (

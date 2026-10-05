@@ -240,6 +240,26 @@ KNOBS: tuple[Knob, ...] = (
         "要么调大它，要么把 README 里的用法示例换成小样本",
     ),
     Knob(
+        "review_trigger_files", 5, CAPABILITY,
+        "L3 语义审查（自动审查层 P2）的**规模触发线**：这一轮改动的文件数达到"
+        "它（或行数达到它 × 80）就跑一次语义审查。依据：设计稿 §5 第 3 条要求"
+        "「与 review_limit 同量级」，5 就是那个量级；行数按 5 × 80 = 400 折算"
+        "（与 `review_gate.trigger_lines` 同一个口径）。**它是省钱的旋钮**："
+        "一次语义审查 ≈ 主循环一步的量级，调小 = 多审查多花钱，调 0 = 只按"
+        "其余四条触发条件跑",
+    ),
+    Knob(
+        "review_max_tokens", 700, CAPABILITY,
+        "L3 一次语义审查的**输出**上限（token）。发现清单是结构化的 JSON，700 "
+        "够它给一屏发现；这是设计稿 §5 说的「上界用 max_tokens 与超时双重约束」"
+        "里的一半（另一半是 `behavior_entry_timeout` 那种墙钟）",
+    ),
+    Knob(
+        "review_max_findings", 12, CAPABILITY,
+        "L3 一次审查最多收几条发现（超出即丢弃并在读数里说明）。依据：设计稿 "
+        "§4 的噪声控制——「一次审查的发现条数设上限，超出说明改动太大、应当拆」",
+    ),
+    Knob(
         "survey_budget", 1200, CAPABILITY,
         "survey 一次最多收多少 token 的上下文",
     ),

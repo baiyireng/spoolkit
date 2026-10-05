@@ -67,13 +67,26 @@ TESTS_WEAKENED_KIND = "tests_weakened"
 #: 「完成声明没有证据」这一类 note 的 kind（探针的 `evidence_gaps` 字段）。
 EVIDENCE_GAPS_KIND = "evidence_gaps"
 
-#: L2 行为回归（P2）两类发现的 note kind。与 L1 分开是因为探针要单独数它们
+#: L2 行为回归（P2）三类发现的 note kind。与 L1 分开是因为探针要单独数它们
 #: （「这一轮有没有行为回归」与「残留引用几条」是两件事），而混在 `audit` 里
 #: 就只能靠读散文认。kind 名与 `agent/review_behavior.py` 的判据名逐字一致——
 #: 那边是产出处，这边是出口映射。
 BEHAVIOR_CHANGED_KIND = "behavior_changed"
 CLI_SURFACE_CHANGED_KIND = "cli_surface_changed"
 PERFORMANCE_REGRESSED_KIND = "performance_regressed"
+
+#: L3 语义审查（P2 后半）发现的 note kind。与 L1/L2 分开的理由同上：探针要
+#: **单独数** `l3_findings`（它与 `review_findings` 的总数不是一回事），
+#: 混进 `audit` 就只能靠读散文认。判据名与 `agent/review_semantic.py`
+#: 里的 `L3_FINDING_KIND` 逐字一致——那边是产出处，这边是出口映射。
+SEMANTIC_FINDING_KIND = "semantic_finding"
+
+#: L3 的**过程读数**（触发条件、跑没跑、被事实核对剔除几条、为什么没给结论）。
+#: 与 L2 的 `behavior_readings` 同一个口径：它是排查材料，**不是发现**
+#: （不进 `REVIEW_NOTE_KINDS`，也不进 `review_findings`）。
+L3_READINGS_KIND = "l3_readings"
+#: 「L3 判了一次，结论是拦下完成声明」（探针的 `l3_blocked`）。
+L3_BLOCKED_KIND = "l3_blocked"
 
 # ---- P1：风险分级放行的两个 kind ---------------------------------------------
 #
@@ -121,6 +134,8 @@ _NOTE_KIND_BY_KIND = {
     BEHAVIOR_CHANGED_KIND: BEHAVIOR_CHANGED_KIND,
     CLI_SURFACE_CHANGED_KIND: CLI_SURFACE_CHANGED_KIND,
     PERFORMANCE_REGRESSED_KIND: PERFORMANCE_REGRESSED_KIND,
+    # L3 语义审查的发现（探针单独数 `l3_findings`，同时进 `review_findings`）。
+    SEMANTIC_FINDING_KIND: SEMANTIC_FINDING_KIND,
 }
 
 

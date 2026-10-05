@@ -31,6 +31,7 @@ from spoolkit.agent.audit import (
     NOT_RUN,
     PASS,
     ReviewLedger,
+    SEMANTIC_FINDING_KIND,
     TESTS_WEAKENED_KIND,
     audit,
     boundary_write,
@@ -62,6 +63,22 @@ from spoolkit.agent.review_gate import (
     parse_reply,
     render_decisions,
     render_summary,
+)
+from spoolkit.agent.review_semantic import (
+    L3_BLOCKED_KIND,
+    L3_DETAIL_KIND,
+    L3_READINGS_KIND,
+    ChangeFacts,
+    ReviewMaterials,
+    SemanticReport,
+    TriggerDecision,
+    as_findings as semantic_findings,
+    blocked_payload as semantic_blocked_payload,
+    decide_triggers as semantic_triggers,
+    reading_payload as semantic_reading_payload,
+    render_report as render_semantic_report,
+    render_unverified as render_semantic_unverified,
+    review as review_semantic,
 )
 from spoolkit.agent.state import TaskState, clear_state, load_state, save_state
 from spoolkit import limits as _limits
@@ -103,6 +120,12 @@ from spoolkit.tools.edit import (
     lingering_hits,
     lingering_note,
 )
+from spoolkit.tools.capabilities import (
+    COMMIT_TOOLS,
+    EDIT_TOOLS,
+    PROGRESS_TOOLS,
+    WRITE_TOOLS,
+)
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import ToolCall, ToolResult
 from spoolkit.tools.verify import (
@@ -117,23 +140,17 @@ from spoolkit.tools.view import WorkspaceView
 SYSTEM_PROMPT = T.SYSTEM
 
 LOOKUP_TOOLS = ("find_symbol", "file_symbols", "find_callers")
-EDIT_TOOLS = ("replace_lines", "replace_text", "write_file")
 
-# 「把工作区变成我要的样子」的写工具：交内容的那几把 + 删除。
+# 写工具那几档清单（EDIT_TOOLS / WRITE_TOOLS / COMMIT_TOOLS / PROGRESS_TOOLS）
+# **不在这一层手写**：它们由 `spoolkit.tools.capabilities` 从**每件工具的能力
+# 元数据**派生（`writes` / `destructive` / `commits` / `progress`），这里只做转出。
 #
-# 删除必须与写工具并列，否则循环看不见它：`edited` / `changed_paths` /
-# 自动验证的范围都按这个集合判定，漏了它就会出现「删掉了文件，但系统认为
-# 这一步什么都没做」——收尾时不报最终状态，验证也不会为它跑一次。
-WRITE_TOOLS = EDIT_TOOLS + (DELETE_TOOL,)
-
-# 「把改动推进下去」的工具：写工具 + 确认入口。
-#
-# 与 EDIT_TOOLS 分开的理由是它们各自回答不同的问题：EDIT_TOOLS 是**交内容**
-# 的那几把（步数预算按它的产出规模放大、验证按它改过的路径分派），而确认入口
-# 不交内容、只是一个很小的举证回合。但有一处它必须算进去：漫游太久时循环会把
-# 采样空间收窄成「只能写」——收窄之后如果确认入口被语法拿掉，模型就再也
-# 确认不了那份暂存的正文了。
-COMMIT_TOOLS = WRITE_TOOLS + (CONFIRM_TOOL,)
+# 为什么不各留一份：这几档回答的是「哪几把工具能把工作区变成我要的样子」，
+# 那是**工具的能力**，不是这一层的判断。两份清单各自演化必然漂移，而且漏一个
+# 名字不会有任何报错——`edited` / `changed_paths` / 自动验证的范围、收窄后的
+# 采样空间都会静默少一块。原先写在这里的两条事实（删除必须与写工具并列；
+# 确认入口必须留在收窄后的采样空间里）现在逐条写在 `capabilities.py` 的声明
+# 与派生规则旁边，并由 `tests/tools/test_capabilities.py` 的冻结快照钉住。
 
 # 同一个调用连续重复到第几次时加提醒（仍然执行），到第几次时不再执行。
 #
@@ -511,6 +528,13 @@ BEHAVIOR_KINDS = frozenset(
         BEHAVIOR_NOT_CHECKED_KIND,
     }
 )
+
+#: L3（P2 后半，语义审查）产出的**发现类别**。它单独一份的理由与上面两组
+#: 不同：L1/L2 是每轮都能重算的机械判据，而 L3 是**一次模型调用**——它的
+#: 判词同样只对某一版内容成立（缓存键含内容指纹），但**不能**在每次收尾时
+#: 无条件重跑（那就成了「每步都跑」）。所以它的作废与重算是同一个入口
+#: （`_semantic_review`：键变了才重跑），这里只登记类别名。
+L3_KINDS = frozenset({SEMANTIC_FINDING_KIND})
 
 
 def _hit_finding(hit) -> Finding:
@@ -971,9 +995,9 @@ def _is_repeat_output(content: str, prefetched: str, seen: set[str]) -> bool:
     seen.add(body)
     return body in prefetched
 
-# 只有这几类工具的结果算「进度」。读文件和搜索不算：它们是手段，
+# 只有这几类工具的结果算「进度」（清单由 `capabilities` 的 `progress` 那一档派生，
+# 与上面那几档写工具清单同一个来源）。读文件和搜索不算：它们是手段，
 # 不是产出，记进去只会把状态撑满噪声。
-PROGRESS_TOOLS = ("write_file", DELETE_TOOL, "replace_lines", "run_command")
 # 「已完成」在状态块里列几条。它每轮都注入，所以是每个请求的税——
 # 完整记录留在状态与 .agent/progress.md 里（见 TaskState.DONE_INLINE）。
 MAX_DONE_NOTES = TaskState.DONE_INLINE
@@ -1179,6 +1203,24 @@ class AgentLoop:
         # 读数一模一样（缓存键是那一批改动的路径+内容指纹，内容变了就重跑）。
         self._behavior_report: BehaviorReport | None = None
         self._behavior_key: str = ""
+        # ---- L3 语义审查（P2 后半，§5 L3）-------------------------------------
+        #
+        # 它是一次**模型调用**（成本 ≈ 主循环一步），所以三条纪律一起落地：
+        # ① 只在触发条件满足时跑（`semantic_triggers`）；② 一次运行里同一份内容
+        # 只跑一遍（缓存键 = 那一批改动的路径 + 内容指纹，与 L2 同口径）；
+        # ③ 它坏了、没给结论、或结论解析不出来时**不据此阻断**——那三种情况
+        # 都是「这次审查没给出东西」，把它们当成缺陷会让每次失败调用都去拦
+        # 一次完成声明（§4 的误报代价）。
+        self._semantic_report: SemanticReport | None = None
+        self._semantic_key: str = ""
+        #: 触发条件判过一次没有。它的理由是**读数**，一份就够；每一版内容各发
+        #: 一条只会把事件流灌满（同一条信息不出现两遍）。
+        self._semantic_decision_sent: bool = False
+        #: 「L3 拦下完成声明」这条 note 发过没有（一次运行只发一条，与
+        #: `_review_note_sent` 同一个理由：探针 `l3_blocked` 量的是运行）。
+        self._semantic_block_sent: bool = False
+        #: 本次运行里 L3 真的跑了几次（模型调用次数，读数用）。
+        self._semantic_runs: int = 0
         #: 目标原文（L2.4 判「这次任务是不是优化/提速类」要用它）。
         self._goal_text: str = ""
         # 本次运行里「没有证据的完成声明」条数（探针的 `evidence_gaps` 字段）。
@@ -1356,6 +1398,13 @@ class AgentLoop:
         # 当成这一次的（缓存键含内容指纹，但空键会让「这一轮没改动」命中旧报告）。
         self._behavior_report = None
         self._behavior_key = ""
+        # L3 的读数同样是**本次运行**的：上一次那批改动的审查结论不能带过来
+        # （缓存键含内容指纹，但空键会让「这一轮没改动」命中旧报告）。
+        self._semantic_report = None
+        self._semantic_key = ""
+        self._semantic_decision_sent = False
+        self._semantic_block_sent = False
+        self._semantic_runs = 0
         # 目标原文（L2.4 判「优化类任务」要用它）。**必须放在这一轮的状态重置
         # 之后**：写在前面的 `goal = state.goal` 那里会被下面这行清零，于是
         # 「优化类任务」永远判不出来——实测就是这样漏掉的（探针里
@@ -2604,6 +2653,10 @@ class AgentLoop:
         attention = self._escalation_note()
         if attention:
             risk += attention
+        # ---- L3 那一段：逐条 file:line（只在真的有东西时出现）----------------
+        semantic = self._semantic_report_section()
+        if semantic:
+            risk += semantic
         # ---- 组装：结论 / 验证 / 风险 / 详情 / 动作 ---------------------------
         #
         # 原先"小改动成功"时把 ②③ 并成一行（压到三行）：那一步正是把内部账糊到
@@ -2673,6 +2726,31 @@ class AgentLoop:
         # 这里判的是「同一条命令、同一份输入，输出有没有变」与「优化类任务
         # 是不是真的做到了又快又不变」（§2.5：拦的是完成声明，不是成果）。
         self._behavior_review(list(changed))
+        # ---- L3 语义审查（P2 后半，§5 L3）-------------------------------------
+        #
+        # 与 L2 放在同一个位置、同一个理由：它是「不许宣称完成」那一关的输入
+        # 之一，必须排在 `_apply_completion_gate` 之前（下面两条收尾出口都要过
+        # 那一关）。
+        #
+        # 与 L2 的两点不同，都是这一层的成本纪律：
+        #   ① 它只在**触发条件满足**时真的调用模型（`decide_triggers`），
+        #      不满足时一次调用都不发生（§5、§7.5「不做成每步都跑」）；
+        #   ② 它对**同一份内容**只跑一次（缓存键与 L2 同口径），而自动修的
+        #      每一轮内容都会变，所以那一轮会重跑一次——那正是「发现当反馈
+        #      重新注入下一轮」要的（§3.1 处理顺序第 1 条）。
+        #
+        # 它同样**不动落盘、不回滚任何东西**：高严重度发现只拦「完成声明」与
+        # 危险动作，成果照落盘（§2.5 的硬不变量）。
+        #
+        # **传进去的是「上一版内容的验证结论」**（`_final_verify`），不是这一版
+        # ——这一版的验证还在下面几步之后才跑（那个 `passed` 变量此刻还是 None）。
+        # 证据账本的缺口判据对它敏感：拿 None 去算的话**每一轮都会报一条「没跑」
+        # 的缺口**，于是 L3 在小改动上也永远触发——那是「每步都跑」的另一种写法
+        # （实测抓出来的：一次 `note.txt` 单文件小改也被判成 F4）。第一次收尾时
+        # 这里为 None，账本如实说「没跑」并按 F4 触发一次，那是**对的**：
+        # 那一刻确实还拿不到结论。
+        prior_verified = self._final_verify[0] if self._final_verify else None
+        self._semantic_review(list(changed), prior_verified=prior_verified)
         # 越界写那类高危发现要进收尾报告：它回答的是「这次运行动了不该动的
         # 东西没有」，而收尾报告是人真的会读的那一份文本（见 `_boundary_report`）。
         boundary = self._boundary_report()
@@ -2796,6 +2874,16 @@ class AgentLoop:
             return
         self._review_blocked = True
         self._review_block_note = blocked if announce else ""
+        # ---- L3 拦下完成声明（§3.1 第 3 条 / §6 的 `l3_blocked`）--------------
+        #
+        # **一次运行只发一条**（与 `blocked_by_review` 同一个理由：探针那个字段
+        # 量的是运行，不是「判了几次」）。它只说明「L3 的高严重度发现让结论降级」
+        # ——**不是**「成果没落盘」：那两件事在本设计里已经分开（§6 字段表）。
+        if not self._semantic_block_sent and self.semantic_high_findings():
+            self._semantic_block_sent = True
+            report = self._semantic_report
+            if report is not None:
+                self._emit("note", semantic_blocked_payload(report))
         trace = self._trace
         if trace is not None:
             trace.append("收尾: 审查拦下了「完成声明」——" + _flat_line(blocked)[:160])
@@ -3537,6 +3625,9 @@ class AgentLoop:
             verified=bool(
                 self._final_verify is not None and self._final_verify[0] is True
             ),
+            # T9（L3 高严重度发现未被处理）：**只降结论**——成果照落盘、可回退、
+            # 报告逐条列出（§3.2.2 处置表把 T9 归在「纯语义」那一档）。
+            semantic=self.semantic_high_findings(),
         )
         if not requests:
             # 没有触发条件（这一轮清清白白）：清掉上一轮留下的拦下判词，
@@ -3888,6 +3979,262 @@ class AgentLoop:
             return ""
         return "\n本次运行的 L2 行为回归：\n" + "\n".join(lines)
 
+    # ---- L3 语义审查（P2 后半，§5 L3）--------------------------------------
+    #
+    # 三条纪律落在这一组方法里（判据本体在 `agent/review_semantic.py`，这里只
+    # 做接线与出口）：
+    #   ① **独立上下文**：送审材料由 `_semantic_materials` 拼，里面**没有**模型
+    #      那一段收尾结论——「不把自我陈述喂给审查者」因此是结构上成立的，
+    #      不靠调用方记得少传一个参数（§9.2）。
+    #   ② **结构化 + 事实核对**：解析、`ReviewFacts` 核对、降级都在那一层。
+    #   ③ **阻断语义与 L1/L2 一致**：发现进同一个账本、走同一个出口
+    #      （`_emit_review_finding` → `audit_log` → T9/T12 → 「不许宣称完成」），
+    #      而**成果照落盘**（§2.5）。
+
+    def _semantic_key_for(self, changed: Sequence[str]) -> str:
+        """这一批改动的缓存键：与 L2 同一个口径（路径 + 内容指纹）。
+
+        为什么不能只按路径集合：一次模型审查的判词是对**某一版内容**下的结论，
+        内容变了就必须重跑，否则「上一版说没问题」会被当成「这一版也没问题」。
+        """
+        return self._behavior_key_for(changed)
+
+    def _semantic_evidence(self) -> list[str]:
+        """跑过什么、结果如何（**原话**，不是总结）。
+
+        判据故意只认两样机械事实：最终验证那条结论、以及账本里 L1/L2 的发现。
+        主循环的 trace 与模型那一段收尾结论**都不进**——前者是实现者的推理，
+        后者是它的自我陈述。
+        """
+        out: list[str] = []
+        if self._final_verify is not None:
+            ok, body = self._final_verify
+            out.append(
+                f"最终验证：{'通过' if ok else '未通过'}——{_flat_line(body)[:400]}"
+            )
+        else:
+            out.append(f"{CANNOT_CHECK}收尾这一刻没有拿到验证结论（本次运行没挂验证器）")
+        for finding in self.audit_log.high()[:8]:
+            out.append(f"发现（{finding.kind}）：{finding.where or '（未给位置）'} {finding.summary}")
+        return out
+
+    def _semantic_materials(self, changed: Sequence[str]) -> ReviewMaterials:
+        """拼送审材料。**刻意不含模型那一段收尾结论**（独立上下文的边界）。"""
+        changes: list[ChangeFacts] = []
+        diff_parts: list[str] = []
+        for path in list(dict.fromkeys(changed)):
+            item = next(
+                (
+                    one
+                    for one in (self.pending.items() if self.pending is not None else [])
+                    if one.path == path
+                ),
+                None,
+            )
+            if item is None:
+                continue
+            old_lines = str(item.old_text).splitlines()
+            new_lines = str(item.new_text).splitlines()
+            changes.append(
+                ChangeFacts(
+                    path=item.path,
+                    edited=not item.is_new_file and not item.deleted,
+                    created=item.is_new_file,
+                    deleted=bool(item.deleted),
+                    added=len(new_lines),
+                    removed=len(old_lines),
+                )
+            )
+            diff_parts.append(item.diff)
+        behavior: list[str] = []
+        report = self._behavior_report
+        if report is not None:
+            behavior.append(report.render())
+            behavior += [item.render() for item in report.findings[:8]]
+        # 回退能力（§2.5 第 2 条）：判据与收尾闸门同一份材料。读不出来时按
+        # 「有」处理——那一边（`_completion_blocked`）会自己判一遍，这里只把
+        # 事实告诉审查者，不该成为它拒答的理由。
+        has_baseline = True
+        if self.pending is not None and len(self.pending):
+            try:
+                has_baseline = not self.pending.unbaselined()
+            except (OSError, ValueError, AttributeError):
+                has_baseline = True
+        return ReviewMaterials(
+            goal=self._goal_text,
+            changes=tuple(changes),
+            diff="\n".join(diff_parts),
+            mechanical=tuple(
+                item.render()
+                for item in self.audit_log.findings
+                if item.kind in MECHANICAL_KINDS
+            )[:8],
+            behavior=tuple(behavior),
+            checks_run=tuple(self._semantic_evidence()),
+            revert_command=self._revert_command(),
+            has_baseline=has_baseline,
+            workspace=self._file_state_line(list(changed)) if changed else "",
+        )
+
+    def _semantic_reading(self, report: SemanticReport, decision: TriggerDecision | None) -> str:
+        """L3 的**过程读数**（只进事件流与 trace，不进结论报告）。
+
+        与 L2 的读数同一个口径：触发条件、跑没跑、被剔除几条、「查不了」的理由
+        都是排查材料。结论报告里只留 `review_semantic.render_report` 那一段
+        ——它只在真的拦下东西时才有内容。
+        """
+        lines = [f"- {report.render()}"]
+        if decision is not None and decision.reasons:
+            lines.append("- 命中的触发条件：" + "；".join(decision.reasons))
+        if report.unverified:
+            lines.append(f"- 被事实核对降级 {report.unverified} 条（已按记录改写）")
+        if report.conflicts:
+            parts = "、".join(
+                f"{key} {value}" for key, value in sorted(report.conflicts.items())
+            )
+            lines.append(f"- 与记录冲突的断言分档：{parts}")
+        if report.reasons:
+            lines.append("- 审查者给的理由：" + "；".join(report.reasons[:3]))
+        body = "\n".join(lines)
+        return f"\n本次运行的 L3 语义审查读数（过程材料，不进结论报告）：\n{body}"
+
+    def _semantic_review(
+        self, changed: Sequence[str], *, prior_verified: bool | None = None
+    ) -> SemanticReport | None:
+        """跑一遍 L3（或因触发条件不满足而跳过），把发现送进账本与事件流。
+
+        **一次运行里同一份内容只跑一遍**：收尾那条「沿用上次验证」的捷径与收尾
+        本体都会走到这里，重跑只是再花一次模型调用、结论一模一样。
+
+        `prior_verified` 是**上一版内容**的验证结论（`_with_final_state` 传的
+        是 `_final_verify`，因为这一版的验证还没跑）。账本缺口的判据要它：
+        拿 None 去算的话每一轮都会报「没跑」，L3 就变成「每步都跑」了。
+        """
+        if not changed or self.pending is None:
+            return self._semantic_report
+        key = self._semantic_key_for(changed)
+        if self._semantic_report is not None and key == self._semantic_key:
+            return self._semantic_report
+        # 触发条件：五条里的四条在这里判（第 5 条走配置/调用方显式要求）。
+        #
+        # 「存在没有证据的完成声明」用的是**那个版本的验证结论**：账本按它算
+        # 缺口，而不是按「此刻还没跑」——后者会让每一轮都命中 F4。
+        decision = semantic_triggers(
+            finding_count=len(self.audit_log.findings),
+            regression=self._behavior_regression(),
+            files=len(set(changed)),
+            lines=sum(
+                len(str(one.new_text).splitlines())
+                for one in self.pending.items()
+                if one.path in set(changed)
+            ),
+            evidence_gaps=self._ledger_gaps(list(changed), prior_verified),
+            explicit=bool(getattr(self.config, "semantic_review", False)),
+            max_files=self.config.limit("review_trigger_files"),
+        )
+        # 旧判词先撤掉：判词是对某一版内容的结论，这一版可能已经改好了
+        # （与 L1/L2 的重判同一个理由）。
+        self.audit_log.forget_kind(L3_KINDS)
+        try:
+            report = review_semantic(
+                self._semantic_materials(changed),
+                root=self.config.project_root,
+                decision=decision,
+                chat=self.gateway,
+                max_tokens=int(self.config.limit("review_max_tokens")),
+                max_findings=int(self.config.limit("review_max_findings")),
+                # 事实核对那条「说某把工具不存在」的判据要**注册表里的名字**
+                # （与督导那一套同一个来源：`_run_facts` 也是从注册表取的）。
+                tools=frozenset(self.registry.names()),
+            )
+        except Exception as exc:  # noqa: BLE001 - 判据出不了结论不是运行失败
+            report = SemanticReport(
+                ran=False,
+                trigger=decision.note,
+                cannot_check=(
+                    f"{CANNOT_CHECK}L3 这一步没能得出结果"
+                    f"（{type(exc).__name__}: {exc}）"
+                ),
+            )
+        # ---- 三条出口 ---------------------------------------------------------
+        # ① 发现 → 账本 + 事件流（走 L1/L2 同一个出口：同一套严重度、同一套
+        #    `file:line`、同一套去重；T9/T12 与收尾报告据此判）。
+        for finding in semantic_findings(report):
+            self._emit_review_finding(finding)
+        if report.findings:
+            # 结构化那一份单独发一条（**读的人是壳与探针，不是模型**）：
+            # 每条发现的 file/line/severity/evidence 与「过没过事实核对」都在
+            # 这里，探针不必去解析散文（§4、§6 字段表）。
+            self._emit(
+                "note",
+                {
+                    "text": "L3 语义审查发现（结构化）",
+                    "ok": not report.blocked,
+                    "kind": L3_DETAIL_KIND,
+                    "findings": [item.to_payload() for item in report.findings],
+                    "blocking": len(report.blocking),
+                    "unverified": report.unverified,
+                    "conflicts": dict(report.conflicts),
+                },
+            )
+        # ② 读数 → 事件流与 trace（触发理由一份就够：它是读数，不是按版本变化的
+        #    结论；每换一版内容再发一条只会把事件流灌满）。
+        if not self._semantic_decision_sent or decision.run:
+            self._semantic_decision_sent = True
+            self._emit(
+                "note",
+                {
+                    "text": self._semantic_reading(report, decision),
+                    "ok": True,
+                    "kind": L3_READINGS_KIND,
+                    **semantic_reading_payload(report),
+                },
+            )
+            self._log(f"自动审查 L3：{report.render()}")
+        # ③ 「L3 拦下完成声明」→ 由 `_apply_completion_gate` 在真的拦下时发。
+        if report.ran:
+            self._semantic_runs += 1
+        self._semantic_report = report
+        self._semantic_key = key
+        return report
+
+    def semantic_high_findings(self) -> list[Finding]:
+        """L3 报出的、**过了事实核对**的高严重度发现（T9 的输入）。"""
+        return [
+            item
+            for item in self.audit_log.of_kind(SEMANTIC_FINDING_KIND)
+            if item.severity == HIGH
+        ]
+
+    def _semantic_report_section(self) -> str:
+        """收尾报告里的 L3 那一段（**只放结论与逐条 `file:line`**，不贴 diff）。
+
+        三条口径与 L2 的报告段一致：
+
+        - **读数不进报告**：触发条件原话、「查不了」的理由、被剔除几条都是过程
+          材料，它们在事件流与 trace 里（`L3_READINGS_KIND` 那条 note）。
+        - **被事实核对降级的那几条也要列出来**：静默丢掉等于把「审查者说错话」
+          这件事藏起来（§4）。但标明「与记录不符、不据此拦完成声明」。
+        - **§2.5 的反向条款只在真的拦下东西时出现**：它是给「被审查拦下」那句
+          判词配的，不是每一轮都要念一遍的样板（问题③）。
+        """
+        report = self._semantic_report
+        if report is None:
+            return ""
+        # **重复不上报**：真的拦下时，逐条发现已经在那句「⚠ 未完成（被审查拦下）」
+        # 里列过一次（`_completion_blocked` 的 `listed`），这里再列一遍就是同一件
+        # 事说两遍（那条纪律在 `_collect_report` 的注释里）。所以这一段只补
+        # **被事实核对降级的那几条**——它们不在那句判词里，而静默丢掉等于把
+        # 「审查者说错话」这件事藏起来（§4）。
+        body = "" if self._review_blocked else render_semantic_report(report)
+        downgraded = render_semantic_unverified(report)
+        if not body and not downgraded:
+            return ""
+        parts = [body] if body else []
+        if downgraded:
+            parts.append(downgraded)
+        return "\n" + "\n".join(parts)
+
     def _emit_review_finding(self, finding: Finding) -> None:
         """一条机械发现的三条出口：账本、事件流、trace。同一条只发一次。
 
@@ -3911,6 +4258,38 @@ class AgentLoop:
         self._log(f"自动审查：{finding.render()}")
 
     # ---- L4 最小证据账本（P0：**只在报告层降级**）--------------------------
+
+    def _ledger_gaps(self, changed: Sequence[str], passed: bool | None) -> int:
+        """只**算**证据缺口，不发事件、不改任何状态（供 L3 的触发条件判据用）。
+
+        为什么要与 `_evidence_ledger` 分开：那一个是收尾出口，它算完会发一条
+        `evidence_gaps` note 并把计数记进本次运行。L3 在收尾**之前**判「有没有
+        没有证据的完成声明」时借用同一份材料，如果直接调那一个，就会在验证
+        还没跑的那一刻先报一条假的「没跑」缺口——那是**凭空造出来的读数**，
+        实测把 `tests/agent/test_evidence_ledger.py::test_验证通过时不降级`
+        判红了（那条用例正是钉「验过了就不许报缺口」的）。
+        """
+        ledger = ReviewLedger()
+        if not changed:
+            return 0
+        claim = f"这次运行的完成结论（{len(changed)} 处改动）"
+        if self.verify is None:
+            ledger.record(
+                claim, "自动验证", CANNOT, "本次运行没有挂验证器，一次检查都没跑"
+            )
+        elif passed is None:
+            ledger.record(
+                claim, "最终验证", NOT_RUN, "收尾这一刻没有拿到验证结论"
+            )
+        else:
+            ledger.record(
+                claim,
+                "最终验证",
+                PASS if passed else FAIL,
+                "",
+                content_key=self._last_verify_key,
+            )
+        return len(ledger.gaps())
 
     def _evidence_ledger(
         self, changed: Sequence[str], passed: bool | None

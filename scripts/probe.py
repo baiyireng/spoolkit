@@ -135,6 +135,18 @@ REQUIRED_RECORD_KEYS = (
     "escalated_before_action",
     "escalation_summary_complete",
     "escalation_approved",
+    # ---- 自动审查层 P2 后半：L3 语义审查的读数（设计稿 §6 字段表）------------
+    #
+    # 三个必填（判据口径写在字段表里，实现不得走样）：
+    #   `review_l3_ran`    L3 **真的调用了模型**几次（触发条件不满足时是 0——
+    #                      这是「不每步都跑」那条纪律的可证伪读数）。
+    #   `l3_findings`      L3 报出的发现条数（**过没过事实核对都算**：被降级的
+    #                      那几条同样进事件流与报告，只是不据此阻断）。
+    #   `l3_blocked`       「L3 的高严重度发现让完成声明降级」判了几次。它
+    #                      **不是**「成果没落盘」——那两件事在本设计里已分开。
+    "review_l3_ran",
+    "l3_findings",
+    "l3_blocked",
     # ---- 带扰动的重复：这一次是「第几遍、用什么设置、说哪句话」 ----
     # 没有这四个字段，results.jsonl 就分不出「同一设置下的波动」和
     # 「不同设置之间的差异」，聚合只能靠猜。
@@ -218,6 +230,17 @@ PERFORMANCE_REGRESSED_KIND = "performance_regressed"
 #: L2 的「查不了」读数（不是发现，不进 `review_findings`）：性能那一条在
 #: 耗时太短或落在噪声带里时**如实报「量不出来」**，不静默通过。
 BEHAVIOR_NOT_CHECKED_KIND = "behavior_not_checked"
+#: L3 语义审查（P2 后半）的发现（**是发现**：混进 `review_findings` 的总额，
+#: 同时单独数 `l3_findings`）。判据名与 `spoolkit/agent/audit.py` 逐字一致。
+SEMANTIC_FINDING_KIND = "semantic_finding"
+#: L3 的过程读数（触发条件 / 跑没跑 / 被事实核对剔除几条 / 为什么没给结论）。
+#: **不是发现**，与 `BEHAVIOR_NOT_CHECKED_KIND` 同一个口径。
+L3_READINGS_KIND = "l3_readings"
+#: L3 发现的**结构化**那一份（每条带 file/line/severity/verified）。它也不是
+#: 发现——发现那一条已经在上面的 `SEMANTIC_FINDING_KIND` 里数过一次了。
+L3_DETAIL_KIND = "l3_detail"
+#: 「L3 拦下了完成声明」（探针的 `l3_blocked`）。
+L3_BLOCKED_KIND = "l3_blocked"
 REVIEW_NOTE_KINDS = frozenset(
     {
         AUDIT_KIND,
@@ -227,6 +250,7 @@ REVIEW_NOTE_KINDS = frozenset(
         BEHAVIOR_CHANGED_KIND,
         CLI_SURFACE_CHANGED_KIND,
         PERFORMANCE_REGRESSED_KIND,
+        SEMANTIC_FINDING_KIND,
     }
 )
 
@@ -796,6 +820,17 @@ def parse_events(text):
         "blocked_by_finding": 0,
         "review_triggers": [],
         "revert_commands": [],
+        # ---- L3 语义审查（P2 后半，§6 字段表）--------------------------------
+        #
+        # `review_l3_ran` 数的是**真的调用了模型**那几次：L3 的读数事件里
+        # `ran=True` 才算（触发条件不满足时也发一条读数，如实写 0——那是
+        # 「不每步都跑」的读数，不是一次审查）。
+        "review_l3_ran": 0,
+        "l3_findings": 0,
+        "l3_unverified": 0,
+        "l3_blocked": 0,
+        "l3_findings_by_severity": {},
+        "l3_conflicts": {},
         "verifier_ran": 0,
         "verifier_auto_ran": 0,
         "verifier_final_ran": 0,
@@ -983,6 +1018,42 @@ def parse_events(text):
                 if counters["escalation_approved"] == "pending":
                     continue
                 counters["escalation_approved"] = approved
+            # ---- L3 语义审查（P2 后半，§6 字段表）----------------------------
+            #
+            # 四条 kind 各回答一件事，**不要混成一个数**：
+            #   `l3_readings`    跑没跑（`ran`）+ 触发条件 + 被剔除几条 + 冲突分档
+            #   `l3_detail`      逐条发现的结构化字段（file/line/severity/verified）
+            #   `semantic_finding` 一条发现（上面 `REVIEW_NOTE_KINDS` 已经数过，
+            #                    这里只补 `l3_findings` 这个**分层**读数）
+            #   `l3_blocked`     「L3 的高严重度发现让完成声明降级」
+            if note_kind == L3_READINGS_KIND:
+                # `ran` 为真才算一次真审查：触发条件不满足时也发读数（如实写 0），
+                # 那是「不每步都跑」的读数，不是一次模型调用。
+                if payload.get("ran"):
+                    counters["review_l3_ran"] += 1
+                # 被核对剔除 / 降级的条数取最大值：同一轮重算一次不该翻倍。
+                counters["l3_unverified"] = max(
+                    counters["l3_unverified"], int(payload.get("unverified") or 0)
+                )
+                for key, value in (payload.get("conflicts") or {}).items():
+                    bucket = counters["l3_conflicts"]
+                    bucket[str(key)] = max(int(bucket.get(str(key), 0)), int(value or 0))
+            elif note_kind == L3_DETAIL_KIND:
+                for item in payload.get("findings") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    severity = str(item.get("severity") or "")
+                    bucket = counters["l3_findings_by_severity"]
+                    bucket[severity] = bucket.get(severity, 0) + 1
+            elif note_kind == SEMANTIC_FINDING_KIND:
+                counters["l3_findings"] += 1
+            elif note_kind == L3_BLOCKED_KIND:
+                # 与 `blocked_by_review` 一样取「判了几次」的**运行**口径：
+                # 同一个运行里重算多次不该累加，所以按存在性取 1（事件本身
+                # 由循环保证一次运行只发一条，这里再兜一层）。
+                counters["l3_blocked"] = max(
+                    counters["l3_blocked"], 1
+                )
             if note_text.startswith(SUPERVISOR_PREFIX):
                 counters["supervisor_interventions"] += 1
         elif kind == "usage":
@@ -1161,6 +1232,19 @@ def skipped_record(probe, options, repeat_index, repeat_total, budget, elapsed):
         "escalated_before_action": 0,
         "escalation_summary_complete": True,
         "escalation_approved": None,
+        # ---- L3 语义审查（P2 后半，§6 字段表）--------------------------------
+        #
+        # 这次有没有给出一轮可执行的整轮回退命令（§2.5 第 2 条）。判的是
+        # 「有没有回退」，**不是**「有没有删东西」。
+        "revert_available": True,
+        # 跳过的那一次没跑任何审查：三个读数都是 0（字段仍要齐：聚合与对照
+        # 都按它取）。`l3_findings_by_severity` / `l3_conflicts` 是分档读数。
+        "review_l3_ran": 0,
+        "l3_findings": 0,
+        "l3_unverified": 0,
+        "l3_blocked": 0,
+        "l3_findings_by_severity": {},
+        "l3_conflicts": {},
         "file_changed": {"changed": False},
         "exit_code": None,
         "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -1345,6 +1429,16 @@ def run_one(
             and counters["escalations_complete"] == counters["escalations"]
         ),
         "escalation_approved": counters["escalation_approved"],
+        # ---- L3 语义审查（P2 后半，§6 字段表）--------------------------------
+        #
+        # `review_l3_ran` 是「L3 真的调用了模型几次」——**触发条件不满足时不跑**
+        # 这件事靠它与 `verifier_ran` 的对比来证伪（设计稿 §6 P2 验收第 3 条：
+        # 全量跑一遍后 `review_l3_ran` 的总次数要显著小于 `verifier_ran`）。
+        # `l3_blocked` 只说明「L3 让完成声明降级」，**不是成果没落盘**。
+        "review_l3_ran": counters["review_l3_ran"],
+        "l3_findings": counters["l3_findings"],
+        "l3_unverified": counters["l3_unverified"],
+        "l3_blocked": counters["l3_blocked"],
         # §3.2.4 的比率口径：**按运行**算「每轮打断了用户几次」。
         # 目标 < 1 次/运行；≥ 0.5 视为设计失败，回去改触发条件。
         "escalation_rate": counters["escalations"],
@@ -1404,6 +1498,10 @@ def run_one(
         # 模块不存在」。报告要能回答「是哪一类在刷屏」。
         "review_findings_by_kind": dict(counters["review_findings_by_kind"]),
         "broken_imports": counters["broken_imports"],
+        # L3 的分档读数（非必填，但报告要能回答「哪一档在刷屏」）：
+        # 严重度分布与「与记录冲突」的断言形状分布。
+        "l3_findings_by_severity": dict(counters["l3_findings_by_severity"]),
+        "l3_conflicts": dict(counters["l3_conflicts"]),
         # ---- P1 的分档读数（非必填，但报告要能回答「哪一条在刷屏」）---------
         "escalation_by_trigger": dict(counters["escalation_triggers"]),
         "actions_gated": counters["actions_gated"],
@@ -1528,6 +1626,12 @@ def evaluate_bounds(probe, record):
             "被拦下的危险动作数超上限",
         ),
         ("escalations", "max_escalations", "主动请示次数超上限"),
+        # ---- L3 语义审查（P2 后半，§6 字段表）--------------------------------
+        # 发现条数走**上限**（§4 的噪声控制：一次审查的发现条数设上限，超出说明
+        # 改动太大、应当拆）；`review_l3_ran` 走**下限**那一侧由探针清单用
+        # `min_review_l3_ran` 表达（「这一轮该跑 L3 却没跑」是缺陷）。
+        ("l3_findings", "max_l3_findings", "L3 语义审查的发现条数超上限"),
+        ("l3_unverified", "max_l3_unverified", "L3 被事实核对降级的条数超上限"),
     ):
         if expect_key not in expect:
             continue
@@ -1632,6 +1736,20 @@ def build_notes(record, probe):
         parts.append(f"无证据的完成声明 {record['evidence_gaps']} 条")
     if record.get("false_completion"):
         parts.append("假完成（自认完成而验收红）")
+    # L3 语义审查（P2 后半）：只在真的跑过、或真的拦住过东西时才说
+    # （`review_l3_ran` 为 0 是**正常的**——触发条件不满足就不跑）。
+    if record.get("review_l3_ran"):
+        parts.append(f"L3 语义审查跑了 {record['review_l3_ran']} 次")
+        if record.get("l3_findings"):
+            severity = record.get("l3_findings_by_severity") or {}
+            detail = "、".join(f"{key} {value}" for key, value in severity.items())
+            parts.append(
+                f"L3 发现 {record['l3_findings']} 条" + (f"（{detail}）" if detail else "")
+            )
+        if record.get("l3_unverified"):
+            parts.append(f"L3 有 {record['l3_unverified']} 条与记录不符已降级")
+        if record.get("l3_blocked"):
+            parts.append("L3 拦下了完成声明（成果照落盘）")
     # 自动审查层 P1 的读数。措辞刻意与「删不删」无关：这几条量的都是
     # 落盘 / 可回退 / 该不该拦（§2.5 与 §6 字段表）。
     if record.get("escalations"):
