@@ -203,7 +203,7 @@ def undo_command(pending: PendingChanges) -> str:
 
 
 def verification_header(
-    passed: bool | None, summary: str, undo: str = ""
+    passed: bool | None, summary: str, undo: str = "", with_undo: bool = True
 ) -> str:
     """收尾处理里**打在 diff 之前**的那一段（未通过时才非空）。
 
@@ -211,6 +211,11 @@ def verification_header(
     `settle` 打出来的，事件流里 diff 是 DIFF 事件——两种通道都必须让结论
     排在它们前面。没有这一段，一次「接受了一份未通过验证的改动」就是
     大 diff 先入眼、判词埋在下面。
+
+    `with_undo=False` 是 **`--events` 那条通道**用的：那里撤销命令由收尾报告
+    （FINAL 事件）给，而且它排在「等你确认 / 已应用」**之后**——这一段在 diff
+    之前，多带一遍就等于同一条撤销信息在事件流里出现两次（问题②的最后一处
+    残余）。终端那条路照旧带着它：那里用户要在这一大片 diff 之前就看见退路。
     """
     if passed is not False:
         return ""
@@ -221,5 +226,9 @@ def verification_header(
     return (
         "⚠ 最终验证：未通过——下面这些改动没有通过验收，先看这一行再往下看 diff。\n"
         f"失败要点：{line}\n"
-        + (f"撤销这一轮：{undo} （网页里可直接点，桥里回 y）\n" if undo else "")
+        + (
+            f"撤销这一轮：{undo} （网页里可直接点，桥里回 y）\n"
+            if (undo and with_undo)
+            else ""
+        )
     )

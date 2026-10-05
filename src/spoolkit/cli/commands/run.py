@@ -250,6 +250,24 @@ def _terminal_escalation_reviewer(out=print, ask=input, tty=None):
     return review
 
 
+def _events_settle_header(result, undo: str) -> str:
+    """`--events` 通道里打在 diff 之前的那一段（未通过时才非空）。
+
+    与终端那条路（`_settle_pending` → `settle(header=…)`）**只差一个字段**：
+    **撤销命令不在这里给**。理由（问题②的最后一处残余）：FINAL 事件带着收尾
+    报告，报告里已经有那一行，而且它排在「等你确认 / 已应用」之后——这一份
+    header 在 diff **之前**，多带一遍就等于同一条撤销信息在事件流里出现两次，
+    而且顺序也读反了（用户先看到退路、后看到结果）。终端那条路照旧带着它：
+    那里 diff 是随后 `settle` 打的，用户需要在这一大片 diff 之前就看见退路。
+    """
+    return verification_header(
+        getattr(result, "verified", None),
+        getattr(result, "verify_summary", ""),
+        undo,
+        with_undo=False,
+    )
+
+
 def _events_mode(args, project_root, gateway, window, pending) -> int:
     """`--events` 模式：stdout 上只有 JSON 行。
 
@@ -354,11 +372,9 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
         scope,
         project_root / ".agent" / "last_change.json",
         writer,
-        # 验证未通过时，结论与撤销命令必须**排在 diff 事件之前**发出去：
-        # 网页壳按事件顺序渲染，diff 一大，埋在后面的判词就没人读到。
-        header=verification_header(
-            result.verified, result.verify_summary, undo
-        ),
+        # 验证未通过时，判词必须**排在 diff 事件之前**发出去：网页壳按事件顺序
+        # 渲染，diff 一大，埋在后面的判词就没人读到。
+        header=_events_settle_header(result, undo),
     )
     # 挂起待批的动作清单（§3.2.3）：它在**落盘之后**才说得准（哪些动作真的
     # 被拦下、哪些成果真的落了盘），所以走在这条通道的最后、FINAL 之前。

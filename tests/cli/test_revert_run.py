@@ -13,6 +13,7 @@
 每一条都有一条用例，且都用**真跑的字节**或**真的执行那条命令**来证伪。
 """
 
+import io
 import json
 import re
 from pathlib import Path
@@ -349,6 +350,91 @@ def test_收尾处理把结论打在diff之前(tmp_path: Path, capsys) -> None:
     assert "--- a/keep.py" in out
     assert out.index("最终验证：未通过") < out.index("--- a/keep.py")
     assert out.index("spool revert --run abc") < out.index("--- a/keep.py")
+
+
+def test_事件流里撤销只出现一次(tmp_path: Path) -> None:
+    """问题②的最后一处残余：验证未通过时，事件流里撤销出现了**两次**。
+
+    两处落点（原先都在用户看得见的地方）：
+      - `settle_with_events` 的 header note —— 它排在 DIFF **之前**；
+      - FINAL 事件里收尾报告的那一行 —— 它排在「等你确认 / 已应用」之后。
+
+    合并后的口径：**事件流只发一次**。header 只留判词与失败要点（这一段必须
+    仍在 diff 之前），撤销那一次由收尾报告给——顺序也对（退路在结果之后）。
+    终端那条路照旧在 diff 之前带命令，见上面那条用例（它一个字没动）。
+    """
+    from spoolkit.cli.commands.run import _events_settle_header
+    from spoolkit.cli.events import EventWriter, settle_with_events
+    from spoolkit.cli.settle import undo_command
+    from spoolkit.policy import ASK
+    from spoolkit.web.protocol import DIFF, FINAL, NOTE
+
+    _workspace(tmp_path)
+    loop, pending = _edit_loop(
+        tmp_path,
+        [
+            _turn(
+                "改一处",
+                [
+                    {
+                        "name": "write_file",
+                        "arguments": {
+                            "path": "keep.py",
+                            "content": "v2 = 1\nv1b = 2\nv1c = 3\n",
+                        },
+                    }
+                ],
+            ),
+            _turn("改完了", final="我改了这一处。"),
+        ],
+        verify=lambda changed: ToolResult(
+            ok=False, content="测试没有通过：assert v1 == 2 失败", raw="assert 失败"
+        ),
+    )
+
+    result = loop.run("改点东西")
+    assert result.verified is False, result.verify_summary
+
+    buffer = io.StringIO()
+    writer = EventWriter(buffer)
+    undo = undo_command(pending)
+    settle_with_events(
+        pending,
+        ASK,
+        (),
+        None,
+        writer,
+        io.StringIO("y\n"),
+        header=_events_settle_header(result, undo),
+    )
+    writer.emit(
+        FINAL, ok=result.finished, text=result.final or "", revert_command=undo
+    )
+
+    events = [json.loads(line) for line in buffer.getvalue().strip().splitlines()]
+    lines: list[str] = []
+    for event in events:
+        if event.get("type") in (NOTE, FINAL):
+            lines.extend(str(event.get("text") or "").splitlines())
+    undo_lines = [
+        line for line in lines
+        if "spool revert --run" in line
+        and ("回退这一轮" in line or "撤销这一轮" in line)
+    ]
+    assert len(undo_lines) == 1, (
+        f"事件流里撤销出现了 {len(undo_lines)} 次（应当只由收尾报告给一次）：\n"
+        + "\n".join(undo_lines)
+    )
+    # header 那一半不能被一起删掉：判词与失败要点仍在 DIFF **之前**。
+    verify_at = next(
+        index for index, event in enumerate(events)
+        if "最终验证：未通过" in str(event.get("text") or "")
+    )
+    diff_at = next(
+        index for index, event in enumerate(events) if event.get("type") == DIFF
+    )
+    assert verify_at < diff_at, [event.get("type") for event in events]
+    assert "失败要点" in str(events[verify_at].get("text") or "")
 
 
 # ---- 不变量：给不出 baseline 的改动不许落盘 ----------------------------------

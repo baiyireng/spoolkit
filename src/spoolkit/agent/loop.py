@@ -43,6 +43,7 @@ from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from spoolkit.agent.review_behavior import (
     BEHAVIOR_CHANGED_KIND,
     BEHAVIOR_NOT_CHECKED_KIND,
+    BEHAVIOR_READINGS_KIND,
     CLI_SURFACE_CHANGED_KIND,
     PERFORMANCE_REGRESSED_KIND,
     BehaviorReport,
@@ -3629,6 +3630,10 @@ class AgentLoop:
         高严重度只拦「完成声明」与危险动作，**不拦成果**（§2.5）。成果照落盘、
         可回退、报告逐条列出；删死代码、合并重复实现、删已被替代的文件都是
         正常编辑，这一层判的是「同一条命令、同一份输入，输出是否一字未变」。
+
+        **读数与发现走两个出口**（问题③）：发现照旧进账本/事件流/报告；读数
+        （判据原话、命令、逐字比对、耗时、「查不了」的理由）只进事件流与
+        trace——它是过程材料，结论报告里不出现系统账目原文。
         """
         key = self._behavior_key_for(changed)
         if self._behavior_report is not None and key == self._behavior_key:
@@ -3673,7 +3678,19 @@ class AgentLoop:
             self._emit_review_finding(finding)
         self._behavior_report = report
         self._behavior_key = key
-        self._log(f"自动审查 L2：{report.render()}")
+        # **读数进过程区，不进结论报告**（问题③的最后一处残余）：
+        # `_behavior_readings` 给的是判据原话、实际跑的命令、逐字比对的结果与
+        # 「查不了」的理由——它们是排查用的材料。它们在结论报告里出现时，
+        # §2.5 的反向条款会跟着一起出现，于是"什么都没拦下"的运行里也读到一段
+        # 无关样板（risky-action 那一轮实测的形状）。报告那一侧只留用户语言的
+        # 一句，见 `_behavior_report_section`。
+        readings = self._behavior_readings(report)
+        if self._behavior_material(report, changed):
+            self._emit(
+                "note",
+                {"text": readings, "ok": True, "kind": BEHAVIOR_READINGS_KIND},
+            )
+        self._log(f"自动审查 L2：{readings}")
         return report
 
     def _written_view(self, changed: Sequence[str]) -> dict[str, str]:
@@ -3713,32 +3730,34 @@ class AgentLoop:
         """
         return any(item.severity == HIGH for item in self.behavior_findings())
 
-    def _behavior_report_section(self, changed: Sequence[str] = ()) -> str:
-        """收尾报告里的 L2 那一段（没跑过、或这一轮谈不上行为就返回空串）。
+    def _behavior_material(
+        self, report: BehaviorReport, changed: Sequence[str] = ()
+    ) -> bool:
+        """这一轮的 L2 有没有**说得出话**的材料（决定它是否出现）。
 
-        **这一段是人真的会读的那一份文本**（模型那段结论之后），所以它要把
-        判据原话、实测读数与**回退能力**三样摆在一起：只写一句「行为变了」
-        会让人以为成果被扣住了。§2.5 的反向条款随这一段一起出——**拦的是完成
-        声明与危险动作，不是成果**：删死代码、合并重复实现、删已被替代的文件
-        都是正常编辑，照样落盘、照样可回退、照样逐条列出。
+        两条来源：报告里真有读数（跑成了对照 / 有发现 / 接口动了 / 优化类任务），
+        或者这一轮改的产出**有行为面**（`.py` 这类；问题⑥：只改了一个 `.txt`
+        的运行不需要被告知「行为回归查不了」）。
 
-        **它按需出现**（问题③⑥）：这里既没有 L2 的实测读数、这一轮改的又是
-        `.txt` 这类没有行为面的产出时，整段一个字都不出——一次「建一个文本
-        文件」的运行不需要被告知「行为回归查不了」，那是无关样板（反向条款
-        自己就带着「删死代码」那半句，会把人读糊涂）。
+        判据与整改前逐字一致——变的只是材料出现的地方：读数去事件流与 trace，
+        用户那一句留在结论报告（见 `_behavior_report_section`）。
         """
-        report = self._behavior_report
-        if report is None:
-            return ""
-        material = bool(
+        return bool(
             report.findings
             or report.checked
             or report.interface_changes
             or report.cli_checked is not None
             or report.optimization
+            or _has_behavior_surface(changed)
         )
-        if not material and not _has_behavior_surface(changed):
-            return ""
+
+    def _behavior_readings(self, report: BehaviorReport) -> str:
+        """L2 的完整读数：**过程材料**，只进事件流与 trace。
+
+        判据原话、实际跑的命令、逐字比对的结果、耗时、「查不了」的理由都在这儿
+        ——排查看的就是这一份。它**不进结论报告**：那是用户读的那一份，里面
+        出现内部读数时会连带把 §2.5 的反向条款拖进去（问题③）。
+        """
         lines = [f"- {report.render()}"]
         if report.cli_checked is not None:
             verdict = "一致" if report.cli_checked else "**不一致**"
@@ -3762,12 +3781,43 @@ class AgentLoop:
             # 「查不了」的理由在 `render()` 里已经带过一次；只有**比对跑成了**
             # 但前置步骤（如造输入）没做成时才需要再补一句。
             lines.append(f"- {CANNOT_CHECK}{report.cannot_check}")
-        return (
-            "\n本次运行的 L2 行为回归读数：\n"
-            + "\n".join(lines)
-            + "\n（拦的是「完成声明」与危险动作，**不是成果**：改动照落盘、可回退、"
-            "报告逐条列出；删死代码、合并重复实现、删已被替代的文件都是正常编辑。）"
-        )
+        body = "\n".join(lines)
+        return f"\n本次运行的 L2 行为回归读数（过程材料，不进结论报告）：\n{body}"
+
+    def _behavior_report_section(self, changed: Sequence[str] = ()) -> str:
+        """收尾报告里的 L2 那一段：**只放用户需要的那一句**（问题③）。
+
+        **读数不进这一份文本**：判据原话、实际跑的命令、逐字比对的结果、耗时、
+        「查不了」的理由都是过程材料，它们在 `_behavior_review` 里进事件流与
+        trace（`BEHAVIOR_READINGS_KIND` 那条 note）——用来跟踪 agent 的思路与
+        排查问题。报告里出现内部读数时，§2.5 的反向条款会跟着一起出现，于是
+        "什么都没拦下"的那一轮也读到一段无关样板（risky-action 那一轮实测的
+        形状：L2 报了「输出逐字不一致」，报告里就多出那句反向条款）。
+
+        §2.5 的反向条款**只在真的拦下东西时**出现：它是给「被审查拦下」那句
+        判词配的（`_review_block_note`）。没拦下时它答的是一个没人问的问题。
+
+        **它按需出现**（问题③⑥）：既没有 L2 材料、改的又是 `.txt` 这类没有
+        行为面的产出时，整段一个字都不出。
+        """
+        report = self._behavior_report
+        if report is None:
+            return ""
+        if not self._behavior_material(report, changed):
+            return ""
+        lines: list[str] = []
+        if report.changed:
+            # 行为变了但**没拦**：一句用户语言，不带内部读数、不带反向条款
+            # （读数为 `L2.2 对照运行：…输出**逐字不一致**`，它在事件流里）。
+            lines.append("- 这次改动会改变程序原有行为。")
+        if self._review_blocked:
+            lines.append(
+                "（拦的是「完成声明」与危险动作，**不是成果**：改动照落盘、可回退、"
+                "报告逐条列出；删死代码、合并重复实现、删已被替代的文件都是正常编辑。）"
+            )
+        if not lines:
+            return ""
+        return "\n本次运行的 L2 行为回归：\n" + "\n".join(lines)
 
     def _emit_review_finding(self, finding: Finding) -> None:
         """一条机械发现的三条出口：账本、事件流、trace。同一条只发一次。

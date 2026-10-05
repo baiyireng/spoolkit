@@ -684,7 +684,7 @@ def _turn(thought: str, calls=None, final=None) -> str:
     )
 
 
-def _loop(root: Path, script: list, pending):
+def _loop(root: Path, script: list, pending, events: list | None = None):
     from spoolkit.agent.loop import AgentLoop
     from spoolkit.config import Config
     from spoolkit.llm.fake import FakeModel
@@ -703,16 +703,44 @@ def _loop(root: Path, script: list, pending):
         registry=registry,
         config=Config(project_root=root, context_window=8192, max_steps=6),
         pending=pending,
+        # 事件流是可选的：要读「过程区」的用例把一份 list 传进来。
+        on_event=(
+            (lambda kind, data: events.append((kind, data)))
+            if events is not None
+            else None
+        ),
     )
 
 
-def test_收尾报告里有_L2_那一段且明确说查不了(tmp_path: Path) -> None:
-    """走真循环：项目没有可跑入口时，收尾报告里必须有「查不了」那一行。"""
+def test_L2_读数进事件流而结论报告不出现系统账目(tmp_path: Path) -> None:
+    """政策重述：原 `test_收尾报告里有_L2_那一段且明确说查不了`（709–742 行）。
+
+    **旧断言逐字是这两条**（改动前）：
+
+        assert "L2 行为回归读数" in result.final
+        assert "查不了" in result.final
+        # §2.5 的反向条款必须一起进模型可见文本
+        assert "不是成果" in result.final
+
+    也就是说：「L2 那一段出现 → 报告里必须同时出现反向条款」。它与原则直接
+    冲突：`risky-action` 那一轮**什么都没拦下**，只是 L2 打了读数（`输出逐字
+    不一致`），报告里就照样多出一段 §2.5 反向条款 → 问题③复现。所以按新政策
+    **重述**（这是政策驱动的重述，不是放宽）：
+
+      - L2 读数（判据原话 / 实际跑的命令 / 逐字比对 / 「查不了」的理由）是
+        **过程材料**：它在事件流与详情里可查，用来跟踪 agent 的思路与排查；
+      - 结论报告里**不出现**系统账目原文；
+      - §2.5 的反向条款**仅在被拦下时**出现（它是给「被审查拦下」那句判词配的）。
+
+    下面第 ② 组是**正向断言**：读数必须真的能在事件流里找到——不许用
+    「报告里看不到」冒充「通过」，那等于把真读数藏起来。
+    """
     from spoolkit.tools.edit import PendingChanges
 
     root = make_project(tmp_path)
     (root / "README.md").write_text("# tool\n\n没有用法示例。\n", encoding="utf-8")
     pending = PendingChanges(root)
+    events: list[tuple[str, dict]] = []
     loop = _loop(
         root,
         [
@@ -729,15 +757,29 @@ def test_收尾报告里有_L2_那一段且明确说查不了(tmp_path: Path) ->
             _turn("交卷", final="写好了"),
         ],
         pending,
+        events,
     )
 
     result = loop.run("写一份 note.py")
 
-    assert "L2 行为回归读数" in result.final, result.final
-    assert "查不了" in result.final
-    # §2.5 的反向条款必须一起进模型可见文本，且不得读成「禁止删除」。
-    assert "不是成果" in result.final
-    assert "删死代码、合并重复实现、删已被替代的文件都是正常编辑" in result.final
+    # ① 结论报告（用户读的那一份）：没有系统账目原文，也没有反向条款
+    #    ——这一轮什么都没拦下（账本里没有高严重度发现）。
+    assert "L2 行为回归读数" not in result.final, result.final
+    assert "【查不了】" not in result.final, result.final
+    assert "不是成果" not in result.final, result.final
+    # ② **读数仍可查**：它落在事件流那条过程 note 里（正向证据，缺了这条
+    #    就等于把真读数藏了）。
+    notes = [str(data.get("text") or "") for kind, data in events if kind == "note"]
+    readings = [text for text in notes if "L2 行为回归读数" in text]
+    assert readings, f"L2 读数在事件流里查不到：{notes}"
+    assert "【查不了】" in readings[0], readings[0]
+    assert any(
+        str(data.get("kind") or "") == "behavior_readings"
+        for kind, data in events
+        if kind == "note"
+    ), "事件流里的读数没有判据分类（kind）"
+    assert loop._behavior_report is not None
+    assert loop._behavior_report.checked is False
     # 拦的是结论与动作，成果照落盘。
     assert [item.path for item in pending.items()] == ["note.py"]
 
@@ -790,3 +832,54 @@ def test_发现能被序列化进事件流(tmp_path: Path) -> None:
         ensure_ascii=False,
     )
     assert RB.BEHAVIOR_CHANGED_KIND in payload
+
+
+def test_真的被拦下时反向条款照出而读数仍在事件流(tmp_path: Path) -> None:
+    """新政策的两侧（与上面那条重述配套）：**拦下了** → 反向条款出现。
+
+    上面那条钉的是「没拦下 → 反向条款一个字都不出」；这一条钉的是反面：
+    优化类任务上行为变了（L2 报高严重度 → T12 拦下完成声明）时，报告里必须
+    有 §2.5 的反向条款——它是给「被审查拦下」那句判词配的（否则会被读成
+    「成果被扣住了」）。**读数不进报告**这条在两种情况下都成立。
+    """
+    from spoolkit.tools.edit import PendingChanges
+
+    root = make_project(tmp_path)
+    broke = GOOD.replace('return f"合计 {value}"', 'return f"总计 {value}"')
+    assert broke != GOOD
+    pending = PendingChanges(root)
+    events: list[tuple[str, dict]] = []
+    loop = _loop(
+        root,
+        [
+            _turn(
+                "换成另一种写法",
+                [
+                    {
+                        "name": "write_file",
+                        "arguments": {"path": "tool.py", "content": broke},
+                        "why": "试着改快一点",
+                    }
+                ],
+            ),
+            _turn("交卷", final="弄快了"),
+        ],
+        pending,
+        events,
+    )
+
+    result = loop.run("这个脚本跑得太慢了，帮我弄快点，结果别改坏了")
+
+    # 真的拦下了（L2 的高严重度发现接在 T12 上）。
+    assert loop._review_blocked is True
+    assert "被审查拦下" in result.final, result.final
+    # 反向条款与用户语言那一句都在；系统账目原文（读数）仍然不在。
+    assert "不是成果" in result.final, result.final
+    assert "删死代码、合并重复实现、删已被替代的文件都是正常编辑" in result.final
+    assert "这次改动会改变程序原有行为" in result.final, result.final
+    assert "L2 行为回归读数" not in result.final, result.final
+    # 读数照样可查：事件流那条过程 note 里带着逐字比对与命令。
+    notes = [str(data.get("text") or "") for kind, data in events if kind == "note"]
+    readings = [text for text in notes if "L2 行为回归读数" in text]
+    assert readings, f"L2 读数在事件流里查不到：{notes}"
+    assert "逐字不一致" in readings[0], readings[0]

@@ -55,6 +55,12 @@ CLI_SURFACE_CHANGED_KIND = "cli_surface_changed"
 PERFORMANCE_REGRESSED_KIND = "performance_regressed"
 #: 「这一步没跑成」也用 L2.2 的 kind：它是**读数**，不是发现（severity=INFO）。
 BEHAVIOR_NOT_CHECKED_KIND = "behavior_not_checked"
+#: L2 的**过程读数**（判据原话 / 实际跑的命令 / 逐字比对的结果 / 耗时 /
+#: 「查不了」的理由）：它进事件流与 trace，供人跟踪与排查；**不是发现**
+#: （探针不按它数 `review_findings`），也**不进结论报告**——报告里出现内部
+#: 读数时，§2.5 的反向条款会跟着一起出现，于是"什么都没拦下"的那一轮里
+#: 也读得到一段无关样板（问题③在 risky-action 那一轮的形状）。
+BEHAVIOR_READINGS_KIND = "behavior_readings"
 
 #: 只比这一个文件名的入口说明（README 是通用约定，不新造格式）。
 README_NAMES = ("README.md", "readme.md", "README.rst")
