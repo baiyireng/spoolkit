@@ -8663,5 +8663,53 @@
       "orchestrate_used_runs": 0
     }
   },
-  "elapsed_seconds": 2673.9
+  "elapsed_seconds": 2673.9,
+  "target_roles": {
+    "A-todo": "control",
+    "B-failing-test": "ability"
+  },
+  "target_verdicts": {
+    "A-todo": {
+      "task": "A-todo",
+      "role": "control",
+      "cells": 18,
+      "pass_by_arm": {
+        "control": {
+          "pass": 0,
+          "of": 6
+        },
+        "off": {
+          "pass": 0,
+          "of": 6
+        },
+        "on": {
+          "pass": 0,
+          "of": 6
+        }
+      },
+      "verdict": "control_failed",
+      "next": "先查测量环境（缺 rg / 代理劫持），别记成模型不行"
+    },
+    "B-failing-test": {
+      "task": "B-failing-test",
+      "role": "ability",
+      "cells": 18,
+      "pass_by_arm": {
+        "control": {
+          "pass": 0,
+          "of": 6
+        },
+        "off": {
+          "pass": 0,
+          "of": 6
+        },
+        "on": {
+          "pass": 0,
+          "of": 6
+        }
+      },
+      "verdict": "no_discrimination",
+      "next": "两臂全不过，量不出差别：先查难度与环境，别急着改实现"
+    }
+  }
 }

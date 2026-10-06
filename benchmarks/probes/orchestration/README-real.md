@@ -80,3 +80,65 @@ B 的 ② 只认「修复/计划/步骤…」这类词——所以 `B/t0.0/contr
   被 `LlamaCppTokenCounter` 的 httpx 客户端吃进去，`/tokenize` 对 `127.0.0.1:8080`
   回 502，整段格子记成「未完成」。跑分器已在 `_isolate_local_http()` 里清掉这组
   环境变量并写 `NO_PROXY`；`diag_tokenize.py` 复现并定位了它。
+
+## S2：靶的角色与判词（**这一节推翻了上面「A 靶」的用法**）
+
+### 先说上面那批读数是怎么被环境弄脏的
+
+上一批里 A 靶两臂都 0/3，一度被读成「模型连汇总待办都做不到」。真因是**测量环境**：
+跑分器的子进程只拿到了 `PYTHONIOENCODING`，`PATH` 里没有 ripgrep，`search_code`
+直接返回「未找到 rg（ripgrep），无法执行搜索」——8 步里根本取不到待办素材。
+补上 `rg` 之后重跑，**A 靶 off/on/control 三臂全是 3/3、3 步、30–36 秒**。
+
+这条不再靠人记着：`spoolkit.envcheck` 把「测量环境自证」做成代码，两个入口都在
+开跑前拦一道——
+
+- `scripts/probe.py --check-env`：只做自证并退出，不合格 **退出码 3**（`bench.EXIT_ENVIRONMENT_BLOCKED`）；
+- `benchmarks/probes/orchestration/real_counterfactual.py::_prepare_process_env()`：
+  在当前进程补 `rg`/`node` 的 PATH、摘掉代理变量、跑 `envcheck.inspect`，不合格
+  打报告与建议后 `raise SystemExit(3)`，**这一批不开跑**（跑完再解释，token 已经花掉了）。
+  自证结果写进每条读数与落盘 payload 的 `env` 字段。
+
+### 裁决：A 是控制靶，B 是能力靶
+
+- **A（`A-todo`）→ 控制靶**：三臂都做对，**量不出「编排有没有用」**。它真正的用处是
+  抓环境故障（缺 rg 时三臂一起归零）——这正是它当初的价值。
+- **B（`B-failing-test`）→ 能力靶**：要求认出失败测试涉及的文件并给出修复计划，
+  上一批 off 0/2、on(converge) 1/2，**有区分度**，且已知缺陷明确（认不出
+  `test_services.py`，`r0` 还误报成 `tests/cli/test_approve_command.py`）。
+
+**能力靶准入判据（加新靶时按这条判）**：同一配方下必须至少有一格两臂判据不同。
+两臂全过 = 无区分度，只能当控制靶；两臂全不过 = 也量不出差别，先查难度与环境，
+别急着改实现。不为「看起来更难」而造靶。
+
+### 判词是机械算出来的，不是人肉看的
+
+`real_counterfactual.py` 里：`TARGET_ROLES`（角色）+ `_cell_passed`（一格通过 =
+该靶全部机械判据通过，`_hits` 只是明细）+ `target_verdict(readings, task)` +
+`target_verdicts(readings)`。判词取值封闭在 `TARGET_VERDICTS`：
+`control_ok` / `control_failed` / `discriminating` / `no_discrimination` / `no_readings`。
+跑完逐靶打一行，并写进读数文件的 `target_roles` / `target_verdicts` 与汇总表的
+每格 `role` / `passed`。
+
+拿**已提交的那批 36 条读数**（环境脏的那批）算，判词正好复现了 S2 的人工诊断：
+
+```
+A-todo: role=control verdict=control_failed | control 0/6、off 0/6、on 0/6 |
+        先查测量环境（缺 rg / 代理劫持），别记成模型不行
+B-failing-test: role=ability verdict=no_discrimination | control 0/6、off 0/6、on 0/6 |
+        两臂全不过，量不出差别：先查难度与环境，别急着改实现
+```
+
+⚠ 注意：**这批读数是脏环境下取的**，所以两条判词都在说「先查环境/难度」。它们**不是**
+能力结论；S12 会用干净环境重跑并覆盖。这一节要说的是「判据已经会自己说这句话了」。
+
+⚠ 别把两个 `control` 搞混：**三臂里的 `control` 臂**是等长安慰剂（把那一件工具的
+索引行换成等长占位，量的是提示长度的作用——`B/t0.0/control` 1 步 / 2120 token，
+模型直接反问「请提供失败测试名」）；**靶角色里的 `control`** 说的是这个靶该不该
+拿来当能力证据。两者互不相干。
+
+守护：`tests/test_counterfactual_targets.py`（16 条：角色齐全、A=control/B=ability、
+控制靶两种形态、能力靶三种形态、`_hits` 不算判据、判词进读数文件与汇总表、
+真读数文件只查结构不写死具体判词）。变异验收 7/7 红：控制靶无条件 `control_ok`、
+能力靶无条件 `discriminating`、少一个靶的角色、`_hits` 算作判据、A 靶改回能力靶、
+读数文件不写判词、汇总表不带角色。

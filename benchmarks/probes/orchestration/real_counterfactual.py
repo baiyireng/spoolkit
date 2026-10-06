@@ -350,6 +350,31 @@ CHECKS = {
     "B": ("点名涉及的文件", "给出修复计划"),
 }
 
+#: 靶的角色。**这是 S2（O2）的裁决**，不是随手贴的标签。
+#:
+#: `A-todo` 原先当能力靶用，但它**没有区分度**：补上 rg 之后，off/on/control 三臂
+#: 都是 3/3、3 步、30–36 秒（同一批格子此前报「0/3」是环境故障——子进程 PATH 里
+#: 没有 rg，见 `spoolkit.envcheck`——不是模型不行）。一个三臂都做对的任务量不出
+#: 「编排有没有用」。它真正的用处是**控制靶**：各臂都应该通过，哪一格没过就先查
+#: 测量环境，而不是记成模型不行——这一条正是 A 靶当初抓出缺 rg 的原因。
+#:
+#: 能力靶的准入判据（同时写进 README-real.md）：**同一配方下必须至少有一格两臂
+#: 判据不同**。两臂全过 = 无区分度，只能当控制靶；两臂全不过 = 也量不出差别，
+#: 先查难度与环境。加新靶时按这条判，不为「看起来更难」而造。
+TARGET_ROLES: dict[str, str] = {
+    "A-todo": "control",
+    "B-failing-test": "ability",
+}
+
+#: 判词取值（给读数文件与用例一个封闭集合，别让拼写漂移）。
+TARGET_VERDICTS = (
+    "control_ok",
+    "control_failed",
+    "discriminating",
+    "no_discrimination",
+    "no_readings",
+)
+
 
 def checks_for(task: str, final: str) -> dict[str, bool]:
     """机械判据。**先定好再跑**，不看措辞好坏。"""
@@ -366,6 +391,55 @@ def checks_for(task: str, final: str) -> dict[str, bool]:
         CHECKS["B"][0]: all(one in text for one in CHECK_B_FILES),
         CHECKS["B"][1]: any(one in text for one in CHECK_B_PLAN),
     }
+
+
+def _cell_passed(row: dict) -> bool:
+    """一格通过 = 它那条靶的**全部机械判据**通过（`_hits` 是明细，不是判据）。"""
+    checks = {key: value for key, value in (row.get("checks") or {}).items() if key != "_hits"}
+    return bool(checks) and all(checks.values())
+
+
+def target_verdict(readings: list[dict], task: str) -> dict:
+    """按角色给一个靶下判词。纯函数：喂合成读数就能验，不需要真跑模型。
+
+    - 控制靶：每格都必须通过；有格没过 → `control_failed`，**先查环境**。
+    - 能力靶：至少一格两臂不同才算 `discriminating`；全过 → 无区分度（只能当控制
+      靶）；全不过 → 也量不出差别（先查难度与环境，别急着改实现）。
+    """
+    rows = [one for one in readings if one.get("task") == task]
+    role = TARGET_ROLES.get(task, "ability")
+    verdict: dict = {"task": task, "role": role, "cells": len(rows)}
+    if not rows:
+        verdict["verdict"] = "no_readings"
+        return verdict
+    by_arm: dict[str, list[bool]] = {}
+    for one in rows:
+        by_arm.setdefault(str(one.get("arm", "?")), []).append(_cell_passed(one))
+    verdict["pass_by_arm"] = {
+        arm: {"pass": sum(1 for ok in flags if ok), "of": len(flags)}
+        for arm, flags in sorted(by_arm.items())
+    }
+    all_pass = all(all(flags) for flags in by_arm.values())
+    any_pass = any(any(flags) for flags in by_arm.values())
+    if role == "control":
+        verdict["verdict"] = "control_ok" if all_pass else "control_failed"
+        if verdict["verdict"] == "control_failed":
+            verdict["next"] = "先查测量环境（缺 rg / 代理劫持），别记成模型不行"
+        return verdict
+    if all_pass:
+        verdict["verdict"] = "no_discrimination"
+        verdict["next"] = "两臂全过，量不出差别：这个靶只能当控制靶（TARGET_ROLES）"
+    elif not any_pass:
+        verdict["verdict"] = "no_discrimination"
+        verdict["next"] = "两臂全不过，量不出差别：先查难度与环境，别急着改实现"
+    else:
+        verdict["verdict"] = "discriminating"
+    return verdict
+
+
+def target_verdicts(readings: list[dict]) -> dict[str, dict]:
+    """每个靶一条判词。`GOALS` 里有几个靶就出几条，缺读数的记 `no_readings`。"""
+    return {task: target_verdict(readings, task) for task in GOALS}
 
 
 # ---- 装配现场（每次跑都要记）-----------------------------------------------
@@ -890,6 +964,18 @@ def _stage1() -> int:
                             )
                     _flush(readings, skipped, settings, repeats, budget, scene, started)
     _flush(readings, skipped, settings, repeats, budget, scene, started)
+    # 靶判词留到最后：中途的判词会被后来补上的格子推翻（跑批是边跑边落盘的）。
+    for task, verdict in target_verdicts(readings).items():
+        arms = "、".join(
+            f"{arm} {one['pass']}/{one['of']}"
+            for arm, one in (verdict.get("pass_by_arm") or {}).items()
+        )
+        line = f"靶判词 {task}（{verdict['role']}）：{verdict['verdict']}"
+        if arms:
+            line += f"；各臂通过 {arms}"
+        if verdict.get("next"):
+            line += f" —— {verdict['next']}"
+        say(line)
     say("===== 跑完 =====")
     return 0
 
@@ -923,7 +1009,13 @@ def _summary(readings: list[dict], settings: list[float]) -> dict:
                 ]
                 if not rows:
                     continue
-                cell: dict = {"runs": len(rows), "finished": sum(1 for one in rows if one["finished"])}
+                cell: dict = {
+                    "runs": len(rows),
+                    "finished": sum(1 for one in rows if one["finished"]),
+                    # 角色跟着格子走：控制靶的格子不能拿来当能力证据。
+                    "role": TARGET_ROLES.get(task, "ability"),
+                    "passed": sum(1 for one in rows if _cell_passed(one)),
+                }
                 for key in keys:
                     values = [one[key] for one in rows]
                     cell[key] = {
@@ -975,6 +1067,8 @@ def _flush(readings, skipped, settings, repeats, budget, scene, started) -> None
         "scene_after": _scene_light(),
         "sandbox": json.loads(STATE_FILE.read_text(encoding="utf-8")),
         "goals": GOALS,
+        "target_roles": dict(TARGET_ROLES),
+        "target_verdicts": target_verdicts(merged),
         "local_http_isolated": True,
         "no_proxy": os.environ.get("NO_PROXY"),
         "env": dict(BATCH_ENV),
