@@ -151,19 +151,27 @@ def test_别的错误仍然算失败(tmp_path: Path, monkeypatch) -> None:
     assert "搜索失败" in result.content
 
 
-def test_真锁死的目录还在时搜索照样成功(tmp_path: Path) -> None:
-    """不 monkeypatch 的那一条：用本机真实存在的 0o700 目录走一遍真 rg。
+def test_真锁死的目录在真rg下报错被如实解析() -> None:
+    """不 monkeypatch 的那一条：本机真实存在的锁死目录，走一遍真 rg。
 
-    这台机器上不一定有（沙箱配置变了就没有），没有就跳过——上面四条已经把
-    判据钉住了。
+    这里**显式把搜索起点指向锁死目录**，而不是指望"搜索整个仓库时会碰到它"。
+    原因是一次真实的假红：本机仓库根下只有一个被 ACL 锁死的目录 `.pytest_cache`，
+    而 rg 默认不进点开头的目录——于是它根本不会去读那个目录，也就不会报错，
+    用例却因为"机器上确实有锁死目录"而开跑，最后红在断言上。显式路径不受忽略
+    规则影响，rg 一定会去读它，于是「解析 rg 报错 → 跳过 + 如实报告」这条真机
+    路径稳定可走。
+
+    这台机器上一个锁死目录都没有时跳过——判据本身由上面四条 monkeypatch 用例钉住。
     """
     locked = _locked_dirs()
     if not locked:
         pytest.skip("本机没有读不了的目录；monkeypatch 那几条兜底")
 
-    result = search_code_spec(REPO_ROOT).handler({"pattern": "def ", "max_results": 5})
+    target = locked[0]
+    result = search_code_spec(REPO_ROOT).handler({"pattern": "def ", "path": target.name})
 
-    assert result.ok is True, result.content
-    assert "跳过" in result.content and "不可读路径" in result.content
-    # 被跳过的目录要**指名道姓**（只报个数字没法让人去修）。
-    assert any(item.name in result.content for item in locked), result.content
+    assert result.ok is False, "一条都没搜就不算成功"
+    assert "没有搜成" in result.content
+    # 跳过的必须可见且指名道姓（只报个数字没法让人去修）。
+    assert "跳过 1 个不可读路径" in result.content
+    assert target.name in result.content
