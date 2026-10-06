@@ -15,6 +15,7 @@ from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.tools.edit import (
     PendingChanges,
+    confirm_rewrite_spec,
     replace_text_spec,
     write_file_spec,
 )
@@ -944,4 +945,115 @@ def test_回归靶_fix_bug的重跑测试被判成有理由的重取(tmp_path: P
         for kind, data in events
         if kind == "tool"
     )
+    assert result.finished is True
+
+
+def test_回归靶_单回合15个list_dir不再逐个执行(tmp_path: Path) -> None:
+    """真机现场：`A-todo|t0.0|on` 第 28 个回合**一口气发了 15 个 list_dir**。
+
+    改动前 `_call_state` 只认得到「文件正文」：目录没有正文（`_text_of` 对目录
+    返回 None），于是这 15 个调用每次都拿空指纹 → 三分类只能归成「判不出」→
+    逐个真的执行。现在目录清单也进指纹：5 个目录各执行一次，重复的 10 次当场
+    拦下。这条是「真机 ×15」那个现场的回归靶。
+    """
+    dirs = ["pkg", "src", "docs", "tests", "tools"]
+    for name in dirs:
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "a.py").write_text("x = 1\n", encoding="utf-8")
+    registry = ToolRegistry()
+    registry.register(list_dir_spec(tmp_path))
+    burst = [{"name": "list_dir", "arguments": {"path": one}} for one in dirs * 3]
+    loop = _edit_loop(
+        tmp_path,
+        [_turn("一口气列一圈", burst), _turn("好了", final="看完了")],
+        registry=registry,
+    )
+    ran: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        ran.append(str(call.arguments.get("path")))
+        return real(call)
+
+    loop.registry.invoke = counting
+    events = _collect_events(loop)
+    result = loop.run("看看项目里有什么")
+
+    assert sorted(ran) == sorted(dirs), f"每个目录只该真的列一次，实际执行了 {ran}"
+    assert any("重复调用第 2 次" in line for line in result.trace), result.trace
+    # 话术要承认这次比的是**目录清单**，不能让模型去找一个不存在的「文件内容」。
+    # 这里从事件流而不是最后一轮 prompt 里读：这一轮的 15 条输出本身就可能把
+    # 上下文顶到硬线（下面 §2 的素材卡会接手），拿 prompt 断言等于在测预算。
+    assert any(
+        "目录清单" in str(data.get("detail") or "")
+        for kind, data in events
+        if kind == "tool"
+    ), events
+    assert result.finished is True
+
+
+def test_回归靶_同一个confirm_rewrite连发只执行一次(tmp_path: Path) -> None:
+    """真机现场：一个 run 里 `confirm_rewrite` 被连发了 18 次。
+
+    这个工具的参数**只有令牌与逐项交代**（没有正文、没有路径），改动前
+    `_call_state` 拿不到任何可比对象 → 三分类永远归成「判不出」→ 每一次都真的
+    执行。现在「令牌指向的那份暂存记录」本身进了指纹：一模一样的一串确认只
+    执行第一次；把项 id 补进 `dropped` 的那一次是**另一次尝试**，照样放行并
+    真的落盘——回归靶必须同时钉住这两半，否则就成了「为了压重复把正常路径
+    拦死」。
+    """
+    old = "".join(f'<p id="p{index}">第 {index} 行</p>\n' for index in range(12))
+    new = '<html>\n<p id="p0">第 0 行</p>\n</html>\n'
+    (tmp_path / "snake.html").write_text(old, encoding="utf-8")
+    pending = PendingChanges(tmp_path)
+    staged = write_file_spec(tmp_path, pending).handler(
+        {"path": "snake.html", "content": new, "rewrite_reason": "合并重复段落"}
+    )
+    assert staged.content.startswith("⏸"), staged.content[:200]
+    token = pending.staged_items()[0].token
+    record, why = pending.lookup_staged(token)
+    assert record is not None, why
+    ids = record.ids()
+    assert len(ids) >= 3, ids
+
+    same = {"name": "confirm_rewrite", "arguments": {"token": token}}
+    fixed = {
+        "name": "confirm_rewrite",
+        "arguments": {
+            "token": token,
+            "dropped": [f"{one}：重复段落，合并时去掉了" for one in ids],
+        },
+    }
+    registry = ToolRegistry()
+    registry.register(write_file_spec(tmp_path, pending))
+    registry.register(confirm_rewrite_spec(tmp_path, pending))
+    loop = _edit_loop(
+        tmp_path,
+        [_turn("确认", [same]) for _ in range(6)]
+        + [_turn("逐项交代", [fixed]), _turn("好了", final="确认完了")],
+        registry=registry,
+        pending=pending,
+    )
+    ran: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        if call.name == "confirm_rewrite":
+            ran.append(str(call.arguments.get("token")))
+        return real(call)
+
+    loop.registry.invoke = counting
+    result = loop.run("把 snake.html 合并成一份")
+
+    assert len(ran) == 2, f"6 次一样的确认只该执行 1 次、改了说法的那次放行，实际 {ran}"
+    assert ran[0] == ran[1] == token
+    prompt = _last_prompt(loop)
+    assert "完全相同" in prompt, prompt
+    assert "没有执行" in prompt, prompt
+    # 改了说法的那一次真的落成了：成果进了待确认清单（`apply` 才写盘），
+    # 不在「被拦」里消失。
+    landed = pending.items()
+    assert [one.path for one in landed] == ["snake.html"], landed
+    assert landed[0].new_text == new
+    assert pending.staged_items() == []
     assert result.finished is True

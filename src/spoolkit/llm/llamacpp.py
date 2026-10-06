@@ -116,6 +116,11 @@ class LlamaCppGateway:
                 if transport is not None
                 else (proxy if proxy is not None else proxy_for(base_url))
             ),
+            # 代理已经由 proxy_for 自己判完了（本机地址一律不走代理），
+            # 不能再让 httpx 去读环境变量：环境里只要有一个 `NO_PROXY=...,[::1]`，
+            # httpx 0.28 在**构造这一步**就会抛 `InvalidURL: Invalid port: ':1]'`，
+            # 本机 8080 还没碰就死了。status.py / health.py 早就是这么写的。
+            trust_env=False,
         )
 
     def chat(self, request: ChatRequest) -> ChatResponse:
@@ -243,6 +248,8 @@ class LlamaCppTokenCounter:
             timeout=timeout,
             transport=transport,
             proxy=proxy if proxy is not None else proxy_for(base_url),
+            # 同上：分词器连的也是本机 llama-server，不让 httpx 读环境代理。
+            trust_env=False,
         )
 
     def count(self, text: str) -> int:

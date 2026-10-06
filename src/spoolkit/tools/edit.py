@@ -1665,6 +1665,44 @@ class StagedRewrite:
         return ttl > 0 and now - self.created_at > ttl
 
 
+def staged_rewrite_key(pending, token: str) -> str:
+    """暂存区里「模型点名的这份重写」现在长什么样；**真的取不到**返回空串。
+
+    给重复调用护栏用：`confirm_rewrite` 的参数里**既没有正文也没有路径**
+    （只有 token 与逐项交代），所以护栏原先拿不到任何可比对象，只能归成
+    「判不出」并放行——真机上于是出现了同一个 stale 令牌连续 18 次
+    （令牌早被 `take_staged` 用掉或已被同路径的再次暂存顶掉，每次拿到的
+    都是同一份「没有这个令牌」的拒绝，改不了结果）。
+
+    刻意返回**可读的状态串**而不是 sha1：这条链路的证据要能直接贴进拒绝
+    话术里给人看，短哈希在这里省不了几个字，却让「为什么判成重复」变回
+    一句无法核对的话。
+
+    指纹**不含 created_at**：同一份重写放久了不是「变了」，把它算进去会让
+    每一次重复都看起来像「有理由的重取」，等于没拦。
+    """
+    def _text(value: object) -> str:
+        return value if isinstance(value, str) else str(value or "")
+
+    record, _why = pending.lookup_staged(token)
+    if record is not None:
+        # 查得到：把这份记录的全部可见内容都收进来（正文只取长度与行数，
+        # 逐字比由同一个签名里的参数负责——参数一字未改就已经说明了一切）。
+        return (
+            f"staged token={_text(record.token)} path={_text(record.path)} "
+            f"lines={record.lines} items={len(record.items)} "
+            f"replaced={len(record.replaced)} chars={len(record.change.new_text)} "
+            f"reason={_text(record.reason)} shrink={bool(record.shrink)}"
+        )
+    # 查不到：令牌作废时，**真正能变的只有清单**（模型可能带了对的意图却拿错
+    # 了令牌，重新提一次就变）。清单也一字未动 → 再发一次拿到的还是同一份拒绝。
+    staged = [f"{item.token}:{item.path}:{item.lines}" for item in pending.staged_items()]
+    changes = [f"{item.path}:{len(item.new_text)}:{item.deleted}" for item in pending.items()]
+    if not staged and not changes:
+        return ""
+    return f"no token={token} staged=[{' '.join(staged)}] changes=[{' '.join(changes)}]"
+
+
 def _now() -> float:
     """暂存时效用的时钟。
 

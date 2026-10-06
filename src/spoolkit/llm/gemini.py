@@ -137,6 +137,9 @@ class GeminiGateway:
                 if transport is not None
                 else (proxy if proxy is not None else system_proxy())
             ),
+            # 代理已经算好了，不让 httpx 再读一遍环境：环境里只要有
+            # `NO_PROXY=...,[::1]`，httpx 0.28 在构造这一步就抛 InvalidURL。
+            trust_env=False,
             headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
         )
 
