@@ -2719,6 +2719,6 @@ def replace_lines_spec(
             "additionalProperties": False,
         },
         handler=handler,
-        brief="按行号替换（需带 expect 锚点）",
+        brief="按行号替换",
         group="改",
     )
