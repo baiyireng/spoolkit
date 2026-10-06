@@ -210,6 +210,19 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec | None:
         return self._specs.get(name)
 
+    def validate(self, name: str, args: dict[str, Any]) -> str | None:
+        """**公开的**参数校验口：整批校验（编排层）与单调用走同一套判据。
+
+        为什么不复用 `invoke`：`invoke` 会**真的执行**那个工具，而编排要的是
+        「先把整批校一遍，有一条不合法就整批不发」。拒绝话术必须是同一份
+        （`_validate` → `_reject` 的支持参数清单 + 照抄形状），否则同一个参数
+        错误在单调用与编排里会得到两种说法，模型在两条路上要学两遍。
+        """
+        spec = self._specs.get(name)
+        if spec is None:
+            return f"未知工具: {name}"
+        return _validate(args, spec.parameters, spec.name)
+
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._specs))
 

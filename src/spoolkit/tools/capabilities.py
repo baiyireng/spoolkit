@@ -97,6 +97,13 @@ class Capability:
     #: 读工作区的工具也不隔离（它读的正是主循环眼前那份内容）。
     isolatable: bool = False
 
+    #: 会**派生一个手里有写工具的执行体**（子智能体那一套）。它自己这一层的
+    #: 参数里没有路径，所以它**不是**写工具（保持 `writes=False`：进不了
+    #: `EDIT_TOOLS` / `WRITE_TOOLS`，既有判定逐条不变）；但编排层要拿这一位
+    #: 回答「这一条能不能与别的调用并行」——两条并行的派发会同时往同一份
+    #: 待确认清单里写。`dispatch` 是唯一一个为真的。
+    delegates: bool = False
+
     #: 会把**已暂存的正文**落盘（确认入口）。它不是「交内容」的写工具，
     #: 所以不算进 `EDIT_TOOLS` 那一档，但算「把改动推进下去」（`COMMIT_TOOLS`）。
     commits: bool = False
@@ -181,7 +188,14 @@ _DECLARED: dict[str, Capability] = {
         progress=True,
     ),
     # ---- 派 / 网：丢给隔离执行体 ----
-    "dispatch": Capability(isolatable=True),
+    # 编排：**一步内批量执行多个工具调用**。它在声明表里是一位中性项——它
+    # 自己不动工作区，动工作区的是它**批里的分支**，而每条分支按**那个工具
+    # 自己的**声明取判据（`can_parallel` / `requires_serial` / `needs_isolation`
+    # / `needs_approval`，见 `tools/orchestrate.py`）。所以它不写、不读、不
+    # 出网、不请批：派的那些派生视图（EDIT/WRITE/COMMIT/ACTION/NETWORK/
+    # APPROVAL/ISOLATABLE/READ）因此一条都不变——那份冻结快照不用动。
+    "orchestrate": Capability(),
+    "dispatch": Capability(isolatable=True, delegates=True),
     "research": Capability(
         network=True,
         network_entry=True,
