@@ -15,7 +15,13 @@
 import json
 from pathlib import Path
 
-from spoolkit.agent.loop import AgentLoop, converge_step
+from spoolkit.agent.loop import (
+    CONCLUDED_BY_CONVERGE,
+    MATERIAL_CARD_HEAD,
+    MATERIAL_CARD_MAX_CHARS,
+    AgentLoop,
+    converge_step,
+)
 from spoolkit.config import Config
 from spoolkit.context import templates as T
 from spoolkit.llm.fake import FakeModel
@@ -23,6 +29,7 @@ from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.tools.edit import PendingChanges, write_file_spec
 from spoolkit.tools.fs import list_dir_spec, read_file_spec
 from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.types import REVERSE_CLAUSE
 
 
 def _turn(thought: str, calls=None, final=None) -> str:
@@ -47,6 +54,7 @@ def _build(
     script: list,
     overrides: dict | None = None,
     files: int = 0,
+    max_steps: int = 6,
 ) -> AgentLoop:
     (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
     # 每一次都读**不同**的文件：参数逐字相同的重复调用会被机械层硬拦
@@ -68,7 +76,7 @@ def _build(
         config=Config(
             project_root=tmp_path,
             context_window=4096,
-            max_steps=6,
+            max_steps=max_steps,
             supervise=False,
             overrides=overrides or {},
         ),
@@ -209,6 +217,152 @@ def test_收束指令在上下文重置之后仍然送得到(tmp_path: Path) -> 
     after = [one for one in prompts if T.CONVERGE_NOW in one]
     assert after, "收束指令一次都没进上下文"
     assert T.CONVERGE_NOW in prompts[-1], "最后一次模型调用里没有收束指令"
+
+
+def test_收束后探索类调用被工具层拒绝而不是靠文本劝阻(tmp_path: Path) -> None:
+    """**P0 修①的验收**：素材已经够了却还想再看时，拦它的是**动作**，不是文字。
+
+    真机诊断（P0 `p0-turns.json`）：`CONVERGE_NOW` 那段文本确实送达了——第 7、
+    8 次模型调用里都能读到——但模型照发 `list_dir`。**模型对文字免疫**，能推得
+    动它的只有「这一轮物理上还剩下什么可选」。所以这一层必须落在
+    `registry.invoke` **之前**：收束态里探索类调用不给执行。
+
+    脚本形状（预算 8 步，`converge_at_steps=3` → 第 7 步进收束态）：
+
+    - 第 1–6 步：读 f0–f5（各自正文不同，不触发重复护栏那条判据）；
+    - 第 7 步（刚进收束态）：读 f6 —— 这是 `CONVERGE_NOW` 承诺的「最多再读一次」；
+    - 第 8 步：读 f7 —— 额度用完了（它是**存在**的，所以拒绝不可能被说成
+      「文件不存在」），**被拒**；收束态里这一轮的调用全被拦 = 没有执行，
+      所以不占步数预算（退还），循环还会再问它一次；
+    - 再一轮：`list_dir` —— 也是探索，**被拒**；
+    - 最后：一段**纯文本**（真机就是这形状：不是合法 JSON）——按结论收下。
+
+    预算为什么是 8 步而不是更小：收束态本身要留出「补素材一次 + 被拒一次 +
+    写结论一次」三轮。预算 6 步（`converge_at_steps=2`）时补素材那一读会把
+    最后一步用掉，模型再没有被问话的机会——那不是它不收尾，是我们没给它开口
+    的机会。这一点是探针（`.probe_runs/probe_converge_order.py`）实测撞出来的。
+    """
+    script = _explore(6)
+    script.append(_turn("补读那一处", [_read("f6.py")]))
+    script.append(_turn("再看一个", [_read("f7.py")]))
+    script.append(_turn("再列一下", [{"name": "list_dir", "arguments": {"path": "."}}]))
+    script.append(
+        "结论：f0–f6 我都读过了，只有赋值语句，没有可改的地方；"
+        "缺 tests/services/ 下的失败用例原文，所以给不出改动方案。"
+    )
+    loop = _build(
+        tmp_path, script, files=8, max_steps=8, overrides={"converge_at_steps": 3}
+    )
+
+    executed: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        executed.append(call.name)
+        return real(call)
+
+    loop.registry.invoke = counting
+    result = loop.run("把这个文件里的待办汇总一下")
+
+    # 真的执行了 7 次读：f0–f6。第 8 次（f7）与 `list_dir` **一次都没执行**。
+    assert executed == ["read_file"] * 7, executed
+    last = _prompts(loop)[-1]
+    # 拒绝话术要说清三件事：这是**预算收束**、**唯一还允许的动作**是什么、
+    # 以及 §2.5 的反向条款（别读成「不许删文件」）。
+    assert "预算收束" in last, last
+    assert "唯一还允许的动作" in last
+    assert REVERSE_CLAUSE in last
+    assert "补一次素材" in last
+    # 那一次「补素材」的额度真的兑现了（trace 里记账）。
+    assert any("补素材" in line for line in result.trace), result.trace
+    # 结论是**它自己写的字**，不是系统判词。
+    assert result.concluded is True, result.final
+    # 终止原因点名「结论是从收束那条出口收下的」——与「模型自己标了 done」
+    # 区分开，报告里才能看出这一次是逼出来的还是它自己收的尾。
+    assert result.terminated_by == CONCLUDED_BY_CONVERGE, result.terminated_by
+    assert result.model_final.startswith("结论：")
+    assert "缺 tests/" in result.model_final
+    assert "已达步数上限" not in result.model_final
+
+
+def test_关掉收束之后同一份脚本会把那个文件读掉(tmp_path: Path) -> None:
+    """**变异对照**：把收束关掉，同一份脚本就会真的把 f5 读掉、也收不了尾。
+
+    这条证明上一条拦住的**是收束政策**，不是「文件不存在」「护栏顺手拦了」
+    之类的巧合：唯一的差别只有 `converge_at_steps`。
+    """
+    script = _explore(6)
+    script.append(_turn("补读那一处", [_read("f6.py")]))
+    script.append(_turn("再看一个", [_read("f7.py")]))
+    script.append(_turn("再列一下", [{"name": "list_dir", "arguments": {"path": "."}}]))
+    script.append("结论：f0–f6 我都读过了。")
+    loop = _build(
+        tmp_path,
+        script,
+        overrides={"converge_at_steps": 0},
+        files=8,
+        max_steps=8,
+    )
+
+    executed: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        executed.append(call.name)
+        return real(call)
+
+    loop.registry.invoke = counting
+    result = loop.run("把这个文件里的待办汇总一下")
+
+    reads = executed.count("read_file")
+    assert reads == 8, executed  # 连 f7 也读了
+    assert all(T.CONVERGE_NOW not in one for one in _prompts(loop))
+    assert all("预算收束" not in one for one in _prompts(loop))
+    # 收束关掉之后那段纯文本不会被当成结论，收不了尾。
+    assert result.concluded is False
+    assert result.terminated_by == "步数上限"
+
+
+def test_硬重置把已读到的原文压成素材卡挂回上下文(tmp_path: Path) -> None:
+    """**P0 修②的验收**：上下文重置丢掉历史，但**不丢素材**。
+
+    真机现场（`p0-turns.json` 第 4→5 步）：第 4 步已经读到失败原文；第 5 步
+    硬重置把 13531 字的上下文砍到 4126 字，**连那份失败原文一起砍掉了**，
+    第 6–8 步它在重新 `list_dir`，最后一句判词是「已达步数上限」。
+
+    两条判据必须同时成立：
+    1. **素材可核对地还在**——重置之后发给模型的提示词里能逐字找到那句断言原文；
+    2. **上下文仍受控**——多出来的那部分就是卡片本身，它按字数封顶；整段
+       900 行的文件正文并没有被搬过来。
+    """
+    failure = "AssertionError: assert service.stopped is True"
+    body = "# 失败原文\n" + failure + "\n" + "value = 1\n" * 900
+    (tmp_path / "services.py").write_text(body, encoding="utf-8")
+    goal = "把失败测试改绿"
+    script = [
+        _turn("读失败原文", [_read("services.py")]),
+        _turn("看一眼现状", [_read("a.py")]),
+        _turn("够了", final=f"结论：失败原文是「{failure}」，改 stop_service 时补一行。"),
+    ]
+    # 硬触发线压到极低：每一步都撞硬线，保证**重置发生在拿到素材之后**。
+    loop = _build(tmp_path, script, overrides={"hard_trigger_ratio": 0.02})
+    result = loop.run(goal)
+
+    prompts = _prompts(loop)
+    assert result.resets >= 2, result.trace
+    assert any("素材卡保留了" in line for line in result.trace), result.trace
+    # ① 素材可核对地还在：这一行断言就是证据——重置之后它仍读得到那句失败原文。
+    last = prompts[-1]
+    assert failure in last, last
+    assert "services.py" in last, last
+    assert MATERIAL_CARD_HEAD in last
+    # ② 上下文仍受控：重置后的提示词只比最初那条（还没有任何素材）多了卡片，
+    #    卡片有上限，而 12000+ 字的文件正文并没有被整段搬进来。
+    delta = len(last) - len(prompts[0])
+    assert 0 < delta <= MATERIAL_CARD_MAX_CHARS + 200, delta
+    assert delta < len(body) // 4, delta
+    assert result.concluded is True, result.final
+    assert result.model_final.startswith("结论：")
 
 
 def test_报告把模型结论与系统判词分开且机读(tmppath=None) -> None:

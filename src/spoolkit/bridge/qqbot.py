@@ -33,6 +33,7 @@ from spoolkit.bridge.channel import Incoming
 from spoolkit.bridge import credentials
 from spoolkit.bridge.ws import Timeout as WebSocketTimeout
 from spoolkit.bridge.ws import WebSocket
+from spoolkit.net import client_proxy
 
 TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 DEFAULT_API = "https://api.sgroup.qq.com"
@@ -120,7 +121,11 @@ class QQBotChannel:
                 base_url=self._api,
                 timeout=timeout,
                 transport=transport,
-                proxy=proxy or None,
+                proxy=client_proxy(proxy, transport),
+                # 代理由 `client_proxy` 决定，不再让 httpx 去读环境变量：
+                # 环境里的 `NO_PROXY=...,[::1]` 会让它在**构造这一步**抛
+                # InvalidURL（详见 net.py 的注释）。
+                trust_env=False,
             )
         except ImportError as exc:
             # httpx 走 SOCKS 要可选的 socksio，而它报出来的是 `No module named

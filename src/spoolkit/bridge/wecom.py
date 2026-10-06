@@ -27,6 +27,7 @@ import httpx
 
 from spoolkit.bridge import credentials
 from spoolkit.bridge.channel import Incoming
+from spoolkit.net import client_proxy
 
 DEFAULT_API = "https://qyapi.weixin.qq.com"
 TOKEN_TTL = 7000.0  # 企业微信的 access_token 有效期 7200 秒，留点余量
@@ -45,6 +46,7 @@ class WeComChannel:
         root=None,
         api: str = DEFAULT_API,
         transport: httpx.BaseTransport | None = None,
+        proxy: str | None = None,
         timeout: float = 20.0,
         clock=time.monotonic,
     ) -> None:
@@ -54,7 +56,13 @@ class WeComChannel:
             agent_id, root, credentials.WECOM_AGENT_ID
         )
         self._client = httpx.Client(
-            base_url=api.rstrip("/"), timeout=timeout, transport=transport
+            base_url=api.rstrip("/"),
+            timeout=timeout,
+            transport=transport,
+            proxy=client_proxy(proxy, transport),
+            # 代理由 `client_proxy` 决定，不再让 httpx 读环境变量：环境里的
+            # `NO_PROXY=...,[::1]` 会让它在构造这一步抛 InvalidURL（见 net.py）。
+            trust_env=False,
         )
         self._clock = clock
         self._token = ""
