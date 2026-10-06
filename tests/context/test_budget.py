@@ -55,9 +55,35 @@ def test_未知区段配额为零() -> None:
 
 
 def test_软硬两条触发线() -> None:
+    """软线按窗口算、硬线按**有效预算**算，而且硬线不得高于有效预算。
+
+    硬线这一条由 P0 取证改过来：旧口径 `window × 0.90` 在 8K 窗口下是 7372，
+    而装配器**最多只能装到有效预算**（6964）——拿一个比它低得多的数当重置线，
+    只会在历史还没装满时就把已读到的工具输出整段丢掉。真机对照 36 次里
+    17 次至少重置过一次，重置之后模型从零重新收集素材，那是「素材够了却
+    写不出结论」的主要成因（逐回合现场见
+    `benchmarks/probes/orchestration/p0-turns.json`）。
+    """
     b = Budget(window=1000)
     assert b.soft_limit() == int(1000 * 0.70)
-    assert b.hard_limit() == int(1000 * 0.90)
+    # 硬线 = 有效预算（850）× hard_trigger_ratio（0.98）= 833，且 ≤ effective()。
+    assert b.hard_limit() == int(b.effective() * 0.98)
+    assert b.hard_limit() <= b.effective()
+
+
+def test_硬触发线随输出预留一起缩() -> None:
+    """输出被抬到 boost 档之后有效预算变小，重置线必须跟着缩。
+
+    否则抬输出这件事会顺带把「能装多少上下文」也悄悄放大——重置发生在
+    `demand >= hard_limit()` 处，而 `demand` 是**裁剪前**的需求量，
+    一个不跟着缩的线会让装配器在必留区段那一步直接抛错。
+    """
+    b = Budget(window=8192)
+    before = b.hard_limit()
+    b.boost_output()
+    assert b.effective() < 8192
+    assert b.hard_limit() < before
+    assert b.hard_limit() <= b.effective()
 
 
 def test_区段默认可裁剪() -> None:

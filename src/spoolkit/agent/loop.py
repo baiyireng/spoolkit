@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+import httpx
+
 from spoolkit.agent.audit import (
     ACTION_BLOCK_KIND,
     AUDIT_KIND,
@@ -174,6 +176,101 @@ REPEAT_INTERVENE_AT = int(_limits.knob("repeat_intervene_at").default)
 # 督导给的续期加起来最多到这里（基础预算的倍数）。
 # 这不是任务预算，是安全线：没有它，一个卡住的任务能把 GPU 烧一整夜。
 STEP_CEILING_FACTOR = int(_limits.knob("step_ceiling_factor").default)
+
+
+def step_hard_cap(config: Config) -> int:
+    """这一次运行真正能走多少步的**硬上限**（天花板，任何放大都不得越过）。
+
+    这个数以前只在督导续期那一侧存在（`step_ceiling`），而「按目标行数自动
+    放大预算」那条路**不经过它**：真机对照实测配 12 步的格子里有 10 格实跑到
+    13–24 步（`B-failing-test|t0.4|control|r1` 跑到 24），报告里只写「未完成」，
+    「上限被抬过」这件事一个字都没有。
+
+    所以放大改走这一条判据：`step_lines_bonus_cap` 是**放大的额度**，
+    `step_budget_hard_cap` 是**允许放大的总上界**（默认 0 = 一次都不许放大，
+    预算就是预算）。两者取小，再与基础预算取大——即使有人把 cap 调得很大，
+    放大也不会越过 `step_budget_hard_cap` 那条线。
+    """
+    base = int(config.max_steps)
+    factor = int(config.limit("step_ceiling_factor")) or STEP_CEILING_FACTOR
+    ceiling = int(config.step_ceiling) if config.step_ceiling else base * factor
+    allowed = int(config.limit("step_budget_hard_cap"))
+    return max(base, min(int(ceiling), base + max(allowed, 0)))
+
+
+def clamp_step_limit(config: Config, candidate: int) -> int:
+    """把一个**想放大**的步数上限夹进硬上限里。返回值才是真正生效的那个数。
+
+    放大被夹住时调用方要如实记一行（见 `run()` 里那条 trace）：
+    「请求放到 N 步，硬上限 M 步，实际 M 步」——读不到这一行，
+    「这次跑了多少步、为什么」就还是只能靠猜。
+    """
+    return min(int(candidate), step_hard_cap(config))
+
+
+def converge_step(converge_at_steps: int, limit: int) -> int:
+    """算「第几步起开始收束」：剩余步数 ≤ `converge_at_steps` 的第一步。
+
+    `converge_at_steps <= 0` 时返回 0——`state.step` 从 1 起，所以 0 永远不会
+    触发，那就是**关掉**（变异对照与「我只想看老行为」时用它）。
+    这个数是**每步都会读到**的（主循环里那一个比较），所以它不许依赖
+    `limit` 在运行中被放大之后的值：收束点按启动时的预算定下来，
+    预算中途被放大也不会让收束点往后跑。
+    """
+    if converge_at_steps <= 0:
+        return 0
+    return max(1, int(limit) - int(converge_at_steps) + 1)
+
+
+#: 收束指令在 trace / 事件里的一句话说明（谁被终止、为什么终止要能查）。
+CONVERGE_REASON = "临近步数预算，注入收束指令（用已有素材给结论）"
+
+#: 一次运行**失败**（而不是「没做完」）时的判词行首标记。
+#:
+#: 「模型没给结论」与「这一次根本没跑成」是两件事：前者是任务状态，
+#: 后者是环境/服务故障。真机对照那批 502 的格子两件事被记成同一句
+#: 「未完成」——于是既看不出失败率，也没人知道该去查代理。
+#: 判词与读数都按这个标记分开（`LoopResult.failed_reason`）。
+RUN_FAILED_PREFIX = "⚠ 本次运行失败（不是「没做完」）："
+
+#: 运行失败那条 note 的 `kind`（跑分器按它数失败次数，不靠正则捞文本）。
+RUN_FAILED_KIND = "run_failed"
+
+#: 「临近预算收束指令已注入」那条 note 的 `kind`。
+#:
+#: 为什么要一条**事件**：`trace` 是给人读的过程材料，而「收束到底有没有
+#: 发出去」是 P0 的可证伪读数（真机实测抓出的那个洞正是「指令在重置那一步
+#: 被丢掉」——只看 trace 的话，那一行照旧在，因为 trace 记的是**判定**，
+#: 不是「装进去了没有」）。事件流里那一条同时带上第几步、剩余多少步，
+#: 跑分器与报告都按它取。
+CONVERGE_KIND = "converge"
+
+#: 「模型/分词这一层失败」的识别（P0 修②只收这一层，别的一律往上抛）。
+#:
+#: 判据按**类型名 + httpx 的异常基类**取，不在这里 import `llamacpp`：
+#: agent 层 import 具体 provider 会把「换一个 provider」变成改这里，
+#: 而这条判据要的只是「这是不是连模型那一步的失败」。三类来源：
+#: llama.cpp 网关自己的 `LlamaCppError`（tokenize/补全/502 都走它）；
+#: httpx 的网络与协议错误（连不上、超时）；以及任何把它包起来再抛的
+#: 变体（沿 `__cause__` 往里看一层）。新增 provider 抛自己的异常类型时，
+#: 把那个名字加进 `_MODEL_CALL_ERROR_NAMES`——**这是「不许静默」的名单**，
+#: 不该靠 `except Exception` 一把抓（那会把「网关壳自己写错」也变成
+#: 一次安静失败，`dispatch` 那条「子智能体炸了主循环继续」的判据就废了）。
+_MODEL_CALL_ERROR_NAMES = frozenset({"LlamaCppError"})
+
+
+def _is_model_call_failure(exc: BaseException) -> bool:
+    """这个异常是不是「模型/分词这一步」的失败（沿 `__cause__` 看进去）。"""
+    seen: set[int] = set()
+    node: BaseException | None = exc
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        if type(node).__name__ in _MODEL_CALL_ERROR_NAMES:
+            return True
+        if isinstance(node, httpx.HTTPError):
+            return True
+        node = node.__cause__ or node.__context__
+    return False
 
 # 只看「连续相同」会漏掉交替打转：A、B、A、B…每一步都和上一步不同，
 # 计数每次都被重置。实测审查者用 git status / git diff 交替复读了 11 步，
@@ -1077,6 +1174,67 @@ class LoopResult:
     # 摆到 diff 之前——那句话不能只藏在报告正文里。
     verified: bool | None = None
     verify_summary: str = ""
+    #: **模型自己写的结论原文**（它宣告完成时那一段；没宣告完成就是空串）。
+    #:
+    #: 与 `final` 分开是必须的：`final` 是给人读的收尾报告，里面混着系统判词
+    #: （「已达步数上限，任务未完成」）、验证结果与账目。真机对照那批 33 次
+    #: 没有结论的运行里，用户读到的唯一正文就是那句判词，于是「它到底有没有
+    #: 给结论」在读数里查不到。这条字段与 `concluded` 一起把它变成机械读数。
+    model_final: str = ""
+    #: **这次运行失败了**（服务/分词/网关报错），不是「没做完」。
+    #: 空串 = 没失败。非空时它的内容是「哪一类 + 原话」，判词与读数都带它。
+    failed_reason: str = ""
+
+    @property
+    def concluded(self) -> bool:
+        """**模型自己写出了结论**（不是系统判词）——收敛率的分子就是它。"""
+        return bool(self.model_final.strip())
+
+    @property
+    def terminated_by(self) -> str:
+        """谁终止了这一次运行（读数的口径只有这一处，别处不许各写一份）。
+
+        四档：模型完成 / 步数上限 / 超时（由调用方按墙钟填，循环自己不判）/
+        失败。循环能判的是三档——超时是进程外的事实，所以这里不猜它；
+        调用方（探针）拿到「进程超时被强杀」时按自己那一档记。
+        """
+        if self.failed_reason:
+            return "失败"
+        if self.concluded:
+            return "模型完成"
+        return "步数上限"
+
+    @property
+    def model_verdict_line(self) -> str:
+        """模型结论那一行（带可分标记）；它没给结论时给一句如实说明。
+
+        这就是「区分模型写的结论与系统判词」的机械出口：判词带 ⚠、
+        这一段带 `MODEL_VERDICT_PREFIX`，两者不再糊成同一段正文。
+        """
+        if self.concluded:
+            return f"{T.MODEL_VERDICT_PREFIX}{self.model_final.strip()}"
+        return (
+            f"{T.MODEL_VERDICT_PREFIX}（这一次模型没有写出结论；"
+            "下面这一段是系统的判词与账目，不是它的结论。）"
+        )
+
+    @property
+    def report_text(self) -> str:
+        """给人读的完整报告：**模型结论在前、系统判词与账目在后**。
+
+        为什么要单独一个出口，而不是直接改 `final`：`final` 是**报告正文**
+        （含系统账目、验证结论、逐条发现），而「这段正文里哪一句是模型写的」
+        在文本里原先分不出来——真机对照那 33 次没结论的运行里，用户读到的
+        唯一正文就是判词「已达步数上限，任务未完成」。所以两者各占一行、
+        各带各的标记，`concluded` / `terminated_by` 两个字段就是这一条的
+        机读形式（收敛率按它们算）。
+        """
+        verdict = self.model_verdict_line
+        body = str(self.final or "")
+        # 两种情况都拼两行：模型写了结论时，它本来就是报告正文的第一行
+        # （`_collect_report` 的 ① 结论），前面加一行带标记的同一句话不算
+        # 重复——标记是给机械核对的（`【模型结论】`），报告正文是给人读的。
+        return f"{verdict}\n\n{body}"
 
     def usage(self) -> str:
         """一行用量摘要，用于比较不同配置的实际成本。"""
@@ -1609,6 +1767,22 @@ class AgentLoop:
             )
         ]
         feedback: str | None = None
+        # 收束的触发点（第几步起改发 `CONVERGE_NOW`）。按 `converge_at_steps`
+        # 在**启动时**算一次：这样「哪一步开始收束」是这次运行的一个事实，
+        # 而不是每步都要重算一遍的口径；`converge_at_steps=0` 时它是 0，
+        # 而 `state.step` 从 1 起，所以那等于关掉（变异对照用的就是它）。
+        # 收束那几轮的开销（168 字）**只在这里出现**，system 区段一个 token
+        # 都没涨——固定税与「快没预算时才说的话」不该共用一份预算。
+        converge_at = converge_step(
+            int(self.config.limit("converge_at_steps")), limit
+        )
+        converged_told = False
+        # 这次运行**失败**的原因（空串 = 没失败）。它不是异常出口：模型那一步
+        # 报错时循环在这里记下来、走正常的收尾路径返回，于是三条出口
+        # （判词 / 事件流 / `LoopResult`）都带着同一个事实（P0 修②）。
+        failed_reason = ""
+        # 模型自己写的结论原文（空串 = 它一次都没宣告完成）。
+        model_final = ""
         # 本次任务里已经出现过的工具输出正文。同一步里第二遍读到同一份内容时，
         # 只在历史里留一行说明——省下的正是「每轮都要重发一遍」的那部分。
         seen_outputs: set[str] = set()
@@ -2031,10 +2205,62 @@ class AgentLoop:
                 self._commit_schema is None
                 and no_edit_steps >= self.config.limit("no_edit_limit")
             )
+            # 收束那几步里不再让 FORCE_* 抢话：预算见底时「给结论」比
+            # 「提改动」更该被要求，而这一条还明确禁止再开新探索。
             if forcing:
                 feedback = T.FORCE_COMMIT
             elif concluding:
                 feedback = T.FORCE_CONCLUDE
+            # ---- 临近预算强制收束（P0 修③）：先**判定**，正文最后才装 -------
+            #
+            # 与上面两条**并存**（各管一件事，见 `templates.CONVERGE_NOW`）：
+            # 那两条由「连续只看不写」触发，这一条只由**剩余步数**触发，所以它
+            # 排在后面覆盖它们——预算见底时「给结论」比「提改动」更该被要求，
+            # 而且这条明确禁止再开新探索。触发点用 `converge_at`（启动时按
+            # `converge_at_steps` 算好的那一步），所以它一旦开始就每步都在，
+            # 而 trace 只记一次（同一句话记 N 遍等于噪声）。
+            #
+            # `converge_at <= 0` 就是**关掉**（标定值 0 时 `converge_step` 返回
+            # 0）。这里必须显式判 `> 0`：`state.step` 从 1 起，`state.step >= 0`
+            # **每一步都成立**——那会变成「全程收束」，与「关掉」正好相反。
+            #
+            # **为什么这一段不能直接拼进 feedback**（真机实测抓出来的）：
+            # 下面那条预算守卫在硬触发时会把 `feedback` 清成 None 再重新装配，
+            # 于是收束指令在**真正需要它的那一步**被自己人丢掉了。P0 真机小样本
+            # 的现场（`p0-turns.json`）逐回合可查：第 4 步它已经读到失败原文与
+            # `services.py`；第 5 步上下文重置把素材整段丢掉、**收束指令
+            # 也被丢掉**；第 6-8 步它在重新 list_dir，最后一次模型调用里
+            # 根本没有那句指令，最后一句判词是「已达步数上限」。
+            # 收束与「丢掉历史」是两件事：后者清掉的是历史，不是我们对它说的话。
+            converging = converge_at > 0 and state.step >= converge_at
+            # **收束是追加，不是替换**：`feedback` 上可能已经挂着督导的改道建议
+            # （或是审查发现、截断说明），那些话比这条更具体。实测抓出来的代价：
+            # 直接覆盖时，收束那一步把「这一轮本来该照做的那句话」挤掉了
+            # （`tests/cli/test_prompt_for_turn.py` 两条端到端就是这么红的——
+            # 模型那一轮只看到收束指令，看不到检索结果自带的说明）。
+            if converging:
+                feedback = (
+                    T.CONVERGE_NOW
+                    if not feedback
+                    else f"{feedback}\n\n{T.CONVERGE_NOW}"
+                )
+            if converging and not converged_told:
+                converged_told = True
+                trace.append(f"step{state.step}: {CONVERGE_REASON}")
+                self._emit(
+                    "note",
+                    {
+                        "text": f"临近预算收束（剩余 {max(limit - state.step, 0)} 步）："
+                        "已要求用现有素材给结论",
+                        "ok": True,
+                        "kind": CONVERGE_KIND,
+                        "converge_at_steps": int(
+                            self.config.limit("converge_at_steps")
+                        ),
+                        "step": state.step,
+                        "remaining": max(limit - state.step, 0),
+                    },
+                )
             # 督导的话排在最后：它比通用提醒具体，不该被顶掉。只发一次——
             # 一直挂着会让每一轮的装配都多一段重复内容。
             #
@@ -2063,6 +2289,11 @@ class AgentLoop:
                 # `_guard_repeat_decision` 的第一条判据）。
                 self._context_revision += 1
                 trace.append(f"step{state.step}: 上下文重置（第 {resets} 次）")
+                # **收束指令在重置之后重新装**：它说的不是历史里的内容，
+                # 而是这一轮该做什么。被重置顺手丢掉的话，「临近预算收束」
+                # 这条机制在重置发生的那几次运行里等于不存在（实测就是这样）。
+                if converging:
+                    feedback = T.CONVERGE_NOW
                 _assemble_started = time.time()
                 assembled = self._assemble(
                     state, history, feedback, prefetched, hot, lesson_text
@@ -2094,7 +2325,6 @@ class AgentLoop:
                 if overflow_retried:
                     raise
                 overflow_retried = True
-                history = [Message(role="user", content=goal)]
                 feedback = None
                 resets += 1
                 # 同上：历史被丢掉，工具结果的内容都不在上下文里了。
@@ -2103,6 +2333,37 @@ class AgentLoop:
                     f"step{state.step}: 服务端说提示词超长，丢掉历史重发（第 {resets} 次）"
                 )
                 continue
+            except Exception as exc:  # noqa: BLE001 - 见下面那段：**不许静默**
+                # ---- P0 修②：LLM/分词相关失败必须响亮 ------------------------
+                #
+                # 这条路以前是**不接**的：异常直接穿出 `run()`，于是「模型那一步
+                # 坏了」在读数里变成两种情况之一——进程带着回溯死掉（调用方只能
+                # 从 stderr 里正则捞），或者跑分器把这一格丢进 `skipped`。
+                # 真机对照实测：代理把 `/tokenize` 劫成 502 之后，整段格子被记为
+                # 「未完成」——它与「任务没做完」长得一模一样，收敛率的分母里
+                # 都看不见它，也没人知道该去查代理。
+                #
+                # **按类型收口，不吞别的异常**：只接「模型/分词这一层」的失败
+                # （llama.cpp 的 `LlamaCppError` 与 httpx 的网络错误）。
+                # 其它异常（网关壳自己写错、依赖内部炸了）照旧往上抛——把它也
+                # 变成一条「失败结果」的话，`dispatch` 那类「子智能体炸了主循环
+                # 继续」的判据就再也测不出来了（`RuntimeError: 网关掉了` 会变成
+                # 一条正常的失败返回）。收口的是**这一类**失败，不是所有失败。
+                model_seconds += time.time() - _call_started
+                if not _is_model_call_failure(exc):
+                    raise
+                failed_reason = f"{type(exc).__name__}: {exc}"
+                trace.append(f"step{state.step}: 运行失败——{failed_reason}")
+                self._emit(
+                    "note",
+                    {
+                        "text": f"运行失败（模型/分词这一步）：{failed_reason}",
+                        "ok": False,
+                        "kind": RUN_FAILED_KIND,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                break
             model_calls += 1
             prompt_tokens += response.prompt_tokens
             completion_tokens += response.completion_tokens
@@ -2251,13 +2512,29 @@ class AgentLoop:
                     bonus = scaled_step_bonus(self.config, target_lines)
                     if bonus > size_bonus:
                         size_bonus = bonus
-                        grown = max(limit, self.config.max_steps + bonus)
+                        # **放大必须过硬上限，而且必须被看见**（P0 修①）。
+                        # 原来这里是 `grown = max(limit, max_steps + bonus)`——
+                        # 直接赋值给 `limit`，于是配置 12 步的格子实跑到 24 步，
+                        # 而报告里只有一句「未完成」。现在两条都改：
+                        #   ① `clamp_step_limit` 把它夹进 `step_budget_hard_cap`
+                        #      （默认 0 = 一次都不许放大，预算就是预算）；
+                        #   ② 无论夹没夹住，都记一行「请求多少 / 硬上限多少 /
+                        #      实际多少」，读数里能看出有没有放大。
+                        wanted = max(self.config.max_steps + bonus, limit)
+                        hard = step_hard_cap(self.config)
+                        grown = clamp_step_limit(self.config, wanted)
+                        if grown != wanted:
+                            trace.append(
+                                f"step{state.step}: 目标产出规模要 {target_lines} 行，"
+                                f"请求把步数预算放到 {wanted} 步，"
+                                f"硬上限 {hard} 步——实际 {grown} 步（放大被夹住）"
+                            )
                         if grown > limit:
                             limit = grown
                             ceiling = max(ceiling, limit)
                             trace.append(
                                 f"step{state.step}: 目标产出规模要 {target_lines} 行，"
-                                f"步数预算按规模放大到 {limit}"
+                                f"步数预算按规模放大到 {limit}（硬上限 {hard} 步）"
                             )
                     result = self._invoke_guarded(call, repeats, seen)
                     # 这次调用发生在哪个上下文版本里。重复调用护栏用它判断
@@ -2623,6 +2900,10 @@ class AgentLoop:
                     continue
                 self._archive(state, "success", trace, turn.final or "")
                 clear_state(checkpoint)
+                # 「模型自己写出了结论」这件事单独存一份（`turn.final` 是它写的
+                # 原文，`final_text` 是加过系统判词与账目的收尾报告）。
+                # 收敛率、`concluded`、报告里那一段「模型结论」都读这一个字段。
+                model_final = turn.final or ""
                 # **有动作没执行**（挂起待批）时不许宣称完成：`finished=False`
                 # 在这里的含义是「有动作在等批复」，**不是**「成果没落盘」——
                 # 成果已经按 §2.5 落在工作区里了（§6 P1 验收口径明确反向过
@@ -2648,11 +2929,20 @@ class AgentLoop:
                     environment_blocked=self.environment_blocked,
                     verified=self._final_verify[0] if self._final_verify else None,
                     verify_summary=self._final_verify[1] if self._final_verify else "",
+                    model_final=model_final,
                 )
 
         self._archive(state, "fail", trace, "")
         final = "已达步数上限，任务未完成"
-        if stopped_by:
+        if failed_reason:
+            # 失败与「没做完」用**两句话**分开（P0 修②）。这一句是给读报告的人
+            # 的判词：它必须一眼看出「这次没跑成」，而不是「任务没做完」。
+            final = (
+                f"{RUN_FAILED_PREFIX}{failed_reason}\n"
+                "这一次的读数**不计入「任务没做完」**：模型那一步没跑起来，"
+                "结论无从谈起。先修服务/代理，再原样重跑。"
+            )
+        if stopped_by and not failed_reason:
             # 收尾文案必须说清**为什么**停：是钱花完了，还是督导判断做不下去。
             # 只说「未完成」的话，用户能做的只有原样再来一次。
             final = f"任务没做完，收手的原因：{stopped_by}"
@@ -2693,6 +2983,8 @@ class AgentLoop:
             environment_blocked=self.environment_blocked,
             verified=self._final_verify[0] if self._final_verify else None,
             verify_summary=self._final_verify[1] if self._final_verify else "",
+            model_final=model_final,
+            failed_reason=failed_reason,
         )
 
     def _content_key(self, changed: Sequence[str]) -> str | None:

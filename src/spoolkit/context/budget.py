@@ -133,10 +133,37 @@ class Budget:
         return {name: self.quota(name) for name in names}
 
     def soft_limit(self) -> int:
-        """软触发线：达到后整理上下文，不中断任务。"""
+        """软触发线：达到后整理上下文，不中断任务。
+
+        **按窗口算**（不是按有效预算）：它管的是「该整理了」，整理一次很便宜，
+        早一点没有代价。硬触发那条不一样，见下。
+        """
         return int(self.window * self._knob("soft_trigger_ratio"))
 
     def hard_limit(self) -> int:
-        """硬触发线：达到后重置上下文，保留状态。"""
-        return int(self.window * self._knob("hard_trigger_ratio"))
+        """硬触发线：达到后重置上下文（丢掉历史、保留状态）。
+
+        **按有效预算算，而且不得高于它**——这一条由 P0 取证改过来，原因是
+        「重置」在这套装配里错得比看上去更早：
+
+        - 装配器对**非必留区段**每个都按配额裁剪（system 900 + hot_memory 1044
+          + task_state 348 + retrieval 1044 + code 2437 + lessons 696 ≈ 6469
+          token，8K 窗口下），必留的 system 另有 2557——所以「需求体积」在
+          **第一步就接近 9000**，而那时模型还什么都没读过；
+        - 旧口径是 `window × 0.90 = 7372`。于是历史还没装多少，重置就先触发了：
+          真机对照 36 次里 **17 次**至少重置过一次，而重置把已读到的工具输出
+          **整段丢掉**（`p0-turns.json` 逐回合可查：第 4 步已读到失败原文与
+          `services.py`，第 5 步重置之后全部作废，第 6-8 步在重新列目录）。
+          这正是「素材够了却写不出结论」的主要成因。
+
+        为什么上界是 `effective()`：装配器**最多只能装到有效预算**，需求超过它
+        本来就要裁剪。所以「真装不下了」这件事在 `demand > effective()` 时才算
+        成立，拿一个比它低得多的数当重置线，只会更早地把素材丢掉。
+        保留 `hard_trigger_ratio` 这个旋钮（默认 0.98）的理由：它仍然要能
+        **提前**一点触发，好让裁剪发生在装配之前而不是让模型读到半截内容。
+        """
+        return min(
+            int(self.effective() * self._knob("hard_trigger_ratio")),
+            self.effective(),
+        )
 

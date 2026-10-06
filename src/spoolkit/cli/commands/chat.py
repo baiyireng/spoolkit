@@ -191,7 +191,8 @@ def _turn(args, project_root, gateway, window, memory) -> int:
     for line in result.trace:
         print(line)
     print("---")
-    print(result.final)
+    # 与 `spool run` 同一条口径：结论与判词分开印（见 `LoopResult.report_text`）。
+    print(result.report_text if result.report_text else result.final)
     _settle_pending(args, project_root, pending)
     return 0 if result.finished else 1
 

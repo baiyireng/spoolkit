@@ -416,7 +416,14 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
     writer.emit(
         FINAL,
         ok=result.finished,
-        text=result.final or "",
+        # `text` 走 `report_text`：模型结论与系统判词各占一行、各带标记。
+        # `concluded` / `terminated_by` 是同一件事的**机读形式**——跑分器按它们
+        # 算收敛率，不再靠正则去猜「这段话是谁说的」（P0 指标）。
+        text=result.report_text or "",
+        concluded=result.concluded,
+        terminated_by=result.terminated_by,
+        failed_reason=result.failed_reason,
+        model_final=result.model_final,
         settled=outcome,
         revert_command=undo,
         revert_run_id=pending.run_id if undo else "",
@@ -503,7 +510,11 @@ def _standard(args, project_root, gateway, window, pending) -> int:
     print("---")
     print(result.usage())
     print("---")
-    print(result.final)
+    # 收尾报告走 `report_text`：模型写的结论与系统判词各占一行、各带各的
+    # 标记（`【模型结论】` / `⚠`）。直接印 `final` 的话，「这一段里哪一句是
+    # 模型说的」读不出来——真机对照 33 次没结论的运行里，用户读到的唯一
+    # 正文就是判词「已达步数上限，任务未完成」。
+    print(result.report_text if result.report_text else result.final)
 
     _settle_pending(args, project_root, pending, result)
     return 0 if result.finished else 1

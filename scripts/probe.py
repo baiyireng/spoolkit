@@ -842,6 +842,23 @@ def parse_events(text):
         "completion_tokens": None,
         "final_ok": False,
         "final_text": "",
+        # ---- P0 指标：**有没有写出结论**、**谁终止的** ------------------------
+        #
+        # 这两个字段是两条「能证伪」的读数，口径**只有一个**出口
+        # （`loop.py` 的 `LoopResult.concluded` / `.terminated_by`，
+        # 经 FINAL 事件下发）——不在跑分器里靠正则去猜。
+        #
+        # 为什么要它们：真机对照 36 次里 33 次没有结论，而旧读数只有
+        # `final_ok`（「模型自认完成」）一个布尔——「模型写了结论但被审查拦下」
+        # 与「模型一个字都没写、只有系统判词」在那个布尔里长得一模一样。
+        "concluded": False,
+        #: 模型自己写的结论原文（判词与账目不在里面）——可用性判据读它，
+        #: 不再读那段混着系统判词的报告正文。
+        "model_final": "",
+        #: 谁终止：模型完成 / 步数上限 / 超时 / 失败。超时由跑分器按墙钟填。
+        "terminated_by": "",
+        #: 失败的原话（空串 = 没失败）。`terminated_by == "失败"` 时非空。
+        "failed_reason": "",
         "settled": "",
         "policy": "",
         "window": None,
@@ -1064,6 +1081,16 @@ def parse_events(text):
         elif kind == "final":
             counters["final_ok"] = bool(payload.get("ok"))
             counters["final_text"] = str(payload.get("text") or "")
+            # P0：结论与终止者都是 FINAL 上的字段。**旧事件流里没有它们**
+            # （老记录、假 runner 的夹具）——那就不猜：`concluded` 退回
+            # 「模型自认完成」，`terminated_by` 留空由收尾处按已知事实补。
+            if "concluded" in payload:
+                counters["concluded"] = bool(payload.get("concluded"))
+            else:
+                counters["concluded"] = counters["final_ok"]
+            counters["model_final"] = str(payload.get("model_final") or "")
+            counters["terminated_by"] = str(payload.get("terminated_by") or "")
+            counters["failed_reason"] = str(payload.get("failed_reason") or "")
             counters["settled"] = str(payload.get("settled") or "")
             # 「有退路」这件事现在的**结构化**读数是 FINAL 上的字段（收尾报告
             # 里那条撤销提示落在 FINAL 正文的最后一行，所以它自然排在
@@ -1195,6 +1222,15 @@ def skipped_record(probe, options, repeat_index, repeat_total, budget, elapsed):
         "final_ok": False,
         "check_ok": False,
         "bounds_ok": False,
+        # P0 指标在跳过记录里也要有（字段齐了，聚合与对照才能按同一个口径取）：
+        # 跳过的那一次没跑，所以「有没有写结论」是「没有」，「谁终止的」是
+        # 「跳过」——**不是**「失败」，也不是「步数上限」。两者的差别要留着：
+        # 前者是我们自己的预算不够，后者是模型没做完，混起来就没人分得清
+        # 「这批跑了几次」与「这几次里有几次不收敛」。
+        "concluded": False,
+        "model_final": "",
+        "terminated_by": "跳过",
+        "failed_reason": "",
         "steps": None,
         "model_calls": None,
         "prompt_tokens": None,
@@ -1249,6 +1285,46 @@ def skipped_record(probe, options, repeat_index, repeat_total, budget, elapsed):
         "exit_code": None,
         "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
+
+
+def _tally_terminated(records) -> dict:
+    """终止者的分档计数（含跳过那一档）。报告里按它念分布。"""
+    tally: dict[str, int] = {}
+    for item in records:
+        key = str(item.get("terminated_by") or "—")
+        tally[key] = tally.get(key, 0) + 1
+    return dict(sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def derive_terminated_by(counters, outcome) -> str:
+    """谁终止了这一次：模型完成 / 超时 / 失败 / 步数上限。
+
+    **顺序就是判据的优先级**，而且每一条都对应一个机械事实：
+    ① 进程超时被强杀（跑分器自己看的墙钟）；
+    ② 进程没能启动；
+    ③ 主循环报出来的 `terminated_by`（它知道自己是怎么结束的）；
+    ④ 事件流里的失败标记 / `failed_reason`；
+    ⑤ 进程异常退出（退出码既不是 0 也不是 1 —— 那两种是 `spool run` 的
+       「完成 / 未完成」）且事件流里连一条 final 都没有：那是进程带着回溯死了，
+       与「任务没做完」不是一回事；
+    ⑥ 模型自己写了结论；
+    ⑦ 其余（撞上步数上限、空回合中断、被拦下收尾）。
+    """
+    if outcome.get("timed_out"):
+        return "超时"
+    if outcome.get("spawn_error"):
+        return "失败"
+    reported = str(counters.get("terminated_by") or "")
+    if reported:
+        return reported
+    if counters.get("failed_reason"):
+        return "失败"
+    code = outcome.get("exit_code")
+    if not counters.get("final_text") and code not in (0, 1, None):
+        return "失败"
+    if counters.get("concluded"):
+        return "模型完成"
+    return "步数上限"
 
 
 def run_one(
@@ -1306,6 +1382,7 @@ def run_one(
     stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.is_file() else ""
     stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.is_file() else ""
     counters = parse_events(stdout_text)
+    terminated_by = derive_terminated_by(counters, outcome)
 
     result_files = fingerprint_tree(sandbox)
     seed_after = fingerprint_tree(seed)
@@ -1485,6 +1562,17 @@ def run_one(
         "guard_failures": guard_failures,
         "timed_out": bool(outcome.get("timed_out")),
         "spawn_error": outcome.get("spawn_error", ""),
+        # ---- P0 指标（口径见 `parse_events` 里那两个字段的说明）---------------
+        #
+        # `terminated_by` **优先信主循环报出来的那一档**（它知道自己是撞了上限
+        # 还是失败了）；主循环没报（老事件流 / 假 runner / 进程被杀）时按这一层
+        # 能看见的事实补：超时 / 启动失败 / 进程异常退出 / 模型自认完成 /
+        # 其余按「步数上限」。**不许**把「失败」写成「未完成」——那正是这次
+        # 要修的那条静默（502 被记成未完成，收敛率里看不见它）。
+        "concluded": bool(counters["concluded"]),
+        "model_final": counters["model_final"],
+        "terminated_by": terminated_by,
+        "failed_reason": counters["failed_reason"],
         "tool_events": counters["tool_events"],
         "tool_failures": counters["tool_failures"],
         "blocked_total": counters["blocked_total"],
@@ -2261,7 +2349,13 @@ def main(argv=None, runner=run_spool):
                 f"[{probe['id']}] 第 {repeat_index + 1}/{repeats} 次 exit={record['exit_code']} "
                 f"步={record['steps']} 墙钟={record['wall_seconds']:.1f}s "
                 f"验收={'绿' if record['check_ok'] else '红'} "
-                f"下限={'过' if record['bounds_ok'] else '未过'}"
+                f"下限={'过' if record['bounds_ok'] else '未过'} "
+                # P0：结论与终止者印在每一行上。失败那一条**必须刺眼**——
+                # 它以前与「未完成」长得一样，整段 502 因此在读数里消失。
+                f"结论={'有' if record.get('concluded') else '无'} "
+                f"终止={record.get('terminated_by') or '—'}"
+                + (f" ！！失败：{record['failed_reason'][:80]}"
+                   if record.get("failed_reason") else "")
             )
             if not args.no_save:
                 save_record(record, stamp)
@@ -2279,6 +2373,19 @@ def main(argv=None, runner=run_spool):
         "check_ok": sum(1 for item in records if item.get("check_ok")),
         "bounds_ok": sum(1 for item in records if item.get("bounds_ok")),
         "skipped": sum(1 for item in records if item.get("skipped")),
+        # ---- P0：收敛率与终止者分布（口径见记录里那两个字段）------------------
+        #
+        # `concluded` 的分母**只算真跑过的那几次**（跳过的那几次没跑，算进去会
+        # 把收敛率凭空抬上去）。`terminated_by` 按档计数，失败与超时各占一档：
+        # 它们不是「模型没做完」，混进同一个数里就永远看不出环境坏了。
+        "concluded": sum(
+            1 for item in records if item.get("concluded") and not item.get("skipped")
+        ),
+        "attempts_concluded": sum(1 for item in records if not item.get("skipped")),
+        "terminated_by": _tally_terminated(records),
+        "failed": sum(
+            1 for item in records if item.get("terminated_by") == "失败"
+        ),
         "steps": sum(item.get("steps") or 0 for item in records),
         "model_calls": sum(item.get("model_calls") or 0 for item in records),
         "prompt_tokens": sum(item.get("prompt_tokens") or 0 for item in records),
@@ -2306,7 +2413,10 @@ def main(argv=None, runner=run_spool):
         "token 输入 {prompt_tokens} / 输出 {completion_tokens}\n"
         "拦截拆分：重复 {repeat_blocked} 次被拦（未执行）+ {repeat_unblocked} 次未被拦，"
         "读取类 {read_blocked} 次被拦 + {read_unblocked} 次未被拦；"
-        "未被拦重复非零的尝试 {attempts_unblocked_repeat} 次（下限只看未被拦的那部分）"
+        "未被拦重复非零的尝试 {attempts_unblocked_repeat} 次（下限只看未被拦的那部分）\n"
+        "P0 收敛：写出结论 {concluded}/{attempts_concluded} 次"
+        "（分母只算真跑过的那几次）；终止分布 {terminated_by}；"
+        "失败 {failed} 次（失败不是「没做完」——它单独一档）"
     ).format(**totals)
     wall_line = f"整批墙钟：{total_wall}s" + (f"（预算上限 {budget}s）" if budget else "")
     setting_line = (

@@ -37,7 +37,7 @@ def _turn(thought: str, calls=None, final=None) -> str:
     )
 
 
-def _build(tmp_path: Path, script: list) -> AgentLoop:
+def _build(tmp_path: Path, script: list, overrides: dict | None = None) -> AgentLoop:
     registry = ToolRegistry()
     registry.register(read_file_spec(tmp_path))
     registry.register(list_dir_spec(tmp_path))
@@ -53,6 +53,7 @@ def _build(tmp_path: Path, script: list) -> AgentLoop:
             context_window=4096,
             max_steps=10,
             supervise=False,
+            overrides=overrides or {},
         ),
     )
 
@@ -77,6 +78,38 @@ def test_参数顺序不同仍算同一次调用() -> None:
     assert call_signature(ToolCall("t", {"x": 1})) != call_signature(
         ToolCall("u", {"x": 1})
     )
+
+
+def test_历史还装得下时不该重置上下文(tmp_path: Path) -> None:
+    """P0 取证抓出来的那条早重置：**工具输出必须活到下一次请求里**。
+
+    旧口径 `hard_limit = window × 0.90`（4096 窗口下 3686，比装配器真正能装的
+    有效预算 3482 还高——但装配器给非必留区段的配额合计就有 2784），于是
+    「需求体积」在历史只装了几百 token 时就过线，重置提前发生、已读到的工具
+    输出被整段丢掉。真机对照 36 次里 17 次如此（逐回合现场见
+    `benchmarks/probes/orchestration/p0-turns.json`）。
+
+    **这条用覆盖把旧口径搬回来当变异**（`hard_trigger_ratio=0.96` → 3342），
+    并断言：`resets == 0` 且下一次请求里仍有上一次读到的正文。它的分量在
+    `tests/cli/test_prompt_for_turn.py` 那两条端到端上也可以复核——那两条在
+    改动前**红**，改完**绿**（见 `P0-mutations.md` 的 M6）。
+    """
+    body = "关键结论在这里\n" + "行\n" * 100
+    (tmp_path / "a.txt").write_text(body, encoding="utf-8")
+    loop = _build(
+        tmp_path,
+        [
+            _turn("读", [_read()]),
+            _turn("看完了", final="里面有内容"),
+        ],
+        overrides={"hard_trigger_ratio": 0.96},
+    )
+    result = loop.run("看看 a.txt")
+
+    assert result.resets == 0, f"历史还装得下，不该重置：{result.trace}"
+    # 第二次请求里带着上一次读到的正文（前几行就够证明它没被丢掉）。
+    assert "关键结论在这里" in _last_prompt(loop)
+    assert result.finished is True
 
 
 def test_第二次相同调用被判成无用重复并被硬拦(tmp_path: Path) -> None:
@@ -599,11 +632,16 @@ def test_失败重提的拦截阈值可以按工作区覆盖(tmp_path: Path) -> 
     assert len(executed) == 2
 
 
-def test_步数预算随目标文件规模放大(tmp_path: Path) -> None:
-    """dogfood：303 行的合并用满 10 步仍失败。规模在第一步就看得见，预算该跟着走。
+def test_步数预算不放大的时候硬上限就是配置的值(tmp_path: Path) -> None:
+    """P0 修①：**预算就是预算**——默认配置下「按目标行数放大」一次都不许发生。
 
-    基线 10 步 + 300 行目标按 60 行/步补 5 步 = 15 步；脚本给 11 步编辑 +
-    收尾，旧行为会在第 10 步撞墙，新行为跑得完。
+    现场（真机对照 36 次，HEAD 4906942）：配 12 步的格子里有 10 格实跑到
+    13–24 步（`step_lines_per_bonus` 被模型反复重写大文件触发），而读数里
+    只写「未完成」——上限被抬过这件事一个字都没有。
+
+    所以默认 `step_budget_hard_cap=0`：脚本给 11 步编辑 + 收尾，而预算只有
+    10 步，于是它在第 10 步撞墙、**收不了尾**（`finished is False`），
+    步数**不超过** 10。这正是旧行为里被放大掩盖掉的那条线。
     """
     (tmp_path / "big.py").write_text(
         "\n".join(f"line{i}" for i in range(300)) + "\n", encoding="utf-8"
@@ -620,7 +658,7 @@ def test_步数预算随目标文件规模放大(tmp_path: Path) -> None:
                     "arguments": {
                         "path": "big.py",
                         # 每次都是不同的正文（不同指纹），但都是 300 行左右，
-                        # 所以每次都够得着「按规模放大」这条。
+                        # 所以每次都够得着「按规模放大」那条。
                         "content": "\n".join(f"LINE{i}-{j}" for j in range(300)) + "\n",
                     },
                 }
@@ -642,10 +680,69 @@ def test_步数预算随目标文件规模放大(tmp_path: Path) -> None:
     )
     result = loop.run("改一份 300 行的文件")
 
-    assert any("步数预算按规模放大到 15" in line for line in result.trace), result.trace
-    assert result.finished is True
-    # 11 步编辑 + 收尾那一步 = 12；旧行为在第 10 步就撞墙了（收不了尾）。
-    assert result.steps == 12, "放大后的预算没让它多走那几步"
+    assert result.steps <= 10, f"配置 10 步却跑了 {result.steps} 步"
+    # 放大**被夹住**这件事必须在 trace 里看得见（读数里能看出有没有放大）。
+    assert any("硬上限 10 步——实际 10 步（放大被夹住）" in line for line in result.trace), (
+        result.trace
+    )
+    assert result.finished is False, "预算没放大，它不该跑得完"
+
+
+def test_显式放宽硬上限之后放大才生效且仍然有界(tmp_path: Path) -> None:
+    """`step_budget_hard_cap` 是**唯一的放宽入口**，而且它自己也是上界。
+
+    两条一起证：① 显式放宽到 5 步之后，同一份脚本跑得完（放大真的生效）；
+    ② 放宽到 5 步时，即使 `step_lines_bonus_cap` 允许补 12 步，
+    实际生效的上限也只有 15（= 10 + 5）——放大不会越过这条线。
+    """
+    from spoolkit.agent.loop import clamp_step_limit, step_hard_cap
+
+    config = Config(
+        project_root=tmp_path,
+        context_window=4096,
+        max_steps=10,
+        supervise=False,
+        overrides={"step_budget_hard_cap": 5},
+    )
+    assert step_hard_cap(config) == 15
+    # 想放大到 22（= 10 + 12）也被夹在 15。
+    assert clamp_step_limit(config, 22) == 15
+
+    (tmp_path / "big.py").write_text(
+        "\n".join(f"line{i}" for i in range(300)) + "\n", encoding="utf-8"
+    )
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(write_file_spec(tmp_path, pending))
+    script = [
+        _turn(
+            f"改第 {i} 处",
+            [
+                {
+                    "name": "write_file",
+                    "arguments": {
+                        "path": "big.py",
+                        "content": "\n".join(f"LINE{i}-{j}" for j in range(300)) + "\n",
+                    },
+                }
+            ],
+        )
+        for i in range(11)
+    ]
+    script.append(_turn("完成", final="改完了"))
+    loop = AgentLoop(
+        gateway=FakeModel(script=script, tokenizer=OfflineTokenCounter()),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=config,
+    )
+    result = loop.run("改一份 300 行的文件")
+
+    assert result.steps <= 15, result.steps
+    assert result.finished is True, "显式放宽 5 步之后预算够收尾了"
+    assert any("步数预算按规模放大到 15（硬上限 15 步）" in line for line in result.trace), (
+        result.trace
+    )
 
 
 def test_参数校验失败的原样重提把修正后的形状端回去(tmp_path: Path) -> None:

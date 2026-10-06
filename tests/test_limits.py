@@ -353,6 +353,22 @@ ORCHESTRATE_KNOBS: tuple[tuple[str, float], ...] = (
 )
 
 
+# 「P0：步数预算硬上限 + 临近预算强制收束」那一轮补登的两个旋钮。单列的理由
+# 同上：它们不属于 P1 的登记批次，也不属于前面任何一轮。
+#
+# 两个默认值的依据都是**真机对照 36 次的现场**（HEAD 4906942，
+# `benchmarks/probes/orchestration/real-readings.json`）：
+#   · `step_budget_hard_cap = 0`：配 12 步的格子里有 10 格实跑到 13–24 步
+#     （放大由「目标行数」触发，而读数里一个字都没有）。默认 0 = 预算就是预算。
+#   · `converge_at_steps = 2`：33/36 没有结论，其中「素材已经够了还在翻文件」
+#     是主因（A 任务 12 步 13 次调用全是查看类，末回合仍是查看）。留 2 步够
+#     写结论、也够一次必要重取；0 = 关掉（变异对照用）。
+P0_CONVERGE_KNOBS: tuple[tuple[str, float], ...] = (
+    ("step_budget_hard_cap", 0),  # 0 = 不许按目标行数放大；>0 时是放大的总上界
+    ("converge_at_steps", 2),  # 剩余 ≤2 步时注入收束指令；0 = 关
+)
+
+
 def test_p1_旋钮全部登记且可覆盖() -> None:
     """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
     for name, default in (
@@ -364,6 +380,7 @@ def test_p1_旋钮全部登记且可覆盖() -> None:
         + INTENT_KNOBS
         + REVIEW_KNOBS
         + ORCHESTRATE_KNOBS
+        + P0_CONVERGE_KNOBS
     ):
         entry = limits.knob(name)
         assert entry is not None, f"{name} 没登记"
@@ -404,7 +421,13 @@ def test_旋钮没有重名() -> None:
     + 「意图与可评估的建议」那一轮的 4（`INTENT_KNOBS`）
     + 「被拦的尝试不该烧掉机会 + 拦截要真的换路」那一轮的 1（`REROUTE_KNOBS`）
     + 「不许宣称完成 / L2 / L3」那几轮的 5（`REVIEW_KNOBS`）
-    + 「编排工具」那一轮的 3（`ORCHESTRATE_KNOBS`）。
+    + 「编排工具」那一轮的 3（`ORCHESTRATE_KNOBS`）
+    + **P0 收束与硬上限那一轮的 2**（`converge_at_steps` / `step_budget_hard_cap`）。
+
+    最后那 2 项与 `KNOBS_BEFORE_P1` 是**两个不同的口径**：那个元组是「P1 改造
+    之前就有的 62 项」的历史快照（它不该长），而这两个是 P0 之后新登记的。
+    所以它们写在这里、不写进那个快照——进快照会把「P1 之前有多少项」这个
+    出处改脏。
     """
     assert len(limits.KNOBS) == len(limits._BY_NAME)
     assert len(limits.KNOBS) == (
@@ -417,6 +440,7 @@ def test_旋钮没有重名() -> None:
         + len(INTENT_KNOBS)
         + len(REVIEW_KNOBS)
         + len(ORCHESTRATE_KNOBS)
+        + len(P0_CONVERGE_KNOBS)
     )
 
 
