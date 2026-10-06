@@ -82,6 +82,7 @@ def say(text: str) -> None:
 #: 「取数 + 归纳」。所以按同一份配方预置 6 条——**两个臂拿到逐字相同的沙箱**。
 #: 这条在上一轮的报告里已经写明，这里沿用（`SEED_MARK` / `SEED_FILES`）。
 from counterfactual import SEED_FILES, SEED_MARK  # noqa: E402  (同目录)
+from spoolkit import envcheck  # noqa: E402  (src 已在上面挂进 sys.path)
 
 #: task B 的失败测试 fixture。为什么自己造一个而不是沿用上一轮的
 #: `tests/cli/test_service_command.py`：那个文件在**本机沙箱里是红的**
@@ -259,6 +260,8 @@ def stage_sandbox() -> int:
     started = time.perf_counter()
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
+    # 与探针同一条补 PATH 的路（候选目录只有一份实现，见 spoolkit.envcheck）。
+    path_added = envcheck.ensure_probe_tools(env, ("rg", "node"))
     finished = subprocess.run(
         [
             str(python),
@@ -297,6 +300,7 @@ def stage_sandbox() -> int:
                 "fail_exit": finished.returncode,
                 "fail_tail": tail,
                 "fail_seconds": round(seconds, 2),
+                "path_added": path_added,
                 "cleanup": "跑完用 `python <本脚本> clean` 删掉这个沙箱",
             },
             ensure_ascii=False,
@@ -608,28 +612,49 @@ def _tap_orchestrator(loop, sink: list[dict]) -> None:
     registry.invoke = tapped
 
 
-def _isolate_local_http() -> None:
-    """本机 8080 不走代理。
+def _isolate_local_http() -> dict[str, str]:
+    """本机 8080 不走代理（唯一实现见 `spoolkit.envcheck.isolate_local_http`）。
 
-    **实测踩到的坑**：`spoolkit.llm.llamacpp.LlamaCppTokenCounter` 建 httpx 客户端时
-    只传了 `proxy=`，没关 `trust_env`；环境里一旦出现 `HTTP_PROXY=http://127.0.0.1:7890`
-    （Clash 那条），它就会把 `/tokenize` 也送去代理，代理对 `127.0.0.1` 的目标回
-    **502**——整批跑从那一刻起全部「未完成（tokenize 返回 502）」。这不是服务挂了
-    （`/props` 与 `/v1/chat/completions` 都正常），是**本机回环被代理劫走**。
-    这里把这次运行的环境清干净：跑分器不改仓库代码，只保证自己这一次的环境是对的，
-    并把这件事写进读数（`local_http_isolated`）。
+    **实测踩到的坑**：`spoolkit.llm.llamacpp` 建 httpx 客户端时曾经没关
+    `trust_env`；环境里一旦出现 `HTTP_PROXY=http://127.0.0.1:7890`（Clash 那条），
+    它就会把 `/tokenize` 也送去代理，代理对 `127.0.0.1` 的目标回 **502**——整批跑
+    从那一刻起全部「未完成（tokenize 返回 502）」。这不是服务挂了（`/props` 与
+    `/v1/chat/completions` 都正常），是**本机回环被代理劫走**。
+
+    现在两件事都做：仓库代码里 12 个构造点全部 `trust_env=False`（由
+    `envcheck.audit_httpx_trust_env` 守着），跑分器再把这一次的环境摘干净，
+    并把结果写进读数（`env`）。
     """
-    for name in (
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ):
-        os.environ.pop(name, None)
-    os.environ["NO_PROXY"] = "127.0.0.1,localhost,::1"
-    os.environ["no_proxy"] = "127.0.0.1,localhost,::1"
+    return envcheck.isolate_local_http()
+
+
+#: 这一批跑分所处的环境（开跑前自证的那一份）。读数必须能回答「这是在 rg 齐不齐、
+#: 代理干不干净的环境里取的」——上一轮 A 类格子正是在没有 rg 的环境里跑出假 0/3。
+BATCH_ENV: dict = {}
+
+
+def _prepare_process_env() -> None:
+    """把**当前进程**的环境弄齐、弄干净，并自证一次；不合格就退出码 3。
+
+    对照是**在进程内**装配循环跑的（不是子进程），所以 rg 必须在当前进程的
+    PATH 里——上一轮漏的正是这一处：只在子进程里补了 PATH。
+    """
+    added = envcheck.ensure_probe_tools(os.environ, ("rg", "node"))
+    removed = envcheck.isolate_local_http()
+    report = envcheck.inspect(
+        os.environ, window=int(os.environ.get("ORCH_WINDOW", "8192"))
+    )
+    say(
+        f"环境自证：{'合格' if report.ok else '不合格'}"
+        f"；补 PATH={added or '无需补'}"
+        f"；摘掉代理变量={sorted(removed) or '无'}"
+    )
+    if not report.ok:
+        say(envcheck.format_report(report))
+        say(envcheck.fix_hint(report))
+        raise SystemExit(envcheck.EXIT_ENVIRONMENT_BLOCKED)
+    BATCH_ENV.clear()
+    BATCH_ENV.update(report.to_dict())
 
 
 def _sham_spec(original) -> object:
@@ -788,7 +813,7 @@ def _write_done(readings: list[dict]) -> None:
 
 
 def _stage1() -> int:
-    _isolate_local_http()
+    _prepare_process_env()
     tasks = _tasks()
     state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     budget = _budget()
@@ -834,6 +859,9 @@ def _stage1() -> int:
                         continue
                     record["elapsed_before"] = round(elapsed, 1)
                     record["budget_used"] = round(used, 3)
+                    # 每条读数自带环境：合并多批读数时，"这一格是在什么环境里
+                    # 取的"必须跟着这一格走，不能只写在文件根上。
+                    record["env"] = dict(BATCH_ENV)
                     readings.append(record)
                     passed = [key for key, value in record["checks"].items()
                               if key != "_hits" and value]
@@ -949,6 +977,7 @@ def _flush(readings, skipped, settings, repeats, budget, scene, started) -> None
         "goals": GOALS,
         "local_http_isolated": True,
         "no_proxy": os.environ.get("NO_PROXY"),
+        "env": dict(BATCH_ENV),
         "checks_definition": {
             "A": list(CHECKS["A"]),
             "B": list(CHECKS["B"]),

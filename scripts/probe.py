@@ -554,40 +554,30 @@ def repo_spool():
     return None
 
 
+def _envcheck():
+    """取 `spoolkit.envcheck`（探针平时只跑子进程，从不 import 仓库代码）。
+
+    候选目录与"补 PATH"这件事现在只有一份实现：真机跑分的那个脚本以前自己
+    另建了一套子进程环境、没走这条路，于是 A 类格子在没 rg 的环境里跑出了
+    假的「可用性 0/3」——补上 rg 之后同一批格子变成 3/3。别名不是省事，是
+    为了不再长出第二份。
+    """
+    src = str(REPO_ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from spoolkit import envcheck
+
+    return envcheck
+
+
 def _tool_dirs():
-    """`rg` 与 `node` 的候选目录。
+    """`rg` 与 `node` 的候选目录（唯一实现在 `spoolkit.envcheck.probe_tool_dirs`）。
 
     `tools/search.py` 依赖 rg；HTML 的内联 JS 验证依赖 node。PATH 里没有它们时，
     「找不到 rg」会被记成工具失败、「找不到 node」会被 HTML 验证器报成
-    「查不了」——两条都不是模型的问题，却会把探针读数染脏。所以这里补一次 PATH。
+    「查不了」——两条都不是模型的问题，却会把探针读数染脏。
     """
-    dirs = []
-    local = os.environ.get("LOCALAPPDATA") or ""
-    if local:
-        versions = Path(local) / "cursor-agent" / "versions"
-        if versions.is_dir():
-            for item in sorted(versions.iterdir(), reverse=True):
-                if item.is_dir():
-                    dirs.append(item)
-        dirs += [
-            Path(local) / "Programs" / "cursor" / "resources" / "app" / "node_modules" / "@vscode" / "ripgrep" / "bin",
-            Path(local) / "Microsoft" / "WinGet" / "Links",
-            Path(local) / "Programs" / "Microsoft VS Code" / "bin",
-        ]
-    dirs += [
-        # 本机有 rg 但不在 PATH 里的那两个位置（实测 `where.exe rg` 找不到，
-        # 而 `tests/` 与 `tools/search.py` 都依赖它）。不加这两条，
-        # 探针里每一次 search_code 都会记成工具失败——那不是模型的读数。
-        Path(local) / "SummerEngine" / "current" / "ripgrep" / "bin",
-        Path(local) / "OpenAI" / "Codex" / "bin",
-    ]
-    codex_root = Path(local) / "OpenAI" / "Codex" / "bin"
-    if codex_root.is_dir():
-        for item in sorted(codex_root.iterdir(), reverse=True):
-            if item.is_dir():
-                dirs.append(item)
-    dirs += [Path(r"C:\Program Files\ripgrep"), Path("/usr/local/bin"), Path("/usr/bin")]
-    return [item for item in dirs if item.is_dir()]
+    return _envcheck().probe_tool_dirs()
 
 
 def probe_env(sandbox):
@@ -617,17 +607,29 @@ def probe_env(sandbox):
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
 
-    added = []
-    for tool in ("rg", "node"):
-        if shutil.which(tool, path=env.get("PATH", "")) is not None:
-            continue
-        for directory in _tool_dirs():
-            if (directory / f"{tool}.exe").is_file() or (directory / tool).is_file():
-                env["PATH"] = f"{directory}{os.pathsep}{env.get('PATH', '')}"
-                added.append(f"{tool}@{directory}")
-                break
+    added = _envcheck().ensure_probe_tools(env, ("rg", "node"))
     env["_PROBE_PATH_ADDED"] = ";".join(added)
     return env
+
+
+def env_self_check(*, window=0, stream=None):
+    """开跑之前的测量环境自证：不合格就别开跑。
+
+    跑完再解释是次优的——模型那一轮的 token 已经花掉了，而且读数还会被当成
+    「模型不行」。所以自证放在**第一批之前**，退出码沿用
+    `bench.EXIT_ENVIRONMENT_BLOCKED`（和「pytest 不在就别开跑」同一个口径）。
+
+    量的是**子进程将看到的那一份环境**：候选目录补 PATH 走的就是子进程那条路，
+    所以拿同一份 `ensure_probe_tools` 结果去判，而不是判探针自己所在的 PATH。
+    """
+    envcheck = _envcheck()
+    probe_ready = dict(os.environ)
+    envcheck.ensure_probe_tools(probe_ready, ("rg", "node"))
+    report = envcheck.inspect(env=probe_ready, window=window or None)
+    code = envcheck.require_or_exit(
+        report, stream=sys.stderr if stream is None else stream
+    )
+    return code, report
 
 
 def build_command(probe, sandbox, options):
@@ -2167,6 +2169,11 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--list", action="store_true", help="列出全部探针")
+    parser.add_argument(
+        "--check-env",
+        action="store_true",
+        help="只做测量环境自证（rg / 代理 / httpx 代理防御）并退出；不合格退出码 3",
+    )
     parser.add_argument("--probe", default="", help="只跑这一个探针（id）")
     parser.add_argument("--all", action="store_true", help="跑全部探针并出汇总表")
     parser.add_argument("--manifest", default=str(MANIFEST_PATH), help="探针清单路径")
@@ -2258,6 +2265,9 @@ def main(argv=None, runner=run_spool):
     if args.list:
         print(render_listing(manifest))
         return 0
+    if args.check_env:
+        code, _ = env_self_check(window=args.window, stream=sys.stdout)
+        return code
     if not args.all and not args.probe:
         parser.print_help()
         return 2
@@ -2270,6 +2280,16 @@ def main(argv=None, runner=run_spool):
     repeats = max(1, int(args.repeat or manifest["defaults"].get("repeat") or 1))
     stamp = time.strftime("%Y%m%d-%H%M%S")
     python = repo_python()
+
+    # 开跑前自证一次：环境不合格就不买这一轮读数（详见 envcheck 模块头）。
+    code, env_report = env_self_check(
+        window=int(options.get("window") or args.window or 0)
+    )
+    if code:
+        print("测量环境不合格：这一批不开跑（跑完再解释，token 已经花掉了）。", file=sys.stderr)
+        return code
+    if env_report.path_added:
+        print("测量环境自证：补进 PATH " + "；".join(env_report.path_added), file=sys.stderr)
 
     if args.probe:
         probe = find_probe(manifest, args.probe)
