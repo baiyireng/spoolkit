@@ -331,17 +331,76 @@ def condense_test_output(text: str, limit: int = 360) -> str:
     return for_prompt(_condense_test_output(text, limit))
 
 
+#: 短摘要最多列几条。实测（2026-10-07，B 靶现场）：26 条收集错误 + 1 条 FAILED
+#: 时，旧实现按行顺序线性拼到 360 字为止——**唯一那条 FAILED 被整条挤掉**，
+#: 模型只看到 26 条 `ERROR tests/cli/...`，于是照着第一条回答。所以改两条：
+#: ① `FAILED`（断言失败）优先于 `ERROR`（收集/环境）；② 列不下的**报条数**，
+#: 不静默丢。
+_SUMMARY_MAX_LINES = 6
+#: 有 FAILED 时最多列几条 ERROR：同一个根因的收集错误会重复几十条，
+#: 而断言失败才是「代码坏了」的直接证据。
+_SUMMARY_MAX_ERRORS_WITH_FAILED = 2
+
+
+def _summary_groups(lines: list[str]) -> tuple[list[str], list[str]]:
+    """把 pytest 的短摘要行分成 `FAILED`（测试没过）与 `ERROR`（收集/环境）。"""
+    failed = [line.strip() for line in lines if line.strip().startswith("FAILED ")]
+    errors = [line.strip() for line in lines if line.strip().startswith("ERROR ")]
+    return failed, errors
+
+
+def _summary_note(failed: int, errors: int, listed: int) -> str:
+    """条数说明。**列不下就说出来**，别让一条判据无声消失。"""
+    parts: list[str] = []
+    if failed:
+        parts.append(f"{failed} 条失败")
+    if errors:
+        parts.append(f"{errors} 条错误")
+    total = failed + errors
+    if total > listed:
+        return f"（共 {'、'.join(parts)}；这里列了 {listed} 条，省略 {total - listed} 条）"
+    return f"（共 {'、'.join(parts)}）"
+
+
+def _join_summary(failed: list[str], errors: list[str], limit: int) -> str:
+    """按配额拼短摘要：失败优先、错误限量、装不下就报条数。"""
+    error_quota = _SUMMARY_MAX_ERRORS_WITH_FAILED if failed else _SUMMARY_MAX_LINES
+    picked: list[str] = []
+    index = 0
+    while len(picked) < _SUMMARY_MAX_LINES:
+        before = len(picked)
+        if index < len(failed):
+            picked.append(failed[index])
+        if index < min(len(errors), error_quota):
+            picked.append(errors[index])
+        if len(picked) == before:
+            break
+        index += 1
+
+    note = _summary_note(len(failed), len(errors), len(picked))
+    budget = max(limit - len(note), 0)
+    out: list[str] = []
+    used = 0
+    for one in picked:
+        cost = len(one) + (3 if out else 0)
+        if used + cost > budget:
+            if not out:
+                # 一条都装不下也得给第一条（截短），判据不能因为配额整条消失。
+                out.append(one[:budget])
+                used = len(out[0])
+            break
+        out.append(one)
+        used += cost
+    return " ｜ ".join(out) + _summary_note(len(failed), len(errors), len(out))
+
+
 def _condense_test_output(text: str, limit: int = 360) -> str:
     """`condense_test_output` 的本体：只挑行，不做清理。"""
     lines = [line.rstrip() for line in text.splitlines()]
 
-    summary = [
-        line.strip()
-        for line in lines
-        if line.strip().startswith(("FAILED ", "ERROR "))
-    ]
-    if summary:
-        return " ｜ ".join(summary)[:limit]
+    failed, errors = _summary_groups(lines)
+    if failed or errors:
+        return _join_summary(failed, errors, limit)
 
     # 没有短摘要（比如进程直接崩了）时，退回 pytest 的 E 行
     errors = [

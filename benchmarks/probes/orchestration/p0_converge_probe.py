@@ -58,8 +58,6 @@ LOG_PATH = HERE / "p0-converge-log.txt"
 from real_counterfactual import (  # noqa: E402
     GOALS,
     checks_for,
-    FIXTURE_SERVICE,
-    FIXTURE_TEST,
     _build_sandbox,
     _isolate_local_http,
     _system_text,
@@ -125,7 +123,7 @@ def stage_sandbox() -> int:
     finished = subprocess.run(
         [
             str(python), "-m", "pytest", "-q", "-p", "no:cacheprovider",
-            "tests/services/test_services.py",
+            "tests/services/test_service_ledger.py",
         ],
         cwd=str(project), env=env, capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=300,

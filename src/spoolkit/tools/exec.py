@@ -306,15 +306,43 @@ def resolve_argv(argv: list[str], root: Path) -> list[str]:
     return ["cmd", "/c", "call", shim, *argv[1:]]
 
 
+#: 截断时最多在省略标记里点名几条判据行（`FAILED`/`ERROR`）。
+_TRUNCATE_JUDGEMENTS = 3
+#: 每条点名的字符上限，免得一条超长行把标记撑破。
+_TRUNCATE_JUDGEMENT_CHARS = 120
+
+
+def _dropped_judgements(dropped: str) -> str:
+    """中间那一段被省掉的内容里有没有判据行。
+
+    实测（2026-10-07，B 靶现场）：一份 25455 字符的 `pytest -q` 输出，头 2000 字
+    是 9 条 `ERROR tests/cli/...`，**唯一那条 `FAILED tests/services/...` 落在中间
+    被省掉的部分**，标记只写「中间省略 N 字符」——模型于是照着 `tests/cli/` 那条
+    回答。所以省掉的东西里只要是失败/错误记录，就在这里点名。
+    """
+    marked = [
+        line.strip()
+        for line in dropped.splitlines()
+        if line.strip().startswith(("FAILED ", "ERROR "))
+    ]
+    if not marked:
+        return ""
+    shown = " ｜ ".join(one[:_TRUNCATE_JUDGEMENT_CHARS] for one in marked[:_TRUNCATE_JUDGEMENTS])
+    more = len(marked) - min(len(marked), _TRUNCATE_JUDGEMENTS)
+    suffix = f"，另有 {more} 条" if more > 0 else ""
+    return f"；这一段里有 {len(marked)} 条失败/错误记录：{shown}{suffix}"
+
+
 def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     # 上限是能力标定值：小模型上 4000 字符够用，强模型读得下更多——
     # 硬截断会把「失败在哪」直接切掉。
     if len(text) <= limit:
         return text
     half = limit // 2
+    dropped = text[half : len(text) - half]
     return (
         f"{text[:half]}\n"
-        f"…（输出过长，中间省略 {len(text) - limit} 字符）…\n"
+        f"…（输出过长，中间省略 {len(dropped)} 字符{_dropped_judgements(dropped)}）…\n"
         f"{text[-half:]}"
     )
 

@@ -216,6 +216,34 @@ def test_超长输出被截断并标注(tmp_path: Path) -> None:
     assert len(result.content) < MAX_OUTPUT_CHARS + 500
 
 
+def test_截断时要点名被丢掉的失败行(tmp_path: Path) -> None:
+    """实测（2026-10-07，B 靶现场）：25455 字符的输出里，唯一那条 FAILED 落在
+    中间被省掉的部分，标记只说「省略 N 字符」——模型照着头部的 `tests/cli/...` 回答。
+    省掉的东西里有判据行就必须点名。"""
+    script = tmp_path / "noisy.py"
+    script.write_text(
+        "print('a' * 3000)\n"
+        "print('FAILED tests/services/test_service_ledger.py::test_x - AssertionError: 少了 stopped')\n"
+        "print('ERROR tests/cli/test_y.py - ImportError: cannot import name render_status')\n"
+        "print('b' * 3000)\n",
+        encoding="utf-8",
+    )
+    result = _run(tmp_path, command=[sys.executable, str(script)])
+    assert result.ok is True
+    assert "输出过长" in result.content
+    assert "这一段里有 2 条失败/错误记录" in result.content
+    assert "test_service_ledger" in result.content
+    assert len(result.content) < MAX_OUTPUT_CHARS + 500
+
+
+def test_截断时没有失败行就不硬凑(tmp_path: Path) -> None:
+    script = _script(tmp_path, "plain.py", "print('z' * 20000)\n")
+    result = _run(tmp_path, command=[sys.executable, script])
+    assert result.ok is True
+    assert "输出过长" in result.content
+    assert "失败/错误记录" not in result.content
+
+
 def test_可以跑真实的pytest(tmp_path: Path) -> None:
     (tmp_path / "test_sample.py").write_text(
         "def test_ok():\n    assert 1 + 1 == 2\n", encoding="utf-8"

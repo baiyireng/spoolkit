@@ -88,19 +88,38 @@ from spoolkit import envcheck  # noqa: E402  (src 已在上面挂进 sys.path)
 #: `tests/cli/test_service_command.py`：那个文件在**本机沙箱里是红的**
 #: （taskkill 被拦），红的原因不是代码而是环境，模型给出的「修复计划」会指向
 #: 沙箱而不是缺陷。这里造一个**确定性失败**：一行代码少了 `stopped = True`，
-#: pytest 断言红，失败信息指向 `services.py` 的那一行。
-FIXTURE_SERVICE = '''"""本机服务配方：拉起 / 停掉 / 按 pid 记录判状态。"""
+#: pytest 断言红，失败信息指向缺陷那一行。
+#:
+#: **为什么不再替换 `src/spoolkit/services.py`（2026-10-07 实测纠正）**：
+#: 上一版用一个精简 `services.py` 顶掉真文件，它少了 `render_status`——而
+#: `spoolkit.cli.app` 一路 import 到它，于是副本里 **23 个测试文件收集即
+#: ImportError**（17 个 `tests/cli/*` + `tests/kernel/test_merge_blockers.py` +
+#: `tests/memory/test_dryrun_readonly.py` + `tests/memory/test_migrate_command.py` +
+#: `tests/test_channel_options.py` + `tests/test_end_to_end.py`），再加 3 个
+#: `import probe` 失败，裸 `python -m pytest -q` 直接
+#: `Interrupted: 26 errors during collection`——**目标测试根本没跑起来**。
+#: 模型拿到的失败要点就是那 26 条 `ERROR tests/cli/...`，于是照着第一条回答
+#: `tests/cli/test_approve_command.py`：那不是幻觉，是照着被截断的现场读出来的。
+#: 这一版**只加不减**：真 `services.py` 原样保留，另加一个自洽模块与它的测试，
+#: 副本能正常收集、目标那一条 FAILED 才可能被看见。
+FIXTURE_LEDGER = '''"""本机服务的台账：拉起 / 停掉各记一笔，按记录判状态。
+
+台账是给 `spool status` 看的，所以「停掉」必须在记录里留下痕迹：进程自己退出
+之后，内存里的那个布尔值没人看得见，下一次 start 会照着一条过期记录说
+「已经在跑」，用户以为自己有服务、其实一个进程都没有。
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-STATE = Path(__file__).resolve().parent / "state.json"
-PID_FILE = STATE.parent / "service.pid"
+STATE = Path(__file__).resolve().parent / "ledger.json"
 
 
-class Service:
+class Entry:
+    """一条服务记录。"""
+
     def __init__(self, name: str) -> None:
         self.name = name
         self.running = False
@@ -109,53 +128,46 @@ class Service:
 
 
 def _read_record() -> dict:
-    if not PID_FILE.is_file():
+    if not STATE.is_file():
         return {}
-    return json.loads(PID_FILE.read_text(encoding="utf-8"))
+    return json.loads(STATE.read_text(encoding="utf-8"))
 
 
 def _write_record(payload: dict) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(json.dumps(payload), encoding="utf-8")
+    STATE.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def start_service(name: str) -> tuple[int, str]:
-    """拉起一个配方。已经有活着的 pid 记录就不重复拉起（判据是记录，不是探针）。"""
+def start(entry: Entry) -> int:
+    """拉起：已经有活着的记录就不重复拉起（判据是记录，不是探针）。"""
     record = _read_record()
-    if record.get("name") == name and record.get("alive"):
-        return 0, f"{name} 已经在跑（pid {record['pid']}）"
-    _write_record({"name": name, "pid": 4242, "alive": True})
-    return 0, f"{name} 已拉起（pid 4242）"
+    if record.get("name") == entry.name and record.get("alive"):
+        return int(record["pid"])
+    _write_record({"name": entry.name, "pid": 4242, "alive": True})
+    entry.pid = 4242
+    entry.running = True
+    return 4242
 
 
-def stop_service(service: Service) -> tuple[int, str]:
-    """停掉一个配方：写停止记录，并清掉活着的 pid 记录。
-
-    配方自己退出之后，pid 记录里必须留下「已停止」，否则下一次 start 会照着
-    一条过期记录说「已经在跑」，用户以为自己有服务、其实一个进程都没有。
-    """
-    if not service.running and not PID_FILE.is_file():
-        return 2, f"没有本命令启动的 {service.name}"
-    _write_record({"name": service.name, "pid": service.pid, "alive": False})
-    # BUG：这里少了 service.stopped = True
-    return 0, f"{service.name} 已停止"
+def stop(entry: Entry) -> None:
+    """停掉：写一笔「已停」，并清掉活着的标记。"""
+    _write_record({"name": entry.name, "pid": entry.pid, "alive": False})
+    entry.running = False
+    # BUG：这里少了 entry.stopped = True
 '''
 
-FIXTURE_TEST = '''"""`stop_service` 的行为：判据是 pid 记录，不是内存里的那个布尔值。"""
+FIXTURE_LEDGER_TEST = '''"""`service_ledger` 的行为：判据是台账记录，不是内存里的那个布尔值。"""
 
 from __future__ import annotations
 
-import json
 import shutil
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import spoolkit.services as svc  # noqa: E402
-from spoolkit.services import Service, _read_record, stop_service  # noqa: E402
+import spoolkit.service_ledger as ledger  # noqa: E402
+from spoolkit.service_ledger import Entry, start, stop  # noqa: E402
 
 
 def _fresh_workdir(name: str) -> Path:
@@ -166,23 +178,74 @@ def _fresh_workdir(name: str) -> Path:
     return base
 
 
-def test_停下之后状态与pid记录都要对上(monkeypatch) -> None:
+def test_拉起之后台账里是活着的(monkeypatch) -> None:
+    workdir = _fresh_workdir("start")
+    monkeypatch.setattr(ledger, "STATE", workdir / "ledger.json")
+
+    assert start(Entry("tunnel")) == 4242
+
+    assert ledger._read_record()["alive"] is True
+
+
+def test_停掉之后台账里要写明已经停过(monkeypatch) -> None:
     workdir = _fresh_workdir("stop")
-    monkeypatch.setattr(svc, "PID_FILE", workdir / "service.pid")
-    monkeypatch.setattr(svc, "STATE", workdir / "state.json")
-    (workdir / "service.pid").write_text(
-        json.dumps({"name": "tunnel", "pid": 4242, "alive": True}), encoding="utf-8"
-    )
-    service = Service("tunnel")
-    service.pid = 4242
+    monkeypatch.setattr(ledger, "STATE", workdir / "ledger.json")
+    entry = Entry("tunnel")
+    start(entry)
 
-    code, message = stop_service(service)
+    stop(entry)
 
-    assert code == 0, message
-    assert service.stopped is True, "停下之后 service.stopped 必须为真"
-    record = _read_record()
-    assert record["alive"] is False, f"pid 记录里的 alive 要为假：{record}"
+    assert entry.stopped is True, "停掉之后 entry.stopped 必须为真"
+    record = ledger._read_record()
+    assert record["alive"] is False, f"台账里的 alive 要为假：{record}"
 '''
+
+
+#: 副本里留下的测试（白名单）。实测（2026-10-07，`.tmp/s3_curate.py`）：整棵
+#: `tests/` 拷进副本、又不抄 `tests/conftest.py` 时，凡是用 `tmp_path` 或平台临时根
+#: 的用例会成片 `PermissionError: [WinError 5]`（memory 381 条、tools 316 条、
+#: cli 272 条、web 194 条……），唯一那条真 FAILED 会被两千多条环境噪声埋掉——
+#: 那样测的是副本，不是模型。所以副本只留**在这个环境里干净**的目录，外加要模型
+#: 找的那条失败测试和它旁边的正常测试。（`tests/services/test_load.py` 也在这一类
+#: 噪声里：它写平台临时根，副本里 3 条 ERROR，所以一并裁掉。）
+#: 不变量由 `stage_sandbox()` 把关：副本里裸 `pytest -q` 必须恰好 1 条 FAILED、0 条 ERROR。
+SANDBOX_TEST_KEEP = (
+    "tests/services/test_service_ledger.py",
+    "tests/context",
+    "tests/health",
+    "tests/fetch",
+)
+
+
+def _prune_tests(project: Path, keep=SANDBOX_TEST_KEEP) -> dict:
+    """把副本的 `tests/` 裁到白名单，返回留下/删掉的数量。
+
+    白名单里给目录表示「这一棵都要」；给文件表示「只要这个文件」。
+    清单里写了一个不存在的东西就直接报错——静默少留东西会让不变量悄悄失效。
+    """
+    tests_root = project / "tests"
+    keep_list = [(project / item).resolve() for item in keep]
+
+    def wanted(target: Path) -> bool:
+        resolved = target.resolve()
+        return any(resolved == one or one in resolved.parents for one in keep_list)
+
+    kept = 0
+    removed = 0
+    for path in sorted(tests_root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if path.is_dir():
+            if not any(path.iterdir()):
+                path.rmdir()
+            continue
+        if wanted(path):
+            kept += 1
+        else:
+            path.unlink()
+            removed += 1
+    missing = [item for item in keep if not (project / item).exists()]
+    if missing:
+        raise RuntimeError(f"副本裁剪清单里有不存在的东西：{missing}")
+    return {"kept": kept, "removed": removed, "whitelist": list(keep)}
 
 
 def sandbox_recipe() -> dict:
@@ -192,12 +255,17 @@ def sandbox_recipe() -> dict:
             ("src/spoolkit", "src/spoolkit"),
             ("tests", "tests"),
             ("pyproject.toml", "pyproject.toml"),
+            # 副本里 `tests/test_probe_runner.py` / `test_probe_stability.py` /
+            # `test_envcheck.py` 会 `import probe`：真仓库靠测试自己把 `scripts`
+            # 插进 `sys.path`，而这个副本必须自带那一份，否则 pytest 收集阶段
+            # 就是 3 条 `ModuleNotFoundError: No module named 'probe'`。
+            ("scripts/probe.py", "scripts/probe.py"),
         ),
         "seed_todos": SEED_FILES,
         "seed_mark": SEED_MARK,
         "write": (
-            ("src/spoolkit/services.py", FIXTURE_SERVICE),
-            ("tests/services/test_services.py", FIXTURE_TEST),
+            ("src/spoolkit/service_ledger.py", FIXTURE_LEDGER),
+            ("tests/services/test_service_ledger.py", FIXTURE_LEDGER_TEST),
         ),
     }
 
@@ -230,6 +298,8 @@ def _build_sandbox(project: Path) -> str:
         target = project / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8", newline="\n")
+    # 裁剪必须在写 fixture 之后：白名单里就有刚写进去的那条失败测试。
+    pruned = _prune_tests(project)
     seeded = 0
     for index, relative in enumerate(recipe["seed_todos"]):
         target = project / relative
@@ -244,7 +314,10 @@ def _build_sandbox(project: Path) -> str:
     # 是**现场噪声**：模型会以为自己该看一眼。清掉。
     for junk in project.glob("pytest-cache-files-*"):
         shutil.rmtree(junk, ignore_errors=True)
-    return f"预置 {seeded}/{len(recipe['seed_todos'])} 条待办"
+    return (
+        f"预置 {seeded}/{len(recipe['seed_todos'])} 条待办，"
+        f"副本测试裁到 {pruned['kept']} 个文件（删掉 {pruned['removed']} 个）"
+    )
 
 
 def stage_sandbox() -> int:
@@ -262,8 +335,10 @@ def stage_sandbox() -> int:
     env["PYTHONIOENCODING"] = "utf-8"
     # 与探针同一条补 PATH 的路（候选目录只有一份实现，见 spoolkit.envcheck）。
     path_added = envcheck.ensure_probe_tools(env, ("rg", "node"))
-    finished = subprocess.run(
-        [
+
+    def run_pytest(target: str | None = None) -> tuple[subprocess.CompletedProcess, float]:
+        """在副本里跑一次 pytest。`target` 为 None 就是裸 `pytest -q`（模型会这么干）。"""
+        argv = [
             str(python),
             "-m",
             "pytest",
@@ -272,17 +347,45 @@ def stage_sandbox() -> int:
             # 盖住真正的失败原文。用例本身不用 tmp_path，所以也不碰平台临时根。
             "-p",
             "no:cacheprovider",
-            "tests/services/test_services.py",
-        ],
-        cwd=str(project),
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=300,
-    )
-    seconds = time.perf_counter() - started
+        ]
+        if target:
+            argv.append(target)
+        began = time.perf_counter()
+        done = subprocess.run(
+            argv,
+            cwd=str(project),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+        )
+        return done, time.perf_counter() - began
+
+    # 第一件事：量副本自己干不干净。模型大概率一上来就敲 `pytest -q`，而这批读数
+    # 要回答的是「它能不能找到那条失败测试」，所以现场必须**只有那一条红**。
+    whole, whole_seconds = run_pytest()
+    whole_raw = (whole.stdout or "") + (whole.stderr or "")
+    (OUT / "real-sandbox-whole.txt").write_text(whole_raw, encoding="utf-8")
+    bare_failed = [
+        line.strip() for line in whole_raw.splitlines() if line.strip().startswith("FAILED ")
+    ]
+    bare_errors = [
+        line.strip() for line in whole_raw.splitlines() if line.strip().startswith("ERROR ")
+    ]
+    if len(bare_failed) != 1 or bare_errors:
+        hint = (
+            "副本自己就不干净：裸 `pytest -q` 应当恰好 1 条 FAILED、0 条 ERROR。"
+            "先修 `sandbox_recipe()` 与 `SANDBOX_TEST_KEEP`，别拿被污染的现场去读模型能力。"
+        )
+        say(f"⚠ 沙箱不变量被打破：FAILED {len(bare_failed)} 条、ERROR {len(bare_errors)} 条")
+        say(hint)
+        for line in (bare_failed[:5] + bare_errors[:5]):
+            say(f"    {line}")
+        raise RuntimeError(hint)
+
+    finished, seconds = run_pytest("tests/services/test_service_ledger.py")
     # 失败原文按 utf-8 落一份：终端是 cp936，中文与替换字符会把 print 弄炸，
     # 而「这次真的红了」的证据必须在。日志走 `errors="replace"`。
     raw = (finished.stdout or "") + (finished.stderr or "")
@@ -290,6 +393,10 @@ def stage_sandbox() -> int:
     tail = "\n".join((finished.stdout or "").strip().splitlines()[-12:])
     say(f"沙箱 : {project}")
     say(f"配方 : {note}")
+    say(
+        f"副本裸跑：exit={whole.returncode}（{whole_seconds:.1f}s）"
+        f"FAILED {len(bare_failed)} 条、ERROR {len(bare_errors)} 条"
+    )
     say(f"失败测试：exit={finished.returncode}（{seconds:.1f}s）")
     say(tail)
     STATE_FILE.write_text(
@@ -297,6 +404,10 @@ def stage_sandbox() -> int:
             {
                 "project": str(project),
                 "todo_seed": len(SEED_FILES),
+                "bare_exit": whole.returncode,
+                "bare_failed": bare_failed,
+                "bare_errors": bare_errors,
+                "bare_seconds": round(whole_seconds, 2),
                 "fail_exit": finished.returncode,
                 "fail_tail": tail,
                 "fail_seconds": round(seconds, 2),
@@ -342,7 +453,7 @@ CHECK_FILES = tuple(one.split("/")[-1] for one in SEED_FILES)
 CHECK_CLASSIFY = ("分类", "类别", "归类")
 CHECK_PRIORITY = ("优先级", "优先", "P0", "P1", "P2", "P3", "高", "中", "低")
 #: 任务 B 的判据：涉及的文件名（fixture 自己声明的）+ 修复计划的记号。
-CHECK_B_FILES = ("services.py", "test_services.py")
+CHECK_B_FILES = ("service_ledger.py", "test_service_ledger.py")
 CHECK_B_PLAN = ("修复", "计划", "步骤", "建议", "改成", "应当", "应该", "需要")
 
 CHECKS = {

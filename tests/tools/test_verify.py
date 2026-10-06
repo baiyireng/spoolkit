@@ -205,6 +205,40 @@ def test_短摘要优先() -> None:
     assert "=====" not in condensed
 
 
+def test_有失败时失败排在错误前面且报条数() -> None:
+    """实测形态（2026-10-07，B 靶副本里的裸 `pytest -q`）：26 条收集 ERROR 在前、
+    1 条 FAILED 在后。旧实现按行顺序线性拼到 360 字，那条 FAILED **整条消失**，
+    模型于是照着 `tests/cli/...` 回答。所以：失败优先，省略的条数要说出来。"""
+    errors = [
+        f"ERROR tests/cli/test_x{index}.py - ImportError: cannot import name 'render_status'"
+        for index in range(26)
+    ]
+    raw = (
+        "退出码 2（失败）\n"
+        + "\n".join(errors)
+        + "\nFAILED tests/services/test_service_ledger.py::test_停掉之后台账里要写明已经停过 - AssertionError\n"
+    )
+    condensed = condense_test_output(raw)
+    assert condensed.startswith(
+        "FAILED tests/services/test_service_ledger.py::test_停掉之后台账里要写明已经停过"
+    )
+    assert "共 1 条失败、26 条错误" in condensed
+    # 列了 1 条失败 + 2 条错误，所以省掉 24 条——省掉多少必须写出来
+    assert "省略 24 条" in condensed
+    assert len(condensed) <= 360
+
+
+def test_错误很多时列前几条并报总数() -> None:
+    raw = "退出码 2（失败）\n" + "\n".join(
+        f"ERROR tests/cli/test_x{index}.py - ImportError" for index in range(26)
+    )
+    condensed = condense_test_output(raw)
+    assert condensed.startswith("ERROR tests/cli/test_x0.py")
+    assert "共 26 条错误" in condensed
+    assert "省略 20 条" in condensed
+    assert len(condensed) <= 360
+
+
 def test_没有短摘要时退回报错行() -> None:
     raw = (
         "退出码 1（失败）\n$ python -m pytest -q\n"

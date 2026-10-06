@@ -21,6 +21,8 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 HARNESS_DIR = REPO / "benchmarks" / "probes" / "orchestration"
 HARNESS = HARNESS_DIR / "real_counterfactual.py"
@@ -277,3 +279,99 @@ def test_真读数文件的结构不变量():
         assert task in module.GOALS
         assert verdict["role"] == roles[task]
         assert verdict["verdict"] in module.TARGET_VERDICTS
+
+
+# ===========================================================================
+# S3-a：副本现场必须**只有那一条红**（否则读的是副本，不是模型）
+# ===========================================================================
+
+
+def test_副本不再替换真源码():
+    """S3-a 的裁决：fixture 只加不减。旧版替换 `src/spoolkit/services.py` 时，
+    副本里 26 条收集错误把目标测试埋掉，B 靶读到的是噪声。"""
+    module = _harness()
+    recipe = module.sandbox_recipe()
+    targets = [relative for relative, _ in recipe["write"]]
+    assert targets == [
+        "src/spoolkit/service_ledger.py",
+        "tests/services/test_service_ledger.py",
+    ]
+    assert not any("services.py" in one and "ledger" not in one for one in targets)
+    assert module.CHECK_B_FILES == ("service_ledger.py", "test_service_ledger.py")
+
+
+def test_副本抄了探针脚本():
+    """`tests/test_probe_*.py` / `test_envcheck.py` 会 `import probe`，副本要自带它。"""
+    module = _harness()
+    targets = [target for _, target in module.sandbox_recipe()["copy"]]
+    assert "scripts/probe.py" in targets
+
+
+def test_裁剪白名单只留干净的目录() -> None:
+    """白名单是量出来的：`context`/`health`/`fetch` 三个目录在副本里 0 红，
+    其余目录成片 `PermissionError`（缺 `tests/conftest.py` 铺临时根）。"""
+    module = _harness()
+    keep = tuple(module.SANDBOX_TEST_KEEP)
+    assert keep == (
+        "tests/services/test_service_ledger.py",
+        "tests/context",
+        "tests/health",
+        "tests/fetch",
+    )
+
+
+def test_裁剪清单里的东西都得存在() -> None:
+    module = _harness()
+    writes = {relative for relative, _ in module.sandbox_recipe()["write"]}
+    for item in module.SANDBOX_TEST_KEEP:
+        assert (REPO / item).exists() or item in writes, item
+
+
+def test_裁剪函数只留白名单(tmp_path: Path) -> None:
+    module = _harness()
+    for relative in (
+        "tests/services/test_service_ledger.py",
+        "tests/services/test_load.py",
+        "tests/context/test_budget.py",
+        "tests/web/sub/test_page.py",
+        "tests/cli/test_x.py",
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    summary = module._prune_tests(
+        tmp_path,
+        keep=("tests/services/test_service_ledger.py", "tests/context"),
+    )
+
+    assert (tmp_path / "tests/services/test_service_ledger.py").is_file()
+    assert (tmp_path / "tests/context/test_budget.py").is_file()
+    assert not (tmp_path / "tests/services/test_load.py").exists()
+    assert not (tmp_path / "tests/web/sub/test_page.py").exists()
+    assert not (tmp_path / "tests/cli/test_x.py").exists()
+    # 空目录要顺手清掉：留着会让 `list_dir` 看见一堆没内容的目录
+    assert not (tmp_path / "tests/cli").exists()
+    assert summary["kept"] == 2
+    assert summary["removed"] == 3
+
+
+def test_裁剪清单写了不存在的东西就报错(tmp_path: Path) -> None:
+    module = _harness()
+    (tmp_path / "tests").mkdir()
+    with pytest.raises(RuntimeError):
+        module._prune_tests(tmp_path, keep=("tests/nope/test_x.py",))
+
+
+def test_建造副本时会裁剪而且阶段零会量副本干不干净() -> None:
+    """两件事必须在代码里：`_build_sandbox` 调裁剪；`stage_sandbox` 量裸跑并
+    在「不是恰好 1 条 FAILED、0 条 ERROR」时**响亮失败**（抛异常，不开跑）。"""
+    module = _harness()
+    source = HARNESS.read_text(encoding="utf-8")
+    assert "pruned = _prune_tests(project)" in source
+    assert "bare_failed" in source and "bare_errors" in source
+    assert "len(bare_failed) != 1 or bare_errors" in source
+    assert "raise RuntimeError(hint)" in source
+    # 量出来的东西要落盘，别只打印
+    assert '"bare_failed": bare_failed,' in source
+    assert module.SANDBOX_TEST_KEEP
