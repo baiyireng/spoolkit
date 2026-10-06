@@ -369,6 +369,18 @@ P0_CONVERGE_KNOBS: tuple[tuple[str, float], ...] = (
 )
 
 
+# 「素材压缩」那一轮（O4，规划里的 S4）补登的四个旋钮：**什么时候值得把已读到的
+# 素材压一遍、压完允许留多少**。它们是动态阈值的四个输入（比例 / 素材占比下限 /
+# 素材绝对下限 / 留给定下一条输出的余量下限），消费点是
+# `context/budget.compact_trigger`。单列的理由同上前几组：它不属于 P1 登记批次。
+MATERIAL_COMPACT_KNOBS: tuple[tuple[str, float], ...] = (
+    ("material_compact_ratio", 0.72),  # 需求过有效预算的 72% 就该压
+    ("material_compact_share", 0.5),  # 素材不足需求一半就别压
+    ("material_compact_floor_tokens", 600),  # 素材短于 600 token 不值得压
+    ("material_compact_min_free_tokens", 800),  # 小窗口下留给下一条输出的余量
+)
+
+
 def test_p1_旋钮全部登记且可覆盖() -> None:
     """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
     for name, default in (
@@ -381,6 +393,7 @@ def test_p1_旋钮全部登记且可覆盖() -> None:
         + REVIEW_KNOBS
         + ORCHESTRATE_KNOBS
         + P0_CONVERGE_KNOBS
+        + MATERIAL_COMPACT_KNOBS
     ):
         entry = limits.knob(name)
         assert entry is not None, f"{name} 没登记"
@@ -422,7 +435,8 @@ def test_旋钮没有重名() -> None:
     + 「被拦的尝试不该烧掉机会 + 拦截要真的换路」那一轮的 1（`REROUTE_KNOBS`）
     + 「不许宣称完成 / L2 / L3」那几轮的 5（`REVIEW_KNOBS`）
     + 「编排工具」那一轮的 3（`ORCHESTRATE_KNOBS`）
-    + **P0 收束与硬上限那一轮的 2**（`converge_at_steps` / `step_budget_hard_cap`）。
+    + **P0 收束与硬上限那一轮的 2**（`converge_at_steps` / `step_budget_hard_cap`）
+    + **「素材压缩」那一轮的 4**（`MATERIAL_COMPACT_KNOBS`）。
 
     最后那 2 项与 `KNOBS_BEFORE_P1` 是**两个不同的口径**：那个元组是「P1 改造
     之前就有的 62 项」的历史快照（它不该长），而这两个是 P0 之后新登记的。
@@ -441,6 +455,7 @@ def test_旋钮没有重名() -> None:
         + len(REVIEW_KNOBS)
         + len(ORCHESTRATE_KNOBS)
         + len(P0_CONVERGE_KNOBS)
+        + len(MATERIAL_COMPACT_KNOBS)
     )
 
 
