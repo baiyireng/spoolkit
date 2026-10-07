@@ -199,6 +199,73 @@ def test_只有明细没有判据不算通过():
     assert module._cell_passed({}) is False
 
 
+def test_任何下划线开头的明细都不算判据():
+    """`_hits` / `_paths` 都是明细。只挑 `_hits` 一个名字排除，日后加明细就会漏。"""
+    module = _harness()
+    assert module._cell_passed({"checks": {"判据": True, "_paths": [1, 2]}}) is True
+    assert module._cell_passed({"checks": {"_paths": [1]}}) is False
+
+
+# ===========================================================================
+# S7：B 靶的判据要挡得住「我查不出来」这种答复
+# ===========================================================================
+
+#: 逐字取自 p0 真机 `converge|r1` 的结论原文。旧判据（裸文件名 + 宽记号）给了它 2/2，
+#: 而它答的其实是「我没查到」。
+NEGATIVE_B_ANSWER = (
+    "目前只能确认：测试目录为 tests/，其下有 context、fetch、health、services 四个子目录；"
+    "尚未拿到失败测试名、报错信息、具体测试文件与相关实现，因此无法确定失败测试涉及哪些文件，"
+    "也无法给出可执行修复计划。已查过：tests 目录列表；尝试读取 tests/test_service_ledger.py "
+    "失败，说明该路径不存在。缺：失败测试名称、pytest 输出/断言错误、对应测试文件路径、相关实现文件路径与内容。"
+)
+
+#: 逐字取自 p0 真机 `base|r0` 的结论原文：这才是答对了的样子。
+POSITIVE_B_ANSWER = (
+    "失败测试：tests/services/test_service_ledger.py::test_停掉之后台账里要写明已经停过。"
+    "涉及文件：src/spoolkit/service_ledger.py、tests/services/test_service_ledger.py。"
+    "修复计划：在 src/spoolkit/service_ledger.py 的 stop() 中补 entry.stopped = True，然后运行该测试验证。"
+)
+
+#: 逐字取自真机 `on|r1` 的结论原文：它答的是「我做了什么」，没答「涉及哪些文件」。
+WORK_REPORT_B_ANSWER = (
+    "已修复 src/spoolkit/service_ledger.py 中 stop 函数缺少 entry.stopped = True 的 bug。"
+    "测试全部通过（45 passed）。"
+)
+
+
+def test_答不出东西的结论不算通过():
+    module = _harness()
+    checks = module.checks_for("B-failing-test", NEGATIVE_B_ANSWER)
+    assert checks[module.CHECKS["B"][0]] is False, "它连正确的测试文件路径都没写出来"
+    assert checks[module.CHECKS["B"][1]] is False, "「无法给出可执行修复计划」不算给出计划"
+    assert module._cell_passed({"checks": checks}) is False
+
+
+def test_真答出来的结论才算通过():
+    module = _harness()
+    checks = module.checks_for("B-failing-test", POSITIVE_B_ANSWER)
+    assert all(checks[one] for one in module.CHECKS["B"])
+    assert module._cell_passed({"checks": checks}) is True
+
+
+def test_工作汇报不算答对问的问题():
+    module = _harness()
+    checks = module.checks_for("B-failing-test", WORK_REPORT_B_ANSWER)
+    assert checks[module.CHECKS["B"][0]] is False
+    assert checks[module.CHECKS["B"][1]] is False
+
+
+def test_判据只认带目录的路径与肯定式计划():
+    module = _harness()
+    assert module.CHECK_B_PLAN_RE.search("修复计划：补 entry.stopped = True")
+    assert module.CHECK_B_PLAN_RE.search("建议 1) 在 stop() 里补上赋值")
+    assert not module.CHECK_B_PLAN_RE.search("无法给出可执行修复计划。")
+    checks = module.checks_for(
+        "B-failing-test", "见 service_ledger.py 与 test_service_ledger.py"
+    )
+    assert checks[module.CHECKS["B"][0]] is False, "裸文件名不再算数，要把路径写出来"
+
+
 def test_判词取值都在封闭集合里():
     module = _harness()
     cases = [
@@ -297,7 +364,10 @@ def test_副本不再替换真源码():
         "tests/services/test_service_ledger.py",
     ]
     assert not any("services.py" in one and "ledger" not in one for one in targets)
-    assert module.CHECK_B_FILES == ("service_ledger.py", "test_service_ledger.py")
+    assert module.CHECK_B_PATHS == (
+        "tests/services/test_service_ledger.py",
+        "src/spoolkit/service_ledger.py",
+    )
 
 
 def test_副本抄了探针脚本():
@@ -388,3 +458,66 @@ def test_批次窗口取自环境变量(tmp_path: Path, monkeypatch: pytest.Monk
     assert module.batch_config(tmp_path).context_window == 4096
     monkeypatch.delenv("ORCH_WINDOW")
     assert module.batch_config(tmp_path).context_window == 8192
+
+
+# --- S7：每一次真机跑之前都要重摆沙箱 -----------------------------------------
+#
+# 沙箱原来是**整批共用一份**，于是第一跑把失败测试的 bug 修好之后，后面的每一跑
+# 都开始于全绿的现场——而这个靶问的正是「哪条测试还红着」。臂的顺序是
+# off → on → control，排在后面的臂系统性地吃亏，那不是模型能力差异。证据在
+# `benchmarks/probes/orchestration/README-real.md` 的 S7 一节。
+
+
+def test_重摆沙箱先删上一份再调造副本(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`reset_sandbox` 的契约：**先删上一份、再造一份新的，返回新的路径**。"""
+    module = _harness()
+    old = tmp_path / "spool-orch-real-old" / "project"
+    old.mkdir(parents=True)
+    state_file = tmp_path / ".real-state.json"
+    state_file.write_text(json.dumps({"project": str(old)}), encoding="utf-8")
+    removed: list[object] = []
+    monkeypatch.setattr(module, "remove_sandbox", lambda project: removed.append(project) or True)
+    staged: list[int] = []
+
+    def stage() -> None:
+        staged.append(1)
+        fresh = tmp_path / "spool-orch-real-new" / "project"
+        fresh.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(json.dumps({"project": str(fresh)}), encoding="utf-8")
+
+    project = module.reset_sandbox(state_file=state_file, stage=stage)
+
+    assert removed == [str(old)], "要删的是上一次那份沙箱"
+    assert staged == [1], "重摆必须真的造一份新的"
+    assert project == str(tmp_path / "spool-orch-real-new" / "project")
+
+
+def test_删沙箱认不出路径就不删(tmp_path: Path) -> None:
+    """删沙箱只能删**我们自己造的**那种路径：否则一次误传就把别人的工作区删了。"""
+    module = _harness()
+    outsider = tmp_path / "someones-workspace" / "project"
+    outsider.mkdir(parents=True)
+    canary = outsider / "keep.txt"
+    canary.write_text("别删我\n", encoding="utf-8")
+    assert module.remove_sandbox(str(outsider)) is False
+    assert module.remove_sandbox(None) is False
+    assert canary.is_file(), "认不出的路径一个字节都不许动"
+    # 我们自己造的那种路径才认
+    assert "spool-orch-real-" in module.SANDBOX_PREFIXES
+
+
+def test_两个探针每跑之前都重摆沙箱() -> None:
+    """接线也要钉住：两个探针的 `run_once` 里都得有重摆这一步。"""
+    p0 = HARNESS_DIR / "p0_converge_probe.py"
+    p0_source = p0.read_text(encoding="utf-8")
+
+    def run_once_body(path: Path) -> str:
+        text = path.read_text(encoding="utf-8")
+        assert "def run_once(" in text, f"{path.name} 里没有 run_once"
+        return text.split("def run_once(", 1)[1].split("\ndef ", 1)[0]
+
+    assert "reset_sandbox()" in run_once_body(HARNESS)
+    assert "reset_sandbox(" in run_once_body(p0)
+    # p0 用的是同一份实现（不抄第二份删/造逻辑）
+    assert "reset_sandbox," in p0_source
+    assert "from real_counterfactual import" in p0_source

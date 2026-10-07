@@ -123,8 +123,9 @@ B 的 ② 只认「修复/计划/步骤…」这类词——所以 `B/t0.0/contr
 ### 判词是机械算出来的，不是人肉看的
 
 `real_counterfactual.py` 里：`TARGET_ROLES`（角色）+ `_cell_passed`（一格通过 =
-该靶全部机械判据通过，`_hits` 只是明细）+ `target_verdict(readings, task)` +
-`target_verdicts(readings)`。判词取值封闭在 `TARGET_VERDICTS`：
+该靶全部机械判据通过，**`_` 开头的一律是明细**——`_hits` / `_paths`）+
+`target_verdict(readings, task)` + `target_verdicts(readings)`。判词取值封闭在
+`TARGET_VERDICTS`：
 `control_ok` / `control_failed` / `discriminating` / `no_discrimination` / `no_readings`。
 跑完逐靶打一行，并写进读数文件的 `target_roles` / `target_verdicts` 与汇总表的
 每格 `role` / `passed`。
@@ -146,11 +147,11 @@ B-failing-test: role=ability verdict=no_discrimination | control 0/6、off 0/6�
 模型直接反问「请提供失败测试名」）；**靶角色里的 `control`** 说的是这个靶该不该
 拿来当能力证据。两者互不相干。
 
-守护：`tests/test_counterfactual_targets.py`（16 条：角色齐全、A=control/B=ability、
-控制靶两种形态、能力靶三种形态、`_hits` 不算判据、判词进读数文件与汇总表、
-真读数文件只查结构不写死具体判词）。变异验收 7/7 红：控制靶无条件 `control_ok`、
-能力靶无条件 `discriminating`、少一个靶的角色、`_hits` 算作判据、A 靶改回能力靶、
-读数文件不写判词、汇总表不带角色。
+守护：`tests/test_counterfactual_targets.py`（32 条：角色齐全、A=control/B=ability、
+控制靶两种形态、能力靶三种形态、明细不算判据、判词进读数文件与汇总表、
+真读数文件只查结构不写死具体判词、S7 的沙箱重摆与判据收紧）。变异验收 7/7 红：
+控制靶无条件 `control_ok`、能力靶无条件 `discriminating`、少一个靶的角色、
+`_hits` 算作判据、A 靶改回能力靶、读数文件不写判词、汇总表不带角色。
 
 ## S3：B 靶的「认错文件」是副本与证据管道造成的（**不是能力结论**）
 
@@ -241,4 +242,46 @@ B-failing-test: role=ability verdict=no_discrimination | control 0/6、off 0/6�
 - **同配置两批 t=0 的 `off|r0` 轨迹不同**（6 步 vs 4 步；第 2 回合起工具结果的字符数就已经
   不一样：405 vs 374），所以「温度 0 逐字复现」这条在这条靶上这次没成立——这是 S13 的输入，
   不是能力结论。
+
+## S7：B 靶可用性（**读数被两处仪器 bug 弄脏过**）
+
+**这一节先修仪器，再读数**。B 靶问的是「找出这条失败测试涉及哪些文件，并给出修复计划」，
+而它此前给出的红绿有两处不是模型的锅：
+
+- **沙箱整批共用一份**：`run_once` 只从 `.real-state.json` 读路径，跑与跑之间不重摆。臂的顺序是
+  off → on → control，第一跑把 `stop()` 的 bug 修好之后，后面每一跑都开始于**已经全绿**的现场，
+  而这个靶问的正是「哪条测试还红着」。证据：S6 那批 8192 读数里 `off|r1` / `on|r0` / `on|r1`
+  的 final 都写着「45 passed」——判据从根上问不出来。修法：`reset_sandbox()`（先删上一份再调
+  `stage_sandbox()` 造一份新的，`remove_sandbox()` 只认 `SANDBOX_PREFIXES` 里的路径，认不出就
+  拒绝删），`real_counterfactual.py` 与 `p0_converge_probe.py` 的 `run_once` 每跑都调。
+- **判据能被「我查不出来」骗过**：p0 真机 `converge|r1` 的结论原文是「…尝试读取
+  tests/test_service_ledger.py 失败，说明该路径不存在…无法确定失败测试涉及哪些文件，也无法
+  给出可执行修复计划」——旧判据（裸文件名 + 宽记号）给了它 **2/2**。修法：只认**带目录的完整
+  路径**（`CHECK_B_PATHS`），且计划记号后面必须**紧跟冒号或数字**（`CHECK_B_PLAN_RE`）；
+  `_` 开头的一律是明细（`_hits` / `_paths`），永远不参与判据。
+
+**收紧判据后的读数**（t=0，每格 2 次，每跑前重摆沙箱、裸跑不变量 `exit=1 / FAILED 1 条 /
+ERROR 0 条` 逐次成立）：
+
+| 探针 | 臂 | 通过 | 步数 | 结论 |
+| --- | --- | --- | --- | --- |
+| real | off | **2/2** | 4 / 4 | 都点名 `tests/services/test_service_ledger.py` + `src/spoolkit/service_ledger.py`，都有 `修复计划：` |
+| real | on | 0/2 | 6 / 6 | 两份 final **逐字相同**：「修复完成…全部 45 个测试通过。」——答的是「我修好了」 |
+| real | control | 0/2 | 1 / 1 | 反问「请提供失败测试的完整名称或文件路径」 |
+| p0 | base（无收束） | 0/2 | 8 / 8 | r0 路径打错成 `src/spspoolkit/service_ledger.py`；r1 撞步数上限、无结论 |
+| p0 | converge | **2/2** | 8 / 4 | r0 一次重置后写了 `修复计划：`（但注明「无法给出具体代码改动」），r1 是教科书式答复 |
+
+靶判词 **`discriminating`**。口径提醒：**判据在 S7 收紧了**，这一节之前的 B ② 读数
+（`checks_definition` 里是 `b_files` 的那些）与这里**不可直接比**；另外 `on` 臂连起来看是
+0/8（本批 0/2、S6 那批 0/4、再上一批 0/2），而 `orchestrate` 真机 0/36 次被调用——这条
+交给 S10 按证据处理，别记成「模型不行」。
+
+**顺带否掉的一件事**：曾按「提示层没说清完整答复指什么」给 SYSTEM / `CONVERGE_NOW` 各补一句
+「先照着用户问的逐条答」，A/B（同一靶、off 臂、每版 2 次、每跑重摆、pre/post 交替）四跑**全部
+2/2**，两份 final 都把两条路径写全并给出修复计划 ⇒ 那句补丁**没有区分度**（n=4 的零结果），
+按「无实测证据不建」**撤回**，`PROMPT_VERSION` 仍是 `2026-10-06.1`。
+
+变异验收 **5/5 红**（`.tmp/s7_mutation.py`：重摆不删不造、删沙箱认出谁都删、判据退回裸文件名、
+计划记号退回宽匹配、明细键按旧办法排除）；对应用例在 `tests/test_counterfactual_targets.py`
+（32 条，含三段**逐字取自真机结论**的夹具：答不出东西的、真答出来的、工作汇报式的）。
 

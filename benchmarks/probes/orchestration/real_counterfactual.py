@@ -19,8 +19,11 @@
 ## 判据（**跑之前就定好**，见 `CHECKS` 与 `checks_for`）
 
 任务 A：① 覆盖预设的 6 条待办（按文件名逐个核）；② 有分类；③ 有优先级。
-任务 B：① 点名了涉及的文件（fixture 自己声明的）；② 给出了修复计划。
-机械判据，只认关键词，不看文采。
+任务 B：① 点名了涉及的两条**文件路径**（带目录，fixture 自己声明的）；② 给出肯定式
+修复计划（记号后面紧跟冒号或数字）。机械判据，只认关键词，不看文采。
+这样做是为了挡掉**否定式答复**：S7 实测里有一格的结论写着「尝试读取
+`tests/test_service_ledger.py` 失败…无法给出可执行修复计划」，裸文件名 + 宽记号会
+把它判成 2/2（详见 `CHECK_B_PATHS` / `CHECK_B_PLAN_RE` 的注释）。
 
 ## 读数
 
@@ -42,6 +45,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -422,17 +426,51 @@ def stage_sandbox() -> int:
     return 0
 
 
+#: 我们造的沙箱目录前缀：本探针一个，p0 收束探针一个。删沙箱前必须对得上其中一个。
+SANDBOX_PREFIXES = ("spool-orch-real-", "spool-p0-converge-")
+
+
+def remove_sandbox(project: str | Path | None) -> bool:
+    """删掉一份沙箱（它自己带 `project` 这一层，只删这一层）。路径形状不对就拒绝删。"""
+    if not project:
+        return False
+    base = Path(project).resolve().parent
+    if base.name == "project" or not any(one in base.name for one in SANDBOX_PREFIXES):
+        say(f"拒绝删除（路径不像我们造的沙箱）：{base}")
+        return False
+    shutil.rmtree(base, ignore_errors=True)
+    return True
+
+
+def reset_sandbox(*, state_file: Path = STATE_FILE, stage=None) -> str:
+    """重摆沙箱：删掉 `state_file` 里那一份，再调 `stage()` 造一份新的，返回新副本路径。
+
+    **每一次真机跑之前都要调**。为什么（S7 实测）：沙箱是整批共用一份，而 B 靶的
+    判据是「找出这条失败测试涉及哪些文件」——第一跑把 `stop()` 修好之后，后面的
+    每一跑都开始于**已经全绿**的现场，判据从根上问不出来。臂的顺序是
+    off → on → control，于是排在后面的臂系统性地吃亏，那不是模型能力差异。
+    （证据：S6 那批 8192 读数里 `off|r1`/`on|r0`/`on|r1` 的 final 写着「45 passed」，
+    而它们要回答的正是「哪条测试还红着」。）
+
+    `stage` 不传就用本探针的 `stage_sandbox()`；p0 收束探针传它自己那个。
+    """
+    if state_file.is_file():
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        remove_sandbox(state.get("project"))
+    (stage or stage_sandbox)()
+    return str(json.loads(state_file.read_text(encoding="utf-8"))["project"])
+
+
 def stage_clean() -> int:
-    """删掉阶段 0 造的那个沙箱（它自己带 `project` 这一层，只删这一层）。"""
+    """删掉阶段 0 造的那个沙箱。"""
     if not STATE_FILE.is_file():
         print("没有 .real-state.json，没什么可删的")
         return 0
     state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     base = Path(state["project"]).resolve().parent
-    if base.name == "project" or "spool-orch-real-" not in base.name:
+    if not remove_sandbox(state.get("project")):
         print(f"拒绝删除（路径不像我们造的沙箱）：{base}")
         return 2
-    shutil.rmtree(base, ignore_errors=True)
     print(f"已删 {base}（还在：{base.exists()}）")
     return 0
 
@@ -452,9 +490,19 @@ CHECK_FILES = tuple(one.split("/")[-1] for one in SEED_FILES)
 #: 分类 / 优先级的机械判据。**跑之前定好**，只认这些记号，不靠事后判断。
 CHECK_CLASSIFY = ("分类", "类别", "归类")
 CHECK_PRIORITY = ("优先级", "优先", "P0", "P1", "P2", "P3", "高", "中", "低")
-#: 任务 B 的判据：涉及的文件名（fixture 自己声明的）+ 修复计划的记号。
-CHECK_B_FILES = ("service_ledger.py", "test_service_ledger.py")
-CHECK_B_PLAN = ("修复", "计划", "步骤", "建议", "改成", "应当", "应该", "需要")
+#: 任务 B 的判据：涉及的文件**路径**（带目录，fixture 自己声明的）+ 修复计划的记号。
+#:
+#: S7 收紧了这两条，因为原来的裸文件名 + 宽记号会被**否定式答复**骗过：p0 真机
+#: `converge|r1` 的结论原文是「…尝试读取 tests/test_service_ledger.py 失败，说明该
+#: 路径不存在…无法确定失败测试涉及哪些文件，也无法给出可执行修复计划…」，判据却给了
+#: 2/2——它答的是「我查不出来」。现在：
+#:   - 认**带目录的完整路径**：否定式答复写不出正确路径（它猜的那个少了 `services/`）；
+#:   - 计划记号必须**紧接着**冒号或数字（`修复计划：` / `建议 1)`），只出现「修复计划」
+#:     四个字不算——「无法给出可执行修复计划」正是这样被挡下的。
+CHECK_B_PATHS = ("tests/services/test_service_ledger.py", "src/spoolkit/service_ledger.py")
+CHECK_B_PLAN = ("修复计划", "修复步骤", "修复方案", "修复建议", "改进计划", "建议", "步骤")
+#: 肯定式计划：记号后面紧跟冒号或数字。
+CHECK_B_PLAN_RE = re.compile(r"(修复计划|修复步骤|修复方案|修复建议|改进计划|建议|步骤)\s*(?:[:：]|\d)")
 #: B 靶那条失败用例的名字（fixture 自己写的）。它**不是判据**，是一条机械读数：
 #: 模型最后有没有真的看到那条失败原文。素材压缩（S6）的验收正是这一条——压完
 #: 判据原文还在上下文里，模型才可能把它名字点出来；压缩把这些丢掉就会立刻显形。
@@ -503,14 +551,19 @@ def checks_for(task: str, final: str) -> dict[str, bool]:
             "_hits": hits,
         }
     return {
-        CHECKS["B"][0]: all(one in text for one in CHECK_B_FILES),
-        CHECKS["B"][1]: any(one in text for one in CHECK_B_PLAN),
+        CHECKS["B"][0]: all(one in text for one in CHECK_B_PATHS),
+        CHECKS["B"][1]: bool(CHECK_B_PLAN_RE.search(text)),
+        "_paths": [one for one in CHECK_B_PATHS if one in text],
     }
 
 
 def _cell_passed(row: dict) -> bool:
-    """一格通过 = 它那条靶的**全部机械判据**通过（`_hits` 是明细，不是判据）。"""
-    checks = {key: value for key, value in (row.get("checks") or {}).items() if key != "_hits"}
+    """一格通过 = 它那条靶的**全部机械判据**通过（`_` 开头的是明细，不是判据）。"""
+    checks = {
+        key: value
+        for key, value in (row.get("checks") or {}).items()
+        if not str(key).startswith("_")
+    }
     return bool(checks) and all(checks.values())
 
 
@@ -648,7 +701,9 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
     head = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"], cwd=str(REPO), capture_output=True, text=True
     ).stdout.strip()
-    project = Path(json.loads(STATE_FILE.read_text(encoding="utf-8"))["project"])
+    # 每一次都**重摆沙箱**（见 `reset_sandbox()`）：不这么做的话，这一跑开始于
+    # 上一跑改过的现场，B 靶的判据从第二跑起就问不出来了。
+    project = Path(reset_sandbox())
     gateway = LlamaCppGateway(
         base_url=os.environ.get("ORCH_BASE_URL", "http://127.0.0.1:8080"),
         model=os.environ.get("ORCH_MODEL", "local"),
@@ -1034,7 +1089,7 @@ def _stage1() -> int:
         f"system {scene['system_tokens']} token（off 臂装配后摘掉 orchestrate）")
     say(f"预算 : {budget}s；设置 {settings}；任务 {list(tasks)}；每格 {repeats} 次")
     say(f"本机回环隔离代理：NO_PROXY={os.environ.get('NO_PROXY')}")
-    say(f"沙箱 : {state['project']}（失败测试 exit={state['fail_exit']}）")
+    say(f"沙箱 : 每次跑前重摆（现状 {state['project']}，失败测试 exit={state['fail_exit']}）")
 
     # 次序：设置 → 臂 → 任务 → 重复。**只跑还没跑过的格子**（`real-done.json`
     # 记着已经落进 readings 的标签），补跑安慰剂臂时不会把已经花掉的格子再买一遍。
@@ -1212,8 +1267,9 @@ def _flush(readings, skipped, settings, repeats, budget, scene, started) -> None
             "B": list(CHECKS["B"]),
             "classify_markers": list(CHECK_CLASSIFY),
             "priority_markers": list(CHECK_PRIORITY),
-            "b_files": list(CHECK_B_FILES),
+            "b_paths": list(CHECK_B_PATHS),
             "b_plan_markers": list(CHECK_B_PLAN),
+            "b_plan_regex": CHECK_B_PLAN_RE.pattern,
         },
         "readings": merged,
         "skipped": skipped,

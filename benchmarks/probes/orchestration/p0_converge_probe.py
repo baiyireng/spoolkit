@@ -61,6 +61,7 @@ from real_counterfactual import (  # noqa: E402
     _build_sandbox,
     _isolate_local_http,
     _system_text,
+    reset_sandbox,
 )
 
 #: 两个机制臂。名字写在读数里，报告按它分组。
@@ -196,7 +197,10 @@ def run_once(task: str, arm: str, repeat: int, label: str) -> dict:
     from spoolkit.llm.llamacpp import LlamaCppGateway
     from spoolkit.tools.edit import PendingChanges
 
-    project = Path(json.loads(STATE_FILE.read_text(encoding="utf-8"))["project"])
+    # 每一次都重摆沙箱（`real_counterfactual.reset_sandbox`，与那份探针同一份实现）：
+    # 沙箱整批共用一份的话，第一跑改完代码之后，后面的臂就都开始于全绿的现场，
+    # 而这个靶问的正是「哪条测试还红着」——臂的顺序会替模型做题。
+    project = Path(reset_sandbox(state_file=STATE_FILE, stage=stage_sandbox))
     gateway = LlamaCppGateway(
         base_url=os.environ.get("ORCH_BASE_URL", "http://127.0.0.1:8080"),
         model=os.environ.get("ORCH_MODEL", "local"),
