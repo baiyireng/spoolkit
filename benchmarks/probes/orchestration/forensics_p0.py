@@ -34,7 +34,7 @@ VERDICT_PREFIXES = (
 #: 只读/查看类工具（用来数「撞上限前它在看还是在写」）。
 READ_TOOLS = {
     "read_file", "list_dir", "search_code", "survey", "dir_stats", "tool_help",
-    "read_diagnosis", "verify_file", "dispatch", "orchestrate",
+    "read_diagnosis", "verify_file", "dispatch",
 }
 WRITE_TOOLS = {"write_file", "replace_lines", "replace_text", "delete_file"}
 

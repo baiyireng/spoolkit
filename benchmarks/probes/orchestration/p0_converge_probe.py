@@ -1,15 +1,15 @@
-"""P0 真机小样本：**off 臂 × 收束机制**在 8080 上跑两个真形状任务。
+"""P0 真机小样本：**收束机制**在 8080 上跑两个真形状任务。
 
-它与上一轮那批（`real_counterfactual.py`，36 次三臂）的关系：
+它与 `real_probe.py`（同目录那份单路真机探针）的关系：
 
 - **同一个沙箱配方、同一段用户原话、同一套机械判据**（`GOALS` / `checks_for`
-  都从 `real_counterfactual` import，一个字不改——判据先定好再跑）；
-- **不同的自变量**：上一轮是「注册表里有没有 `orchestrate`」，这一轮是
-  「按目标行数放大预算 / 临近预算收束」这两条 P0 修法的开与关；
-- 上一轮的 `on` / `control` 臂**本轮不跑**（那两臂的结论已经写进
-  `README-real.md`：编排工具 36/36 一次没被调用）。所以本轮的口径是
-  **off 臂内部的前后对照**，不是与 33/36 的直接同格对比——这一点必须写在
-  报告里，否则读数会被读成「同一件事的两次采样」。
+  都从 `real_probe` import，一个字不改——判据先定好再跑）；
+- **自变量是收束期那几条修法**（按目标行数放大预算 / 临近预算收束 / 收束期写额度）
+  的开与关，写在下面的 `ARMS` 里；
+- 上一轮那批三臂对照（`real-readings.json`，36 跑）是**历史证据**：它证明
+  `orchestrate` 36 次一次没被调用，S10 据此把那件工具整层删掉（见 `README-real.md`
+  的 S10 一节）。本轮不再有臂可跑，口径是**同一份判据下各机制臂的前后对照**——
+  这一点必须写在报告里，否则读数会被读成「同一件事的几次采样」。
 
 三条要求落在这里：
 
@@ -55,7 +55,7 @@ LOG_PATH = HERE / "p0-converge-log.txt"
 
 #: 沙箱配方与用户原话**从上一轮那份脚本 import**：不抄第二份，也不可能改到
 #: 判据（判据夹具在 `seeds/expected/checks/probes.json`，这里一个字不碰）。
-from real_counterfactual import (  # noqa: E402
+from real_probe import (  # noqa: E402
     GOALS,
     checks_for,
     guard_readings,
@@ -79,7 +79,7 @@ from real_counterfactual import (  # noqa: E402
 #:
 #: `converge` 臂把 `-1` **显式写出来**，不靠默认值：这一档的默认值已经改成 0
 #: （见 `limits.converge_write_grace` 的依据），若这里省略，两臂会变成同一个
-#: 配置、对照实验静默失效——`tests/test_counterfactual_targets.py` 钉着这一点。
+#: 配置、对照实验静默失效——`tests/test_real_probe_targets.py` 钉着这一点。
 ARMS: dict[str, dict[str, float]] = {
     "base": {"step_budget_hard_cap": 0, "converge_at_steps": 0},
     "converge": {
@@ -185,7 +185,7 @@ def scene_now() -> dict:
     from spoolkit.llm.tokenizer import OfflineTokenCounter
     from spoolkit.cli.runtime import assemble_loop
 
-    from real_counterfactual import _NullGateway, _scene_wiring
+    from real_probe import _NullGateway, _scene_wiring
 
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=str(REPO), capture_output=True, text=True
@@ -222,7 +222,7 @@ def run_once(task: str, arm: str, repeat: int, label: str) -> dict:
     from spoolkit.llm.llamacpp import LlamaCppGateway
     from spoolkit.tools.edit import PendingChanges
 
-    # 每一次都重摆沙箱（`real_counterfactual.reset_sandbox`，与那份探针同一份实现）：
+    # 每一次都重摆沙箱（`real_probe.reset_sandbox`，与那份探针同一份实现）：
     # 沙箱整批共用一份的话，第一跑改完代码之后，后面的臂就都开始于全绿的现场，
     # 而这个靶问的正是「哪条测试还红着」——臂的顺序会替模型做题。
     project = Path(reset_sandbox(state_file=STATE_FILE, stage=stage_sandbox))
@@ -260,9 +260,6 @@ def run_once(task: str, arm: str, repeat: int, label: str) -> dict:
         from dump_turns import tap_gateway
 
         tap_gateway(gateway, turns)
-    # 与上一轮 off 臂逐字同一条路：**禁用开关**（不是提示词里求它别用）。
-    removed = loop.registry._specs.pop("orchestrate", None)
-    assert removed is not None, "off 臂：注册表里没有 orchestrate 可摘"
     tool_count = len(loop.registry.names())
     system_tokens = tokenizer.count(_system_text(loop))
     # S9 读数：收束期的紧步数最招重复（S8 那两批的同一个现场在这里最容易踩到

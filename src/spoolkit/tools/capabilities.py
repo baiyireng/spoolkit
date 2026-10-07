@@ -28,9 +28,8 @@
 
 - 已有的判定按派生视图取值（`EDIT_TOOLS` … `NETWORK_ENTRY_TOOLS`），
   与改动前逐条相同（冻结快照用例保证）；
-- 编排层将来直接用 `can_parallel` / `requires_serial` / `needs_isolation`
-  这类纯函数判断「能不能并行 / 要不要隔离」。本轮**只留接口，不实现**
-  任何批量执行或并行调度。
+- 判据以纯函数住在本层（`can_parallel` / `requires_serial` /
+  `needs_isolation`），**调度不在这里**：谁与谁并行、谁必须串行，由调用方决定。
 """
 
 from __future__ import annotations
@@ -65,8 +64,9 @@ __all__ = [
 class Capability:
     """一件工具的结构性能力。
 
-    字段都是**事实**，不是判定：编排层拿它们判断「能不能并行 / 要不要隔离 /
-    重复有没有意义 / 需不需要批准」。每一项的含义写在各字段下面。
+    字段都是**事实**，不是判定：读的人（步进体、护栏、审阅层）拿它们判断
+    「能不能并行 / 要不要隔离 / 重复有没有意义 / 需不需要批准」。每一项的含义
+    写在各字段下面。
     """
 
     #: 会读工作区里的内容（文件 / 目录 / 符号 / 搜索 / 统计）。
@@ -99,9 +99,9 @@ class Capability:
 
     #: 会**派生一个手里有写工具的执行体**（子智能体那一套）。它自己这一层的
     #: 参数里没有路径，所以它**不是**写工具（保持 `writes=False`：进不了
-    #: `EDIT_TOOLS` / `WRITE_TOOLS`，既有判定逐条不变）；但编排层要拿这一位
-    #: 回答「这一条能不能与别的调用并行」——两条并行的派发会同时往同一份
-    #: 待确认清单里写。`dispatch` 是唯一一个为真的。
+    #: `EDIT_TOOLS` / `WRITE_TOOLS`，既有判定逐条不变）；但这一位回答「这一条
+    #: 能不能与别的调用并行」——两条并行的派发会同时往同一份待确认清单里写。
+    #: `dispatch` 是唯一一个为真的。
     delegates: bool = False
 
     #: 会把**已暂存的正文**落盘（确认入口）。它不是「交内容」的写工具，
@@ -188,13 +188,6 @@ _DECLARED: dict[str, Capability] = {
         progress=True,
     ),
     # ---- 派 / 网：丢给隔离执行体 ----
-    # 编排：**一步内批量执行多个工具调用**。它在声明表里是一位中性项——它
-    # 自己不动工作区，动工作区的是它**批里的分支**，而每条分支按**那个工具
-    # 自己的**声明取判据（`can_parallel` / `requires_serial` / `needs_isolation`
-    # / `needs_approval`，见 `tools/orchestrate.py`）。所以它不写、不读、不
-    # 出网、不请批：派的那些派生视图（EDIT/WRITE/COMMIT/ACTION/NETWORK/
-    # APPROVAL/ISOLATABLE/READ）因此一条都不变——那份冻结快照不用动。
-    "orchestrate": Capability(),
     "dispatch": Capability(isolatable=True, delegates=True),
     "research": Capability(
         network=True,
@@ -206,11 +199,20 @@ _DECLARED: dict[str, Capability] = {
     "web_fetch": Capability(network=True, needs_approval=True, isolatable=True),
     "web_search": Capability(network=True, needs_approval=True, isolatable=True),
     # ---- 历史动作名 ----
-    # 注册表里已经没有这两把工具（迁移/改名由编辑工具承担），但判定口径仍在：
-    # `review_gate.ACTION_TOOLS` 由 `destructive` 派生，少了它们会**静默松开**
-    # 那两个名字上的动作拦截。所以它们留在声明里，并由冻结快照用例钉住。
+    # 注册表里已经没有这三把工具（迁移/改名由编辑工具承担，编排层已整层删除），
+    # 但判定口径仍在。
+    # 前两个：`review_gate.ACTION_TOOLS` 由 `destructive` 派生，少了它们会**静默
+    # 松开**那两个名字上的动作拦截。所以它们留在声明里，并由冻结快照用例钉住。
     "move_file": Capability(destructive=True, needs_approval=True),
     "rename_file": Capability(destructive=True, needs_approval=True),
+    # `orchestrate`（当年「一步内批量执行多个工具调用」那把工具）已按证据整层删除：
+    # 真机 36 跑里它一次都没被调用过（见 `benchmarks/probes/orchestration/
+    # README-real.md` 的 S10 一节）。
+    # **它留在这里的理由和前两行不同，别照抄那句话**：`Capability()` 每位都是假，
+    # 不进任何派生视图，删掉只会让 `of_spec` 退回 `UNKNOWN`（全真）——那是**更严**，
+    # 不是更松。留着是为了「声明过的动作名」这份账目完整（与冻结快照一致），
+    # 不是为了拦什么。
+    "orchestrate": Capability(),
 }
 
 
@@ -223,7 +225,7 @@ def declared(name: str) -> Capability | None:
 
 
 def declared_names() -> tuple[str, ...]:
-    """声明过的全部工具名（含两个历史动作名，见上面的注释）。"""
+    """声明过的全部工具名（含三个历史动作名，见上面的注释）。"""
     return tuple(_DECLARED)
 
 
@@ -286,7 +288,7 @@ ISOLATABLE_TOOLS = frozenset(_by(lambda c: c.isolatable))
 READ_TOOLS = frozenset(_by(lambda c: c.reads))
 
 
-# ---- 给编排层留的纯函数（本轮只留接口，不实现调度）--------------------------
+# ---- 能力判据的纯函数（只给判据，不做调度）----------------------------------
 
 
 def _capability(name: str) -> Capability:

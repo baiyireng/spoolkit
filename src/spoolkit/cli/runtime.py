@@ -61,7 +61,6 @@ from spoolkit.tools.stats import dir_stats_spec
 from spoolkit.tools.survey import survey_spec
 from spoolkit.tools.calc import calc_spec
 from spoolkit.tools.dispatch import dispatch_spec
-from spoolkit.tools.orchestrate import Orchestrator, orchestrate_spec
 from spoolkit.tools.research import research_spec
 from spoolkit.tools.sources import SourceLog, check_numbers_spec
 
@@ -546,13 +545,6 @@ def assemble_loop(
         """上一轮回来的诊断报告：开局就摆到模型面前，不用它记得去查。"""
         return diagnosis.render_incoming(project_root)
 
-    # 编排：**一步内发出并执行多个工具调用**。它注册在最后一批里，因为它要
-    # 绑这个注册表本身（批里的分支按名字查别工具的能力与参数 schema），
-    # 而注册表是逐个长起来的。子智能体拿不到它（`ROLES` 的工具表里没有它），
-    # 所以不存在「编排里再派发再编排」的递归。
-    orchestrator = Orchestrator(registry, settings)
-    registry.register(orchestrate_spec(orchestrator))
-
     return AgentLoop(
         gateway=gateway,
         tokenizer=tokenizer,
@@ -581,7 +573,6 @@ def assemble_loop(
         pending=parts.pending,
         escalation_review=parts.escalation_review,
         defer_final_verify=parts.defer_final_verify,
-        orchestrator=orchestrator,
         # 素材压缩跟着装配走来（生产默认开）：真正跑起来时预算见底的不是
         # 「步数」而是素材体积，压一遍比整个丢掉历史更省上下文。
         compaction=compaction,

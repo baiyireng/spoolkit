@@ -72,7 +72,7 @@ def probe_tool_dirs() -> list[Path]:
     「查不了」——两条都不是模型的问题，却会把探针读数染脏。所以这里补一次 PATH。
 
     唯一的事实来源：`scripts/probe.py` 与
-    `benchmarks/probes/orchestration/real_counterfactual.py` 都调这一个函数。
+    `benchmarks/probes/orchestration/real_probe.py` 都调这一个函数。
     上一轮的问题正是后者自己另建了一套沙箱环境，**没走这条补 PATH 的路**。
     """
     if os.environ.get(NO_TOOL_DIRS_ENV):

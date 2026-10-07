@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,8 +14,9 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
-from real_counterfactual import STATE_FILE, say  # noqa: E402
-from counterfactual import _add_rg_to_path  # noqa: E402
+from real_probe import STATE_FILE, say  # noqa: E402
+
+from spoolkit import envcheck  # noqa: E402
 
 from spoolkit.tools.registry import ToolRegistry  # noqa: E402
 from spoolkit.tools.types import ToolCall  # noqa: E402
@@ -25,7 +27,7 @@ from spoolkit.llm.tokenizer import OfflineTokenCounter  # noqa: E402
 
 project = Path(json.loads(STATE_FILE.read_text(encoding="utf-8"))["project"])
 print(f"沙箱: {project}")
-print(f"rg  : {_add_rg_to_path()}")
+print(f"rg  : {envcheck.ensure_probe_tools(os.environ, ('rg',)) or 'PATH 里已有'}")
 
 registry = ToolRegistry()
 registry.register(list_dir_spec(project, None, ()))

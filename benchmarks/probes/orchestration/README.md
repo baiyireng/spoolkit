@@ -1,9 +1,14 @@
 # 编排工具（`orchestrate`）的反事实对照
 
-**这是什么**：`orchestrate`（一步内发出并执行多个工具调用）的对照读数留档。
-脚本 `counterfactual.py`，原始读数 `readings.json`，运行日志 `run-log.txt`。
+> **S10 留档说明**：这份对照的离线脚本 `counterfactual.py` 已随 `orchestrate`
+> **整层删除**（真机 36 跑一次没被调用过，见 `README-real.md` 的 S10 一节）。
+> 下面的读数（`readings.json` / `run-log.txt`）**原样保留**——它是删除决定的证据之一。
+> 真机那一轮改用 `real_probe.py`（单路，见 `README-real.md`）。
 
-对着跑法（本目录内可复现）：
+**这是什么**：`orchestrate`（一步内发出并执行多个工具调用）的对照读数留档。
+脚本 `counterfactual.py`（**已删**），原始读数 `readings.json`，运行日志 `run-log.txt`。
+
+当时的跑法（脚本已删，留档备查）：
 
 ```powershell
 cd D:\workSpace\agents_dev

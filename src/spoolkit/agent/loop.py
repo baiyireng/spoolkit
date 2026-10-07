@@ -9,7 +9,6 @@
 
 import hashlib
 import json
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -400,8 +399,7 @@ def call_signature(call: ToolCall) -> str:
 # 不占步数预算。被拦的动作没有任何产出，也不换来任何新信息——让它白吃一步，
 # 等于用预算给模型的原地打转付费（dogfood：两次被拒的 write_file 白吃 2 步）。
 #
-# 正文那份常量在 `tools/types.py`（编排工具也要用同一个前缀：一整批分支一条都
-# 没执行时，这一步同样不该吃预算），这里只做转出。
+# 正文那份常量在 `tools/types.py`（跨层的判据只留一份），这里只做转出。
 BLOCKED_PREFIX = _types.BLOCKED_PREFIX
 
 #: 结论是**收束出口**收下的（收束态里模型没调工具、只写了正文）。它不是
@@ -783,9 +781,9 @@ def _reverse_clause() -> str:
     合并、删死代码当成违规动作而不敢做，任务反而做不完。所以每条拦截话术都要
     带上这一句，而且是**同一句**（两处说法不一等于两套语义）。
 
-    正文那份常量搬到了 `tools/types.py`：**编排工具的聚合结果**也要带这一句
-    （被拦的分支在那里如实交代），而工具层不能从这一层 import（会成环）。
-    这里保留函数是因为调用点很多，改签名会把 diff 铺到整条拦截路径上。
+    正文那份常量搬到了 `tools/types.py`（跨层的**同一句话**只留一份，工具层
+    不能从这一层 import）。这里保留函数是因为调用点很多，改签名会把 diff 铺到
+    整条拦截路径上。
     """
     return REVERSE_CLAUSE
 
@@ -1270,13 +1268,10 @@ MAX_DONE_NOTES = TaskState.DONE_INLINE
 class _WriteBook:
     """**这一步**里「写落成了」那本账。
 
-    为什么要有它：编排的一批写在**一个工具调用**里完成，而主循环原先只在
-    「这一次调用的名字是写工具」时记账（产出计数、changed 清单、基线行数、
-    符号快照、越界审计）。不把批次里的写接进同一本账，就会出现最坏的一种
-    静默缺口：文件确实进了待确认清单，但收尾**不验证**它、报告**不列**它。
-
-    单调用与批次共用 `_note_landed_write` 这一个实现，所以两条路的账
-    （`changed` / `changed_paths` / `_base_lines` / 符号快照 / 审计）逐条相同。
+    为什么要有它：这一段账（产出计数、changed 清单、基线行数、符号快照、
+    越界审计）原先散在 `run()` 的步进体里，抽出来才能单独验。少记一笔的
+    后果是最坏的一种静默缺口：文件确实进了待确认清单，但收尾**不验证**它、
+    报告**不列**它。
     """
 
     #: 这一步改过哪些文件（自动验证的范围跟着它走）。
@@ -1289,13 +1284,6 @@ class _WriteBook:
     fail_streak: int = 0
     #: 这一步有没有落成过改动。
     landed: bool = False
-    #: 这一批（编排分支）里落成的写调用，按落成顺序；由步进那一侧取走。
-    batch: list[ToolCall] = field(default_factory=list)
-
-    def take_batch(self) -> list[ToolCall]:
-        taken = list(self.batch)
-        self.batch.clear()
-        return taken
 
 
 @dataclass
@@ -1448,7 +1436,6 @@ class AgentLoop:
         escalation_review: Callable[[EscalationRequest, str], tuple[str, str]] | None = None,
         gate_network: bool = True,
         defer_final_verify: list | None = None,
-        orchestrator: Any | None = None,
         compactor: Callable[[str], str] | None = None,
         compaction: bool = True,
     ) -> None:
@@ -1652,147 +1639,12 @@ class AgentLoop:
         # 没有写工具（只读角色）就没有这回事，None 表示这条路不适用。
         edits = [name for name in COMMIT_TOOLS if registry.get(name) is not None]
         self._commit_schema = build_turn_schema(registry, only=edits) if edits else None
-        # ---- 编排工具（一步内批量执行）的接线 ---------------------------------
-        #
-        # 它是注册表里的一件工具，但它的分支必须走**这一层**的护栏 / 请示 /
-        # 审计，所以由这里持有通道（`tools/orchestrate.Orchestrator.attach`）。
-        # 没接上（只读角色、测试直接构造的循环）时那把工具会如实说「通道没
-        # 接通、这次没执行」——不静默地一条一条跑。
-        self._orchestrator = orchestrator
-        if orchestrator is not None:
-            orchestrator.attach(self)
-        # 并行只读分支要往循环侧的记账里写（护栏指纹 / 进度）。它们跑在别的
-        # 线程上，所以那几笔记账用一把锁护住。
-        self._branch_lock = threading.Lock()
-        # 「这一条被拦是因为**在等人批复**，还是**不允许**」。串行分支执行前
-        # 后比一次待批清单（`_orchestrate_status` 读它）。
-        self._batch_suspended = False
-        # 当前这一步的「这一批写落成了」账本。批编排与单调用**共用同一份实现**
-        # （`_note_landed_write`），所以不会出现「批次里写的文件不算产出、
-        # 收尾不验证也不列进 changed」这种静默缺口。
-        self._write_book: _WriteBook | None = None
-        # 当前这一步的状态对象（进度记账要用它）。只在一步之内有效。
-        self._progress_state: TaskState | None = None
-
-    # ---- 编排分支的两条通道（由 `tools/orchestrate` 调用）--------------------
-
-    def orchestration_runner(self) -> Any:
-        """给编排工具的 `BranchRunner`：两条通道 + 状态判定 + 事件。
-
-        `note` 不在这里给：分支结果的记账就发生在它执行完的那一刻
-        （`_orchestrate_read` / `_orchestrate_serial` 里），因为「写落成了」
-        那本账必须按**实际执行顺序**记，晚一步就会记错顺序。
-        """
-        from spoolkit.tools.orchestrate import BranchRunner
-
-        return BranchRunner(
-            read=self._orchestrate_read,
-            serial=self._orchestrate_serial,
-            status=self._orchestrate_status,
-            emit=self._emit,
-        )
-
-    def _orchestrate_read(self, call: ToolCall) -> ToolResult:
-        """**只读**分支：可以并行，所以只走注册表那一层的校验与执行。
-
-        护栏 / 请示 / 审计那几套是**共享状态机**（`_deleted` 计数、
-        `pending_actions`、`_blocked_combos`），并行跑它们只会得到一个说不清的
-        次序。所以并行分支只做记账那一半（护栏指纹与进度），而且都在这把
-        锁里；「该不该请示」这类判定一律走串行那条路（见 `_orchestrate_serial`）。
-        """
-        # 并行分支上没有「刚挂起一个动作」这回事：状态判定按「被拦」算
-        # （要请批的分支根本不会进并行池，见 `orchestrate._parallel_ok`）。
-        self._batch_suspended = False
-        result = self.registry.invoke(call)
-        with self._branch_lock:
-            self._note_guard_result(call, result)
-            if self._progress_state is not None:
-                self._note_progress(self._progress_state, call, result)
-        return result
-
-    def _orchestrate_serial(self, call: ToolCall) -> ToolResult:
-        """会改工作区 / 要请批 / 要隔离的分支：与单调用**同一条路**。
-
-        `repeats=1, seen=1` 是有意的：批次里的每一条都是一次全新的调用，
-        不是「模型又发了一遍同一个调用」——重复护栏管的是后者。
-        """
-        pending_before = self._suspended_fingerprints()
-        result = self._invoke_guarded(call, 1, 1)
-        self._batch_suspended = self._suspended_fingerprints() - pending_before
-        with self._branch_lock:
-            self._note_batch_write(call, result)
-            if self._progress_state is not None:
-                self._note_progress(self._progress_state, call, result)
-        return result
-
-    def _suspended_fingerprints(self) -> frozenset[str]:
-        """待批动作的指纹集合（判「这一条是挂起还是被拦」用）。"""
-        try:
-            return frozenset(
-                item.fingerprint for item in self.escalation_gate.pending_actions
-            )
-        except AttributeError:  # pragma: no cover - 只读替身没有这个闸门
-            return frozenset()
-
-    def _orchestrate_status(self, call: ToolCall, result: ToolResult) -> str:
-        """这条结果属于哪一档：成功 / 已暂存 / 失败 / 被拦 / 挂起待批。
-
-        判据全是既有的那几条，不新造：
-        - `STAGE_MARKER` 前缀 = 正文已暂存（`tools/edit.py` 判的）；
-        - `_is_blocked` = 被硬拦、**没有执行**；
-        - 被拦里再看「挂起清单里有没有多出一条」——多出来的是**等人批复**，
-          不是「不允许」（§3.2.3：无人值守时动作挂起、成果照落盘）。
-        """
-        from spoolkit.tools.orchestrate import (
-            STATUS_BLOCKED,
-            STATUS_FAILED,
-            STATUS_OK,
-            STATUS_STAGED,
-            STATUS_SUSPENDED,
-        )
-
-        if result.ok:
-            return (
-                STATUS_STAGED
-                if result.content.startswith(STAGE_MARKER)
-                else STATUS_OK
-            )
-        if _is_blocked(result):
-            if self._batch_suspended:
-                return STATUS_SUSPENDED
-            return STATUS_BLOCKED
-        return STATUS_FAILED
-
-    def _take_batch_edits(self) -> list[ToolCall]:
-        """取走这一批里真的落成的写调用（取走即清空）。"""
-        if self._write_book is None:
-            return []
-        return self._write_book.take_batch()
-
-    def _note_batch_write(self, call: ToolCall, result: ToolResult) -> None:
-        """编排批次里的写分支：登记一笔**待结的账**。
-
-        只入队、不在这里结账：这一段可能跑在分支线程上，而结账要动符号快照与
-        审计（`escalation_gate.snapshot_symbols` / `_note_boundary_write`）。
-        由步进那一侧在主线程上按同一份实现结（`_take_batch_edits`）。
-        """
-        book = self._write_book
-        if book is None:
-            return
-        if (
-            result.ok
-            and call.name in COMMIT_TOOLS
-            and not result.content.startswith(STAGE_MARKER)
-        ):
-            book.batch.append(call)
 
     def _note_landed_write(self, call: ToolCall, book: _WriteBook) -> None:
-        """一次**真的落成**的写调用要记的全部账。**单调用与编排批次共用这一份**。
+        """一次**真的落成**的写调用要记的全部账。
 
-        原先这一整段写在 `run()` 的步进体里（只认「这次调用的名字是写工具」）。
-        编排把一批写藏进一个调用之后，那段判据就抓不到它们了，于是收尾不验证、
-        报告不列 changed——最坏的一种静默缺口。所以把它抽成一个实现，两条路
-        （单调用、批里的分支）走同一份。
+        原先这一整段散在 `run()` 的步进体里，抽出来是为了能单独验：漏记一笔的
+        后果是收尾不验证、报告不列 changed——最坏的一种静默缺口。
 
         暂存**不算产出**：正文收下了，但文件还没落盘。把它算成产出的话，循环
         会去「验证这次改动」——而没有待确认的改动，验证只能报「没有需要验证的
@@ -2903,17 +2755,13 @@ class AgentLoop:
                 # 这一轮改过哪些文件。自动验证靠它判断「该在哪儿验」——
                 # 一个工作区里有很多件事时，范围跟着改动走才对得上因果。
                 changed: list[str] = []
-                # 这一步「写落成了」那本账。编排的一批写会**入同一本账**
-                # （`_note_batch_write` → 下面 `_take_batch_edits` 结账），
-                # 于是「批里的写」与「一步一个写」在产出计数、changed 清单、
-                # 自动验证范围、符号快照、越界审计上逐条相同。
+                # 这一步「写落成了」那本账。产出计数、changed 清单、自动验证
+                # 范围、符号快照、越界审计都从它走。
                 book = _WriteBook(
                     changed=changed,
                     changed_paths=changed_paths,
                     fail_streak=edit_fail_streak,
                 )
-                self._write_book = book
-                self._progress_state = state
                 for call in turn.tool_calls:
                     signature = call_signature(call)
                     repeats = repeats + 1 if signature == last_signature else 1
@@ -3023,11 +2871,6 @@ class AgentLoop:
                         # 被硬拦的不计进「连续失败」：它没执行，也不是格式错误，
                         # 而且拦它的话术本身已经给了照做的下一步。
                         book.fail_streak += 1
-                    # 编排：一批写在**一个工具调用**里完成，那些分支的账在这里
-                    # 按**同一份实现**结（`_note_landed_write`）——不然会出现
-                    # 「文件进了待确认清单，但这一步不算产出、收尾也不验证它」。
-                    for branch_call in self._take_batch_edits():
-                        self._note_landed_write(branch_call, book)
                     if level >= self.config.limit("repeat_warn_at"):
                         trace.append(
                             f"step{state.step}: 重复调用第 {level} 次：{call.name}"
@@ -3101,11 +2944,8 @@ class AgentLoop:
                         f"step{state.step}: 工具 {call.name}{why} -> {status}{detail}"
                     )
                 tool_seconds += time.time() - _tools_started
-                # 这一步的账结算：本账 → 步进用的局部量。单调用的写与编排批次
-                # 里的写走的是同一本账（`_note_landed_write`），所以两条路在
-                # 下面「要不要自动验证」「算不算漫游结束」上表现完全一致。
-                self._write_book = None
-                self._progress_state = None
+                # 这一步的账结算：本账 → 步进用的局部量。产出计数、连续失败、
+                # 自动验证的范围都从它取。
                 edited = book.landed
                 edits_made = edits_before_step + book.edits
                 edit_fail_streak = book.fail_streak
@@ -4130,7 +3970,7 @@ class AgentLoop:
             # 记在「空转」账上（merge-html 与 fix-bug 各一次，两条真病态）。
             # 现在改成先用机械判据归三类，再按类处置：
             #   无用 → 第一次就硬拦 + 换路；有理由 → 放行并写明理由；
-            #   判不出 → 保留提醒路径，但记下「这次判不出」。
+            #   判不出 → 同样拒绝（没有可比对象，就没有理由说重跑有意义）。
             #
             # 判据不许无脑拦：刚写完再读一遍、文件真的变了之后再查一遍，
             # 都是合法的重取（判据二成立 → 有理由的重取）。
@@ -5574,7 +5414,7 @@ class AgentLoop:
         - **不动工作区的三件心算**（`CONVERGE_ALLOWED_EXTRAS`：`calc` /
           `tool_help` / `remember`）允许：它们不产出新素材，也不会变成新的
           探索方向，拦下来只有坏处（算个比例、查一眼工具用法都是收尾要用的）。
-        - **其余一律拒**：读 / 列 / 搜 / 跑 / 查历史 / 出网 / 编排——它们都是
+        - **其余一律拒**：读 / 列 / 搜 / 跑 / 查历史 / 出网——它们都是
           「再收集一点」的形状，而收束态的定义就是**不再开新的收集**。
         - **例外：补一次素材**（`CONVERGE_GRACE_READS` 次）。`CONVERGE_NOW`
           那段话对模型的承诺是「确实还缺一处关键内容时，最多再读一次那一处」。
@@ -5621,7 +5461,7 @@ class AgentLoop:
         return (
             f"{BLOCKED_PREFIX}现在处于**预算收束**（{left}，"
             f"收束线由 `converge_at_steps` 决定），所以**探索类动作不再执行**："
-            f"这一次的 `{call.name}` 被拒了（读 / 列 / 搜 / 跑 / 出网 / 编排"
+            f"这一次的 `{call.name}` 被拒了（读 / 列 / 搜 / 跑 / 出网"
             "都属于这一类）。\n"
             "**唯一还允许的动作**：直接用你手上已有的素材给出结论——协议里"
             "写 `done=true` + `final`（收束态里只写正文也可以，循环会按结论"

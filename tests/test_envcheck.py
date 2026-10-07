@@ -25,8 +25,8 @@ from spoolkit import envcheck
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 SCRIPTS = REPO_ROOT / "scripts"
-COUNTERFACTUAL = (
-    REPO_ROOT / "benchmarks" / "probes" / "orchestration" / "real_counterfactual.py"
+REAL_PROBE = (
+    REPO_ROOT / "benchmarks" / "probes" / "orchestration" / "real_probe.py"
 )
 
 if str(SCRIPTS) not in sys.path:  # 与 tests/test_probe_runner.py 同一条路
@@ -200,7 +200,7 @@ def test_构造点漏掉就判不合格(monkeypatch, tmp_path) -> None:
 
 
 def test_候选目录没有第二份实现() -> None:
-    for path in (SCRIPTS / "probe.py", COUNTERFACTUAL):
+    for path in (SCRIPTS / "probe.py", REAL_PROBE):
         text = path.read_text(encoding="utf-8")
         assert "SummerEngine" not in text, f"{path} 里又长出了一份候选目录清单"
         assert "cursor-agent" not in text, f"{path} 里又长出了一份候选目录清单"
@@ -213,7 +213,7 @@ def test_探针的候选目录就是envcheck那一份() -> None:
 
 
 def test_真机跑分脚本接到了环境自证() -> None:
-    text = COUNTERFACTUAL.read_text(encoding="utf-8")
+    text = REAL_PROBE.read_text(encoding="utf-8")
 
     # 当前进程补 PATH：A 类假 0/3 的根因就是只在子进程里补、进程内没补
     assert "envcheck.ensure_probe_tools(os.environ" in text

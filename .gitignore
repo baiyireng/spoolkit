@@ -24,6 +24,14 @@ scratch_lab/
 # 互动面探针的沙箱副本与快照（scripts/interact_probe.py 的产物，不进仓库）
 .probe_runs/
 
+# 真机探针每跑的产物（real_probe.py：读数/日志逐跑覆盖，不进仓库）
+benchmarks/probes/orchestration/real-probe-readings.json
+benchmarks/probes/orchestration/real-probe-done.json
+benchmarks/probes/orchestration/real-probe-log.txt
+benchmarks/probes/orchestration/real-sandbox-whole.txt
+# 注意：`real-sandbox-pytest.txt` 与 `.real-state.json` 也是每跑覆盖，但它们是**已入库的
+# 冻结证据**，gitignore 对已跟踪文件无效——跑完按老规矩用 `git checkout --` 还原，别改名。
+
 # 本地交接备忘（开发机用，不进仓库）
 docs/roadmap.md
 

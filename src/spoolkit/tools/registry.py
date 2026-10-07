@@ -211,12 +211,12 @@ class ToolRegistry:
         return self._specs.get(name)
 
     def validate(self, name: str, args: dict[str, Any]) -> str | None:
-        """**公开的**参数校验口：整批校验（编排层）与单调用走同一套判据。
+        """**公开的**参数校验口：只校验，不执行。
 
-        为什么不复用 `invoke`：`invoke` 会**真的执行**那个工具，而编排要的是
-        「先把整批校一遍，有一条不合法就整批不发」。拒绝话术必须是同一份
-        （`_validate` → `_reject` 的支持参数清单 + 照抄形状），否则同一个参数
-        错误在单调用与编排里会得到两种说法，模型在两条路上要学两遍。
+        为什么不复用 `invoke`：`invoke` 会**真的执行**那个工具。要问「这条调用
+        本身合不合法」的地方（注册表自己 `invoke` 前的那一步、参数形状的用例）
+        走这里，判据与话术与单调用同一份（`_validate` → `_reject` 的支持参数
+        清单 + 照抄形状），否则同一个参数错误会出现两种说法。
         """
         spec = self._specs.get(name)
         if spec is None:

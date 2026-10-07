@@ -342,17 +342,6 @@ REVIEW_KNOBS: tuple[tuple[str, float], ...] = (
 )
 
 
-# 「编排工具」（一步内发出并执行多个工具调用）那一轮补登的旋钮：一次编排能压
-# 多宽（并行几条 / 最多几条 / 聚合多少字）。单列的理由同上：它们不属于 P1
-# 批次，也不属于前面任何一轮的读数——依据写在 `limits.py` 各自的 note 与
-# `tools/orchestrate.py` 的模块注释里。
-ORCHESTRATE_KNOBS: tuple[tuple[str, float], ...] = (
-    ("orchestrate_max_parallel", 4),  # 只读分支同时跑几条
-    ("orchestrate_max_calls", 8),  # 一份计划最多几条调用
-    ("orchestrate_aggregate_chars", 2400),  # 聚合结果最多多少字
-)
-
-
 # 「P0：步数预算硬上限 + 临近预算强制收束」那一轮补登的两个旋钮。单列的理由
 # 同上：它们不属于 P1 的登记批次，也不属于前面任何一轮。
 #
@@ -400,7 +389,6 @@ def test_p1_旋钮全部登记且可覆盖() -> None:
         + CONFIRM_KNOBS
         + INTENT_KNOBS
         + REVIEW_KNOBS
-        + ORCHESTRATE_KNOBS
         + P0_CONVERGE_KNOBS
         + MATERIAL_COMPACT_KNOBS
         + CONVERGE_WRITE_KNOBS
@@ -444,7 +432,6 @@ def test_旋钮没有重名() -> None:
     + 「意图与可评估的建议」那一轮的 4（`INTENT_KNOBS`）
     + 「被拦的尝试不该烧掉机会 + 拦截要真的换路」那一轮的 1（`REROUTE_KNOBS`）
     + 「不许宣称完成 / L2 / L3」那几轮的 5（`REVIEW_KNOBS`）
-    + 「编排工具」那一轮的 3（`ORCHESTRATE_KNOBS`）
     + **P0 收束与硬上限那一轮的 2**（`converge_at_steps` / `step_budget_hard_cap`）
     + **「素材压缩」那一轮的 4**（`MATERIAL_COMPACT_KNOBS`）
     + **「收束期还准不准写成果」那一轮的 1**（`CONVERGE_WRITE_KNOBS`）。
@@ -464,7 +451,6 @@ def test_旋钮没有重名() -> None:
         + len(CONFIRM_KNOBS)
         + len(INTENT_KNOBS)
         + len(REVIEW_KNOBS)
-        + len(ORCHESTRATE_KNOBS)
         + len(P0_CONVERGE_KNOBS)
         + len(MATERIAL_COMPACT_KNOBS)
         + len(CONVERGE_WRITE_KNOBS)

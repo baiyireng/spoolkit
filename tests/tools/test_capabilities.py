@@ -231,16 +231,19 @@ def test_每件已注册工具都声明了能力(tmp_path: Path, monkeypatch: py
         assert C.of_spec(spec).params, f"{name} 的参数名没绑上"
 
     # 反方向：声明表里不许有注册表里不存在的幽灵工具。
-    # 三处**有意**不在主循环注册表里（都在下面点名，不许再冒新的）：
+    # 四处**有意**不在主循环注册表里（都在下面点名，不许再冒新的）：
     #   - `replace_text`：实现与单测都在，但主循环按量测结论**故意不挂**它
     #     （见 `register_edit_tools` 的 docstring：给 7B 之后 6 道本来全过的题全挂）；
     #   - `web_fetch` / `web_search`：只挂进研究会话的工具表（角色工具表里查得到）；
-    #   - `move_file` / `rename_file`：历史动作名，注册表里已经没有对应工具。
+    #   - `move_file` / `rename_file`：历史动作名，注册表里已经没有对应工具；
+    #   - `orchestrate`：S10 按证据整层删掉（真机 36 跑一次没调用过），中性声明
+    #     留在声明表末尾。它每位都是假、不进派生视图，删掉只会让 `of_spec` 退回
+    #     `UNKNOWN`（更严不是更松）——留着是为了账目完整，不是为了拦什么。
     role_tools = {name for role in ROLES.values() for name in role.tools}
     not_registered = sorted(
         name for name in C.declared_names() if name not in names and name not in role_tools
     )
-    assert not_registered == ["move_file", "rename_file", "replace_text"], (
+    assert not_registered == ["move_file", "orchestrate", "rename_file", "replace_text"], (
         f"声明表里有幽灵工具: {not_registered}——注册表与角色工具表里都找不到它们"
     )
 

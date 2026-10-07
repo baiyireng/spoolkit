@@ -209,8 +209,9 @@ def test_改名复跑新增的两句一条不缺() -> None:
 #
 # **上一版这条用例量错了对象**：它自己列了 9 件关键工具（只够让 workflow 的
 # 各个分支出现），于是量的是「system 区段不含工具索引的那部分」，还另立了一个
-# 2900 的手工上界。真实运行装的是 26 件（清单见 `最全装配工具清单`）——
-# 改动前实测 system 3548 / effective 3482，**早就超了**，而这条用例一直是绿的。
+# 2900 的手工上界。真实运行装的是**全量工具**（清单见 `最全装配工具清单`，
+# 当年 26 件、删掉编排层之后 25 件）——改动前实测 26 件下 system 3548 /
+# effective 3482，**早就超了**，而这条用例一直是绿的。
 # 它守的不是真实装配，所以真实装配的超支只能等到发布才暴露（本轮就是这件事）。
 #
 # 现在改成量**真实最全装配**（走 `cli/runtime.assemble_loop`，不另抄一份注册
@@ -223,6 +224,9 @@ SYSTEM_RESERVE_RATIO = 0.05
 #:
 #: 改动前（离线计数，4096 窗口）：26 件 → system 3548 / effective 3482，超 66。
 #: 压缩之后：26 件 → system 3195 / effective 3482，余 287（8.2%）。
+#: 删掉编排层之后：25 件 → system 3177 / effective 3482，余 305（8.8%）。
+#: （那件工具的参数 schema 有 675 字，但它不在这条读数里：它进的是每轮的
+#: `response_schema`，也就是解码约束，不进 system 区段。）
 最全装配工具清单 = (
     "read_file",
     "list_dir",
@@ -246,7 +250,6 @@ SYSTEM_RESERVE_RATIO = 0.05
     "dispatch",
     "research",
     "survey",
-    "orchestrate",
     "find_symbol",
     "file_symbols",
     "find_callers",
@@ -282,7 +285,7 @@ def _最全装配(tmp_path: Path):
       `register_edit_tools` 的非小项目那一支，把 replace_lines 也装进来；
     - 编辑四件（write_file / confirm_rewrite / delete_file / replace_lines）；
     - 记忆三件（recall / remember / search_history）；
-    - 派发、编排、诊断两件、核对、tool_help、survey、verify_file。
+    - 派发、诊断两件、核对、tool_help、survey、verify_file。
 
     外挂（MCP）**不在这里**：它由用户配置决定、件数没有上界，所以它由
     `test_加一批外挂工具就超支即红` 那条守着。

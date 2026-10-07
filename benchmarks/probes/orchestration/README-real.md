@@ -1,5 +1,12 @@
 # 编排工具（`orchestrate`）的反事实对照 —— **真模型**轮（第二轮）
 
+> **S10 现状（先读这段）**：`orchestrate` 已按证据**整层删除**——真机 36 跑一次
+> 没被调用过（见文末 S10 一节）。跑分器因此从 `real_counterfactual.py`（off / on /
+> control 三臂）改成 `real_probe.py`（**单路**：`run_once(task, temperature, label)`），
+> 靶判词也从「按臂比」改成「按设置（温度）算」。本文里以三臂为背景的批次叙述（含 S9 那一
+> 节的真机批次）都是**当时的记录**，保留原样以备核对；删层这件事本身与现在的口径在文末的
+> S10 一节。
+
 **这是什么**：把上一轮（`counterfactual.py` + `readings.json`，脚本化**假** provider）
 换成**真调本机 llama.cpp**（`http://127.0.0.1:8080`，Qwen3-27B-IQ2_S，`n_ctx=8192`，
 `--reasoning off`）再做一次反事实对照：`orchestrate` 到底有没有被用、写了什么、
@@ -7,7 +14,7 @@
 
 | 文件 | 是什么 |
 | --- | --- |
-| `real_counterfactual.py` | 本轮的跑分器（三臂；真 provider） |
+| `real_probe.py` | 现在的跑分器（单路；真 provider）。S10 之前叫 `real_counterfactual.py`，那时是 off / on / control 三臂 |
 | `real-readings.json` | **36 条逐次读数**（全量，不取最好那次）+ 中位数/极差汇总 |
 | `real-run-log.txt` | 跑批日志（含 502 那一段与补偿跑） |
 | `real-table.txt` | 由 `render_table.py` 生成的对照表 |
@@ -102,7 +109,7 @@ B 的 ② 只认「修复/计划/步骤…」这类词——所以 `B/t0.0/contr
 开跑前拦一道——
 
 - `scripts/probe.py --check-env`：只做自证并退出，不合格 **退出码 3**（`bench.EXIT_ENVIRONMENT_BLOCKED`）；
-- `benchmarks/probes/orchestration/real_counterfactual.py::_prepare_process_env()`：
+- `benchmarks/probes/orchestration/real_probe.py::_prepare_process_env()`：
   在当前进程补 `rg`/`node` 的 PATH、摘掉代理变量、跑 `envcheck.inspect`，不合格
   打报告与建议后 `raise SystemExit(3)`，**这一批不开跑**（跑完再解释，token 已经花掉了）。
   自证结果写进每条读数与落盘 payload 的 `env` 字段。
@@ -116,40 +123,52 @@ B 的 ② 只认「修复/计划/步骤…」这类词——所以 `B/t0.0/contr
   `tests/cli/test_approve_command.py` 曾被记成「模型认错文件」——**S3 查明那是
   脚手架+证据管道造成的，见下面 S3 一节**，不是能力结论。
 
-**能力靶准入判据（加新靶时按这条判）**：同一配方下必须至少有一格两臂判据不同。
-两臂全过 = 无区分度，只能当控制靶；两臂全不过 = 也量不出差别，先查难度与环境，
-别急着改实现。不为「看起来更难」而造靶。
+**能力靶准入判据（加新靶时按这条判）**：同一配方下必须至少有一格通过——扰动采样里
+t=0 没过、换个温度过了也算。一格都不过 = 量不出差别，先查难度与环境，别急着改实现。
+不为「看起来更难」而造靶。（S10 去掉第二臂之后，这条从「两臂要有差别」改成「按设置算」。）
 
 ### 判词是机械算出来的，不是人肉看的
 
-`real_counterfactual.py` 里：`TARGET_ROLES`（角色）+ `_cell_passed`（一格通过 =
-该靶全部机械判据通过，**`_` 开头的一律是明细**——`_hits` / `_paths`）+
-`target_verdict(readings, task)` + `target_verdicts(readings)`。判词取值封闭在
-`TARGET_VERDICTS`：
-`control_ok` / `control_failed` / `discriminating` / `no_discrimination` / `no_readings`。
+`real_probe.py` 里：`TARGET_ROLES`（角色）+ `_cell_passed`（一格通过 = 该靶全部
+机械判据通过，**`_` 开头的一律是明细**——`_hits` / `_paths`）+ `target_verdict(readings,
+task)` + `target_verdicts(readings)`。判词取值封闭在 `TARGET_VERDICTS`：
+`control_ok` / `control_failed` / `ability_ok` / `ability_failed` / `no_readings`
+（控制靶要求每一格都过，能力靶至少一格过；S10 之前那套 `discriminating` /
+`no_discrimination` 是双臂口径，已随三臂一起删掉）。
 跑完逐靶打一行，并写进读数文件的 `target_roles` / `target_verdicts` 与汇总表的
 每格 `role` / `passed`。
 
-拿**已提交的那批 36 条读数**（环境脏的那批）算，判词正好复现了 S2 的人工诊断：
+拿**已提交的那批 36 条读数**（环境脏的那批）喂给**现在的**判据，逐靶得到（2026-10 本地实跑
+`target_verdict(readings, task)` 的原样输出）：
 
 ```
-A-todo: role=control verdict=control_failed | control 0/6、off 0/6、on 0/6 |
+A-todo: role=control verdict=control_failed | 18 格：t0.0 0/9、t0.4 0/9 |
         先查测量环境（缺 rg / 代理劫持），别记成模型不行
-B-failing-test: role=ability verdict=no_discrimination | control 0/6、off 0/6、on 0/6 |
-        两臂全不过，量不出差别：先查难度与环境，别急着改实现
+B-failing-test: role=ability verdict=ability_failed | 18 格：t0.0 0/9、t0.4 0/9 |
+        一格都没过，量不出差别：先查难度与环境，别急着改实现
 ```
+
+**三臂时代的输出长这样**（留档，别当现行口径）：
+
+```
+A-todo: role=control verdict=control_failed | control 0/6、off 0/6、on 0/6
+B-failing-test: role=ability verdict=no_discrimination | control 0/6、off 0/6、on 0/6
+```
+
+注意 `no_discrimination` 已不在 `TARGET_VERDICTS` 里，现在的代码**不可能**再产出它；现在
+按设置（温度）分组，不再按臂分组。
 
 ⚠ 注意：**这批读数是脏环境下取的**，所以两条判词都在说「先查环境/难度」。它们**不是**
 能力结论；S12 会用干净环境重跑并覆盖。这一节要说的是「判据已经会自己说这句话了」。
 
-⚠ 别把两个 `control` 搞混：**三臂里的 `control` 臂**是等长安慰剂（把那一件工具的
-索引行换成等长占位，量的是提示长度的作用——`B/t0.0/control` 1 步 / 2120 token，
-模型直接反问「请提供失败测试名」）；**靶角色里的 `control`** 说的是这个靶该不该
-拿来当能力证据。两者互不相干。
+⚠ 别把两个 `control` 搞混（这条是**三臂时代**的提醒，现在只剩靶角色那一个意思）：**三臂里的
+`control` 臂**是等长安慰剂（把那一件工具的索引行换成等长占位，量的是提示长度的作用——
+`B/t0.0/control` 1 步 / 2120 token，模型直接反问「请提供失败测试名」）；**靶角色里的
+`control`** 说的是这个靶该不该拿来当能力证据。两者互不相干。
 
-守护：`tests/test_counterfactual_targets.py`（32 条：角色齐全、A=control/B=ability、
+守护：`tests/test_real_probe_targets.py`（35 条：角色齐全、A=control/B=ability、
 控制靶两种形态、能力靶三种形态、明细不算判据、判词进读数文件与汇总表、
-真读数文件只查结构不写死具体判词、S7 的沙箱重摆与判据收紧）。变异验收 7/7 红：
+归档读数文件只查结构不写死具体判词、S7 的沙箱重摆与判据收紧）。变异验收 7/7 红：
 控制靶无条件 `control_ok`、能力靶无条件 `discriminating`、少一个靶的角色、
 `_hits` 算作判据、A 靶改回能力靶、读数文件不写判词、汇总表不带角色。
 
@@ -217,7 +236,7 @@ B-failing-test: role=ability verdict=no_discrimination | control 0/6、off 0/6�
 一起丢掉。S6 在重置之前插一级：把素材压成「判据原文逐字保留 + 其余按对象去重截断」的
 压缩稿，装得下就不重置；装不下才重置，且重置挂的是压缩后那份。
 
-**真机读数**（`real_counterfactual.py`，t=0，每臂 2 次，HEAD `d5b2937`，沙箱
+**真机读数**（当时还叫 `real_counterfactual.py`，t=0，每臂 2 次，HEAD `d5b2937`，沙箱
 `spool-orch-real-c2ojl3yk`；新增三个字段 `compactions` / `resets` /
 `judgement_lines_kept` / `final_names_failing_test`）：
 
@@ -237,7 +256,7 @@ B-failing-test: role=ability verdict=no_discrimination | control 0/6、off 0/6�
   （9/32/95 条），说明「压完失败断言还在」这条机制在真机上是成立的；但那两条臂都撞 12 步
   上限、判据全红——窄窗口把任务本身压垮了。压过之后仍可能重置（素材本身太大或系统段占满）。
 - `ORCH_WINDOW` 以前只喂给环境自证，循环硬编码 8192，于是「换个窗口看阶梯」这件事一次都
-  量不到（S6 踩到）。现在它接进 `batch_config()`，由 `tests/test_counterfactual_targets.py`
+  量不到（S6 踩到）。现在它接进 `batch_config()`，由 `tests/test_real_probe_targets.py`
   钉住。
 - **同配置两批 t=0 的 `off|r0` 轨迹不同**（6 步 vs 4 步；第 2 回合起工具结果的字符数就已经
   不一样：405 vs 374），所以「温度 0 逐字复现」这条在这条靶上这次没成立——这是 S13 的输入，
@@ -253,7 +272,7 @@ B-failing-test: role=ability verdict=no_discrimination | control 0/6、off 0/6�
   而这个靶问的正是「哪条测试还红着」。证据：S6 那批 8192 读数里 `off|r1` / `on|r0` / `on|r1`
   的 final 都写着「45 passed」——判据从根上问不出来。修法：`reset_sandbox()`（先删上一份再调
   `stage_sandbox()` 造一份新的，`remove_sandbox()` 只认 `SANDBOX_PREFIXES` 里的路径，认不出就
-  拒绝删），`real_counterfactual.py` 与 `p0_converge_probe.py` 的 `run_once` 每跑都调。
+  拒绝删），`real_probe.py` 与 `p0_converge_probe.py` 的 `run_once` 每跑都调。
 - **判据能被「我查不出来」骗过**：p0 真机 `converge|r1` 的结论原文是「…尝试读取
   tests/test_service_ledger.py 失败，说明该路径不存在…无法确定失败测试涉及哪些文件，也无法
   给出可执行修复计划」——旧判据（裸文件名 + 宽记号）给了它 **2/2**。修法：只认**带目录的完整
@@ -362,11 +381,68 @@ S9 的正面依据是定向用例（`tests/agent/test_repeat_guard.py` 的「判
 **没有回归**：A 靶（控制靶）`control_ok`（control / off / on 各 2/2）；B 靶（能力靶）
 `discriminating`（off **2/2**、on 0/2、control 0/2）——off 臂这一批是迄今最好的一批。
 
-**读数口径**：`instrument_guards` / `guard_readings` 两个探针共用（`real_counterfactual.py`
+**读数口径**：`instrument_guards` / `guard_readings` 两个探针共用（`real_probe.py`
 里定义，p0 直接 import），只读地包一层 `registry.invoke`（按「工具 + 参数逐字」归一，数
 「真的重跑了几件」）与 `_refuse`（收话术 + 工具名，按判据分成两档）。四列主读数
 （`repeat_executions` / `refused_useless` / `refused_undecided` / `command_runs`）加三条明细
 （`refused_useless_tools` / `refused_undecided_tools` / `repeat_tools`）——只给总数等于没说，
 报告要说清「拦的是哪一件」。
+
+## S10：`orchestrate` 整层删掉（按证据，不是按喜好）
+
+**删它的依据**：归档对照批 `real-readings.json`（2 靶 × 2 温度 × 3 臂 × 3 重复 = **36 跑**）
+里，`orchestrate_calls` **36/36 都是 0**；其中在册可调用的 24 跑（on 12 + control 12）也是 0，
+`orchestrate_plans_rejected` 同样全 0——不是「写了计划被校验器打回」，是一次都没走那条路。
+三臂通过率 `off` 3/4、`on` 0/8、`control` 0/2。S7 还试过「加提示词让模型愿意写计划」：两版
+各 2/2、无区分度，按「没有实测证据不建」撤回（`PROMPT_VERSION` 至今仍是 `2026-10-06.1`）。
+
+**诚实的限度**：「orchestrate 有害」**不成立**（样本小，等长占位的 `control` 臂也 0/2）。能
+立住的只有两句：它**从未被用过**，也**看不到收益**。所以删它的理由不是「它坏」，是「它是一笔
+每轮都在付、却一次都没被用到的开销」。
+
+**留着的代价（可核对，不是估的）**：
+
+- 每轮都付的税：`plan_parameters()` 的 `json.dumps` **675 字**进
+  `agent/protocol.py::build_turn_schema`（把全部工具参数的并集塞进 `arguments`），再经
+  `llm/llamacpp.py` 作为约束解码的 `schema` 下发；索引里另占一行（约 31 字，每轮常驻）。
+- **第二套判据语义**：批次串行分支走 `_invoke_guarded(call, 1, 1)`，而 `level = max(repeats,
+  seen)` 在这一路上恒为 1 ⇒ 重复护栏**整段**（含 S9 新加的「判不出 ⇒ 拒绝」）对这条分支
+  结构性跳过；并行只读分支直接 `registry.invoke`。护栏在两条路上各说各话。
+- 跨层一致性成本：`_note_batch_write` / `_take_batch_edits` / `_branch_lock` 都是为「第二条路
+  别静默漏账」长出来的；S5 / S6 / S8 / S9 每一步都要额外回答「批次分支怎么办」。
+- 体量：源码 1021 行 + 用例 692 行 / 24 条 + 3 条标定值 + 探针一整臂设计。
+
+**删了什么**（产品侧全库只有这六处 + 测试 + 探针）：
+
+- `git rm src/spoolkit/tools/orchestrate.py`（1021 行）、`git rm tests/tools/test_orchestrate.py`
+  （692 行 / 24 条）。
+- `src/spoolkit/agent/loop.py`：构造参数 `orchestrator`、接线块（`_orchestrator` / `attach` /
+  `_branch_lock` / `_batch_suspended`）、**112 行编排通道**（`orchestration_runner` /
+  `_orchestrate_read` / `_orchestrate_serial` / `_suspended_fingerprints` / `_orchestrate_status`）、
+  `_WriteBook.batch` 与 `take_batch()`、步进体里的 `_take_batch_edits()` 结账、`_note_batch_write`。
+- `src/spoolkit/cli/runtime.py`：import、`Orchestrator(...)`、
+  `registry.register(orchestrate_spec(...))`、`orchestrator=` 传参。
+- `src/spoolkit/limits.py`：`orchestrate_max_parallel` / `orchestrate_max_calls` /
+  `orchestrate_aggregate_chars` 三个旋钮。
+- 探针：离线脚本化对照 `counterfactual.py` 删；`real_counterfactual.py` → `real_probe.py` 改成
+  **单路**（`run_once(task, temperature, label)`），靶判词改成按设置算（`control_ok` /
+  `control_failed` / `ability_ok` / `ability_failed` / `no_readings`）；
+  `tests/test_counterfactual_targets.py` → `tests/test_real_probe_targets.py`。
+
+**保留了什么**：`tools/capabilities.py` 里那条**中性声明** `"orchestrate": Capability()` 移到文件
+末尾的「历史动作名」一节。注意它和 `move_file` / `rename_file` 的保留理由**不同**：那两个是
+`destructive=True`、缺席会让 `ACTION_TOOLS` 静默松开拦截；`orchestrate` 那条每位都是假、不进任何
+派生视图，删掉只会让 `of_spec` 退回 `UNKNOWN`（**更严**，不是更松）——留着是为了让「声明过的动作
+名」这份账目完整、与冻结快照一致。`GOALS` / `CHECKS` / `checks_for` / 沙箱三件套 /
+`instrument_guards` / `guard_readings` 原样保留；`revert` / 台账 / web 层没有任何引用，整轮
+回退不受影响。
+
+**改完的读数**（同一支量尺 `.tmp/s7_quota.py`，4096 窗口、`PROMPT_VERSION 2026-10-06.1`）：
+工具件数 26 → **25**；system **3177** token、有效预算 3482、余量 **305（8.8%）**（量尺上一步
+读到的 26 件是 3195）。省下来的就是索引那一行；`plan_parameters()` 那 675 字**不在这条读数
+里**——它进的是每轮的 `response_schema`。
+
+**还没重跑**：S10 之后真机一批都还没跑（S12 会重跑稳定样本）。所以这一节现在能说的是「照证据
+删了、删完装得起来、用例全绿」，**不是**「删完真机更好」。
 
 

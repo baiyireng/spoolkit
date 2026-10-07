@@ -1,20 +1,17 @@
-"""编排工具（`orchestrate`）的反事实对照 —— **真模型**版。
+"""真机探针：模型在本机 llama.cpp 上跑靶题，按**跑之前定好的机械判据**读数。
 
-上一轮（`counterfactual.py` + `readings.json`）用的是脚本化假 provider：两臂的
-「脚本形状」本身就是自变量，步数与模型调用次数是**定义出来的**，不是模型自己
-选的。这个脚本把同一件事换成真调本机 llama.cpp（`http://127.0.0.1:8080`），
-于是「模型会不会写计划、写不写得对、用了之后到底省不省」变成**真读数**。
+这个文件当年叫 `real_counterfactual.py`：那时注册表里挂着一件 `orchestrate`
+（一步内批量执行多个工具调用），对照的自变量就是「它在不在册」，于是有 off / on /
+control 三个臂。S10 按证据把那件工具**整层删掉**了（真机 36 跑一次都没被调用过，
+见本目录 `README-real.md` 的 S10 一节）：自变量没有了，对照也就没有了对象。于是这里
+只剩一条路——装配一次、真跑一次、读数。名字里的「反事实」只说明来历。
 
-## 两个臂（唯一的差别是注册表里有没有那一件工具）
+## 靶与角色（`GOALS` / `TARGET_ROLES`）
 
-- `off`：**一次一调**。`orchestrate` **不注册**——装配完之后从注册表里把它拿掉
-  （禁用开关，不是提示词里求它别用）。于是它既不在工具索引里，也不在 GBNF
-  的工具名 enum 里，模型**看不见**它。
-- `on`：**一步多调**。只是把 `orchestrate` 留着（`assemble_loop` 本来就会注册）。
-  任务描述与提示词一个字都不加——不给它任何「你应该用编排」的暗示。
-
-两个臂跑的是**同一段用户原话**（`GOALS`，逐字），同一份沙箱配方，同一套采样
-参数，同一份判据。
+- `A-todo`（**控制靶**）：读一份仓库快照，覆盖 6 条待办并按分类/优先级整理。它怎么
+  跑都做对，量不出差别——作用是**测测量本身**：哪一格不过，先查环境（缺 rg、代理
+  劫持），别记成模型不行。
+- `B-failing-test`（**能力靶**）：修一条真失败的单测并给出修复计划。
 
 ## 判据（**跑之前就定好**，见 `CHECKS` 与 `checks_for`）
 
@@ -27,9 +24,10 @@
 
 ## 读数
 
-逐次全量落 `real-readings.json`（不取最好那次）：步数 / 模型调用 / 输入 token /
-输出 token / 墙钟 / 工具耗时 / 结果可用性 / 编排调用次数与合法性 / 计划原文 /
-被拒原因 / 子调用状态。汇总（中位数 + 极差）写在同一个文件里。
+逐次全量落 `real-probe-readings.json`（不取最好那次）：步数 / 模型调用 / 输入 token /
+输出 token / 墙钟 / 工具耗时 / 结果可用性 / 判据命中 / 素材压缩保留了哪几行判据 /
+收束期拦了几次写 / 重复执行与护栏拦截计数。汇总（中位数 + 极差）写在同一个文件里。
+**当年的三臂读数 `real-readings.json` 原样冻结**：它是删掉编排层的证据，不再被重写。
 
 跑法（本目录内可复现）：
 
@@ -37,7 +35,7 @@
 cd D:\\workSpace\\agents_dev
 $env:ORCH_TOTAL_BUDGET = "3600"   # 整批墙钟上限（秒），有界；快撞线时**减设置不减重复**
 $env:ORCH_REAL_SETTINGS = "0"     # 逗号分隔的采样温度，例如 "0,0.4"
-.venv\\Scripts\\python.exe benchmarks\\probes\\orchestration\\real_counterfactual.py
+.venv\\Scripts\\python.exe benchmarks\\probes\\orchestration\\real_probe.py
 ```
 """
 
@@ -67,7 +65,7 @@ try:  # pragma: no cover - 只影响终端那条路
 except Exception:
     pass
 
-LOG_PATH = OUT / "real-run-log.txt"
+LOG_PATH = OUT / "real-probe-log.txt"
 
 
 def say(text: str) -> None:
@@ -82,10 +80,19 @@ def say(text: str) -> None:
 # ===========================================================================
 
 #: 沙箱里预置的待办标记。这个仓库里几乎没有 `TODO` 字面量（`rg "TODO|FIXME|XXX"
-#: src/spoolkit` 只有 1 条误命中），按原样跑任务 A 会量到「没东西可取」而不是
-#: 「取数 + 归纳」。所以按同一份配方预置 6 条——**两个臂拿到逐字相同的沙箱**。
-#: 这条在上一轮的报告里已经写明，这里沿用（`SEED_MARK` / `SEED_FILES`）。
-from counterfactual import SEED_FILES, SEED_MARK  # noqa: E402  (同目录)
+#: src/spoolkit` 只有 1 条误命中：`.env.XXXX.tmp` 那个注释），按原样跑任务 A 会量到
+#: 「没东西可取」而不是「取数 + 归纳」。所以按同一份配方预置 6 条——**每一次跑
+#: 拿到的是逐字相同的沙箱**。这份配方原来放在离线的 `counterfactual.py` 里；S10
+#: 删掉那份脚本（它 import 了已删除的编排模块）时搬到这里：沙箱配方只留一份。
+SEED_MARK = "TODO(orchestration-bench)"
+SEED_FILES = (
+    "src/spoolkit/cli/runtime.py",
+    "src/spoolkit/tools/registry.py",
+    "src/spoolkit/tools/capabilities.py",
+    "src/spoolkit/agent/audit.py",
+    "src/spoolkit/tools/exec.py",
+    "src/spoolkit/tools/fs.py",
+)
 from spoolkit import envcheck  # noqa: E402  (src 已在上面挂进 sys.path)
 
 #: task B 的失败测试 fixture。为什么自己造一个而不是沿用上一轮的
@@ -515,15 +522,15 @@ CHECKS = {
 
 #: 靶的角色。**这是 S2（O2）的裁决**，不是随手贴的标签。
 #:
-#: `A-todo` 原先当能力靶用，但它**没有区分度**：补上 rg 之后，off/on/control 三臂
-#: 都是 3/3、3 步、30–36 秒（同一批格子此前报「0/3」是环境故障——子进程 PATH 里
-#: 没有 rg，见 `spoolkit.envcheck`——不是模型不行）。一个三臂都做对的任务量不出
-#: 「编排有没有用」。它真正的用处是**控制靶**：各臂都应该通过，哪一格没过就先查
-#: 测量环境，而不是记成模型不行——这一条正是 A 靶当初抓出缺 rg 的原因。
+#: `A-todo` 原先当能力靶用，但它**没有区分度**：三臂都是 3/3、3 步、30–36 秒
+#: （同一批格子此前报「0/3」是环境故障——子进程 PATH 里没有 rg，见
+#: `spoolkit.envcheck`——不是模型不行）。一个怎么跑都做对的任务量不出差别。
+#: 它真正的用处是**控制靶**：每一格都应该通过，哪一格没过就先查测量环境，而不是
+#: 记成模型不行——这一条正是 A 靶当初抓出缺 rg 的原因。
 #:
-#: 能力靶的准入判据（同时写进 README-real.md）：**同一配方下必须至少有一格两臂
-#: 判据不同**。两臂全过 = 无区分度，只能当控制靶；两臂全不过 = 也量不出差别，
-#: 先查难度与环境。加新靶时按这条判，不为「看起来更难」而造。
+#: 能力靶的准入判据（同时写进 README-real.md）：**同一配方下必须至少有一格通过**。
+#: 一格都不过 → 先查难度与环境；全过也行，但那时要说清这条靶只是在守住能力，
+#: 不区分任何变量。加新靶时按这条判，不为「看起来更难」而造。
 TARGET_ROLES: dict[str, str] = {
     "A-todo": "control",
     "B-failing-test": "ability",
@@ -533,10 +540,15 @@ TARGET_ROLES: dict[str, str] = {
 TARGET_VERDICTS = (
     "control_ok",
     "control_failed",
-    "discriminating",
-    "no_discrimination",
+    "ability_ok",
+    "ability_failed",
     "no_readings",
 )
+
+#: 当年三臂那批归档（`real-readings.json`）用的判词。S10 之后跑分器**不会再产出**
+#: 这两个词——归档留着当删层的证据，所以结构检查要把它算进合法集合，否则那条用例
+#: 只能对着归档报「判词不认识」。
+LEGACY_VERDICTS = ("discriminating", "no_discrimination")
 
 
 def checks_for(task: str, final: str) -> dict[str, bool]:
@@ -571,8 +583,11 @@ def target_verdict(readings: list[dict], task: str) -> dict:
     """按角色给一个靶下判词。纯函数：喂合成读数就能验，不需要真跑模型。
 
     - 控制靶：每格都必须通过；有格没过 → `control_failed`，**先查环境**。
-    - 能力靶：至少一格两臂不同才算 `discriminating`；全过 → 无区分度（只能当控制
-      靶）；全不过 → 也量不出差别（先查难度与环境，别急着改实现）。
+    - 能力靶：至少一格通过 → `ability_ok`；一格都不过 → `ability_failed`
+      （先查难度与环境，别急着改实现）。
+
+    「格」= 一次真跑（`task` + 温度 + 重复序号）。S10 删掉编排层之后不再有「臂」：
+    对照的自变量没有了，剩下的问题只是「这条靶还跑不跑得出可用的结论」。
     """
     rows = [one for one in readings if one.get("task") == task]
     role = TARGET_ROLES.get(task, "ability")
@@ -580,28 +595,25 @@ def target_verdict(readings: list[dict], task: str) -> dict:
     if not rows:
         verdict["verdict"] = "no_readings"
         return verdict
-    by_arm: dict[str, list[bool]] = {}
+    by_setting: dict[str, list[bool]] = {}
     for one in rows:
-        by_arm.setdefault(str(one.get("arm", "?")), []).append(_cell_passed(one))
-    verdict["pass_by_arm"] = {
-        arm: {"pass": sum(1 for ok in flags if ok), "of": len(flags)}
-        for arm, flags in sorted(by_arm.items())
+        by_setting.setdefault(str(one.get("temperature", "?")), []).append(_cell_passed(one))
+    verdict["pass_by_setting"] = {
+        setting: {"pass": sum(1 for ok in flags if ok), "of": len(flags)}
+        for setting, flags in sorted(by_setting.items())
     }
-    all_pass = all(all(flags) for flags in by_arm.values())
-    any_pass = any(any(flags) for flags in by_arm.values())
+    all_pass = all(all(flags) for flags in by_setting.values())
+    any_pass = any(any(flags) for flags in by_setting.values())
     if role == "control":
         verdict["verdict"] = "control_ok" if all_pass else "control_failed"
         if verdict["verdict"] == "control_failed":
             verdict["next"] = "先查测量环境（缺 rg / 代理劫持），别记成模型不行"
         return verdict
-    if all_pass:
-        verdict["verdict"] = "no_discrimination"
-        verdict["next"] = "两臂全过，量不出差别：这个靶只能当控制靶（TARGET_ROLES）"
-    elif not any_pass:
-        verdict["verdict"] = "no_discrimination"
-        verdict["next"] = "两臂全不过，量不出差别：先查难度与环境，别急着改实现"
+    if any_pass:
+        verdict["verdict"] = "ability_ok"
     else:
-        verdict["verdict"] = "discriminating"
+        verdict["verdict"] = "ability_failed"
+        verdict["next"] = "一格都没过，量不出差别：先查难度与环境，别急着改实现"
     return verdict
 
 
@@ -637,7 +649,6 @@ def scene_now() -> dict:
     return {
         "head": head,
         "tool_count": len(registry.names()),
-        "has_orchestrate": registry.get("orchestrate") is not None,
         "system_chars": len(system_text),
         "system_tokens": counter.count(system_text),
         "tools": list(registry.names()),
@@ -691,7 +702,7 @@ def batch_config(project: Path):
     )
 
 
-def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
+def run_once(task: str, temperature: float, label: str) -> dict:
     from spoolkit.cli.runtime import LoopWiring, assemble_loop, counter_for
     from spoolkit.llm.llamacpp import LlamaCppGateway
     from spoolkit.tools.edit import PendingChanges
@@ -714,11 +725,6 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
     tokenizer = counter_for(gateway)
     pending = PendingChanges(project)
     events: list[tuple[str, dict]] = []
-    #: 每一次 `orchestrate` 调用的「模型写了什么 + 系统回了什么」。事件流不足以
-    #: 拿到这两样（`tool` 事件的 payload 里没有 arguments，detail 又被截到
-    #: 200 字），而这个对照的**首要问题**正是「计划写出来了吗、合法吗」——
-    #: 所以在这一层绕一下处理器，**只读地记一份**（不改工具实现、不改提示词）。
-    plan_calls: list[dict] = []
     #: 逐回合的「模型自己一步发了几个调用」。主循环的 `tool_calls` 读数包含
     #: 自动验证/最终验证那几条**循环自己发的**，分不出「模型一步多调」这件事，
     #: 所以额外记一份：每一回合的 tool_calls 条数。
@@ -736,22 +742,6 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
         wiring=LoopWiring(mcp=False, pending=pending, on_event=on_event),
     )
     wiring_seconds = time.perf_counter() - wiring_started
-    if arm == "on":
-        _tap_orchestrator(loop, plan_calls)
-    if arm == "off":
-        # **禁用开关**：装配完之后把 `orchestrate` 从注册表里拿掉。它已按单调用
-        # 路径注册；这里只做「摘除」这一件事，不改任何工具实现，也不碰提示词。
-        removed = loop.registry._specs.pop("orchestrate", None)
-        assert removed is not None, "off 臂：注册表里没有 orchestrate 可摘"
-    if arm == "control":
-        # **安慰剂臂**：拿掉 `orchestrate`，塞一件**名字与用途都不是编排**的占位
-        # 工具，但把索引里那一行的**长度调到逐字相同**。于是它与 `on` 臂在
-        # 「工具件数」「system 区段大小」上完全对齐，只差那一个名字/用途。
-        # 没有这一臂就分不清「工具在册带来的收益」与「模型看到的东西不同导致的
-        # 轨迹分叉」——而这次的读数恰好落在那个歧义上。
-        removed = loop.registry._specs.pop("orchestrate", None)
-        assert removed is not None, "control 臂：注册表里没有 orchestrate 可摘"
-        loop.registry.register(_sham_spec(removed))
     tool_count = len(loop.registry.names())
     system_tokens = tokenizer.count(_system_text(loop))
 
@@ -764,9 +754,7 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
     wall = time.perf_counter() - started
     gateway.close()
 
-    # ---- 从事件流里把编排这件事逐条读出来 ---------------------------------
-    orch_calls: list[dict] = []
-    subcalls: list[dict] = []
+    # ---- 从事件流里把读数逐条读出来 ---------------------------------------
     tools: list[dict] = []
     judgement_lines_kept = 0
     write_allowed = 0
@@ -774,10 +762,6 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
     for kind, data in events:
         if kind == "tool":
             tools.append(data)
-            if data.get("name") == "orchestrate":
-                orch_calls.append(data)
-        elif kind == "subcall":
-            subcalls.append(data)
         elif kind == "note" and data.get("kind") == "material_compacted":
             # 素材压缩（S6）保留了 N 行判据原文——这些行是逐字直通的，不是模型
             # 复述的。压缩只会在这一条事件上计数（`LoopResult.compactions` 同源）。
@@ -791,7 +775,6 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
             elif data.get("action") == "write_blocked":
                 write_blocked += 1
 
-    runner = _plan_evidence(plan_calls)
     # S9 读数：重复执行了几次、护栏按哪条判据拦了几次（两档分开数，见
     # `guard_readings`）。直接摊进记录的字段里，报告末列读的就是这四个数。
     guards = guard_readings(book)
@@ -799,20 +782,8 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
     refused_useless = guards["refused_useless"]
     refused_undecided = guards["refused_undecided"]
     command_runs = guards["command_runs"]
-    plans = []
-    for index, one in enumerate(orch_calls):
-        plans.append(
-            {
-                "index": index,
-                "ok": bool(one.get("ok")),
-                "detail": one.get("detail", ""),
-            }
-        )
-    rejected = [one for one in plans if not one["ok"]]
-    tap_ok = (not orch_calls) or (len(plan_calls) >= len(orch_calls))
     return {
         "task": task,
-        "arm": arm,
         "temperature": temperature,
         "label": label,
         "head": head,
@@ -852,60 +823,11 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
         "model_multi_call_turns": sum(1 for one in turns if one["tool_calls"] > 1),
         "model_max_calls_in_turn": max([one["tool_calls"] for one in turns] or [0]),
         "model_calls_in_turns": sum(one["tool_calls"] for one in turns),
-        "orchestrate_calls": len(orch_calls),
-        "orchestrate_plans_ok": len(plans) - len(rejected),
-        "orchestrate_plans_rejected": len(rejected),
-        "orchestrate_rejects": [one["detail"] for one in rejected],
-        "orchestrate_plan_texts": [one.get("plan_text", "") for one in runner],
-        "orchestrate_full_rejects": [one["content"] for one in runner if not one["ok"]],
-        "tap_ok": tap_ok,
-        "orchestrate_plan_shape": [
-            {"ok": one["ok"], "why": one["why"], "calls": one["calls"],
-             "aggregate": one["aggregate"], "batch_edits": one["batch_edits"]}
-            for one in runner
-        ],
-        "orchestrate_batch_edits": sum(one["batch_edits"] for one in runner),
-        "subcalls": len(subcalls),
-        "subcall_status": _tally(one.get("status", "?") for one in subcalls),
-        "subcall_parallel": sum(1 for one in subcalls if one.get("parallel")),
-        "subcall_serial": sum(1 for one in subcalls if not one.get("parallel")),
-        "subcall_tools": sorted({str(one.get("tool")) for one in subcalls}),
         "tool_count": tool_count,
         "system_tokens": system_tokens,
         "max_steps": int(os.environ.get("ORCH_MAX_STEPS", "12")),
         "checks": checks_for(task, result.final),
     }
-
-
-def _tally(items) -> dict:
-    out: dict[str, int] = {}
-    for one in items:
-        key = str(one)
-        out[key] = out.get(key, 0) + 1
-    return out
-
-
-# ---- 计划原文（成功 / 失败各留一份）----------------------------------------
-
-
-def _tap_orchestrator(loop, sink: list[dict]) -> None:
-    registry = loop.registry
-    original = registry.invoke
-
-    def tapped(call):
-        if call.name != "orchestrate":
-            return original(call)
-        result = original(call)
-        sink.append(
-            {
-                "plan": dict(call.arguments).get("plan"),
-                "ok": bool(getattr(result, "ok", False)),
-                "content": getattr(result, "content", ""),
-            }
-        )
-        return result
-
-    registry.invoke = tapped
 
 
 def _isolate_local_http() -> dict[str, str]:
@@ -951,44 +873,6 @@ def _prepare_process_env() -> None:
         raise SystemExit(envcheck.EXIT_ENVIRONMENT_BLOCKED)
     BATCH_ENV.clear()
     BATCH_ENV.update(report.to_dict())
-
-
-def _sham_spec(original) -> object:
-    """安慰剂工具：索引行长度与 `original` **逐字相同**，行为是「什么也不做」。
-
-    判据是**索引里那一行**（`registry.describe` 的输出），不是 description——
-    进 system 区段的只有那一行（`name(params) brief`）。所以先量出原行有多长，
-    再用同样的字数写一句与编排无关的话；参数名照抄（`name(params)` 那一段）。
-    """
-    from spoolkit.tools.registry import _index_entry
-    from spoolkit.tools.types import ToolResult, ToolSpec
-
-    line = _index_entry(original)
-    head = line.split(" ", 1)[0]
-    brief = line[len(head) + 1 :] if " " in line else ""
-    spec = ToolSpec(
-        name="noop_tool",
-        description="占位工具，不做任何事",
-        parameters=original.parameters,
-        handler=lambda args: ToolResult(ok=True, content="（占位工具，没有做事）"),
-        brief="占位工具，不做任何事",
-        group=original.group,
-    )
-    short = len(line) - len(_index_entry(spec))
-    if short > 0:
-        spec = ToolSpec(
-            name=spec.name,
-            description=spec.description,
-            parameters=spec.parameters,
-            handler=spec.handler,
-            brief=spec.brief + "·" * short,
-            group=spec.group,
-        )
-    assert len(_index_entry(spec)) == len(line), (
-        f"安慰剂行的长度必须与原来那一行逐字相同："
-        f"{len(_index_entry(spec))} != {len(line)}（原 brief={brief!r}）"
-    )
-    return spec
 
 
 #: 「判不出」那一档拦下的话术里的两句原文（S9 起这一档的处置是拒绝）。
@@ -1090,46 +974,6 @@ def _instrument_gateway(gateway, turns: list[dict]) -> None:
     gateway.chat = tapped
 
 
-def _plan_evidence(plan_calls: list[dict]) -> list[dict]:
-    """把每一次 `orchestrate` 调用整理成一条证据：**模型写的那份计划原文**。
-
-    计划正文来自调用**当时**的 `args["plan"]`（不是事后的复述），拒绝话术来自
-    工具真正返回的那份 `content`（不是事件流里被截到 200 字的 `detail`）。
-    """
-    out: list[dict] = []
-    for one in plan_calls:
-        plan = one.get("plan") or {}
-        calls = plan.get("calls") if isinstance(plan, dict) else None
-        items = [item for item in (calls if isinstance(calls, list) else []) if isinstance(item, dict)]
-        tools = [item.get("tool") for item in items]
-        out.append(
-            {
-                "ok": bool(one.get("ok")),
-                "plan_text": json.dumps(plan, ensure_ascii=False),
-                "content": one.get("content", ""),
-                "why": plan.get("why", "") if isinstance(plan, dict) else "",
-                "aggregate": plan.get("aggregate", "") if isinstance(plan, dict) else "",
-                "calls": [
-                    {
-                        "id": item.get("id"),
-                        "tool": item.get("tool"),
-                        "args": item.get("args"),
-                        "why": item.get("why"),
-                        "needs": item.get("needs"),
-                    }
-                    for item in items
-                ],
-                # 「把不该并行的写操作塞进一批」这件事要能被数出来：计划里出现
-                # 会改工作区的工具就记一笔（它们会被串行执行，但仍是「一批里
-                # 混了写」的证据）。
-                "batch_edits": sum(
-                    1 for name in tools if name in ("write_file", "replace_text", "edit", "apply_patch")
-                ),
-            }
-        )
-    return out
-
-
 # ===========================================================================
 # 主流程
 # ===========================================================================
@@ -1156,9 +1000,9 @@ def _budget() -> int:
     return int(os.environ.get("ORCH_TOTAL_BUDGET", "3600"))
 
 
-#: 已经落进 `real-readings.json` 的那些格子的标签。补跑（例如后加的安慰剂臂）
+#: 已经落进 `real-probe-readings.json` 的那些格子的标签。补跑（例如新加的靶）
 #: 时不该把已经花掉的格子再买一遍——那是白花钱，也会把读数搞成两套设置。
-DONE_FILE = OUT / "real-done.json"
+DONE_FILE = OUT / "real-probe-done.json"
 
 
 def _done_labels() -> set[str]:
@@ -1188,83 +1032,71 @@ def _stage1() -> int:
     scene = scene_now()
     say(f"\n===== 真模型对照 @ {time.strftime('%Y-%m-%d %H:%M:%S')} =====")
     say(f"版本 : HEAD {scene['head'][:12]} 工具 {scene['tool_count']} 件 "
-        f"system {scene['system_tokens']} token（off 臂装配后摘掉 orchestrate）")
+        f"system {scene['system_tokens']} token")
     say(f"预算 : {budget}s；设置 {settings}；任务 {list(tasks)}；每格 {repeats} 次")
     say(f"本机回环隔离代理：NO_PROXY={os.environ.get('NO_PROXY')}")
     say(f"沙箱 : 每次跑前重摆（现状 {state['project']}，失败测试 exit={state['fail_exit']}）")
 
-    # 次序：设置 → 臂 → 任务 → 重复。**只跑还没跑过的格子**（`real-done.json`
-    # 记着已经落进 readings 的标签），补跑安慰剂臂时不会把已经花掉的格子再买一遍。
+    # 次序：设置 → 任务 → 重复。**只跑还没跑过的格子**（`real-probe-done.json`
+    # 记着已经落进 readings 的标签），补跑新靶时不会把已经花掉的格子再买一遍。
     # 设置放外层，是为了「预算不够时**减设置不减重复**」。
     done = _done_labels()
     readings: list[dict] = []
     skipped: list[dict] = []
     started = time.time()
     for temperature in settings:
-        for arm in ("off", "on", "control"):
-            for task in tasks:
-                for repeat in range(repeats):
-                    label = f"{task}|t{temperature}|{arm}|r{repeat}"
-                    if label in done:
-                        say(f"{label}: 已有读数，跳过")
-                        continue
-                    elapsed = time.time() - started
-                    used = elapsed / budget if budget else 0.0
-                    if budget and elapsed >= budget:
-                        skipped.append({"label": label, "reason": "整批预算已用尽"})
-                        say(f"{label}: 跳过（整批预算已用尽 {elapsed:.0f}s / {budget}s）")
-                        continue
-                    say(f"{label}: 开跑（已用 {elapsed:.0f}s / {budget}s）…")
-                    try:
-                        record = run_once(task, arm, temperature, label)
-                    except Exception as exc:  # noqa: BLE001 - 一次失败不许带走整批
-                        skipped.append(
-                            {"label": label, "reason": f"{type(exc).__name__}: {exc}"}
-                        )
-                        say(f"{label}: 未完成（{type(exc).__name__}: {exc}）")
-                        continue
-                    record["elapsed_before"] = round(elapsed, 1)
-                    record["budget_used"] = round(used, 3)
-                    # 每条读数自带环境：合并多批读数时，"这一格是在什么环境里
-                    # 取的"必须跟着这一格走，不能只写在文件根上。
-                    record["env"] = dict(BATCH_ENV)
-                    readings.append(record)
-                    passed = [key for key, value in record["checks"].items()
-                              if key != "_hits" and value]
-                    say(
-                        f"  步数 {record['steps']:2d} 模型调用 {record['model_calls']:2d} "
-                        f"输入 {record['prompt_tokens']:6d} 输出 {record['completion_tokens']:4d} "
-                        f"墙钟 {record['wall_seconds']:6.1f}s 工具 {record['tool_seconds']:5.1f}s "
-                        f"工具调用 {record['tool_calls']:2d} 编排 {record['orchestrate_calls']} "
-                        f"（合法 {record['orchestrate_plans_ok']}/拒 {record['orchestrate_plans_rejected']}）"
-                        f" 子调用 {record['subcalls']} 可用 {len(passed)} 项 "
-                        f"多调回合 {record['model_multi_call_turns']}/"
-                        f"{record['model_turns_count']} "
-                        f"{'完成' if record['finished'] else '未完成'}"
+        for task in tasks:
+            for repeat in range(repeats):
+                label = f"{task}|t{temperature}|r{repeat}"
+                if label in done:
+                    say(f"{label}: 已有读数，跳过")
+                    continue
+                elapsed = time.time() - started
+                used = elapsed / budget if budget else 0.0
+                if budget and elapsed >= budget:
+                    skipped.append({"label": label, "reason": "整批预算已用尽"})
+                    say(f"{label}: 跳过（整批预算已用尽 {elapsed:.0f}s / {budget}s）")
+                    continue
+                say(f"{label}: 开跑（已用 {elapsed:.0f}s / {budget}s）…")
+                try:
+                    record = run_once(task, temperature, label)
+                except Exception as exc:  # noqa: BLE001 - 一次失败不许带走整批
+                    skipped.append(
+                        {"label": label, "reason": f"{type(exc).__name__}: {exc}"}
                     )
-                    if record["orchestrate_rejects"]:
-                        say("  拒绝原因：")
-                        for one in record["orchestrate_full_rejects"][0].splitlines()[:6]:
-                            say(f"    {one}")
-                    if record["arm"] == "on":
-                        for one in record["orchestrate_plan_shape"]:
-                            mark = "合法" if one["ok"] else "被拒"
-                            say(
-                                f"  计划（{mark}）：{len(one['calls'])} 条 "
-                                f"why={one['why'][:60]!r} "
-                                f"写操作 {one['batch_edits']} 条"
-                            )
-                    _flush(readings, skipped, settings, repeats, budget, scene, started)
+                    say(f"{label}: 未完成（{type(exc).__name__}: {exc}）")
+                    continue
+                record["elapsed_before"] = round(elapsed, 1)
+                record["budget_used"] = round(used, 3)
+                # 每条读数自带环境：合并多批读数时，"这一格是在什么环境里
+                # 取的"必须跟着这一格走，不能只写在文件根上。
+                record["env"] = dict(BATCH_ENV)
+                readings.append(record)
+                passed = [key for key, value in record["checks"].items()
+                          if not key.startswith("_") and value]
+                say(
+                    f"  步数 {record['steps']:2d} 模型调用 {record['model_calls']:2d} "
+                    f"输入 {record['prompt_tokens']:6d} 输出 {record['completion_tokens']:4d} "
+                    f"墙钟 {record['wall_seconds']:6.1f}s 工具 {record['tool_seconds']:5.1f}s "
+                    f"工具调用 {record['tool_calls']:2d} 可用 {len(passed)} 项 "
+                    f"多调回合 {record['model_multi_call_turns']}/"
+                    f"{record['model_turns_count']} "
+                    f"压缩 {record['compactions']} 收束拦写 {record['write_blocked']} "
+                    f"重复执行 {record['repeat_executions']} "
+                    f"（拦下 无用{record['refused_useless']}/判不出{record['refused_undecided']}）"
+                    f"{'完成' if record['finished'] else '未完成'}"
+                )
+                _flush(readings, skipped, settings, repeats, budget, scene, started)
     _flush(readings, skipped, settings, repeats, budget, scene, started)
     # 靶判词留到最后：中途的判词会被后来补上的格子推翻（跑批是边跑边落盘的）。
     for task, verdict in target_verdicts(readings).items():
-        arms = "、".join(
-            f"{arm} {one['pass']}/{one['of']}"
-            for arm, one in (verdict.get("pass_by_arm") or {}).items()
+        cells = "、".join(
+            f"t{setting} {one['pass']}/{one['of']}"
+            for setting, one in (verdict.get("pass_by_setting") or {}).items()
         )
         line = f"靶判词 {task}（{verdict['role']}）：{verdict['verdict']}"
-        if arms:
-            line += f"；各臂通过 {arms}"
+        if cells:
+            line += f"；各设置通过 {cells}"
         if verdict.get("next"):
             line += f" —— {verdict['next']}"
         say(line)
@@ -1273,7 +1105,7 @@ def _stage1() -> int:
 
 
 def _summary(readings: list[dict], settings: list[float]) -> dict:
-    """中位数 + 极差，逐设置逐臂。**全量读数都在 readings 里，不取最好那次。**"""
+    """中位数 + 极差，逐设置逐靶。**全量读数都在 readings 里，不取最好那次。**"""
     out: dict[str, dict] = {}
     keys = (
         "steps",
@@ -1284,59 +1116,47 @@ def _summary(readings: list[dict], settings: list[float]) -> dict:
         "model_seconds",
         "tool_seconds",
         "tool_calls",
-        "orchestrate_calls",
-        "subcalls",
         "model_multi_call_turns",
         "model_max_calls_in_turn",
     )
     for task in [one for one in GOALS if any(r["task"] == one for r in readings)]:
         for temperature in sorted({one["temperature"] for one in readings}):
-            for arm in ("off", "on", "control"):
-                rows = [
-                    one
-                    for one in readings
-                    if one["task"] == task
-                    and one["arm"] == arm
-                    and one["temperature"] == temperature
-                ]
-                if not rows:
-                    continue
-                cell: dict = {
-                    "runs": len(rows),
-                    "finished": sum(1 for one in rows if one["finished"]),
-                    # 角色跟着格子走：控制靶的格子不能拿来当能力证据。
-                    "role": TARGET_ROLES.get(task, "ability"),
-                    "passed": sum(1 for one in rows if _cell_passed(one)),
+            rows = [
+                one
+                for one in readings
+                if one["task"] == task and one["temperature"] == temperature
+            ]
+            if not rows:
+                continue
+            cell: dict = {
+                "runs": len(rows),
+                "finished": sum(1 for one in rows if one["finished"]),
+                # 角色跟着格子走：控制靶的格子不能拿来当能力证据。
+                "role": TARGET_ROLES.get(task, "ability"),
+                "passed": sum(1 for one in rows if _cell_passed(one)),
+            }
+            for key in keys:
+                values = [one[key] for one in rows]
+                cell[key] = {
+                    "median": statistics.median(values),
+                    "min": min(values),
+                    "max": max(values),
                 }
-                for key in keys:
-                    values = [one[key] for one in rows]
-                    cell[key] = {
-                        "median": statistics.median(values),
-                        "min": min(values),
-                        "max": max(values),
-                    }
-                checks = [one["checks"] for one in rows]
-                cell["checks"] = {
-                    key: {
-                        "pass": sum(1 for one in checks if one.get(key)),
-                        "of": len(checks),
-                    }
-                    for key in checks[0]
-                    if key != "_hits"
+            checks = [one["checks"] for one in rows]
+            cell["checks"] = {
+                key: {
+                    "pass": sum(1 for one in checks if one.get(key)),
+                    "of": len(checks),
                 }
-                cell["orchestrate_plans_ok"] = sum(one["orchestrate_plans_ok"] for one in rows)
-                cell["orchestrate_plans_rejected"] = sum(
-                    one["orchestrate_plans_rejected"] for one in rows
-                )
-                cell["orchestrate_used_runs"] = sum(
-                    1 for one in rows if one["orchestrate_calls"] > 0
-                )
-                out[f"{task}/t{temperature}/{arm}"] = cell
+                for key in checks[0]
+                if not key.startswith("_")
+            }
+            out[f"{task}/t{temperature}"] = cell
     return out
 
 
 def _flush(readings, skipped, settings, repeats, budget, scene, started) -> None:
-    target = OUT / "real-readings.json"
+    target = OUT / "real-probe-readings.json"
     # 补跑时把上一批的读数原样并回来：这一批只买了几个新格子，汇总必须覆盖
     # **全部**读数，否则报告会把自己上一批的证据丢掉。
     previous: list[dict] = []
@@ -1345,11 +1165,10 @@ def _flush(readings, skipped, settings, repeats, budget, scene, started) -> None
             previous = json.loads(target.read_text(encoding="utf-8")).get("readings", [])
         except Exception:
             previous = []
-    known = {one["label"] for one in readings}
     merged = previous + [one for one in readings if one["label"] not in
                          {p["label"] for p in previous}]
     payload = {
-        "kind": "real-model counterfactual",
+        "kind": "real-model probe",
         "provider": os.environ.get("ORCH_BASE_URL", "http://127.0.0.1:8080"),
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "budget_seconds": budget,
