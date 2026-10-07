@@ -64,14 +64,37 @@ from real_counterfactual import (  # noqa: E402
     reset_sandbox,
 )
 
-#: 两个机制臂。名字写在读数里，报告按它分组。
+#: 机制臂。名字写在读数里，报告按它分组。
 #:
 #: - `base`：**不放大、不收束**（硬上限 0 / 收束关）。它等价于「只留下修①，
 #:   把修③关掉」，用来量收束本身值多少；
-#: - `converge`：修① + 修③（硬上限 0、剩余 ≤ `converge_at_steps` 步收束）。
+#: - `converge`：修① + 修③（硬上限 0、剩余 ≤ `converge_at_steps` 步收束），
+#:   写成果**不设上限**（`converge_write_grace = -1`，旧行为）；
+#: - `converge-nowrite` / `converge-onewrite`：在 `converge` 之上只动
+#:   `converge_write_grace`（0 = 收束期只准给结论，1 = 只准写一次）。
+#:   这是 O6/O8 的对照实验：同一份提示、同一份沙箱，唯一差别是**收束期还能不能
+#:   写**。读数看 `write_allowed` / `write_blocked` 与 `checks` 三列一起比。
+#:
+#: `converge` 臂把 `-1` **显式写出来**，不靠默认值：这一档的默认值已经改成 0
+#: （见 `limits.converge_write_grace` 的依据），若这里省略，两臂会变成同一个
+#: 配置、对照实验静默失效——`tests/test_counterfactual_targets.py` 钉着这一点。
 ARMS: dict[str, dict[str, float]] = {
     "base": {"step_budget_hard_cap": 0, "converge_at_steps": 0},
-    "converge": {"step_budget_hard_cap": 0, "converge_at_steps": 3},
+    "converge": {
+        "step_budget_hard_cap": 0,
+        "converge_at_steps": 3,
+        "converge_write_grace": -1,
+    },
+    "converge-nowrite": {
+        "step_budget_hard_cap": 0,
+        "converge_at_steps": 3,
+        "converge_write_grace": 0,
+    },
+    "converge-onewrite": {
+        "step_budget_hard_cap": 0,
+        "converge_at_steps": 3,
+        "converge_write_grace": 1,
+    },
 }
 
 
@@ -259,6 +282,16 @@ def run_once(task: str, arm: str, repeat: int, label: str) -> dict:
     converged = any("注入收束指令" in line for line in (result.trace if result else []))
     step_lines = [line for line in (result.trace if result else []) if "硬上限" in line]
     failed_notes = [one for one in notes if one.get("kind") == "run_failed"]
+    # 收束期「写成果」的放行/拦截次数（`loop._converge_write_verdict` 打的那两条
+    # note，`kind="converge"` + `action`）。默认 -1 时这两条**一次都不打**，
+    # 所以默认臂读到的 0 表示「这一级没参与」，不是「一次都没写」。
+    converge_notes = [one for one in notes if one.get("kind") == "converge"]
+    write_allowed = sum(
+        1 for one in converge_notes if one.get("action") == "write_allowed"
+    )
+    write_blocked = sum(
+        1 for one in converge_notes if one.get("action") == "write_blocked"
+    )
 
     final_text = result.report_text if result is not None else ""
     return {
@@ -287,6 +320,8 @@ def run_once(task: str, arm: str, repeat: int, label: str) -> dict:
         "converge_injected": converged,
         "budget_notes": step_lines,
         "failed_notes": len(failed_notes),
+        "write_allowed": write_allowed,
+        "write_blocked": write_blocked,
         "tool_calls": len(tools),
         # 逐回合诊断（只在 `ORCH_DUMP_TURNS` 打开时有内容）。
         "turns_tail": [
@@ -334,6 +369,8 @@ def _failed_record(task: str, arm: str, repeat: int, label: str, exc, scene: dic
         "converge_injected": False,
         "budget_notes": [],
         "failed_notes": 1,
+        "write_allowed": 0,
+        "write_blocked": 0,
         "tool_calls": 0,
         "checks": checks_for(task, ""),
         "final_text": "",
@@ -353,6 +390,8 @@ def _summary(readings: list[dict]) -> dict:
                 "concluded": sum(1 for one in rows if one["concluded"]),
                 "finished": sum(1 for one in rows if one["finished"]),
                 "converge_injected": sum(1 for one in rows if one["converge_injected"]),
+                "write_allowed": sum(one.get("write_allowed", 0) for one in rows),
+                "write_blocked": sum(one.get("write_blocked", 0) for one in rows),
                 "terminated_by": _tally(one["terminated_by"] for one in rows),
                 "steps_median": statistics.median([one["steps"] or 0 for one in rows]),
                 "prompt_tokens_median": statistics.median(
@@ -361,7 +400,8 @@ def _summary(readings: list[dict]) -> dict:
                 "checks": {
                     key: sum(1 for one in checks if one.get(key))
                     for key in checks[0]
-                    if key != "_hits"
+                    # `_` 开头的一律是明细（`_hits` / `_paths`），不是判据。
+                    if not key.startswith("_")
                 },
                 "checks_of": len(checks),
             }

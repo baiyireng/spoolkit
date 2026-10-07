@@ -382,6 +382,14 @@ MATERIAL_COMPACT_KNOBS: tuple[tuple[str, float], ...] = (
 )
 
 
+# 「收束期还准不准写成果」那一轮（O6/O8，规划里的 S8）补登的一个旋钮。默认值 0
+# 是**对照实验**定的：步数压紧（max_steps=5）时，不设上限那臂 3/8 跑出结论、
+# 拦写那臂 8/8；步数宽松（max_steps=8）时这一档几乎不被触发、两臂都在天花板上。
+CONVERGE_WRITE_KNOBS: tuple[tuple[str, float], ...] = (
+    ("converge_write_grace", 0),  # 0 = 收束态只准给结论；-1 = 不设上限（旧行为）
+)
+
+
 def test_p1_旋钮全部登记且可覆盖() -> None:
     """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
     for name, default in (
@@ -395,6 +403,7 @@ def test_p1_旋钮全部登记且可覆盖() -> None:
         + ORCHESTRATE_KNOBS
         + P0_CONVERGE_KNOBS
         + MATERIAL_COMPACT_KNOBS
+        + CONVERGE_WRITE_KNOBS
     ):
         entry = limits.knob(name)
         assert entry is not None, f"{name} 没登记"
@@ -437,7 +446,8 @@ def test_旋钮没有重名() -> None:
     + 「不许宣称完成 / L2 / L3」那几轮的 5（`REVIEW_KNOBS`）
     + 「编排工具」那一轮的 3（`ORCHESTRATE_KNOBS`）
     + **P0 收束与硬上限那一轮的 2**（`converge_at_steps` / `step_budget_hard_cap`）
-    + **「素材压缩」那一轮的 4**（`MATERIAL_COMPACT_KNOBS`）。
+    + **「素材压缩」那一轮的 4**（`MATERIAL_COMPACT_KNOBS`）
+    + **「收束期还准不准写成果」那一轮的 1**（`CONVERGE_WRITE_KNOBS`）。
 
     最后那 2 项与 `KNOBS_BEFORE_P1` 是**两个不同的口径**：那个元组是「P1 改造
     之前就有的 62 项」的历史快照（它不该长），而这两个是 P0 之后新登记的。
@@ -457,6 +467,7 @@ def test_旋钮没有重名() -> None:
         + len(ORCHESTRATE_KNOBS)
         + len(P0_CONVERGE_KNOBS)
         + len(MATERIAL_COMPACT_KNOBS)
+        + len(CONVERGE_WRITE_KNOBS)
     )
 
 

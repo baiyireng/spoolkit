@@ -42,6 +42,18 @@ def _harness():
     return module
 
 
+@pytest.fixture(autouse=True)
+def _isolate_probe_log(tmp_path, monkeypatch):
+    """单元测试不许往仓库里的探针日志追加内容。
+
+    `remove_sandbox()` 的拒绝话术走 `say()`，而 `say()` 写的是模块级
+    `LOG_PATH`（`benchmarks/probes/orchestration/real-run-log.txt`）——跑一次
+    用例就让 `git status` 多出一行脏改动，混进提交前的路径清单里。把它指到
+    临时目录；探针自己真被跑起来时不受影响（读的仍是那个默认值）。
+    """
+    monkeypatch.setattr(_harness(), "LOG_PATH", tmp_path / "probe.log")
+
+
 def _cell(task: str, arm: str, passed: bool, *, temperature: float = 0.0, label: str = "") -> dict:
     """一格读数的最小形状：判据一条，通过与否由 `passed` 定。"""
     return {
@@ -521,3 +533,57 @@ def test_两个探针每跑之前都重摆沙箱() -> None:
     # p0 用的是同一份实现（不抄第二份删/造逻辑）
     assert "reset_sandbox," in p0_source
     assert "from real_counterfactual import" in p0_source
+
+
+def test_p0有两条写额度对照臂且读数带计数() -> None:
+    """**O6/O8 的对照必须能被读出来**：臂在 `ARMS` 里，计数在 `run_once` 与汇总里。
+
+    三件事，缺一条这条实验就量不出来：
+
+    1. 两个对照臂只差 `converge_write_grace`（0 / 1），其余 overrides 与
+       `converge` 臂逐字相同——否则差别不只一个变量；
+    2. 记录里有 `write_allowed` / `write_blocked`：没有它们，「收束期到底拦了几次
+       写」只能靠人肉翻事件流；
+    3. 汇总也带上这两列，报告才能按臂比。
+    """
+    p0 = HARNESS_DIR / "p0_converge_probe.py"
+    source = p0.read_text(encoding="utf-8")
+    arms_text = source.split("ARMS: dict", 1)[1].split("\n}\n", 1)[0]
+    # ① 臂的形状：与 converge 臂同源，只多一个键。
+    assert '"converge-nowrite"' in arms_text and '"converge-onewrite"' in arms_text
+    for arm in ("converge-nowrite", "converge-onewrite"):
+        block = arms_text.split(f'"{arm}"', 1)[1].split("}", 1)[0]
+        assert '"step_budget_hard_cap": 0' in block, block
+        assert '"converge_at_steps": 3' in block, block
+    assert '"converge_write_grace": 0' in arms_text
+    assert '"converge_write_grace": 1' in arms_text
+    # `converge` 对照臂必须**显式**钉住 -1：这一档的默认值已经是 0，省略就两臂同配、
+    # 对照实验静默失效。
+    converge_block = arms_text.split('"converge":', 1)[1].split("}", 1)[0]
+    assert '"converge_write_grace": -1' in converge_block, converge_block
+    # ② 记录与 ③ 汇总都带这两列。
+    assert source.count('"write_allowed"') >= 2, "记录与汇总都要有 write_allowed"
+    assert source.count('"write_blocked"') >= 2, "记录与汇总都要有 write_blocked"
+    # 两条计数从收束事件里数出来（`kind="converge"` + `action`），不是猜的。
+    assert 'one.get("action") == "write_allowed"' in source
+    assert 'one.get("action") == "write_blocked"' in source
+    # 汇总里的判据明细按 `_` 前缀排除（`_paths` 也是明细，不只是 `_hits`）。
+    summary = source.split("def _summary(", 1)[1].split("\ndef ", 1)[0]
+    assert 'if not key.startswith("_")' in summary, summary
+    assert 'key != "_hits"' not in summary, "明细的排除口径退回旧写法了"
+
+
+def test_真机探针读数也带收束写计数() -> None:
+    """默认改成「收束期拦写」之后，真机读数必须看得见它到底拦到没有。
+
+    B 靶那三臂用的是**默认配置**（`off` / `on` / `control` 只差编排这一件事），
+    所以 `converge_write_grace=0` 在真机批次里是真的生效的。读数里没有这两列的话，
+    「默认开了、一次没拦」和「默认没开」在报告里长得一模一样。
+    """
+    source = HARNESS.read_text(encoding="utf-8")
+    run_once = source.split("def run_once(", 1)[1].split("\ndef ", 1)[0]
+    assert 'data.get("kind") == "converge"' in run_once
+    assert 'data.get("action") == "write_allowed"' in run_once
+    assert 'data.get("action") == "write_blocked"' in run_once
+    assert '"write_allowed": write_allowed' in run_once
+    assert '"write_blocked": write_blocked' in run_once

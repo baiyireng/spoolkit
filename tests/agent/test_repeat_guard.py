@@ -641,8 +641,16 @@ def test_步数预算不放大的时候硬上限就是配置的值(tmp_path: Pat
     只写「未完成」——上限被抬过这件事一个字都没有。
 
     所以默认 `step_budget_hard_cap=0`：脚本给 11 步编辑 + 收尾，而预算只有
-    10 步，于是它在第 10 步撞墙、**收不了尾**（`finished is False`），
-    步数**不超过** 10。这正是旧行为里被放大掩盖掉的那条线。
+    10 步，于是它在第 10 步撞墙、**收不了尾**，步数**不超过** 10。这正是旧行为里
+    被放大掩盖掉的那条线。
+
+    S8 把「收束期拦写」做成默认之后，这条用例的**收尾那半**换了形状，值得写下来：
+    最后两步的 `write_file` 被拒（`converge_write_grace=0`），而**被硬拦的调用
+    不占步数预算**（这条规则比 S8 早，见 trace 里的「已退还 N/3」），于是脚本在
+    被拒两次之后仍然走到了那条收尾应答、`finished` 变成 True。所以这里不再钉
+    `finished is False`（那是「脚本耗尽」的代理指标，不是预算语义），改钉三件
+    真正该成立的事：**步数没超预算、被拒的写一次都没落盘、被拒的调用确实走了
+    「不占步数预算」那条路**。
     """
     (tmp_path / "big.py").write_text(
         "\n".join(f"line{i}" for i in range(300)) + "\n", encoding="utf-8"
@@ -686,7 +694,18 @@ def test_步数预算不放大的时候硬上限就是配置的值(tmp_path: Pat
     assert any("硬上限 10 步——实际 10 步（放大被夹住）" in line for line in result.trace), (
         result.trace
     )
-    assert result.finished is False, "预算没放大，它不该跑得完"
+    # 收束期那两次写被拒（默认额度 0），而且它们**不占步数预算**——
+    # 拦动作不拦成果：拒的是动作，代价不该记在模型的步数上。
+    assert sum("拒掉写成果" in line for line in result.trace) == 2, result.trace
+    assert any("不占步数预算" in line for line in result.trace), result.trace
+    # 被拒的两次**一次都没执行**：脚本给了 11 次改写，真正执行到的只有前 9 次
+    # （第 9、10 次落在收束期，被额度挡在门外）。
+    ok_writes = [
+        line for line in result.trace if "工具 write_file" in line and "成功" in line
+    ]
+    assert len(ok_writes) == 9, result.trace
+    assert not any("改第 9 处" in line or "改第 10 处" in line for line in ok_writes), ok_writes
+
 
 
 def test_显式放宽硬上限之后放大才生效且仍然有界(tmp_path: Path) -> None:

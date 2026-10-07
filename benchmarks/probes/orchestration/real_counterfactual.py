@@ -765,6 +765,8 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
     subcalls: list[dict] = []
     tools: list[dict] = []
     judgement_lines_kept = 0
+    write_allowed = 0
+    write_blocked = 0
     for kind, data in events:
         if kind == "tool":
             tools.append(data)
@@ -776,6 +778,14 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
             # 素材压缩（S6）保留了 N 行判据原文——这些行是逐字直通的，不是模型
             # 复述的。压缩只会在这一条事件上计数（`LoopResult.compactions` 同源）。
             judgement_lines_kept += int(data.get("protected_lines", 0) or 0)
+        elif kind == "note" and data.get("kind") == "converge":
+            # 收束期「写成果」的额度（S8，默认 0 = 收束期不再受理新改动）。真机读数
+            # 里必须看得见它有没有真的生效：两列都为 0 也不奇怪（这一档只在收束
+            # 期被踩到），但「默认开了却一次都没拦」与「默认没开」是两回事。
+            if data.get("action") == "write_allowed":
+                write_allowed += 1
+            elif data.get("action") == "write_blocked":
+                write_blocked += 1
 
     runner = _plan_evidence(plan_calls)
     plans = []
@@ -810,6 +820,9 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
         # `resets` 照旧，说明这一级压根没参与；两个都高说明压完还得重置。
         "compactions": result.compactions,
         "judgement_lines_kept": judgement_lines_kept,
+        # S8：收束期拦了几次写、放行了几次。默认 `converge_write_grace=0`。
+        "write_allowed": write_allowed,
+        "write_blocked": write_blocked,
         "final_names_failing_test": CHECK_B_FAILING_TEST in (result.final or ""),
         "finished": result.finished,
         "final": result.final,

@@ -15,6 +15,7 @@
 import json
 from pathlib import Path
 
+from spoolkit import limits
 from spoolkit.agent.loop import (
     CONCLUDED_BY_CONVERGE,
     MATERIAL_CARD_HEAD,
@@ -26,7 +27,7 @@ from spoolkit.config import Config
 from spoolkit.context import templates as T
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
-from spoolkit.tools.edit import PendingChanges, write_file_spec
+from spoolkit.tools.edit import PendingChanges, register_edit_tools, write_file_spec
 from spoolkit.tools.fs import list_dir_spec, read_file_spec
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools.types import REVERSE_CLAUSE
@@ -416,3 +417,197 @@ def test_报告把模型结论与系统判词分开且机读(tmppath=None) -> No
     assert with_conclusion.terminated_by == "模型完成"
     assert with_conclusion.model_verdict_line == f"{T.MODEL_VERDICT_PREFIX}改好了"
     assert "最终验证：通过" in with_conclusion.report_text
+
+
+# --- O6/O8：收束期该不该把「写成果」挡在门外（`converge_write_grace`）---------
+#
+# 这一组量的是**可切换的那一级**：0 = 默认（收束期只准给结论），1 = 只准写一次，
+# -1 = 不设上限（旧行为，做对照用）。默认值为什么是 0、依据是哪两批真机读数，
+# 见 `limits.py` 里那条 `Knob` 的 note 与 README-real.md 的 S8 一节。
+#
+# 分工：这里钉**机制**（谁被拒、话术说什么、`confirm_rewrite` 与心算不受影响、
+# 默认值就是拦写），真机读数钉**值不值得开**。
+
+
+def _write_call(path: str, content: str = "x = 1\n") -> dict:
+    return {"name": "write_file", "arguments": {"path": path, "content": content}}
+
+
+def _build_with_writes(
+    tmp_path: Path,
+    script: list,
+    overrides: dict | None = None,
+    files: int = 6,
+    max_steps: int = 8,
+) -> AgentLoop:
+    """在 `_build` 的注册表之外再加上写工具（`write_file` / `confirm_rewrite`）。"""
+    (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
+    for index in range(files):
+        (tmp_path / f"f{index}.py").write_text(
+            f"y{index} = 0\n" + "z = 1\n" * 40, encoding="utf-8"
+        )
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path))
+    registry.register(list_dir_spec(tmp_path))
+    register_edit_tools(registry, tmp_path, PendingChanges(tmp_path))
+    return AgentLoop(
+        gateway=FakeModel(script=script, tokenizer=OfflineTokenCounter()),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=Config(
+            project_root=tmp_path,
+            context_window=4096,
+            max_steps=max_steps,
+            supervise=False,
+            overrides=overrides or {},
+        ),
+        compaction=False,
+    )
+
+
+def _watch(loop: AgentLoop) -> list[str]:
+    """把 `registry.invoke` 包起来，记录**真的执行过**的调用名。"""
+    executed: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        executed.append(call.name)
+        return real(call)
+
+    loop.registry.invoke = counting
+    return executed
+
+
+def test_不设上限时收束期的写成果照旧放行(tmp_path: Path) -> None:
+    """`converge_write_grace=-1` = 旧行为：这一级一个字都没改。
+
+    判据是两件事同时成立：写动作**真的被执行**，而收束期**没有**多打
+    「放行 / 拒掉写成果」的记账（多打就等于 -1 不再等于旧路径、对照臂也就没意义）。
+    `-1` 在这里**显式给**：默认值已经改成 0（拦写），要靠默认值拿到旧行为是不对的。
+    """
+    script = _explore(6)
+    script.append(_turn("把结论落一份", [_write_call("out1.txt")]))
+    script.append(_turn("够了", final="结论：已写出 out1.txt。"))
+    loop = _build_with_writes(
+        tmp_path,
+        script,
+        overrides={"converge_at_steps": 3, "converge_write_grace": -1},
+        files=6,
+    )
+    executed = _watch(loop)
+    result = loop.run("把结论落一份")
+
+    assert executed == ["read_file"] * 6 + ["write_file"], executed
+    trace = "\n".join(result.trace)
+    assert "收束态：放行写成果" not in trace
+    assert "收束态：拒掉写成果" not in trace
+    assert loop._converge_writes_used == 0, "不设上限时不该记账"
+    assert result.concluded is True
+
+
+def test_默认值就是收束期拦写(tmp_path: Path) -> None:
+    """**登记表里的默认值就是 0**：不写 overrides 也必须拦（真机读数定的那一档）。
+
+    这条是 S8 那两批对照实验的落点：默认值一旦漂回 -1，读数支持的结论就白丢了。
+    """
+    assert limits.resolve("converge_write_grace") == (0, "默认")
+    script = _explore(6)
+    script.append(_turn("把结论落一份", [_write_call("out1.txt")]))
+    script.append("结论：手上有失败原文，改动方案是补 entry.stopped = True。")
+    loop = _build_with_writes(tmp_path, script, overrides={"converge_at_steps": 3}, files=6)
+    executed = _watch(loop)
+    result = loop.run("把结论落一份")
+
+    assert executed == ["read_file"] * 6, executed
+    assert "收束态：拒掉写成果" in "\n".join(result.trace)
+    assert not (tmp_path / "out1.txt").exists()
+    assert result.concluded is True
+
+
+def test_收束期只准给结论时写被拒且话术说清下一步(tmp_path: Path) -> None:
+    """`converge_write_grace=0`：收束期的写**一次都不执行**，但结论照收。
+
+    拒绝话术必须把三件事说全（不然模型只会换个工具继续撞）：这是**预算收束**、
+    成果已经落盘、**唯一该做的是给结论**——外加 §2.5 的反向条款。
+    """
+    script = _explore(6)
+    script.append(_turn("把结论落一份", [_write_call("out1.txt")]))
+    script.append("结论：手上有失败原文，改动方案是补 entry.stopped = True。")
+    loop = _build_with_writes(
+        tmp_path,
+        script,
+        overrides={"converge_at_steps": 3, "converge_write_grace": 0},
+        files=6,
+    )
+    executed = _watch(loop)
+    result = loop.run("把结论落一份")
+
+    assert executed == ["read_file"] * 6, executed
+    prompts = "\n".join(_prompts(loop))
+    assert "收束态：拒掉写成果" in "\n".join(result.trace), result.trace
+    assert "预算收束" in prompts
+    assert "允许写成果的额度（0 次）已经用完了" in prompts, prompts[-2000:]
+    assert "唯一该做的" in prompts
+    assert REVERSE_CLAUSE in prompts
+    assert result.concluded is True, result.final
+    assert not (tmp_path / "out1.txt").exists(), "被拒的写不该落盘"
+
+
+def test_收束期只准写一次时第二次被拒(tmp_path: Path) -> None:
+    """`converge_write_grace=1`：第一次放行、第二次拒——额度按整段收束期算。"""
+    script = _explore(6)
+    script.append(_turn("落一份", [_write_call("out1.txt")]))
+    script.append(_turn("再落一份", [_write_call("out2.txt")]))
+    script.append("结论：两份都写完了。")
+    loop = _build_with_writes(
+        tmp_path,
+        script,
+        overrides={"converge_at_steps": 3, "converge_write_grace": 1},
+        files=6,
+    )
+    executed = _watch(loop)
+    result = loop.run("把结论落两份")
+
+    assert executed == ["read_file"] * 6 + ["write_file"], executed
+    assert loop._converge_writes_used == 1
+    trace = "\n".join(result.trace)
+    assert "收束态：放行写成果" in trace
+    assert "收束态：拒掉写成果" in trace
+    assert "允许写成果的额度（1 次）已经用完了" in "\n".join(_prompts(loop))
+    assert not (tmp_path / "out2.txt").exists(), "第二次写不该落盘"
+
+
+def test_确认暂存与心算不受写额度管(tmp_path: Path) -> None:
+    """`confirm_rewrite` 与三件心算**不占额度、也不该被拒**。
+
+    为什么单拎出来：`confirm_rewrite` 是**已经暂存的正文**落盘的最后一步，
+    拒它等于把这一轮的工作作废（`capabilities.py` 里写着同一句话）；`calc` /
+    `tool_help` / `remember` 不产出新素材、也不会变成新的探索方向。把这条
+    钉住，才能保证「额度」只砍「再交一份内容」，不砍收尾本身。
+    """
+    from spoolkit.tools.types import ToolCall
+
+    loop = _build_with_writes(
+        tmp_path,
+        [_turn("够了", final="结论：不用改。")],
+        overrides={"converge_at_steps": 3, "converge_write_grace": 0},
+    )
+    loop._converging = True
+    loop._converge_remaining = 2
+
+    confirm = ToolCall("confirm_rewrite", {"token": "t", "acked_disappeared": []})
+    assert loop._converge_write_verdict(confirm) == ("allow", "")
+    assert loop._converge_blocked_call(confirm) == ""
+    assert loop._converge_writes_used == 0, "确认落盘不该占写额度"
+
+    calc = ToolCall("calc", {"expression": "1+1"})
+    assert loop._converge_blocked_call(calc) == ""
+    remember = ToolCall("remember", {"text": "记住这句"})
+    assert loop._converge_blocked_call(remember) == ""
+
+    # 对照：真的是「交一份内容」的写，在额度 0 下必拒。
+    write = ToolCall("write_file", {"path": "out.txt", "content": "x\n"})
+    verdict, message = loop._converge_write_verdict(write)
+    assert verdict == "block"
+    assert "预算收束" in message and "额度（0 次）" in message
+

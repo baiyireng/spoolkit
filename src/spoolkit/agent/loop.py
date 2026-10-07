@@ -1531,6 +1531,9 @@ class AgentLoop:
         self._converge_remaining: int | None = None
         # 收束态里已经用掉几次「补一次素材」。每次进入收束时归零。
         self._converge_grace_used = 0
+        # 收束态里已经用掉几次「写成果」的额度（默认值是 0，所以常态就是
+        # 「一次也不放行」；只有把它调成正数才数得着）。同样每次进入收束时归零。
+        self._converge_writes_used = 0
         # 素材卡：已经真的执行过的调用（去重键, 工具名, 输出正文）。硬重置把
         # 历史丢掉时，卡片从**这里**现算——它不依赖历史还剩什么，所以
         # 「先丢再拼」的顺序不会影响它。每次 run() 开头清空。
@@ -1987,6 +1990,7 @@ class AgentLoop:
         self._converging = False
         self._converge_remaining = None
         self._converge_grace_used = 0
+        self._converge_writes_used = 0
         self._material_notes.clear()
         # 机械审查的去重集合与证据缺口计数也是**本次运行**的：上一次 run() 发过
         # 的那几条不该把这一次的同类发现压掉。
@@ -2428,8 +2432,9 @@ class AgentLoop:
             if converging and not converged_told:
                 # 刚进收束态：把「补一次素材」的额度归零一次。放在这里而不是
                 # 每步归零，是因为额度是**整段收束期**的：「最多再读一次那一处」
-                # 说的是这一次收束，不是每一步各一次。
+                # 说的是这一次收束，不是每一步各一次。「写成果」的额度同理。
                 self._converge_grace_used = 0
+                self._converge_writes_used = 0
             # **收束是追加，不是替换**：`feedback` 上可能已经挂着督导的改道建议
             # （或是审查发现、截断说明），那些话比这条更具体。实测抓出来的代价：
             # 直接覆盖时，收束那一步把「这一轮本来该照做的那句话」挤掉了
@@ -5375,6 +5380,79 @@ class AgentLoop:
         self._material_notes.append((key, call.name, content))
         del self._material_notes[: -(MATERIAL_CARD_MAX_ITEMS * 2)]
 
+    def _converge_write_verdict(self, call: ToolCall) -> tuple[str, str]:
+        """收束态里这次调用是写动作的话，该放行还是该拒：`(verdict, 话术)`。
+
+        三种返回值：
+
+        - `("none", "")`：**根本不是写动作**（读 / 搜 / 跑 / 心算都算），交给
+          调用方按原来的分流继续判。
+        - `("allow", "")`：放行，且**不占额度**。两种情形走这支：额度是负数
+          （不设上限，旧行为）时一律放行；以及 `confirm_rewrite`——它 `writes=True`
+          但 `commits=True`，是**已经暂存的正文**落盘的最后一步，拒它等于把
+          这一轮的工作作废，所以永不受额度管（`capabilities.py` 里写着同一句话）。
+        - `("block", 话术)`：额度用完了，拒。话术要说清：这是预算收束不是权限、
+          成果已经落盘（`_reverse_clause`）、**唯一还允许的动作就是给结论**。
+        """
+        if call.name not in COMMIT_TOOLS:
+            return ("none", "")
+        spec = self.registry.get(call.name)
+        if spec is not None and capability_of_spec(spec).commits:
+            return ("allow", "")
+        cap = int(self.config.limit("converge_write_grace"))
+        if cap < 0:
+            return ("allow", "")
+        used = self._converge_writes_used
+        if used < cap:
+            self._converge_writes_used = used + 1
+            line = (
+                f"收束态：放行写成果（{call.name}，"
+                f"已用 {self._converge_writes_used}/{cap}）"
+            )
+            self._log(line)
+            self._emit(
+                "note",
+                {
+                    "text": line,
+                    "ok": True,
+                    "kind": CONVERGE_KIND,
+                    "action": "write_allowed",
+                    "tool": call.name,
+                    "write_used": self._converge_writes_used,
+                    "write_cap": cap,
+                },
+            )
+            return ("allow", "")
+        remaining = self._converge_remaining
+        left = "步数预算已用尽" if not remaining else f"只剩 {remaining} 步"
+        self._log(
+            f"收束态：拒掉写成果（{call.name}，额度已用完 {used}/{cap}）"
+        )
+        self._emit(
+            "note",
+            {
+                "text": f"收束态：拒掉写成果（{call.name}，额度已用完 {used}/{cap}）",
+                "ok": False,
+                "kind": CONVERGE_KIND,
+                "action": "write_blocked",
+                "tool": call.name,
+                "write_used": used,
+                "write_cap": cap,
+            },
+        )
+        return (
+            "block",
+            f"{BLOCKED_PREFIX}现在处于**预算收束**（{left}），"
+            f"而收束期**允许写成果的额度（{cap} 次）已经用完了**："
+            f"这一次的 `{call.name}` 被拒了。已经写下的东西都还在盘上、还能"
+            "回退（写过的文件不会被撤回），但收束期不再受理新的改动。\n"
+            "**现在唯一该做的**：用你手上已有的素材给出结论——协议里写 "
+            "`done=true` + `final`（收束态里只写正文也可以，循环会按结论收下）。"
+            "素材确实不足时**如实写明缺什么**，不要编造。"
+            + _reverse_clause()
+            + (f"\n{_intent_clause(call)}" if call.intent else "")
+        )
+
     def _converge_readable(self, call: ToolCall) -> bool:
         """这次调用是不是「读一处内容」——只有它配得上那次补素材的额度。
 
@@ -5393,12 +5471,16 @@ class AgentLoop:
 
         允许什么、为什么：
 
-        - **写成果一律允许**（`COMMIT_TOOLS`：写文件、改正文、删文件，以及
-          「逐项确认暂存的重写」）。理由有二。①「成果仍在盘上、可回退」这条
-          不变量要求收束**不许拦住产出**——预算见底时把已经想好的改动挡在
-          门外，等于让它带着成果去死。②`confirm_rewrite` 必须在这一档：暂存
-          的正文只有经它确认才落盘，它是**已经发起的改动**的最后一步，拒掉它
-          就等于把这一轮的工作作废（`capabilities.py` 的注释里写着同一句话）。
+        - **写成果受 `converge_write_grace` 管**（`COMMIT_TOOLS`：写文件、改正文、
+          删文件）。默认 `0` = 收束态**不再受理新的「交内容」改动**，依据是
+          真机对照（p0、`max_steps=5`、t=0）：不设上限那臂 3/8 跑出结论，其余
+          5 跑在收束态继续写/改，撞步数上限、`concluded=False`；拦写那臂 8/8。
+          这不违反「拦动作不拦成果」——**已经写下的东西一件不少**（仍在盘上、
+          仍可回退），拒绝话术就把这件事和「现在该给结论」一起说了。`-1` =
+          退回旧行为（不设上限），`1` = 收束期只准写一次，两档都留着做对照。
+        - **`confirm_rewrite` 永远放行**：它 `writes=True` 但 `commits=True`，
+          是**已经暂存的正文**落盘的最后一步，拒它等于把这一轮的工作作废
+          （`capabilities.py` 的注释里写着同一句话），所以它从不占上面的额度。
         - **不动工作区的三件心算**（`CONVERGE_ALLOWED_EXTRAS`：`calc` /
           `tool_help` / `remember`）允许：它们不产出新素材，也不会变成新的
           探索方向，拦下来只有坏处（算个比例、查一眼工具用法都是收尾要用的）。
@@ -5411,7 +5493,14 @@ class AgentLoop:
         """
         if not self._converging:
             return ""
-        if call.name in COMMIT_TOOLS or call.name in CONVERGE_ALLOWED_EXTRAS:
+        # 写动作单独一批判：`("block", 话术)` 拒、`("allow", "")` 放行、
+        # `("none", "")` 表示「这根本不是写动作」，继续往下按探索类判。
+        verdict, verdict_text = self._converge_write_verdict(call)
+        if verdict == "block":
+            return verdict_text
+        if verdict == "allow":
+            return ""
+        if call.name in CONVERGE_ALLOWED_EXTRAS:
             return ""
         remaining = self._converge_remaining
         left = "步数预算已用尽" if not remaining else f"只剩 {remaining} 步"
