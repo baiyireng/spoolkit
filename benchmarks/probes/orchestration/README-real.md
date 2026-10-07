@@ -442,7 +442,17 @@ S9 的正面依据是定向用例（`tests/agent/test_repeat_guard.py` 的「判
 读到的 26 件是 3195）。省下来的就是索引那一行；`plan_parameters()` 那 675 字**不在这条读数
 里**——它进的是每轮的 `response_schema`。
 
-**还没重跑**：S10 之后真机一批都还没跑（S12 会重跑稳定样本）。所以这一节现在能说的是「照证据
-删了、删完装得起来、用例全绿」，**不是**「删完真机更好」。
+**拆完的功能完整性核验**（用户要求「拆完需要验证 agent 功能是否完整」，这一步做三件事）：
+①走 `cli/runtime.assemble_loop` 的**真实装配路径**装一次（`.tmp/s10_assembly.py`）：工具
+**25** 件、与冻结线一致，索引三件 / 编辑四件 / 记忆三件 / 核对·诊断 / 命令·读全部在，
+`orchestrat*` 零命中；`spool --help` 的 27 个子命令齐（`revert` / `bench` / `web` /
+`service` …）。②定向 + 全量：468 passed、全量 **3048 passed**。③**真机一次**（`ORCH_TASKS=
+B-failing-test ORCH_REPEATS=1 ORCH_REAL_SETTINGS=0`）：环境自证合格、沙箱重摆后裸跑
+`exit=1 / FAILED 1 条 / ERROR 0 条`，跑完 4 步 / 4 次模型调用 / 7 次工具调用 / 两格判据全过、
+`finished=True`，靶判词 `B-failing-test role=ability verdict=ability_ok`（`t0.0 1/1`）——
+删掉编排层之后这条能力靶**真机跑得通**。
+
+**还没重跑稳定样本**：S12 才会重跑稳定批（35 格 + 交互探针），所以这一节能说的是「照证据删了、
+删完装得起来、用例全绿、单次真机跑通」，**不是**「删完真机更好」。
 
 
