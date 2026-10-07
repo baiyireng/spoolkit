@@ -47,6 +47,22 @@ def test_截断时翻倍预算重试() -> None:
     assert response.truncated is False
 
 
+def test_截断重试的心跳标明输出加长() -> None:
+    from spoolkit.llm.gateway import current_wait_phase, wait_phase
+
+    seen: list[str] = []
+
+    class _Phased(_Scripted):
+        def chat(self, request: ChatRequest) -> ChatResponse:
+            seen.append(current_wait_phase())
+            return super().chat(request)
+
+    gateway = _Phased([_cut(), _ok()])
+    with wait_phase("主循环"):
+        chat_with_escalation(gateway, _request())
+    assert seen == ["主循环", "主循环·输出加长"]
+
+
 def test_重试次数受参数约束() -> None:
     gateway = _Scripted([_cut(), _ok()])
     chat_with_escalation(gateway, _request(), attempts=1)

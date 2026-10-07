@@ -1580,7 +1580,8 @@ function liveTraceLine(data) {
     };
   }
   if (kind === 'wait') {
-    let text = WAIT_PREFIX + ' ' + data.elapsed + 's';
+    const phase = data.phase ? String(data.phase) + '：' : '';
+    let text = phase + WAIT_PREFIX + ' ' + data.elapsed + 's';
     if (data.limit) { text += ' / 上限 ' + data.limit + 's'; }
     return {type: 'wait', text: text};
   }

@@ -180,12 +180,20 @@ def test_同一份正文原样重提被硬拦且话术带确认入口(tmp_path: 
     assert pending.staged_count() == 1, "重发那次不该产生第二份暂存"
 
 
-def test_收窄成只能写时确认入口仍在(tmp_path: Path) -> None:
-    """收窄把确认入口拿掉的话，模型刚被逼到只能写、却确认不了暂存的正文。"""
-    loop, _ = _build(tmp_path, [_turn("完成", final="好了")])
-    assert loop._commit_schema is not None
-    allowed = loop._commit_schema["properties"]["tool_calls"]["items"][
-        "properties"
-    ]["name"]["enum"]
+def test_白看之后确认入口和读工具都还在(tmp_path: Path) -> None:
+    """白看不再收成只能写。确认入口留在实际发给模型的那份 schema 里。"""
+    from spoolkit.agent.loop import NO_EDIT_LIMIT
+
+    script = [
+        _turn("看", [{"name": "read_file", "arguments": {"path": "nope.html"}}])
+        for _ in range(NO_EDIT_LIMIT)
+    ]
+    script.append(_turn("完成", final="没有读到"))
+    loop, _pending = _build(tmp_path, script)
+    loop.run("看看")
+    allowed = loop.gateway.requests[NO_EDIT_LIMIT].response_schema["properties"][
+        "tool_calls"
+    ]["items"]["properties"]["name"]["enum"]
     assert "confirm_rewrite" in allowed
+    assert "read_file" in allowed
     assert "write_file" in allowed

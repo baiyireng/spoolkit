@@ -13,7 +13,7 @@
 
 from dataclasses import replace
 
-from spoolkit.llm.gateway import ModelGateway
+from spoolkit.llm.gateway import ModelGateway, current_wait_phase, wait_phase
 from spoolkit.llm.types import ChatRequest, ChatResponse
 
 DEFAULT_ATTEMPTS = 2
@@ -34,6 +34,11 @@ def chat_with_escalation(
         request = replace(
             request, max_tokens=max(1, int(request.max_tokens * multiplier))
         )
-        response = gateway.chat(request)
+        # 同一次主循环里第二次生成会把等待上限翻倍。心跳仍写「主循环」时，
+        # 轨迹上看起来像计时被重置了两轮。这里标明这是输出加长后的重试。
+        phase = current_wait_phase()
+        label = f"{phase}·输出加长" if phase else "输出加长"
+        with wait_phase(label):
+            response = gateway.chat(request)
     return response
 

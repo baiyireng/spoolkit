@@ -220,7 +220,9 @@ def trace_line(event: Event) -> dict | None:
             "text": str(data.get("text") or ""),
         }
     if kind == WAIT:
-        text = f"模型生成中，已等待 {data.get('elapsed', 0)}s"
+        phase = str(data.get("phase") or "").strip()
+        head = f"{phase}：" if phase else ""
+        text = f"{head}模型生成中，已等待 {data.get('elapsed', 0)}s"
         if data.get("limit"):
             text += f" / 上限 {data['limit']}s"
         return {"type": WAIT, "text": text}

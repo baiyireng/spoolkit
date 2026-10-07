@@ -379,6 +379,12 @@ CONVERGE_WRITE_KNOBS: tuple[tuple[str, float], ...] = (
 )
 
 
+# 观察外置：超过这么多行的可检查文件，全文不进对话。
+OBSERVATION_KNOBS: tuple[tuple[str, float], ...] = (
+    ("observation_inline_lines", 80),
+)
+
+
 def test_p1_旋钮全部登记且可覆盖() -> None:
     """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
     for name, default in (
@@ -392,6 +398,7 @@ def test_p1_旋钮全部登记且可覆盖() -> None:
         + P0_CONVERGE_KNOBS
         + MATERIAL_COMPACT_KNOBS
         + CONVERGE_WRITE_KNOBS
+        + OBSERVATION_KNOBS
     ):
         entry = limits.knob(name)
         assert entry is not None, f"{name} 没登记"
@@ -434,7 +441,8 @@ def test_旋钮没有重名() -> None:
     + 「不许宣称完成 / L2 / L3」那几轮的 5（`REVIEW_KNOBS`）
     + **P0 收束与硬上限那一轮的 2**（`converge_at_steps` / `step_budget_hard_cap`）
     + **「素材压缩」那一轮的 4**（`MATERIAL_COMPACT_KNOBS`）
-    + **「收束期还准不准写成果」那一轮的 1**（`CONVERGE_WRITE_KNOBS`）。
+    + **「收束期还准不准写成果」那一轮的 1**（`CONVERGE_WRITE_KNOBS`）
+    + **观察外置的 1**（`OBSERVATION_KNOBS`）。
 
     最后那 2 项与 `KNOBS_BEFORE_P1` 是**两个不同的口径**：那个元组是「P1 改造
     之前就有的 62 项」的历史快照（它不该长），而这两个是 P0 之后新登记的。
@@ -454,6 +462,7 @@ def test_旋钮没有重名() -> None:
         + len(P0_CONVERGE_KNOBS)
         + len(MATERIAL_COMPACT_KNOBS)
         + len(CONVERGE_WRITE_KNOBS)
+        + len(OBSERVATION_KNOBS)
     )
 
 

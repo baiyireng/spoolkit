@@ -17,7 +17,13 @@ from spoolkit.net import system_proxy
 from spoolkit import settings
 from spoolkit.agent.loop import AgentLoop
 from spoolkit.config import Config
-from spoolkit.llm.gateway import ModelGateway, WaitingGateway, attach_wait_listener, wait_line
+from spoolkit.llm.gateway import (
+    ModelGateway,
+    WaitingGateway,
+    attach_wait_listener,
+    current_wait_phase,
+    wait_line,
+)
 from spoolkit.web.protocol import WAIT
 from spoolkit.index.indexer import index_project, iter_source_files
 from spoolkit import limits
@@ -243,14 +249,17 @@ def bind_model_wait(gateway, args, writer=None) -> None:
     events = bool(getattr(args, "events", False))
 
     def on_wait(elapsed: int, limit: float | None) -> None:
+        phase = current_wait_phase()
         if events:
             payload = {"elapsed": elapsed}
             if limit is not None:
                 payload["limit"] = int(limit)
+            if phase:
+                payload["phase"] = phase
             stream = writer if writer is not None else EventWriter()
             stream.emit(WAIT, **payload)
             return
-        print(wait_line(elapsed, limit), file=sys.stderr, flush=True)
+        print(wait_line(elapsed, limit, phase), file=sys.stderr, flush=True)
 
     attach_wait_listener(gateway, on_wait)
 

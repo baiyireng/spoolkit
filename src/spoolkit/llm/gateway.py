@@ -1,5 +1,6 @@
 """模型网关协议。"""
 
+import contextvars
 import threading
 import time
 from typing import Callable, Protocol
@@ -56,12 +57,41 @@ class CountingGateway:
 
 HEARTBEAT_SECONDS = 15.0
 
+#: 这一次生成是谁在等。压缩、主循环、督导共用一个网关，不标明的话心跳长得一样。
+_wait_phase: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "spool_wait_phase", default=""
+)
 
-def wait_line(elapsed: int, limit: float | None) -> str:
-    """心跳给人看的那一行。网页和 stderr 用同一句。"""
+
+class wait_phase:
+    """标出当前这次模型调用属于哪一层。心跳读这个标记。"""
+
+    def __init__(self, phase: str) -> None:
+        self._phase = phase
+        self._token: contextvars.Token[str] | None = None
+
+    def __enter__(self) -> "wait_phase":
+        self._token = _wait_phase.set(self._phase)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._token is not None:
+            _wait_phase.reset(self._token)
+
+
+def current_wait_phase() -> str:
+    return _wait_phase.get()
+
+
+def wait_line(elapsed: int, limit: float | None, phase: str = "") -> str:
+    """心跳给人看的那一行。网页和 stderr 用同一句。
+
+    `phase` 非空时写在前面，用来分开「素材压缩 / 主循环 / 督导」。
+    """
+    head = f"{phase}：" if phase else ""
     if limit is None:
-        return f"模型生成中，已等待 {elapsed}s"
-    return f"模型生成中，已等待 {elapsed}s / 上限 {int(limit)}s"
+        return f"{head}模型生成中，已等待 {elapsed}s"
+    return f"{head}模型生成中，已等待 {elapsed}s / 上限 {int(limit)}s"
 
 
 class WaitingGateway:
@@ -83,17 +113,15 @@ class WaitingGateway:
         started = self._clock()
         limit = self._limit_for(request)
         stop = threading.Event()
+        phase = current_wait_phase()
 
         def tick() -> None:
-            while not stop.wait(self._heartbeat):
-                callback = self.on_wait
-                if callback is None:
-                    continue
-                elapsed = int(self._clock() - started)
-                try:
-                    callback(elapsed, limit)
-                except Exception:
-                    pass
+            # 心跳在另一条线程上。ContextVar 不会跟着过去，这里按开跑时的标记重设。
+            token = _wait_phase.set(phase)
+            try:
+                self._tick(stop, started, limit)
+            finally:
+                _wait_phase.reset(token)
 
         worker = threading.Thread(target=tick, name="spool-model-wait", daemon=True)
         worker.start()
@@ -102,6 +130,17 @@ class WaitingGateway:
         finally:
             stop.set()
             worker.join(timeout=1.0)
+
+    def _tick(self, stop: threading.Event, started: float, limit: float | None) -> None:
+        while not stop.wait(self._heartbeat):
+            callback = self.on_wait
+            if callback is None:
+                continue
+            elapsed = int(self._clock() - started)
+            try:
+                callback(elapsed, limit)
+            except Exception:
+                pass
 
     def _limit_for(self, request: ChatRequest) -> float | None:
         fn = getattr(self._inner, "_timeout_for", None)

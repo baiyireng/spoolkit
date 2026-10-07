@@ -61,7 +61,9 @@ KNOBS: tuple[Knob, ...] = (
     ),
     Knob(
         "no_edit_limit", 4, CAPABILITY,
-        "连续几步不提出改动就收窄成只能写（实测模型对文字提醒免疫）",
+        "连续几步查看却没有拿到新信息，就要求这一轮给结论（写明缺什么）。"
+        "不收成只能写：还没有新内容时，写工具只能拿来猜。"
+        "读到了新内容不算进这条：那是探索，到 no_edit_intervene_at 再问督导",
     ),
     Knob(
         "no_edit_intervene_at", 8, CAPABILITY,
@@ -717,6 +719,13 @@ KNOBS: tuple[Knob, ...] = (
         "它只约束模型压出来的普通正文。700 与 L3 的 `review_max_tokens` 同量级"
         "（只让它做删减与归类，不需要长篇输出）；超了、格式不对、或者被机械核对"
         "拦空，就整段回退机械层结果，绝不把没压下去的东西硬塞回上下文",
+    ),
+    Knob(
+        "observation_inline_lines", 80, CAPABILITY,
+        "整份读入时，不超过这么多行的可检查文件仍把正文留在对话里。"
+        "超过的只把检查结论记入观察（指纹、结构问题），全文不进主循环。"
+        "80 行量级是「一段还看得完」；snake.html 这种两三百行的文档会走观察。"
+        "调大 = 更长的原文进对话（更早触发压缩），调 0 = 可检查文件一律不内联全文",
     ),
     Knob(
         "material_compact_min_free_tokens", 800, CAPABILITY,

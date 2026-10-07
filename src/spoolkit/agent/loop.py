@@ -41,6 +41,14 @@ from spoolkit.agent.audit import (
     note_kind,
     tests_weakened,
 )
+from spoolkit.agent.observations import (
+    CHECKABLE_SUFFIXES,
+    ObservationBook,
+    facts_for_span,
+    feature_brief,
+    pointer,
+    suffix_of,
+)
 from spoolkit.agent.material_compactor import (
     KEEP_NOTE,
     compact_material,
@@ -108,7 +116,7 @@ from spoolkit.context.budget import Budget, compact_trigger
 from spoolkit.context.sections import Section
 from spoolkit.context import templates as T
 from spoolkit.errors import ContextOverflowError, PathOutsideProjectError
-from spoolkit.llm.gateway import ModelGateway
+from spoolkit.llm.gateway import ModelGateway, wait_phase
 from spoolkit.llm.retry import chat_with_escalation
 from spoolkit.llm.tokenizer import TokenCounter
 from spoolkit.llm.types import ChatRequest, Message
@@ -298,9 +306,9 @@ def _is_model_call_failure(exc: BaseException) -> bool:
 # 同样是原地打转，不管中间夹了什么。
 RECENT_WINDOW = 6
 
-# 连续多少步没有提出任何改动，就收窄输出通道。
-# 重复调用检测只盖得住「参数完全相同」的打转，盖不住「每次都换一个查询」
-# 的漫游——实测那条轨迹 12 步里换了 8 种不同的调用，一次都没被拦住。
+# 连续多少步**白看**（查看了，窗口里一次成功都没有），就要求这一轮给结论。
+# 不收成只能写：没有新内容时逼它写，它会用写工具去读，或交一份没有依据的改动。
+# 读到了新内容的探索不进这个数。
 NO_EDIT_LIMIT = int(_limits.knob("no_edit_limit").default)
 
 # 只看不写**不等于**打转：先读后计划本来是许多任务的第一步（「优化一下旧文件」
@@ -313,9 +321,9 @@ NO_EDIT_LOOK_WINDOW = int(_limits.knob("no_edit_look_window").default)
 
 # 漫游到这个步数还没产出，就升级给督导。
 #
-# NO_EDIT_LIMIT 那一步做的是**收窄输出通道**（只能写），它盖得住「它还想查」
-# 这一种。盖不住的是「收窄之后它去翻别的文件」——每一步换一个查询，
-# 机械计数器永远归零。到这一步该有人看看它到底在干什么，而不是继续加规则。
+# NO_EDIT_LIMIT 那一步注入「给结论」，只计白看。
+# 盖不住的是它换一个查询继续翻：到这一步该有人看看它到底在干什么，
+# 而不是继续加规则。
 #
 # 判据已经按任务形状区分：**同一个失败动作反复重试**才算打转（见
 # failed_repeat_at 那条升级路径），而「读了很多步、每一步都拿到新东西」
@@ -1389,12 +1397,20 @@ class LoopResult:
         各带各的标记，`concluded` / `terminated_by` 两个字段就是这一条的
         机读形式（收敛率按它们算）。
         """
-        verdict = self.model_verdict_line
-        body = str(self.final or "")
-        # 两种情况都拼两行：模型写了结论时，它本来就是报告正文的第一行
-        # （`_collect_report` 的 ① 结论），前面加一行带标记的同一句话不算
-        # 重复——标记是给机械核对的（`【模型结论】`），报告正文是给人读的。
-        return f"{verdict}\n\n{body}"
+        body = str(self.final or "").strip()
+        if not self.concluded:
+            verdict = self.model_verdict_line
+            return f"{verdict}\n\n{body}" if body else verdict
+        # 答复只有一份。`final` 的第一段往往就是模型那句话，再前置一份带标记的
+        # 副本，网页气泡会把同一段话画两次。标记贴在这一份上，不另起一段。
+        bare = self.model_final.strip()
+        marked = f"{T.MODEL_VERDICT_PREFIX}{bare}"
+        if body == bare or body.startswith(bare):
+            rest = body[len(bare):].lstrip("\n")
+            return marked if not rest else f"{marked}\n\n{rest}"
+        if body.startswith(T.MODEL_VERDICT_PREFIX) or not body:
+            return body or marked
+        return f"{marked}\n\n{body}"
 
     def usage(self) -> str:
         """一行用量摘要，用于比较不同配置的实际成本。"""
@@ -1410,6 +1426,24 @@ class LoopResult:
                 else ""
             )
         )
+
+
+def _requested_span(call: ToolCall, total: int) -> tuple[bool, str, int]:
+    """这次读取要的行段：`(是不是带行号, start-end, 行数)`。不带行号时行数是整份。"""
+    start = call.arguments.get("start_line")
+    end = call.arguments.get("end_line")
+    if start is None and end is None:
+        return False, "", total
+
+    def as_int(value: object, default: int) -> int:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+
+    first = as_int(start, 1)
+    last = as_int(end, total)
+    return True, f"{first}-{last}", max(0, last - first + 1)
 
 
 class AgentLoop:
@@ -1445,7 +1479,7 @@ class AgentLoop:
         # 假模型没有判断力（它把下一条脚本当成压缩结果，等于凭空吃掉一步），
         # 而量「重置不丢素材」那一组用例要的正是旧路本身。
         self._compaction = bool(compaction)
-        self._compactor = (
+        raw_compactor = (
             compactor
             if compactor is not None or not compaction
             else gateway_compactor(
@@ -1453,6 +1487,15 @@ class AgentLoop:
                 max_tokens=int(config.limit("material_compact_model_tokens")),
             )
         )
+
+        if raw_compactor is None:
+            self._compactor = None
+        else:
+            def _tagged_compactor(prompt: str) -> str:
+                with wait_phase("素材压缩"):
+                    return raw_compactor(prompt)
+
+            self._compactor = _tagged_compactor
         self.tokenizer = tokenizer
         self.registry = registry
         self.config = config
@@ -1534,6 +1577,8 @@ class AgentLoop:
         # ① 上一次结果还在不在上下文里：装配时的历史版本号。
         self._context_revision = 0
         self._seen_at_revision: dict[str, int] = {}
+        # 文件判断（指纹、检查结论、取过的行段）。活在对话外面，压缩丢不掉。
+        self.observations = ObservationBook()
         # ② ③ **这中间有没有可观察的变化**：每个签名上一次真的执行时的两条指纹
         # ——调用对象的状态 + 待确认清单。缺这个键 = 它从没执行过。
         #
@@ -1634,11 +1679,6 @@ class AgentLoop:
             window=config.context_window, overrides=config.overrides
         )
         self._schema = build_turn_schema(registry)
-        # 强制收敛用的收窄 schema：只留写工具（以及确认入口——见 COMMIT_TOOLS
-        # 的注释：收窄把确认入口拿掉的话，暂存的正文就没人能确认了）。
-        # 没有写工具（只读角色）就没有这回事，None 表示这条路不适用。
-        edits = [name for name in COMMIT_TOOLS if registry.get(name) is not None]
-        self._commit_schema = build_turn_schema(registry, only=edits) if edits else None
 
     def _note_landed_write(self, call: ToolCall, book: _WriteBook) -> None:
         """一次**真的落成**的写调用要记的全部账。
@@ -1663,6 +1703,8 @@ class AgentLoop:
             return
         if path not in book.changed:
             book.changed.append(path)
+        # 写过之后重算观察：事实还在，就还没修好；事实消失，才算修好。
+        self._record_observation(path)
         # 本次运行**累计**改过哪些文件：结尾的最终验证与结论里的真实状态都用它
         # （`changed` 只覆盖这一轮）。两个出口各记一份，不是重复——一个按轮、
         # 一个按次运行。
@@ -1754,6 +1796,20 @@ class AgentLoop:
                 priority=30,
             )
         )
+        observed = self.observations.render()
+        if observed:
+            # 必留：这个区段没有单独配额，不标必留就会被裁成「内容已裁剪」，
+            # 判断等于没送到。正文有上限，避免它反过来撑破有效预算。
+            if len(observed) > 1500:
+                observed = observed[:1500] + "\n…（观察还有更多）"
+            sections.append(
+                Section(
+                    name="observations",
+                    text=for_prompt(observed),
+                    priority=32,
+                    mandatory=True,
+                )
+            )
         if prefetched:
             sections.append(
                 Section(name="retrieval", text=for_prompt(prefetched), priority=35)
@@ -1871,6 +1927,7 @@ class AgentLoop:
         # 不能带过来（带了的话，第一次重复调用就会拿着旧 run 的状态做判断）。
         self._trace = trace
         self._context_revision = 0
+        self.observations.clear()
         self._seen_at_revision.clear()
         self._observed_state.clear()
         self._observed_output.clear()
@@ -2018,7 +2075,7 @@ class AgentLoop:
             exploring = still_exploring(look_window)
             # 反过来，「看了好几步却一步新信息都没进来」才是那类该被看见的
             # 漫游：它每一步都在换查询，机械计数器永远归零。这条与
-            # no_edit_limit 的分工是：限值**收窄输出通道**（语法层，不花钱），
+            # no_edit_limit 的分工是：限值要求给结论（不花钱），
             # 这条**叫督导**（花一次调用，但能给出「换个做法」的具体建议）。
             stuck_on_roam = (
                 self.config.supervise
@@ -2146,7 +2203,7 @@ class AgentLoop:
                     repeats=repeats,
                     no_edit=no_edit_steps,
                     tokens=prompt_tokens + completion_tokens,
-                    asking=asking,
+                    asking=self._supervisor_asking(asking),
                     cycle=report.cycle,
                     oscillations=report.oscillations,
                     same_query=report.same_query,
@@ -2278,24 +2335,12 @@ class AgentLoop:
                         failed_repeat_at = max(
                             failed_streak * 2, failed_repeat_at * 2
                         )
-            # 强制收敛：连续若干步只查看不修改时，把「继续查」这个选项从
-            # 语法里拿掉。实测这个模型对文字提醒完全免疫（重复提醒、拦截
-            # 说明都照发不误），能推得动它的只有「这一轮物理上只能选什么」。
-            forcing = (
-                self._commit_schema is not None
-                and no_edit_steps >= self.config.limit("no_edit_limit")
-            )
-            # 只读角色没有写工具，收窄无从谈起——对它来说唯一的「推进」
-            # 就是给结论。没有这股压力，它会一路翻文件翻到步数上限。
-            concluding = (
-                self._commit_schema is None
-                and no_edit_steps >= self.config.limit("no_edit_limit")
-            )
+            # 白看够了就要求给结论。读工具留着：没有新内容时把语法收成只能写，
+            # 模型会用写工具去读。读到了新内容不算白看。
+            concluding = no_progress_steps >= self.config.limit("no_edit_limit")
             # 收束那几步里不再让 FORCE_* 抢话：预算见底时「给结论」比
             # 「提改动」更该被要求，而这一条还明确禁止再开新探索。
-            if forcing:
-                feedback = T.FORCE_COMMIT
-            elif concluding:
+            if concluding:
                 feedback = T.FORCE_CONCLUDE
             # ---- 临近预算强制收束（P0 修③）：先**判定**，正文最后才装 -------
             #
@@ -2519,16 +2564,15 @@ class AgentLoop:
 
             try:
                 _call_started = time.time()
-                response = chat_with_escalation(
-                    self.gateway,
-                    ChatRequest(
-                        messages=assembled.messages,
-                        max_tokens=self._budget.output_reserve(),
-                        response_schema=(
-                            self._commit_schema if forcing else self._schema
+                with wait_phase("主循环"):
+                    response = chat_with_escalation(
+                        self.gateway,
+                        ChatRequest(
+                            messages=assembled.messages,
+                            max_tokens=self._budget.output_reserve(),
+                            response_schema=self._schema,
                         ),
-                    ),
-                )
+                    )
                 model_seconds += time.time() - _call_started
             except ContextOverflowError:
                 model_seconds += time.time() - _call_started
@@ -2822,6 +2866,7 @@ class AgentLoop:
                                 f"步数预算按规模放大到 {limit}（硬上限 {hard} 步）"
                             )
                     result = self._invoke_guarded(call, repeats, seen)
+                    shown = self._present_read(call, result)
                     # ---- 素材卡原料（P0 修②）--------------------------------
                     #
                     # 只收**真的执行过**的调用（被拦的那一次没有拿到任何东西，
@@ -2829,8 +2874,8 @@ class AgentLoop:
                     # 一份（`_material_key` 去重）：真机上那串连发 15 次的
                     # `list_dir` 会把卡片名额全吃掉，第 4 步读到的失败原文反而
                     # 被挤出去。
-                    if not _is_blocked(result) and result.content.strip():
-                        self._note_material(call, result.content)
+                    if not _is_blocked(result) and shown.strip():
+                        self._note_material(call, self._material_body(call, shown))
                     # 这次调用发生在哪个上下文版本里。重复调用护栏用它判断
                     # 「上一份结果还在不在上下文里」——被砍过历史之后，
                     # 同一个签名虽然还算「重复」，内容却已经不在了。
@@ -2888,9 +2933,9 @@ class AgentLoop:
                         # 而写在末尾的那一段就永远读不到（实测：调试时我从事件流
                         # 里搜「旧名仍有残留」搜不到，一度以为功能没生效）。
                         # 「有没有报出残留」是该被机械核对的事实，放在第一位。
-                        "detail": " ".join(f"{extra} {result.content}".split())[:200]
+                        "detail": " ".join(f"{extra} {shown}".split())[:200]
                         if extra
-                        else " ".join(result.content.split())[:200],
+                        else " ".join(shown.split())[:200],
                     }
                     # 意图进事件流。**这是「工具调用带上意图」这件事的出口**：
                     # `--events` 录下来的 JSONL 里每一行 tool 事件都能读到
@@ -2907,7 +2952,7 @@ class AgentLoop:
                         payload["calls"] = result.usage.calls
                     self._emit("tool", payload)
                     status = "成功" if result.ok else "失败"
-                    if _is_repeat_output(result.content, prefetched, seen_outputs):
+                    if _is_repeat_output(shown, prefetched, seen_outputs):
                         # 相同正文仍在提示词里（预取或上一轮），只是不再重复第二遍。
                         outputs.append(
                             f"[{call.name}] {status}: （这段内容上面已经给过，未重复）"
@@ -2920,7 +2965,7 @@ class AgentLoop:
                         # 的输出同时还要给人看——事件流的 `detail`、trace、落盘
                         # 日志都用上面那份**未清理**的原文，精确路径仍可查。
                         outputs.append(
-                            f"[{call.name}] {status}: {for_prompt(result.content)}"
+                            f"[{call.name}] {status}: {for_prompt(shown)}"
                         )
                     if extra:
                         outputs.append(for_prompt(extra))
@@ -2931,7 +2976,7 @@ class AgentLoop:
                     # 而不是错误原因——调试时会被误导。
                     # 失败信息给足长度：160 字刚好够看到命令本身，
                     # 而真正的原因在后面——调试时会被自己的截断挡住。
-                    flat = " ".join(result.content.split())
+                    flat = " ".join(shown.split())
                     detail = "" if result.ok else f": {flat[:400]}"
                     # 意图进 trace（督导看到的正是它）。一行里同时给出
                     # 「想干什么」与「结果如何」，督导才不必从工具名去猜目的。
@@ -3066,15 +3111,11 @@ class AgentLoop:
                     no_progress_steps += 1
                 else:
                     no_progress_steps = 0
-                # 只读角色没有写工具，收窄无从谈起——日志说「收窄为只能写」
-                # 而实际什么都没发生，那是最难查的一类假日志。
-                if (
-                    no_edit_steps == self.config.limit("no_edit_limit")
-                    and self._commit_schema is not None
-                ):
+                # 计数用白看，不用「没写代码」。四次都读到了新行段，不要求收手。
+                if no_progress_steps == self.config.limit("no_edit_limit"):
                     trace.append(
-                        f"step{state.step}: 连续 {NO_EDIT_LIMIT} 步没有提出改动，"
-                        "下一轮收窄为只能写"
+                        f"step{state.step}: 连续 {no_progress_steps} 步查看没有拿到新信息，"
+                        "下一轮要求给结论"
                     )
 
             # 被硬拦的动作**不占步数预算**：它没有产出，也不换来新信息
@@ -3730,6 +3771,26 @@ class AgentLoop:
             changed=frozenset(changed),
         )
 
+    def _supervisor_asking(self, asking: str) -> str:
+        """把观察附进督导的「当前情况」。
+
+        督导看不到主循环对话。轨迹里被拦住的读取，看起来像「还没读到」。
+        观察里若已有同一文件两段的声明对照，对比材料已经在，不该据此收手。
+        """
+        observed = self.observations.render()
+        if not observed:
+            return asking
+        if len(observed) > 1500:
+            observed = observed[:1500] + "\n…（观察还有更多）"
+        return (
+            asking
+            + "\n观察里已经记下的事实（压缩对话不会丢掉）：\n"
+            + observed
+            + "\n轨迹里被拦住的读取，不表示这些事实没有。"
+            "若声明对照已经按段列出同一文件里的两份文档，对比材料已经在，"
+            "让它根据观察给结论，不要判成「第二份还没读」。"
+        )
+
     def _ask_supervisor(
         self,
         state: TaskState,
@@ -3786,12 +3847,13 @@ class AgentLoop:
             assessment=assessment,
             suggestion=suggestion,
         )
-        verdict, conflicts = supervise(
-            self.gateway,
-            evidence,
-            max_grant=int(self.config.limit("supervisor_max_grant")),
-            facts=self._run_facts(edits=edits, changed=changed),
-        )
+        with wait_phase("督导"):
+            verdict, conflicts = supervise(
+                self.gateway,
+                evidence,
+                max_grant=int(self.config.limit("supervisor_max_grant")),
+                facts=self._run_facts(edits=edits, changed=changed),
+            )
         if conflicts:
             # 说错话被拦下这件事必须看得见：否则「督导的断言有人核对」这条
             # 规矩坏掉时，日志里什么都看不出来，而它端给模型的是假事实。
@@ -4122,15 +4184,6 @@ class AgentLoop:
                 "reason": reason,
                 "level": level,
                 "tool": call.name,
-            },
-        )
-        self._emit(
-            "note",
-            {
-                "text": f"{REPEAT_REFRESH_PREFIX}{reason}",
-                "ok": True,
-                "kind": GUARD_REFRESH_KIND,
-                "decision": decision,
             },
         )
         result = self.registry.invoke(call)
@@ -5216,6 +5269,127 @@ class AgentLoop:
         except (OSError, ValueError):
             return ""
 
+    def _withheld_observation(self, call: ToolCall) -> bool:
+        """整份或超宽行段的事实已经在观察里，压缩对话也不会把它丢掉。
+
+        不超过上限的行段正文不在观察里。压缩丢掉当轮工具结果之后，
+        同一段要重新取，不能当成已经扣下。
+        """
+        if call.name != "read_file":
+            return False
+        path = call.arguments.get("path")
+        if not isinstance(path, str) or not path:
+            return False
+        text = self._text_of(path)
+        if text is None:
+            return False
+        item = self.observations.get(path)
+        if item is None or item.fingerprint != _content_fingerprint(text):
+            return False
+        total = len(text.splitlines())
+        ranged, key, width = _requested_span(call, total)
+        if not ranged:
+            return item.withheld
+        limit = int(self.config.limit("observation_inline_lines"))
+        if width <= limit:
+            return False
+        return key in item.span_keys or item.withheld
+
+    def _present_read(self, call: ToolCall, result: ToolResult) -> str:
+        """模型在对话里看到的工具正文。
+
+        可检查文件超过内联行数时，对话里只留事实卡（问题、名字、行号）。
+        带行号但一次要的行数仍超过上限时同样不返回正文，改为这一段的事实。
+        不超过上限的行段按工具原样返回，只活在当轮；素材卡另记一行指针。
+        """
+        if (
+            not result.ok
+            or call.name != "read_file"
+            or _is_blocked(result)
+        ):
+            return result.content
+        path = call.arguments.get("path")
+        if not isinstance(path, str) or not path:
+            return result.content
+        if suffix_of(path) not in CHECKABLE_SUFFIXES:
+            return result.content
+        text = self._text_of(path)
+        if text is None:
+            return result.content
+        limit = int(self.config.limit("observation_inline_lines"))
+        lines = len(text.splitlines())
+        ranged, key, _width = _requested_span(call, lines)
+        asked = len(result.content.splitlines()) if result.content else 0
+        too_wide = asked > limit
+        item = self._record_observation(
+            path,
+            withheld=too_wide,
+            span="",
+            span_key=key if ranged and too_wide else "",
+            text=text,
+        )
+        if too_wide:
+            problem = item.problems[0] if item is not None and item.problems else ""
+            card = pointer(
+                path,
+                _content_fingerprint(text),
+                lines,
+                problem,
+                asked=asked if ranged else None,
+                limit=limit if ranged else None,
+            )
+            if ranged and item is not None and "-" in key:
+                first_s, last_s = key.split("-", 1)
+                facts = facts_for_span(
+                    path, text, item.problems, int(first_s), int(last_s)
+                )
+                if facts:
+                    return card + "\n" + facts
+            return card
+        return result.content
+
+    def _record_observation(
+        self,
+        path: str,
+        *,
+        withheld: bool = False,
+        span: str = "",
+        span_key: str = "",
+        text: str | None = None,
+    ):
+        if suffix_of(path) not in CHECKABLE_SUFFIXES:
+            return None
+        body = text if text is not None else self._text_of(path)
+        if body is None:
+            return None
+        problems = self._document_problems(path, body)
+        lines = len(body.splitlines())
+        limit = int(self.config.limit("observation_inline_lines"))
+        if lines > limit:
+            withheld = True
+        brief = ""
+        if withheld or any("又一个 <html>" in item for item in problems):
+            brief = feature_brief(path, body, problems)
+        return self.observations.note(
+            path=path,
+            fingerprint=_content_fingerprint(body),
+            lines=lines,
+            problems=problems,
+            withheld=withheld,
+            span=span,
+            span_key=span_key,
+            brief=brief,
+        )
+
+    def _document_problems(self, path: str, text: str) -> tuple[str, ...]:
+        from spoolkit.tools.verify import analyze_text
+
+        try:
+            report = analyze_text(self.config.project_root, path, text)
+        except Exception as exc:  # noqa: BLE001 - 检查失败也是一条事实，不能假装没问题
+            return (f"文档检查没有跑成：{type(exc).__name__}: {exc}",)
+        return tuple(report.problems)
+
     def _text_of(self, path: str) -> str | None:
         """这个路径现在的内容（**叠加待确认改动之后**的视图）。取不到返回 None。
 
@@ -5294,6 +5468,32 @@ class AgentLoop:
         except Exception:  # pragma: no cover - pending 自己坏了不该毁掉护栏
             return ""
         return hashlib.sha1("|".join(items).encode("utf-8")).hexdigest()[:12]
+
+    def _material_body(self, call: ToolCall, shown: str) -> str:
+        """可检查文件的正文不进素材卡。压缩会改写卡片，改写正文就是失真。
+
+        超宽读取的 `shown` 已经是事实卡，原样留下。不超过上限的行段，
+        正文只活在当轮工具结果里，卡片只留一行指针。
+        """
+        if call.name != "read_file" or shown.startswith("已记入观察"):
+            return shown
+        path = call.arguments.get("path")
+        if not isinstance(path, str) or suffix_of(path) not in CHECKABLE_SUFFIXES:
+            return shown
+        text = self._text_of(path)
+        if text is None:
+            return shown
+        total = len(text.splitlines())
+        ranged, key, width = _requested_span(call, total)
+        if ranged:
+            return (
+                f"{path} 第 {key.replace('-', '–')} 行已读取（{width} 行）。"
+                "正文只在当轮工具结果里，不入素材。"
+            )
+        return (
+            f"{path} 已读取（{total} 行）。"
+            "正文只在当轮工具结果里，不入素材。"
+        )
 
     def _note_material(self, call: ToolCall, content: str) -> None:
         """把一次**真的执行过**的调用记进素材卡原料（供硬重置后复用）。
@@ -5644,7 +5844,11 @@ class AgentLoop:
         模型生成与一次工具执行。这一类在**第一次重复**就要硬拦。
         """
         mark = self._seen_at_revision.get(signature)
-        if mark is not None and mark < self._context_revision:
+        if (
+            mark is not None
+            and mark < self._context_revision
+            and not self._withheld_observation(call)
+        ):
             return (
                 REPEAT_REFRESH,
                 "上一次的结果已经被上下文压缩丢弃（它不在你手上了）",
@@ -5704,10 +5908,29 @@ class AgentLoop:
                 what = "这次要交出去的正文"
             digest = self._observed_output.get(signature, "")
             extra = f"；上一次那条命令的输出摘要 {digest}" if digest else ""
+            if self._withheld_observation(call):
+                total = 0
+                body = self._text_of(path) if isinstance(path, str) else None
+                if body is not None:
+                    total = len(body.splitlines())
+                _ranged, _key, width = _requested_span(call, total)
+                limit = int(self.config.limit("observation_inline_lines"))
+                if _ranged and width > limit:
+                    where = (
+                        f"第 {_key} 行共 {width} 行，超过内联上限 {limit}。"
+                        "观察里是这一段的声明对照和结构问题，没有正文。"
+                        f"正文还没取到。把 start_line/end_line 收窄到不超过 {limit} 行，"
+                        "对准声明对照里的行号再读。"
+                        "声明对照已经够下结论，就直接给结论。不要原样重发这一段"
+                    )
+                else:
+                    where = "判断仍在观察里（压缩只丢了对话，没有丢掉这份事实）"
+            else:
+                where = "上一次的结果仍在你的上下文里，待确认清单也没有动过"
             return (
                 REPEAT_USELESS,
                 f"{what}自上次调用以来一字未变（指纹 {current}），"
-                "上一次的结果仍在你的上下文里，待确认清单也没有动过"
+                f"{where}"
                 f"{extra}",
             )
         return (

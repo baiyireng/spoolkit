@@ -261,8 +261,7 @@ EDIT_TOOLS = _by(lambda c: c.writes and not c.destructive and not c.commits)
 WRITE_TOOLS = _by(lambda c: c.writes and not c.commits)
 
 #: 「把改动推进下去」的工具：一切会让工作区内容被改写的调用（含确认入口）。
-#: 确认入口必须留在这一档：漫游太久时采样空间会收窄成「只能写」，
-#: 收窄之后拿掉它，模型就再也确认不了那份暂存的正文了。
+#: 确认入口留在这一档：暂存的正文要靠它落进待确认清单。
 COMMIT_TOOLS = _by(lambda c: c.writes)
 
 #: 成功即算一项「产出」的动作（写进状态块的已完成清单）。
