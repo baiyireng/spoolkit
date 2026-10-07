@@ -587,3 +587,45 @@ def test_真机探针读数也带收束写计数() -> None:
     assert 'data.get("action") == "write_blocked"' in run_once
     assert '"write_allowed": write_allowed' in run_once
     assert '"write_blocked": write_blocked' in run_once
+
+
+def test_真机探针读数带重复执行与拦下计数() -> None:
+    """S9 关掉的是「判不了就放行」，真机读数必须看得见「同一件事重跑了没有」。
+
+    护栏的拦截在事件流里并不都有留痕（「无用重复」那一档只回一条 `ok=False` 的
+    结果），所以读数靠绕一层**只读**处理器：包 `registry.invoke` 数真执行过的调用，
+    包 `_refuse` 收拦下来的话术。没有这两份账，「拦住了」与「压根没重复」在报告里
+    长得一模一样。
+    """
+    source = HARNESS.read_text(encoding="utf-8")
+    run_once = source.split("def run_once(", 1)[1].split("\ndef ", 1)[0]
+    instrument = source.split("def instrument_guards(", 1)[1].split("\ndef ", 1)[0]
+    readings = source.split("def guard_readings(", 1)[1].split("\ndef ", 1)[0]
+    # ① 包的是真实现，不是自己重写一份。
+    assert "real_invoke = loop.registry.invoke" in instrument
+    assert "real_refuse = loop._refuse" in instrument
+    assert "loop.registry.invoke = counting_invoke" in instrument
+    assert "loop._refuse = counting_refuse" in instrument
+    # ② 「同一次调用」按「工具 + 参数逐字」归一，不看名字。
+    assert "json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)" in instrument
+    # ③ 两档拒绝按话术分开数（判不出 / 无用重复），不是合成一个数。
+    assert "与上一次**完全相同**" in readings
+    assert "UNDECIDED_MARKS" in source
+    assert "没有可比较的内容对象" in source
+    assert "没有真的执行过的记录" in source
+    # 拦截要记**工具名**：报告要说清「拦的是哪一件」，只给总数等于没说。
+    assert 'book["refusals"].append((call.name, str(message)))' in instrument
+    assert '"refused_useless_tools": useless' in readings
+    assert '"repeat_tools": repeated' in readings
+    # ④ 记录里读的是这四个字段，且探针真的调了这两个助手。
+    assert "book = instrument_guards(loop)" in run_once
+    assert "guards = guard_readings(book)" in run_once
+    for field in ("repeat_executions", "refused_useless", "refused_undecided", "command_runs"):
+        assert f'"{field}": {field}' in run_once, field
+    # ⑤ P0 探针（紧步数那一档）走**同一份**实现，不抄第二份读数口径。
+    other = (HARNESS_DIR / "p0_converge_probe.py").read_text(encoding="utf-8")
+    assert "guard_readings," in other and "instrument_guards," in other, "P0 没接同一份读数"
+    assert "guard_book = instrument_guards(loop)" in other
+    assert "guard = guard_readings(guard_book)" in other
+    for field in ("repeat_executions", "refused_useless", "refused_undecided", "command_runs"):
+        assert f'"{field}": guard["{field}"]' in other, field

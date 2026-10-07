@@ -58,6 +58,8 @@ LOG_PATH = HERE / "p0-converge-log.txt"
 from real_counterfactual import (  # noqa: E402
     GOALS,
     checks_for,
+    guard_readings,
+    instrument_guards,
     _build_sandbox,
     _isolate_local_http,
     _system_text,
@@ -263,6 +265,9 @@ def run_once(task: str, arm: str, repeat: int, label: str) -> dict:
     assert removed is not None, "off 臂：注册表里没有 orchestrate 可摘"
     tool_count = len(loop.registry.names())
     system_tokens = tokenizer.count(_system_text(loop))
+    # S9 读数：收束期的紧步数最招重复（S8 那两批的同一个现场在这里最容易踩到
+    # 「判不出就放行」那条旧通道），所以这一档也记「同一件事真的重跑了几次」。
+    guard_book = instrument_guards(loop)
 
     started = time.perf_counter()
     error = ""
@@ -292,6 +297,7 @@ def run_once(task: str, arm: str, repeat: int, label: str) -> dict:
     write_blocked = sum(
         1 for one in converge_notes if one.get("action") == "write_blocked"
     )
+    guard = guard_readings(guard_book)
 
     final_text = result.report_text if result is not None else ""
     return {
@@ -322,6 +328,13 @@ def run_once(task: str, arm: str, repeat: int, label: str) -> dict:
         "failed_notes": len(failed_notes),
         "write_allowed": write_allowed,
         "write_blocked": write_blocked,
+        "repeat_executions": guard["repeat_executions"],
+        "refused_useless": guard["refused_useless"],
+        "refused_undecided": guard["refused_undecided"],
+        "command_runs": guard["command_runs"],
+        "refused_useless_tools": guard["refused_useless_tools"],
+        "refused_undecided_tools": guard["refused_undecided_tools"],
+        "repeat_tools": guard["repeat_tools"],
         "tool_calls": len(tools),
         # 逐回合诊断（只在 `ORCH_DUMP_TURNS` 打开时有内容）。
         "turns_tail": [
@@ -371,6 +384,13 @@ def _failed_record(task: str, arm: str, repeat: int, label: str, exc, scene: dic
         "failed_notes": 1,
         "write_allowed": 0,
         "write_blocked": 0,
+        "repeat_executions": 0,
+        "refused_useless": 0,
+        "refused_undecided": 0,
+        "command_runs": 0,
+        "refused_useless_tools": {},
+        "refused_undecided_tools": {},
+        "repeat_tools": {},
         "tool_calls": 0,
         "checks": checks_for(task, ""),
         "final_text": "",
@@ -392,6 +412,10 @@ def _summary(readings: list[dict]) -> dict:
                 "converge_injected": sum(1 for one in rows if one["converge_injected"]),
                 "write_allowed": sum(one.get("write_allowed", 0) for one in rows),
                 "write_blocked": sum(one.get("write_blocked", 0) for one in rows),
+                "repeat_executions": sum(one.get("repeat_executions", 0) for one in rows),
+                "refused_useless": sum(one.get("refused_useless", 0) for one in rows),
+                "refused_undecided": sum(one.get("refused_undecided", 0) for one in rows),
+                "command_runs": sum(one.get("command_runs", 0) for one in rows),
                 "terminated_by": _tally(one["terminated_by"] for one in rows),
                 "steps_median": statistics.median([one["steps"] or 0 for one in rows]),
                 "prompt_tokens_median": statistics.median(

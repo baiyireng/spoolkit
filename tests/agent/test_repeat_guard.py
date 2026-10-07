@@ -13,6 +13,7 @@ from spoolkit.agent.loop import REPEAT_BLOCK_AT, AgentLoop, call_signature
 from spoolkit.config import Config
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.calc import calc_spec
 from spoolkit.tools.edit import (
     PendingChanges,
     confirm_rewrite_spec,
@@ -433,16 +434,70 @@ def test_无理由的重复被判成无用重复并硬拦(tmp_path: Path) -> Non
     assert "参数一字未改" in prompt
 
 
-def test_判不出时如实记录而且不硬拦(tmp_path: Path) -> None:
-    """拿不到可比对象时：**如实记成判不出，而且保留提醒路径（不硬拦）**。
+def test_判不出时如实记录而且拒绝(tmp_path: Path) -> None:
+    """拿不到可比对象时：**如实记成判不出，而且拒绝**（S9 起；旧口径是放行）。
 
     这一条钉两件事，缺一不可：
-    - 事件流里必须看见「这次判不出」（不许把「没判」记成「判过」）；
-    - 它必须**照常执行**——判不出就没有理由拦，拦了就是拿猜测当判据。
+    - 事件流里必须看见「这次判不出」而且 `refused=True`（不许把「没判」记成
+      「判过」）；
+    - 它**不再执行**——拿不出可比对象，就没有证据说重跑有意义，而重跑要付一次
+      完整的模型生成与一次工具执行。
 
-    现场形状：`run_command` 既不带正文、也不带可读路径，两条指纹都取不到；
-    中间没有任何改动落成。旧口径（把判不出当判过）会让第二次调用被硬拦，
-    而那条命令本来完全可能给出新结果（时间、外部状态）。
+    现场形状：`calc` 只带一个表达式，既没有正文、也没有可读路径、也不是一条
+    命令，三条指纹都取不到；中间没有任何改动落成。旧口径（判不出 = 放行）让所有
+    这类调用拿到免检通道，S9 关掉的就是它。
+    """
+    registry = ToolRegistry()
+    registry.register(calc_spec())
+    call = {"name": "calc", "arguments": {"expression": "1 + 1"}}
+    loop = _edit_loop(
+        tmp_path,
+        [
+            _turn("算一遍", [call]),
+            _turn("再算一遍", [call]),
+            _turn("好了", final="算完了"),
+        ],
+        registry=registry,
+        max_steps=6,
+    )
+    events: list[tuple[str, dict]] = []
+    loop.on_event = lambda kind, data: events.append((kind, data))
+    ran: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call_):
+        ran.append(call_.name)
+        return real(call_)
+
+    loop.registry.invoke = counting
+    loop.run("算两遍同样的东西")
+
+    assert ran == ["calc"], "判不出不再等于放行"
+    undecided = [
+        data for kind, data in events if data.get("kind") == "guard_repeat_undecided"
+    ]
+    assert undecided, f"判不出的事件没有记下来：{[k for k, _ in events]}"
+    assert any(item.get("decision") == "undecided" for item in undecided), undecided
+    assert any(item.get("refused") is True for item in undecided), undecided
+    assert not any(item.get("capped") for item in undecided), "这条不是被上限挡住的"
+    tools = [data for kind, data in events if kind == "tool"]
+    assert any("⛔ 未执行" in str(item.get("detail") or "") for item in tools), tools
+    prompt = _last_prompt(loop)
+    assert "没有可比较的内容对象" in prompt
+    assert "出路有三条" in prompt
+    assert "§2.5 反向条款" in prompt
+
+
+def test_同一条命令现场没变时第二次不再执行(tmp_path: Path) -> None:
+    """`run_command` 现在也有可比对象：**这条命令本身**（命令 + 工作目录 + 参数）。
+
+    S9 之前命令没有指纹，判据落到「判不出 → 放行」，于是同一条命令在没改过任何
+    东西的情况下可以一路重跑。现在：参数逐字相同 + 现场（待确认清单）也没变 →
+    判成无用重复，第一次重复就拒绝，并把**上一次那条命令的输出摘要**端回去，
+    让模型知道自己手上那一份是哪一份。
+
+    对照组是同文件里的 `test_回归靶_fix_bug的重跑测试被判成有理由的重取`：
+    中间真的改过文件时，命令重跑仍然放行。
     """
     (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
     (tmp_path / "test_gate.py").write_text(
@@ -451,7 +506,10 @@ def test_判不出时如实记录而且不硬拦(tmp_path: Path) -> None:
     pending = PendingChanges(tmp_path)
     registry = ToolRegistry()
     registry.register(run_command_spec(tmp_path, pending))
-    command = {"name": "run_command", "arguments": {"command": ["pytest", "-q", "test_gate.py"]}}
+    command = {
+        "name": "run_command",
+        "arguments": {"command": ["pytest", "-q", "test_gate.py"]},
+    }
     loop = _edit_loop(
         tmp_path,
         [
@@ -474,19 +532,16 @@ def test_判不出时如实记录而且不硬拦(tmp_path: Path) -> None:
         return real(call)
 
     loop.registry.invoke = counting
-    result = loop.run("跑两遍测试")
+    loop.run("跑两遍同一条命令")
 
-    assert ran == ["run_command", "run_command"], "判不出时必须保留提醒路径（照常执行）"
-    undecided = [
-        data for kind, data in events if data.get("kind") == "guard_repeat_undecided"
-    ]
-    assert undecided, f"判不出的事件没有记下来：{[k for k, _ in events]}"
-    assert any(item.get("decision") == "undecided" for item in undecided), undecided
-    assert not any(item.get("capped") for item in undecided), "这条不是被上限挡住的"
-    # 没有任何硬拦：判不出就不拦。
-    tools = [data for kind, data in events if kind == "tool"]
-    assert not any("⛔ 未执行" in str(item.get("detail") or "") for item in tools), tools
-    assert "结果不会改变" in _last_prompt(loop)
+    assert ran == ["run_command"], "同一条命令、现场没变，第二次不该真的再跑"
+    prompt = _last_prompt(loop)
+    assert "这条命令（命令 + 工作目录 + 参数）" in prompt
+    assert "一字未变" in prompt
+    assert "上一次那条命令的输出摘要" in prompt
+    assert "§2.5 反向条款" in prompt
+    # 判不出的事件不该出现：这一条是**判过**的（判成无用重复）。
+    assert not [d for _, d in events if d.get("kind") == "guard_repeat_undecided"]
 
 
 # ---- 「三道墙」之二：失败过的调用原样重提必须硬拦 ---------------------------
@@ -607,7 +662,14 @@ def test_硬拦的编辑动作不占步数预算(tmp_path: Path) -> None:
 
 
 def test_失败重提的拦截阈值可以按工作区覆盖(tmp_path: Path) -> None:
-    """`failed_repeat_block_at` 是可覆盖的：调到 3 就允许它再试一次。"""
+    """`failed_repeat_block_at` 是可覆盖的：调到 3 就允许它再试一次。
+
+    S9 之后这条用例多了一层意思：失败之后原样重提**不再**走「判不出」那条
+    （那条现在会被拒），而是被判成「有理由的重取——上一次执行失败了」。
+    所以两件事都得钉：第二次真的执行了，而且理由写的是重试；第三次被那道闸
+    拦下（`failures >= block_at - 1`）。若放行路不记失败，这个阈值就数不到
+    重试，会变成「允许无限重试」。
+    """
     (tmp_path / "snake.html").write_text(_TWO_DOCS, encoding="utf-8")
     loop = _edit_loop(
         tmp_path,
@@ -619,6 +681,8 @@ def test_失败重提的拦截阈值可以按工作区覆盖(tmp_path: Path) -> 
         ],
         overrides={"failed_repeat_block_at": 3},
     )
+    events: list[tuple[str, dict]] = []
+    loop.on_event = lambda kind, data: events.append((kind, data))
     executed: list[str] = []
     real = loop.registry.invoke
 
@@ -628,9 +692,14 @@ def test_失败重提的拦截阈值可以按工作区覆盖(tmp_path: Path) -> 
         return real(call)
 
     loop.registry.invoke = counting
-    loop.run("合并成一份单文档")
+    result = loop.run("合并成一份单文档")
     # 阈值 3 = 允许一次重试；第二次重提才拦。
     assert len(executed) == 2
+    refreshes = [d for _, d in events if d.get("kind") == "guard_refresh"]
+    assert any("上一次执行失败了" in str(item.get("reason") or "") for item in refreshes), (
+        refreshes
+    )
+    assert any("重试" in line for line in result.trace)
 
 
 def test_步数预算不放大的时候硬上限就是配置的值(tmp_path: Path) -> None:

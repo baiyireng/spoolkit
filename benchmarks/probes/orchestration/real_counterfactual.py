@@ -755,6 +755,10 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
     tool_count = len(loop.registry.names())
     system_tokens = tokenizer.count(_system_text(loop))
 
+    # S9 的读数：**同一件事真的重复执行了几次**（`instrument_guards` 的注释里
+    # 写了为什么要绕这一层）。
+    book = instrument_guards(loop)
+
     started = time.perf_counter()
     result = loop.run(GOALS[task])
     wall = time.perf_counter() - started
@@ -788,6 +792,13 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
                 write_blocked += 1
 
     runner = _plan_evidence(plan_calls)
+    # S9 读数：重复执行了几次、护栏按哪条判据拦了几次（两档分开数，见
+    # `guard_readings`）。直接摊进记录的字段里，报告末列读的就是这四个数。
+    guards = guard_readings(book)
+    repeat_executions = guards["repeat_executions"]
+    refused_useless = guards["refused_useless"]
+    refused_undecided = guards["refused_undecided"]
+    command_runs = guards["command_runs"]
     plans = []
     for index, one in enumerate(orch_calls):
         plans.append(
@@ -823,6 +834,14 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
         # S8：收束期拦了几次写、放行了几次。默认 `converge_write_grace=0`。
         "write_allowed": write_allowed,
         "write_blocked": write_blocked,
+        # S9：同一件事真的重跑了没有，以及护栏各按哪条判据拦了几次。
+        "repeat_executions": repeat_executions,
+        "refused_useless": refused_useless,
+        "refused_undecided": refused_undecided,
+        "command_runs": command_runs,
+        "refused_useless_tools": guards["refused_useless_tools"],
+        "refused_undecided_tools": guards["refused_undecided_tools"],
+        "repeat_tools": guards["repeat_tools"],
         "final_names_failing_test": CHECK_B_FAILING_TEST in (result.final or ""),
         "finished": result.finished,
         "final": result.final,
@@ -970,6 +989,76 @@ def _sham_spec(original) -> object:
         f"{len(_index_entry(spec))} != {len(line)}（原 brief={brief!r}）"
     )
     return spec
+
+
+#: 「判不出」那一档拦下的话术里的两句原文（S9 起这一档的处置是拒绝）。
+#: 认话术而不是认事件：`_refuse` 是两档共用的出口，账本只能从话术上分。
+UNDECIDED_MARKS = ("没有可比较的内容对象", "没有真的执行过的记录")
+
+
+def instrument_guards(loop) -> dict:
+    """S9 的读数账本：**同一件事真的重复执行了几次**、护栏按哪条判据拦了几次。
+
+    护栏的判据（指纹）与拦截都在主循环内部：「判不出」那一档的拒绝在事件流里
+    留痕，但「无用重复」那一档不留痕（只回一条 `ok=False` 的结果）。所以这里
+    绕一层处理器，**只读地**记两份账——真的执行过的调用（按「工具 + 参数逐字」
+    归一，看的是「同一条命令有没有重跑」）与拦下来的话术（看的是护栏拦了几次、
+    按哪条判据拦的）。不改工具实现、不改提示词、不改任何一条判据。
+    """
+    book: dict = {"executions": {}, "refusals": []}
+    real_invoke = loop.registry.invoke
+    real_refuse = loop._refuse
+
+    def counting_invoke(call):
+        key = (call.name, json.dumps(call.arguments, ensure_ascii=False, sort_keys=True))
+        book["executions"][key] = book["executions"].get(key, 0) + 1
+        return real_invoke(call)
+
+    def counting_refuse(call, signature, message, remedies=()):
+        # 连**工具名**一起记：报告要说清「拦的是哪一件」，只给总数等于没说。
+        book["refusals"].append((call.name, str(message)))
+        return real_refuse(call, signature, message, remedies)
+
+    loop.registry.invoke = counting_invoke
+    loop._refuse = counting_refuse
+    return book
+
+
+def guard_readings(book: dict) -> dict:
+    """把账本数成四个数。两档拒绝**分开数**，才知道拦住的是哪一类：
+
+    - `refused_useless`：「与上一次**完全相同**」——指纹对上了，重跑没有意义；
+    - `refused_undecided`：「没有可比较的内容对象 / 没有真的执行过的记录」——
+      S9 起这一档从「照常执行」改成拒绝，所以它每非零一次，就是旧口径下会白跑
+      一次的调用。
+    """
+    executions = book.get("executions", {})
+    refusals = book.get("refusals", [])
+    useless: dict[str, int] = {}
+    undecided: dict[str, int] = {}
+    for one in refusals:
+        # 账本记的是 `(工具名, 话术)`；兼容只记话术的旧账本。
+        name, text = one if isinstance(one, tuple) else ("?", one)
+        if "与上一次**完全相同**" in text:
+            useless[name] = useless.get(name, 0) + 1
+        if UNDECIDED_MARKS[0] in text or UNDECIDED_MARKS[1] in text:
+            undecided[name] = undecided.get(name, 0) + 1
+    repeated: dict[str, int] = {}
+    for (name, _args), count in executions.items():
+        if count > 1:
+            repeated[name] = repeated.get(name, 0) + (count - 1)
+    return {
+        "repeat_executions": sum(count - 1 for count in executions.values() if count > 1),
+        "refused_useless": sum(useless.values()),
+        "refused_undecided": sum(undecided.values()),
+        "command_runs": sum(
+            count for (name, _args), count in executions.items() if name == "run_command"
+        ),
+        # 明细：拦的是哪一件、重跑的是哪一件。只给总数等于没说。
+        "refused_useless_tools": useless,
+        "refused_undecided_tools": undecided,
+        "repeat_tools": repeated,
+    }
 
 
 def _instrument_gateway(gateway, turns: list[dict]) -> None:

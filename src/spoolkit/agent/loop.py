@@ -445,8 +445,11 @@ GUARD_REFRESH_KIND = "guard_refresh"
 #:
 #: 与 `guard_refresh` 分开是因为它回答的是另一个问题：`guard_refresh` 说
 #: 「我知道为什么允许」，这一条说「我**没有**判出来」——不许把没判成判过
-#: （那会让「空转归零」变成一个说法，而不是一个读数）。放行行为一样，
-#: 理由字段不一样。
+#: （那会让「空转归零」变成一个说法，而不是一个读数）。
+#:
+#: S9 起这一类的处置从「照常执行、只提醒」改成**拒绝**（`refused=True`）：
+#: 判不出不是放行的理由，理由字段仍然分开记，读数是「护栏拦了一次判不出的
+#: 重复」，不是「判过之后放行」。
 GUARD_UNDECIDED_KIND = "guard_repeat_undecided"
 
 #: 「重复调用但**已经判明有理由**」时进工具输出的前缀。
@@ -467,10 +470,12 @@ REPEAT_REFRESH_PREFIX = "⟳ 重复调用放行："
 #   `REPEAT_REFRESH`    内容指纹变了，或上下文版本推进导致原结果已被压掉
 #                       → **放行**，并把「为什么允许」写进 trace 与事件流
 #                       （`kind=guard_refresh`）。它不是空转。
-#   `REPEAT_UNDECIDED`  拿不到指纹、也没有可观察变化可比较（`run_command`
-#                       这类没有路径的调用）→ 保留「提醒」路径，并**记录
-#                       「这次判不出」**（`kind=guard_repeat_undecided`）。
-#                       不许假装判过：假装判过等于把「空转归零」变成一个说法。
+#   `REPEAT_UNDECIDED`  拿不到可比对象（既没有正文、也没有可读路径），或这个
+#                       签名**从没有真的执行过** → **拒绝**（S9 起；旧口径是
+#                       「保留提醒路径、照常执行」），并记「这次判不出」
+#                       （`kind=guard_repeat_undecided`，`refused=True`）。
+#                       拿不出可比对象，就没有证据说重跑有意义；而重跑要付一次
+#                       完整的模型生成与一次工具执行。假装判过更不允许。
 REPEAT_USELESS = "useless"
 REPEAT_REFRESH = "refresh"
 REPEAT_UNDECIDED = "undecided"
@@ -490,6 +495,39 @@ def _content_fingerprint(text: str) -> str:
 def _flat_line(text: str) -> str:
     """压成一行。收尾报告里「失败要点」只有一行的位置，换行会把后面挤没。"""
     return " ".join((text or "").split())
+
+
+#: `run_command` 那条命令的参数名。与 `path` / `content` 同一个层级的事实
+#: （工具声明的参数名），所以同样是字面量：这里认的是**这条调用长什么样**，
+#: 不是某个模块的内部状态。
+COMMAND_PARAM = "command"
+
+
+def _command_of(call: ToolCall) -> str:
+    """这条调用是不是一条命令；是的话返回它逐字渲染出来的样子，否则空串。
+
+    指纹与「上一次那条命令输出了什么」两处都要问同一个问题，判据写成两份会
+    漂。空数组不算一条命令（没有可跑的东西；schema 只要求 `command` 必填，
+    并不要求非空），它落进「判不出」那一档，处置同样是拒绝。
+    """
+    command = call.arguments.get(COMMAND_PARAM)
+    if isinstance(command, (list, tuple)) and command:
+        return _render_args(call)
+    return ""
+
+
+def _output_digest(text: str) -> str:
+    """一条命令输出的「关键摘要」：内容指纹 + 首行。
+
+    它只回答「你要重跑的那一份是哪一份」——进拒绝对话的话术，也让读数看得见。
+    **不参与归类判据**：输出是执行之后才知道的东西，把它塞进可比对象，每一次
+    重复都会看起来「变了」，那正是要关掉的那条通道。
+    """
+    lines = text.splitlines()
+    head = _flat_line(lines[0]) if lines else ""
+    if len(head) > 60:
+        head = head[:60] + "…"
+    return f"{_content_fingerprint(text)}（首行：{head or '空'}）"
 
 
 #: **只给模型看**的那一句（第二人称指令）。它进模型上下文，绝不进任何用户可见面。
@@ -1515,6 +1553,10 @@ class AgentLoop:
         # 用指纹而不是「改动次数」：次数分不出「同一个调用的两次之间什么都没
         # 发生」（暂存本身就会把它推上去），而指纹直接回答「对象变了没有」。
         self._observed_state: dict[str, tuple[str, str]] = {}
+        # ③ 上一次那条命令**输出**的关键摘要（只有命令有）。它不进归类判据
+        # （输出是执行之后才知道的，会每次都「看起来变了」），只用来在拒绝时
+        # 告诉模型「你要重跑的是哪一份输出」。
+        self._observed_output: dict[str, str] = {}
         # ---- 收束态（工具层强制，不是文本请求）----------------------------------
         #
         # P0 真机诊断抓出来的事实：`CONVERGE_NOW` 那段文本**确实送达了**
@@ -1979,6 +2021,7 @@ class AgentLoop:
         self._context_revision = 0
         self._seen_at_revision.clear()
         self._observed_state.clear()
+        self._observed_output.clear()
         self._refreshes_used = 0
         # 「组合停用」的计数与留给督导的证据同样是**本次运行**的：
         # 上一次 run() 停用过的组合不该把这一次的第一个同名调用直接拒掉。
@@ -3961,9 +4004,10 @@ class AgentLoop:
         - **有理由的重取**：内容指纹变了，或上下文版本推进导致原结果已被压掉
           → **放行**，并把理由写进 trace 与事件流（`kind=guard_refresh`）。
           它不是空转：模型没有别的办法拿到新内容。
-        - **判不出**（拿不到指纹、无法比较，例如 `run_command`）：保留「提醒」
-          路径放行，但**记下「这次判不出」**（`kind=guard_repeat_undecided`）
-          ——不许假装判过。
+        - **判不出**（拿不到可比对象：既没有正文、也没有可读路径、也不是一条
+          命令；或者这个签名从没有真的执行过）：**拒绝**，并记下「这次判不出」
+          （`kind=guard_repeat_undecided`，`refused=True`）——不许假装判过，
+          也不许把「判不出」当成免检通道（S9 之前正是这样放行的）。
 
         放行有上限：`_REFRESH_LIMIT`，否则「不断被拦」+ 硬拦退还预算就成了
         无限预算。
@@ -4119,25 +4163,63 @@ class AgentLoop:
             # 里留下的**理由**：一类是「判不出」，一类是「判得出有理由但放行
             # 额度用满了」。两者混成一句话，就等于把「没判」说成「判过」。
             if decision == REPEAT_UNDECIDED:
-                line = f"⟳ 重复调用判不出：{reason}（保留提醒路径）"
-                note_kind = GUARD_UNDECIDED_KIND
-                extra: dict = {"decision": decision, "tool": call.name}
-                warn_note = (
-                    "注意：这一步与上一步完全相同，该调用已经执行过一次，"
-                    "结果不会改变。"
-                )
-            else:
+                # 「判不出」不再等于「放行」（S9）。
+                #
+                # 旧口径这一支照常执行、只打一句提醒，于是所有**没有可比对象**
+                # 的调用都拿到了一条免检通道：现场那次 `list_dir` 连发 15 次、
+                # `confirm_rewrite` 连发 18 次，以及真机上同一条命令在没改过任何
+                # 东西的情况下重跑，走的都是「判不出 → 放行」。现在改成拒绝：
+                # 拿不出可比对象就没有证据说重跑有意义，而重跑要付一次完整的
+                # 模型生成与一次工具执行。
                 line = (
-                    f"⟳ 重复调用判得出有理由（{reason}），但放行已到上限"
-                    f"（{self._refreshes_used}/{_REFRESH_LIMIT}）："
-                    "本次只提醒、不再额外放行"
+                    f"⛔ 重复调用判不出：{reason}——没有可比对象就没有证据说"
+                    "重跑有意义，所以这一次没有执行"
                 )
-                note_kind = GUARD_UNDECIDED_KIND
-                extra = {"decision": decision, "tool": call.name, "capped": True}
-                warn_note = (
-                    "注意：这个调用在最近几步里已经执行过；"
-                    "它这次确实可能拿到新内容，但同一处已经放过几次了。"
+                self._log(line)
+                self._emit(
+                    "note",
+                    {
+                        "text": line,
+                        "ok": False,
+                        "kind": GUARD_UNDECIDED_KIND,
+                        "decision": decision,
+                        "tool": call.name,
+                        "refused": True,
+                        "repeats": repeats,
+                        "seen": seen,
+                    },
                 )
+                return self._refuse(
+                    call,
+                    signature,
+                    (
+                        f"{BLOCKED_PREFIX}{reason}，所以这一次没有执行。"
+                        "你这次重发的参数（与上一次逐字相同）："
+                        f"{_render_args(call)}"
+                        "出路有三条：① 换一组参数（你要问的东西不一样了）；"
+                        "② 换成能给出可比对象的路——读具体文件（read_file）、"
+                        "看目录（list_dir）、写文件（write_file / replace_text），"
+                        "或者把要问的东西写成一条命令（run_command）；"
+                        "③ 手上的素材够了就直接给结论，不要再查一遍。"
+                        "下一步的意图要写清「这一次想拿到什么、拿到之后做什么」。"
+                        + _reverse_clause()
+                        + (f"\n{_intent_clause(call)}" if call.intent else "")
+                    ),
+                    _remedies(self._failed_output.get(signature, "")),
+                )
+            # 剩下的一类退回「提醒」路径（照常执行）：判得出有理由、但放行额度
+            # 已经用满。事件流里照旧留下理由，不把「没判」说成「判过」。
+            line = (
+                f"⟳ 重复调用判得出有理由（{reason}），但放行已到上限"
+                f"（{self._refreshes_used}/{_REFRESH_LIMIT}）："
+                "本次只提醒、不再额外放行"
+            )
+            note_kind = GUARD_UNDECIDED_KIND
+            extra: dict = {"decision": decision, "tool": call.name, "capped": True}
+            warn_note = (
+                "注意：这个调用在最近几步里已经执行过；"
+                "它这次确实可能拿到新内容，但同一处已经放过几次了。"
+            )
             self._log(line)
             self._emit("note", {"text": line, "ok": True, "kind": note_kind, **extra})
             result = self.registry.invoke(call)
@@ -4180,6 +4262,8 @@ class AgentLoop:
 
         「放行过就要更新它看过什么」这条同样重要：不更新的话，下一次同签名进来
         时判据仍然成立，会连着放行到上限——那是把一次性补救当成了常规通道。
+        重取之后**又失败**时还要记一笔失败（`_remember_failure`）：这是
+        `failed_repeat_block_at` 那道闸数「重试过几次」的唯一来源。
         """
         self._refreshes_used += 1
         trace_line = (
@@ -4211,6 +4295,12 @@ class AgentLoop:
         )
         result = self.registry.invoke(call)
         self._note_guard_result(call, result)
+        if not result.ok:
+            # 放行之后**又失败**了：这一笔必须记进失败表。S9 起「上一次失败 → 重提」
+            # 走的就是这条放行路（不再走「判不出」那条），不在这里记账，
+            # 上游 `failed_repeat_block_at` 就数不到这次重试——「允许一次重试」会
+            # 变成「允许无限重试」，那个旋钮等于被悄悄关掉。
+            self._remember_failure(signature, result.content)
         self._seen_at_revision[signature] = self._context_revision
         intent = _intent_clause(call)
         return ToolResult(
@@ -5630,9 +5720,15 @@ class AgentLoop:
         - 写类（`write_file` / `replace_text` …）：它问的是**自己要交出去的那份
           正文**，所以指纹取参数里的 `content`。取盘上内容会把「暂存之后盘上还
           是旧的」读成「变了」，于是同一个暂存再发一遍永远被放行。
+        - `run_command`：它问的是**这条命令本身**（命令 + 工作目录 + 参数逐字
+          渲染）。命令的输出由「命令 + 现场」决定，而现场有没有变由
+          `_pending_state_key()` 那条独立证据回答（模型提出的改动都记在里面），
+          所以这里只需要把命令指纹化——S9 之前这里返回空串，同一条命令在没改过
+          任何东西的情况下重跑，就那样从「判不出」的通道里过去了。
 
-        取不到（`run_command` 这类既不带正文也不带可读路径的调用）仍然是空串：
-        那是**真的**没有可比对象，护栏必须继续如实说「判不出」，不许改成硬拦。
+        真的取不到对象（既没有正文、也没有可读路径、也不是一条命令）仍然是空串：
+        护栏如实说「判不出」，但**处置是拒绝**（`_invoke_guarded` 那一支），
+        不再是旧口径的「判不出就照常执行」。
         """
         if call.name in WRITE_TOOLS:
             body = call.arguments.get("content")
@@ -5667,6 +5763,9 @@ class AgentLoop:
             )
             state = staged_rewrite_key(self.pending, token.strip())
             return "" if not state else f"{state}|declared={declared}"
+        command = _command_of(call)
+        if command:
+            return _content_fingerprint(command)
         return ""
 
     def _guard_repeat_decision(
@@ -5690,9 +5789,15 @@ class AgentLoop:
              的改动也算数——`run_command` 会在试跑副本上带着它们跑，所以中间
              改过文件时重跑测试是有理由的（fix-bug 现场：先红后绿正是这条）；
            - 这次调用看的那个对象变了（`_call_state`）：内容指纹不等，旧结果
-             描述的是旧内容，行号也可能已经漂了。
+             描述的是旧内容，行号也可能已经漂了（`run_command` 看的就是
+             「命令 + 工作目录 + 参数」这一串本身）。
         3. **能不能判**：签名从没执行过、或这次调用根本没有可比较的对象
-           （没有 `content`、也没有可读的 `path`）→ 判不出。
+           （没有 `content`、没有可读的 `path`、也不是一条命令）→ 判不出。
+           **判不出与无用重复的处置相同：拒绝**（S9 起；旧口径是放行 + 提醒）。
+           区别只在理由字段与事件 kind：拿不出可比对象就没有证据说重跑有意义，
+           而它照样要付一次完整的模型生成与一次工具执行。
+           例外是「上一次**执行失败**了」（签名在 `_failed_output` 里）：那一次是
+           重试，归上游 `failed_repeat_block_at` 那道闸管，这里判成有理由的重取。
 
         剩下的情况（执行过 + 参数逐字相同 + 结果还在 + 两条证据都没变）就是
         **无用重复**：再跑一遍拿到的必然还是同一份结果，而它要付一次完整的
@@ -5705,9 +5810,26 @@ class AgentLoop:
                 "上一次的结果已经被上下文压缩丢弃（它不在你手上了）",
             )
         if signature not in self._observed_state:
-            # 它从没真的执行过（比如上一次这一条被别的闸拦下了）：没有「上一次
-            # 的结果」可以复用，谈不上重复。
-            return REPEAT_UNDECIDED, "这个签名没有执行过的记录，判不出能不能复用上一次的结果"
+            failure = self._failed_output.get(signature, "")
+            if failure:
+                # 上一次**真的执行了、只是失败了**：这一次是重试，不是「无事重复」，
+                # 也不是「判不出」。重试归上游的 `failed_repeat_block_at` 那道闸管
+                # （它已经放行到这里了），护栏再拦一次会让那个旋钮失效，还会把
+                # 「上一次它被别的闸拦下了」这句读错的理由写进提示。理论上限由
+                # `_REFRESH_LIMIT` 兜着，重试次数不会无限。
+                head = _flat_line(failure)[:60]
+                return (
+                    REPEAT_REFRESH,
+                    f"上一次执行失败了（{head}…），这一次是重试，不是无事重复",
+                )
+            # 它从没真的执行过（上一次这一条被别的闸拦下了）：没有「上一次的结果」
+            # 可以复用，也没有对象可以比较。旧口径在这里放行（理由写作「谈不上
+            # 重复」），于是任何「被拦 → 再原样发一遍」都白跑一次。
+            return (
+                REPEAT_UNDECIDED,
+                "这个签名没有真的执行过的记录（上一次它被别的闸拦下了），"
+                "既没有可复用的结果，也没有可比较的对象",
+            )
         observed_state, observed_pending = self._observed_state[signature]
         if self._pending_state_key() != observed_pending:
             return (
@@ -5717,13 +5839,14 @@ class AgentLoop:
             )
         current = self._call_state(call)
         if not current or not observed_state:
-            # 拿不到可比的对象（`run_command` 这类既没有正文、也没有可读路径的
-            # 调用）：**如实记成判不出**，不假装判过。注意「当时拿不到」也算——
-            # 两个空指纹互相「相等」，那种相等什么也证明不了。
+            # 拿不到可比的对象（既没有正文、也没有可读路径、也不是一条命令）：
+            # **如实记成判不出**，不假装判过。注意「当时拿不到」也算——两个空
+            # 指纹互相「相等」，那种相等什么也证明不了。处置与无用重复相同。
             return (
                 REPEAT_UNDECIDED,
                 f"这个调用（{call.name}）没有可比较的内容对象"
-                "（既不带正文、也不带可读路径），护栏判不出这次重复有没有意义",
+                "（既不带正文、也不带可读路径、也不是一条命令），"
+                "护栏判不出这次重复有没有意义",
             )
         if current == observed_state:
             path = call.arguments.get("path")
@@ -5735,12 +5858,17 @@ class AgentLoop:
                 what = f"{path} 的内容"
             elif call.name == CONFIRM_TOOL:
                 what = "这份暂存的重写（令牌指向的那一份）"
+            elif _command_of(call):
+                what = "这条命令（命令 + 工作目录 + 参数）"
             else:
                 what = "这次要交出去的正文"
+            digest = self._observed_output.get(signature, "")
+            extra = f"；上一次那条命令的输出摘要 {digest}" if digest else ""
             return (
                 REPEAT_USELESS,
                 f"{what}自上次调用以来一字未变（指纹 {current}），"
-                "上一次的结果仍在你的上下文里，待确认清单也没有动过",
+                "上一次的结果仍在你的上下文里，待确认清单也没有动过"
+                f"{extra}",
             )
         return (
             REPEAT_REFRESH,
@@ -5752,7 +5880,7 @@ class AgentLoop:
 
         判据全部落在 `_guard_repeat_decision` 里（一处判据、一个口径）：
         只有它判成「有理由的重取」才返回理由，判成「无用重复」或「判不出」
-        都返回空串——前者的处置是硬拦，后者的处置是保留提醒路径。
+        都返回空串——两者的处置都是硬拦（「判不出」从 S9 起不再放行）。
         """
         if self._refreshes_used >= _REFRESH_LIMIT:
             return ""
@@ -5778,15 +5906,18 @@ class AgentLoop:
         """记下这次调用当时的**两条指纹**，供下一次重复调用判「该不该拦」。
 
         - `_call_state(call)`：这次调用看的那个对象长什么样（读类看盘上/暂存区
-          内容，写类看它自己要交出去的正文）。
+          内容，写类看它自己要交出去的正文，命令类看「命令 + 工作目录」这一串）。
         - `_pending_state_key()`：当时的待确认清单长什么样。
 
+        命令类**额外**记一条输出摘要（`_observed_output`，单独一本账）：它不进
+        归类判据，只在拒绝时告诉模型「你要重跑的是哪一份输出」。
+
         两条都只在这次调用**真的执行了**（`result.ok`）时才记：没执行的调用没有
-        「上一次的结果」可复用。两条都取不到（`run_command` 这类没有内容的调用）
-        时记空串——下一次进来会如实归成「判不出」，而不是假装判过。
+        「上一次的结果」可复用。真的取不到对象（既没有正文、也没有可读路径、
+        也不是一条命令）时记空串——下一次进来如实归成「判不出」，处置是拒绝。
 
         以前这里只认 `read_file` 的文件指纹，于是写类调用的重复永远拿不到可比
-        对象，全落到「判不出」。现在两种调用各看各的对象，判据本身没变。
+        对象，全落到「判不出」。现在三种调用各看各的对象，判据本身没变。
         """
         if not result.ok:
             return
@@ -5795,6 +5926,8 @@ class AgentLoop:
             self._call_state(call),
             self._pending_state_key(),
         )
+        if _command_of(call):
+            self._observed_output[signature] = _output_digest(result.content)
 
     def _forget_read(self, path: str) -> None:
         """这个文件被改过：清掉它的「读于哪个上下文版本」。
