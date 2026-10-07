@@ -455,6 +455,10 @@ CHECK_PRIORITY = ("优先级", "优先", "P0", "P1", "P2", "P3", "高", "中", "
 #: 任务 B 的判据：涉及的文件名（fixture 自己声明的）+ 修复计划的记号。
 CHECK_B_FILES = ("service_ledger.py", "test_service_ledger.py")
 CHECK_B_PLAN = ("修复", "计划", "步骤", "建议", "改成", "应当", "应该", "需要")
+#: B 靶那条失败用例的名字（fixture 自己写的）。它**不是判据**，是一条机械读数：
+#: 模型最后有没有真的看到那条失败原文。素材压缩（S6）的验收正是这一条——压完
+#: 判据原文还在上下文里，模型才可能把它名字点出来；压缩把这些丢掉就会立刻显形。
+CHECK_B_FAILING_TEST = "test_停掉之后台账里要写明已经停过"
 
 CHECKS = {
     "A": ("覆盖预设待办（6/6）", "有分类", "有优先级"),
@@ -618,9 +622,24 @@ class _NullGateway:
 # ---- 真模型跑一次 -----------------------------------------------------------
 
 
+def batch_config(project: Path):
+    """这一批的循环配置。
+
+    窗口是这一批的**自变量**：`ORCH_WINDOW` 以前只喂给环境自证，循环却一直按
+    8192 跑——于是「换个窗口看预算阶梯」这件事根本量不到（S6 踩到）。
+    """
+    from spoolkit.config import Config
+
+    return Config(
+        project_root=project,
+        supervise=False,
+        max_steps=int(os.environ.get("ORCH_MAX_STEPS", "12")),
+        context_window=int(os.environ.get("ORCH_WINDOW", "8192")),
+    )
+
+
 def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
     from spoolkit.cli.runtime import LoopWiring, assemble_loop, counter_for
-    from spoolkit.config import Config
     from spoolkit.llm.llamacpp import LlamaCppGateway
     from spoolkit.tools.edit import PendingChanges
 
@@ -658,12 +677,7 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
     loop = assemble_loop(
         project,
         gateway,
-        config=Config(
-            project_root=project,
-            supervise=False,
-            max_steps=int(os.environ.get("ORCH_MAX_STEPS", "12")),
-            context_window=8192,
-        ),
+        config=batch_config(project),
         wiring=LoopWiring(mcp=False, pending=pending, on_event=on_event),
     )
     wiring_seconds = time.perf_counter() - wiring_started
@@ -695,6 +709,7 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
     orch_calls: list[dict] = []
     subcalls: list[dict] = []
     tools: list[dict] = []
+    judgement_lines_kept = 0
     for kind, data in events:
         if kind == "tool":
             tools.append(data)
@@ -702,6 +717,10 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
                 orch_calls.append(data)
         elif kind == "subcall":
             subcalls.append(data)
+        elif kind == "note" and data.get("kind") == "material_compacted":
+            # 素材压缩（S6）保留了 N 行判据原文——这些行是逐字直通的，不是模型
+            # 复述的。压缩只会在这一条事件上计数（`LoopResult.compactions` 同源）。
+            judgement_lines_kept += int(data.get("protected_lines", 0) or 0)
 
     runner = _plan_evidence(plan_calls)
     plans = []
@@ -732,6 +751,11 @@ def run_once(task: str, arm: str, temperature: float, label: str) -> dict:
         "tool_seconds": round(result.tool_seconds, 3),
         "wiring_seconds": round(wiring_seconds, 3),
         "resets": result.resets,
+        # S6：走的是哪一级（压了还是重置了）必须一起读。`compactions` 为 0 而
+        # `resets` 照旧，说明这一级压根没参与；两个都高说明压完还得重置。
+        "compactions": result.compactions,
+        "judgement_lines_kept": judgement_lines_kept,
+        "final_names_failing_test": CHECK_B_FAILING_TEST in (result.final or ""),
         "finished": result.finished,
         "final": result.final,
         "tool_calls": len(tools),

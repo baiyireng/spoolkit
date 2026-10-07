@@ -16,7 +16,8 @@
 的 S3 节）。**保护区逐字直通是结构性的，不靠模型自觉。**
 
 这一层只负责"把素材变成一段更短的文本"；什么时候压、压完怎么装回上下文，由
-`context/budget.compact_trigger` 判、由主循环在重置之前接（计划 S6）。
+`context/budget.compact_trigger` 判、由主循环按阶梯接（`agent/loop.py`：先压，
+压完仍超硬线才重置，见那里的"预算守卫"一段）。
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from spoolkit.context.budget import Budget, CompactDecision, compact_trigger
 from spoolkit.llm.tokenizer import OfflineTokenCounter, TokenCounter
@@ -48,7 +50,16 @@ JUDGEMENT_MARKERS: tuple[str, ...] = (
     "exit code",
 )
 
-SECTION_HEAD = "【素材（已压缩；判据原文逐字保留）】"
+#: 素材被压过之后必须跟模型说的那句话。素材卡（`loop.MATERIAL_CARD_HEAD`）与
+#: 压缩结果说的是同一件事，所以这句话只有一份实现，两边都引它——两个入口把
+#: 「已经拿到的成果还在不在」说岔了，模型就会在其中一个入口把读过的文件再读
+#: 一遍（重复收集的代价见 README-real.md 的 S3 节）。
+KEEP_NOTE = (
+    "**拿到的成果不会消失**——它们仍在盘上、仍可回退，只是不再逐字留在对话里。"
+    "基于它们继续做，不要为了「再看一眼」重新收集一遍。"
+)
+
+SECTION_HEAD = "【素材（已压缩；判据原文逐字保留）】\n" + KEEP_NOTE
 PROTECTED_HEAD = "【判据原文（逐字，未改写）】"
 BULK_HEAD = "【其余素材（已压缩）】"
 
@@ -283,6 +294,19 @@ class CompactOutcome:
     """压完仍然超过 `decision.keep_tokens`：如实记下，不假装压够了。"""
 
 
+def material_tokens(
+    material: Sequence[tuple[str, str, str]], *, counter: TokenCounter | None = None
+) -> int:
+    """这些素材一共多少 token。
+
+    **循环与压缩器必须走同一处实现**：`compact_trigger` 拿这个数判「压不压」，
+    压缩器拿它算「压完省了多少」。两处各写一遍的话，「什么时候压」与「压了
+    多少」会在某次改动之后悄悄对不上，而两者都对得上测试——只是彼此不对。
+    """
+    token_counter = counter or OfflineTokenCounter()
+    return token_counter.count("\n".join(str(body) for _key, _tool, body in material))
+
+
 def compact_material(
     notes: Sequence[MaterialNote],
     *,
@@ -296,14 +320,15 @@ def compact_material(
 ) -> CompactOutcome:
     """按预算判定要不要压；要压就先机械层、还不够小再上模型层。
 
-    `model` 是一个只接收 prompt、返回文本的干净上下文调用口（S6 用真实网关接），
-    拿不到就只用机械层。**没到线时一次模型调用都不会发生**——这条是用例直接
-    数调用次数断言的。
+    `model` 是一个只接收 prompt、返回文本的干净上下文调用口（真实网关用
+    `gateway_compactor` 收成这个形状），拿不到就只用机械层。**没到线时一次模型
+    调用都不会发生**——这条是用例直接数调用次数断言的。
     """
     token_counter = counter or OfflineTokenCounter()
-    raw = "\n".join(note.body for note in notes)
-    material_tokens = token_counter.count(raw)
-    decision = compact_trigger(budget, used=used, material=material_tokens)
+    raw_tokens = material_tokens(
+        [(note.key, note.tool, note.body) for note in notes], counter=token_counter
+    )
+    decision = compact_trigger(budget, used=used, material=raw_tokens)
 
     def nothing() -> CompactOutcome:
         return CompactOutcome(
@@ -384,3 +409,27 @@ def compact_material(
         seconds=seconds,
         over_budget=tokens > decision.keep_tokens,
     )
+
+
+def gateway_compactor(gateway: Any, *, max_tokens: int) -> Callable[[str], str]:
+    """把网关收成一个「发一段话、拿一段文字」的压缩调用口。
+
+    与 L3 语义审查（`agent/review_semantic.py`）同一个形状，理由也一样：压缩这
+    一层只需要这两个动作，接口收得越窄，注入面越小——用例给一个普通函数就能
+    把整条链路走完，真调模型的那条路只在产品里走。
+
+    **干净上下文不是靠自觉，是靠这个函数**：它只把 prompt 装进请求，不接历史、
+    不接素材台账。压缩器要往 prompt 里放什么（问题 + 调用声明 + 待压正文）由
+    `build_prompt` 决定，`compact_material` 的行为就是它前面那段输入。
+    """
+    def call(prompt: str) -> str:
+        from spoolkit.llm.types import ChatRequest, Message
+
+        request = ChatRequest(
+            messages=(Message(role="user", content=prompt),),
+            max_tokens=max_tokens,
+        )
+        response = gateway.chat(request)
+        return str(getattr(response, "text", "") or "")
+
+    return call

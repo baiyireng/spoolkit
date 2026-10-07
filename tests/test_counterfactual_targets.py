@@ -375,3 +375,16 @@ def test_建造副本时会裁剪而且阶段零会量副本干不干净() -> No
     # 量出来的东西要落盘，别只打印
     assert '"bare_failed": bare_failed,' in source
     assert module.SANDBOX_TEST_KEEP
+
+
+def test_批次窗口取自环境变量(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ORCH_WINDOW` 是这一批的自变量，必须真的改变循环窗口。
+
+    S6 踩到的正是这里：环境变量只喂给环境自证，循环却硬编码 8192，
+    于是「换个窗口看预算阶梯」这件事一次都没量到。
+    """
+    module = _harness()
+    monkeypatch.setenv("ORCH_WINDOW", "4096")
+    assert module.batch_config(tmp_path).context_window == 4096
+    monkeypatch.delenv("ORCH_WINDOW")
+    assert module.batch_config(tmp_path).context_window == 8192

@@ -80,6 +80,10 @@ def _build(
             supervise=False,
             overrides=overrides or {},
         ),
+        # 这一组量的是**旧的重置路**：素材压缩（阶梯第一级）会另花一次模型
+        # 调用，把脚本化假模型的一步顶掉。阶梯那一级由
+        # `tests/agent/test_material_ladder.py` 单独钉。
+        compaction=False,
     )
 
 

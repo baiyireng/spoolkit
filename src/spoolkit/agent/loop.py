@@ -42,7 +42,14 @@ from spoolkit.agent.audit import (
     note_kind,
     tests_weakened,
 )
-from spoolkit.agent.material_compactor import material_label as _material_label_of
+from spoolkit.agent.material_compactor import (
+    KEEP_NOTE,
+    compact_material,
+    gateway_compactor,
+    material_label as _material_label_of,
+    material_tokens,
+    notes_from_material,
+)
 from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from spoolkit.agent.review_behavior import (
@@ -98,7 +105,7 @@ from spoolkit.agents.supervisor import (
 )
 from spoolkit.config import Config
 from spoolkit.context.assembler import Assembler
-from spoolkit.context.budget import Budget
+from spoolkit.context.budget import Budget, compact_trigger
 from spoolkit.context.sections import Section
 from spoolkit.context import templates as T
 from spoolkit.errors import ContextOverflowError, PathOutsideProjectError
@@ -250,6 +257,14 @@ RUN_FAILED_KIND = "run_failed"
 #: 不是「装进去了没有」）。事件流里那一条同时带上第几步、剩余多少步，
 #: 跑分器与报告都按它取。
 CONVERGE_KIND = "converge"
+
+#: 「素材被压过一遍」那条 note 的 `kind`（阶梯的第一级）。
+#:
+#: 为什么要一条**事件**：探针与跑分器要能回答「这一轮到底压了几次、压完省了
+#: 多少、模型那一层有没有用上、回退的原因是什么」——这些数只能从事件流取，
+#: 报告里的人话里没有它们（报告是给用户的，不是台账）。`compactions` 在这条
+#: 事件上累加，与 `resets` 一起构成阶梯的两级读数。
+COMPACT_KIND = "material_compacted"
 
 #: 「模型/分词这一层失败」的识别（P0 修②只收这一层，别的一律往上抛）。
 #:
@@ -1104,9 +1119,7 @@ REPEAT_MIN_CHARS = 200
 # `MATERIAL_CARD_MAX_CHARS`）。
 MATERIAL_CARD_HEAD = (
     "【重置前拿到的素材】下面是你之前几步真的执行过的调用与它们的输出原文"
-    "（每条已截断）。**上下文重置不会让这些成果消失**——它们仍在盘上、仍可"
-    "回退，只是不再逐字留在对话里。基于它们继续做，不要为了「再看一眼」"
-    "重新收集一遍。"
+    "（每条已截断）。" + KEEP_NOTE
 )
 
 #: 卡片总字数上限。按字数（不是 token）封顶是为了与 `for_prompt` 的口径一致，
@@ -1256,6 +1269,10 @@ class LoopResult:
     state: TaskState
     steps: int
     resets: int
+    #: **素材压缩了几遍**（阶梯第一级）。与 `resets` 一起读才知道运行走的是哪一
+    #: 级：重置次数下降而压缩次数上去，说明素材是**被压住**的，不是被丢掉的。
+    #: 这个数只从事件流那一份（`kind=COMPACT_KIND`）来，不另算一份。
+    compactions: int = 0
     trace: list[str] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -1394,8 +1411,23 @@ class AgentLoop:
         gate_network: bool = True,
         defer_final_verify: list | None = None,
         orchestrator: Any | None = None,
+        compactor: Callable[[str], str] | None = None,
+        compaction: bool = True,
     ) -> None:
         self.gateway = gateway
+        # 素材压缩（阶梯第一级）。`compaction=False` 就是**关掉这一级**，直接回到
+        # 「需求超硬线就重置」的旧路——留着它是因为两条路都要能单独被量：脚本化
+        # 假模型没有判断力（它把下一条脚本当成压缩结果，等于凭空吃掉一步），
+        # 而量「重置不丢素材」那一组用例要的正是旧路本身。
+        self._compaction = bool(compaction)
+        self._compactor = (
+            compactor
+            if compactor is not None or not compaction
+            else gateway_compactor(
+                gateway,
+                max_tokens=int(config.limit("material_compact_model_tokens")),
+            )
+        )
         self.tokenizer = tokenizer
         self.registry = registry
         self.config = config
@@ -1932,6 +1964,11 @@ class AgentLoop:
         # 强制收敛那几处覆盖掉——而改道的话比通用提醒具体，不能被覆盖。
         redirect: str | None = None
         resets = 0
+        compactions = 0
+        # 压过的那一份素材文本。它有两个用处：① 压完装得下就直接用它重建历史；
+        # ② 压完仍超硬线要重置时，挂回新历史的那张卡片**优先用它**——否则刚花
+        # 一次模型调用压好的东西会被机械卡片顶掉（那等于白压）。
+        compacted_text = ""
         trace: list[str] = []
         # 本轮运行重置护栏状态：上一次 run() 看到的调用对象/清单指纹与上下文版本
         # 不能带过来（带了的话，第一次重复调用就会拿着旧 run 的状态做判断）。
@@ -2290,6 +2327,7 @@ class AgentLoop:
                         state=state,
                         steps=state.step,
                         resets=resets,
+                        compactions=compactions,
                         trace=trace,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
@@ -2438,7 +2476,90 @@ class AgentLoop:
             assemble_seconds += time.time() - _assemble_started
             self._emit("step", {"n": state.step})
 
-            # 预算守卫：软触发整理，硬触发重置。依据需求体积而非装入量。
+            # 预算守卫：**阶梯**——先压素材，压完仍超硬线才重置；软触发只截历史。
+            # 依据需求体积而非装入量。
+            #
+            # 阶梯第一级（S6）：素材是撑大需求的那部分，而压缩**在干净上下文里
+            # 做**（`agent/material_compactor.py`：提示里只有问题、调用声明与
+            # 素材正文，不背历史）。压完装得下就不重置：判据原文逐字还在，别的
+            # 素材按对象去重后留着。这一级的触发线比硬线低（`material_compact_*`
+            # 四个标定值算出来的整理线），所以那次模型调用发生时预算还从容。
+            if self._compaction and self._material_notes:
+                need = compact_trigger(
+                    self._budget,
+                    used=assembled.demand_tokens,
+                    material=material_tokens(
+                        self._material_notes, counter=self.tokenizer
+                    ),
+                )
+                if need.should:
+                    outcome = compact_material(
+                        notes_from_material(self._material_notes),
+                        goal=goal,
+                        budget=self._budget,
+                        used=assembled.demand_tokens,
+                        model=self._compactor,
+                        counter=self.tokenizer,
+                    )
+                    compactions += 1
+                    if outcome.text:
+                        compacted_text = outcome.text
+                    # 事件流那一份是**读数**：压没压成、省了多少、模型层用没
+                    # 用上、回退的原因。报告里的人话不写这些（那是给用户的）。
+                    self._emit(
+                        "note",
+                        {
+                            "text": (
+                                f"素材压缩（第 {compactions} 次）："
+                                f"{need.used} token 的需求里素材占 "
+                                f"{need.material}，压到 {outcome.tokens}"
+                            ),
+                            "ok": True,
+                            "kind": COMPACT_KIND,
+                            "step": state.step,
+                            "compactions": compactions,
+                            "used_model": outcome.used_model,
+                            "tokens": outcome.tokens,
+                            "kept_items": outcome.kept_items,
+                            "dropped_items": outcome.dropped_items,
+                            "protected_lines": outcome.protected_lines,
+                            "dropped_lines": outcome.dropped_lines,
+                            "fallback": outcome.fallback,
+                            "over_budget": outcome.over_budget,
+                            "used": need.used,
+                            "material": need.material,
+                            "threshold": need.threshold,
+                            "keep_tokens": need.keep_tokens,
+                            "expected_saving": need.expected_saving,
+                        },
+                    )
+                    trace.append(
+                        f"step{state.step}: 素材压缩（第 {compactions} 次）"
+                        f"，{need.material} token 的素材压到 {outcome.tokens}"
+                        + (
+                            "，判据原文逐字保留"
+                            if outcome.protected_lines
+                            else ""
+                        )
+                        + (f"，{outcome.fallback}" if outcome.fallback else "")
+                    )
+                    if outcome.text:
+                        history = [
+                            Message(
+                                role="user",
+                                content=f"{goal}\n\n{outcome.text}",
+                            )
+                        ]
+                        # 工具结果的**逐字原文**不在上下文里了（换成了压缩稿）：
+                        # 版本号 +1，重复调用护栏据此放行刷新读取。收束指令
+                        # 不在这里重装——这一级不动 feedback（它不是重置）。
+                        self._context_revision += 1
+                        _assemble_started = time.time()
+                        assembled = self._assemble(
+                            state, history, feedback, prefetched, hot, lesson_text
+                        )
+                        assemble_seconds += time.time() - _assemble_started
+            # 阶梯第二级：压完（或没得压）仍然超硬线，才重置。
             if assembled.demand_tokens >= self._budget.hard_limit():
                 # ---- 重置**不丢素材**（P0 修②）--------------------------------
                 #
@@ -2456,7 +2577,10 @@ class AgentLoop:
                 # 为什么不做成「摘要」：摘要要再调一次模型（这一轮恰恰是预算
                 # 见底的时候，而且会把一次运行的不确定性再放大一次）。卡片是
                 # 机械的原文截断——零额外调用、逐字可核对、失败面为零。
-                card = _material_card(self._material_notes)
+                #
+                # 已经压过的那一份优先：刚花一次调用压好的东西不该被机械卡片
+                # 顶掉（那等于白压）。压不动时才是机械卡片。
+                card = compacted_text or _material_card(self._material_notes)
                 history = [
                     Message(
                         role="user",
@@ -2612,6 +2736,7 @@ class AgentLoop:
                         state=state,
                         steps=state.step,
                         resets=resets,
+                        compactions=compactions,
                         trace=trace,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
@@ -2649,6 +2774,7 @@ class AgentLoop:
                             state=state,
                             steps=state.step,
                             resets=resets,
+                            compactions=compactions,
                             trace=trace,
                             prompt_tokens=prompt_tokens,
                             completion_tokens=completion_tokens,
@@ -3189,6 +3315,7 @@ class AgentLoop:
                     state=state,
                     steps=state.step,
                     resets=resets,
+                    compactions=compactions,
                     trace=trace,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
@@ -3244,6 +3371,7 @@ class AgentLoop:
             state=state,
             steps=state.step,
             resets=resets,
+            compactions=compactions,
             trace=trace,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,

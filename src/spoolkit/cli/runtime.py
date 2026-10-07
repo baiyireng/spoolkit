@@ -398,11 +398,16 @@ def assemble_loop(
     gateway: ModelGateway,
     config: Config | None = None,
     wiring: LoopWiring | None = None,
+    compaction: bool = True,
 ) -> AgentLoop:
     """用给定网关装配完整循环：注册全部工具、建索引、接上预取。
 
     预算（窗口、步数）走 Config，可选的协作者走 LoopWiring。
     两者分开是因为性质不同：前者是「这次跑多大」，后者是「挂上哪些能力」。
+
+    `compaction` 默认开：素材压缩（预算阶梯第一级）用**同一个网关**另起一次
+    干净上下文的调用。脚本化假模型驱动的路径要传 False——假模型没有判断力，
+    它被压缩提示顶掉的那一步，本来是要走脚本的。
     """
     settings = config or Config(project_root=project_root)
     parts = wiring or LoopWiring()
@@ -577,6 +582,9 @@ def assemble_loop(
         escalation_review=parts.escalation_review,
         defer_final_verify=parts.defer_final_verify,
         orchestrator=orchestrator,
+        # 素材压缩跟着装配走来（生产默认开）：真正跑起来时预算见底的不是
+        # 「步数」而是素材体积，压一遍比整个丢掉历史更省上下文。
+        compaction=compaction,
     )
 
 
@@ -589,6 +597,9 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
         # 假模型没有判断力：它的「续期」只是把脚本里下一条当成结论。
         # 这条路是离线演示与测试用的，督导在这里只会有害。
         config=Config(project_root=project_root, context_window=window, supervise=False),
+        # 同理：素材压缩要另起一次模型调用，假模型给不出可用的压缩稿，
+        # 只会把脚本里下一步顶掉。离线路径整级关掉（阶梯另有独立用例）。
+        compaction=False,
     )
 
 
