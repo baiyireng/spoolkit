@@ -378,6 +378,7 @@ MATERIAL_COMPACT_KNOBS: tuple[tuple[str, float], ...] = (
     ("material_compact_share", 0.5),  # 素材不足需求一半就别压
     ("material_compact_floor_tokens", 600),  # 素材短于 600 token 不值得压
     ("material_compact_min_free_tokens", 800),  # 小窗口下留给下一条输出的余量
+    ("material_compact_model_tokens", 700),  # 压缩模型那一层的产出上限
 )
 
 

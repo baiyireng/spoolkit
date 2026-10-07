@@ -723,6 +723,13 @@ KNOBS: tuple[Knob, ...] = (
         "（只要过线就压，短素材也压）",
     ),
     Knob(
+        "material_compact_model_tokens", 700, CAPABILITY,
+        "**压缩模型那一层最多产出多少 token**：判据行是逐字直通、不占这份额度，"
+        "它只约束模型压出来的普通正文。700 与 L3 的 `review_max_tokens` 同量级"
+        "（只让它做删减与归类，不需要长篇输出）；超了、格式不对、或者被机械核对"
+        "拦空，就整段回退机械层结果，绝不把没压下去的东西硬塞回上下文",
+    ),
+    Knob(
         "material_compact_min_free_tokens", 800, CAPABILITY,
         "**留给下一条工具输出的余量下限**（token）：目标余量取"
         "`max(有效预算 × (1 − ratio), 它)`。小窗口下比例线保不住「一条工具输出"

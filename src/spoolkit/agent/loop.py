@@ -42,6 +42,7 @@ from spoolkit.agent.audit import (
     note_kind,
     tests_weakened,
 )
+from spoolkit.agent.material_compactor import material_label as _material_label_of
 from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
 from spoolkit.agent.review_behavior import (
@@ -1135,21 +1136,14 @@ CONVERGE_TEXT_MIN_CHARS = 24
 def _material_label(name: str, key: str) -> str:
     """素材卡每条的抬头：要能看出这一条是**对哪个对象**做的。
 
-    只写工具名（旧样子）时「素材还在」这句话其实不可核对：模型看得到一段
-    正文，却不知道它是从哪个文件读来的。真机现场丢掉的恰恰是「第 4 步读到
-    `services.py` 的失败原文」——路径本身就是素材的一半。
+    实现只有一份，在 `agent/material_compactor.material_label`：素材卡与压缩器
+    对「这条素材是对哪个对象做的」必须给出同一个答案，否则卡片上写的对象和压缩后
+    写的对象会各说各话。这里留着的注释是当初为什么需要它——只写工具名（旧样子）
+    时「素材还在」这句话其实不可核对：模型看得到一段正文，却不知道它是从哪个
+    文件读来的。真机现场丢掉的恰恰是「第 4 步读到 `services.py` 的失败原文」——
+    路径本身就是素材的一半。
     """
-    raw = key.partition(" ")[2]
-    try:
-        args = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return name
-    if not isinstance(args, dict):
-        return name
-    path = args.get("path")
-    if isinstance(path, str) and path:
-        return f"{name} {path}"
-    return name
+    return _material_label_of(name, key)
 
 
 def _material_card(notes: Sequence[tuple[str, str, str]]) -> str:
