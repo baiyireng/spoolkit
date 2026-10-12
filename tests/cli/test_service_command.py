@@ -420,14 +420,39 @@ def test_render_status_embeds_state_markup(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
     monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path / "state"))
     closed = _closed_port()
-    _write_recipe(
+    _write_recipes(
         path,
-        name="llama",
-        command=["llama-server"],
-        health=f"http://127.0.0.1:{closed}/props",
+        [
+            {
+                "name": "llama",
+                "command": ["llama-server"],
+                "health": f"http://127.0.0.1:{closed}/props",
+            },
+            {"name": "mine", "command": ["x"], "health": f"tcp:127.0.0.1:{closed}"},
+        ],
     )
+    svc.write_pid("mine", os.getpid())
     out = render_status()
-    assert "[state." in out
+    assert "[state.down]" in out
+    assert "[state.up]" in out
+    mine = _line_for(out, "mine")
+    assert "[start]" in mine
+
+
+def test_service_list_prints_probe_and_start_via_print_out(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    path.write_text(
+        '[[service]]\nname = "tunnel"\nhealth = "tcp:127.0.0.1:1"\n\n'
+        + _recipe_block(name="llama", command=["llama-server"]),
+        encoding="utf-8",
+    )
+    assert service_command(argparse.Namespace(action="list", name="")) == 0
+    out = capsys.readouterr().out
+    assert "[probe]" in out
+    assert "[start]" in out
 
 
 def test_list_三种状态分得清(tmp_path: Path, monkeypatch) -> None:

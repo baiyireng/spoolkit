@@ -79,6 +79,19 @@ STATE_LABELS: dict[str, str] = {
     STATE_UNKNOWN: "unknown",
 }
 
+#: `service list` state labels → existing `state.*` theme keys (no new theme entries).
+_LIST_STATE_STYLE: dict[str, str] = {
+    STATE_OURS: "up",
+    STATE_OCCUPIED: "slow",
+    STATE_DOWN: "down",
+    STATE_UNKNOWN: "unknown",
+}
+
+
+def _list_state_style(service_state: str) -> str:
+    return state_style(_LIST_STATE_STYLE.get(service_state, "unknown"))
+
+
 #: OpenProcess 的访问位（Windows）。只要这两个：判活 + 读创建时刻。
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _SYNCHRONIZE = 0x00100000
@@ -644,9 +657,9 @@ def render_status() -> str:
         how = "probe" if not item.command else "start"
         where = state.target or "(no health)"
         label = STATE_LABELS[state.state]
-        styled = f"[{state_style(state.state)}]{escape(label)}[/]"
+        styled = f"[{_list_state_style(state.state)}]{escape(label)}[/]"
         lines.append(
-            f"  - {escape(item.name)} [{how}] {styled}  "
+            f"  - {escape(item.name)} {escape(f'[{how}]')} {styled}  "
             f"{escape(where)}  {escape(state.detail)}"
         )
     lines.append("")
