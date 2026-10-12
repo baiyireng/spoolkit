@@ -1,11 +1,16 @@
 # 命令速查
 
-`spool --help` 是总入口。本页逐条列出命令与参数，文本与 `--help` 对齐；参数变更后本页需同步修改。设计理由见 [`rationale.md`](rationale.md)。
+与 `spool --help` 对齐；改参数同步本页。取舍 → [rationale.md](rationale.md)。
 
-`--root` 缺省时的工作区解析顺位：显式给出 → 自当前目录向上查找 `.agent/` → 客户端指向 → 全局登记表 `%APPDATA%\spoolkit\workspaces.json` → 当前目录。**机器级入口**（`serve` / `hub` / `web` / `bridge` / `qq` / `mcp`，不给 `--root` 时）**不读取当前目录**，服务整台机器。
-`--session` 留空时取客户端指向中的会话；无指向时用该入口的默认名：`run` / `plan` / `serve` / `hub` / `web` → `cli`，`chat` → `chat`，`bridge` / `qq` → `bridge`，`mcp` → `mcp`。
+| | |
+|--|--|
+| `--root` 顺位 | 显式 → 向上找 `.agent/` → 客户端指向 → `workspaces.json` → cwd |
+| 机器级（无 `--root`） | `serve`/`hub`/`web`/`bridge`/`qq`/`mcp`：**不认 cwd** |
+| `--session` 默认 | 指向中的会话；否则入口默认名（`run`→`cli`，`chat`→`chat`，`bridge`/`qq`→`bridge`，`mcp`→`mcp`） |
+| 裸 `spool` | 进对话；非工作区则询问 init（非交互 → 打印帮助） |
+| 版本 | `spool --version` → `spool 0.0.1 (spoolkit)` |
 
-`spool` 不带子命令时进入对话：当前目录不是工作区时先询问是否在此初始化，非交互环境下改为打印帮助。`spool --version` 输出 `spool 0.0.1 (spoolkit)`。子命令：`init` `ws` `run` `plan` `policy` `revert` `bench` `session` `serve` `hub` `web` `qq` `diagnose` `limits` `config` `env` `chat` `mcp` `mcp-servers` `bridge` `approve` `extra` `service` `status` `help`。
+子命令：`init` `ws` `run` `plan` `policy` `revert` `bench` `session` `serve` `hub` `web` `qq` `diagnose` `limits` `config` `env` `chat` `mcp` `mcp-servers` `bridge` `approve` `extra` `service` `status` `help`。
 
 ## spool ws
 
@@ -18,6 +23,8 @@
 | `spool ws add <目录>` | 创建 `.agent/` 并登记（等价于 `spool init`）|
 | `spool ws alias <名字> <短名>` | 为工作区设置短名 |
 | `spool ws forget <名字>` | 从登记表移除（目录与 `.agent/` 均不变）|
+
+Human list may use color in a TTY; pipes and `NO_COLOR` stay plain.
 
 ## spool session
 
@@ -203,58 +210,66 @@ spool qq --root D:\某个工作区              # 给了就钉住这一个工作
 
 ## spool service
 
-本机外接配方的快捷入口：按用户配置 `[[service]]` 启动 / 停止 / 列出。**不入仓库**，也不写死 gguf 路径或 ssh 主机。子命令 `list`（默认）/ `start` / `stop`；`name` 是配方名，`start` / `stop` 不给时对全部（`start` 只动有 `command` 的）。
+Local `[[service]]` recipes: `list` (default) / `start` / `stop`. Not in-repo; no hardcoded gguf/ssh host.
 
 ```toml
 [[service]]
-name = "llama"                       # 本机语言模型：hub 按 provider / base_url 探活；start 以 pid 记录为判据，不重复拉起
-command = ["llama-server", "-m", "你的模型.gguf", "--port", "8080"]
+name = "llama"
+command = ["llama-server", "-m", "model.gguf", "--port", "8080"]
 health = "http://127.0.0.1:8080/props"
 
 [[service]]
-name = "tunnel"                      # 通道出网的本机 SOCKS（ssh -D），不是模型代理
-command = ["ssh", "-N", "-D", "1080", "你的跳板"]
+name = "tunnel"   # channel SOCKS (ssh -D), not model --proxy
+command = ["ssh", "-N", "-D", "1080", "jump-host"]
 health = "tcp:127.0.0.1:1080"
 ```
 
-`command` 可为空：为空时只探测、不启动。`health` 接受 `http(s)://…`（GET）与 `tcp:host:port`；停止只杀 `spool service start` 记下 pid 的子进程。`spool config --set` 不会抹掉 `[[service]]` / `[[mcp]]`。
+| | |
+|--|--|
+| Empty `command` | Probe only |
+| `health` | `http(s)://…` or `tcp:host:port` |
+| Start gate | **pid record** (not probe). Alive → `already running (pid …)` |
+| Stop | Only kills pid started by `spool service start` |
+| Detached | Windows process-group/detached; POSIX new session (Ctrl-C in same tty does not kill it) |
 
-**"要不要拉起"的判据是本命令记录的 pid，不是探针**（探针只报状态）：同一条配方最多一个进程，有存活记录时打印"已经在跑（pid …）"。`list` 的状态词按此口径解读：
+`list` states:
 
-| 状态词 | 解读 |
+| State | Meaning |
 |---|---|
-| 运行中（本命令启动） | pid 记录中的进程仍存活（`start` 写入）；其后是 pid 与探针结果（HTTP 状态，或 `端口开着`）|
-| 端口被占用（非本命令启动） | 探针通，但没有存活的 pid 记录——该地址被其他进程占用；改用其他端口，或先停止该进程 |
-| 未运行 | 无 pid 记录且探针不通；其后是探针结果（如 `timed out`）|
-| 无法判定 | 该配方未配置 `health`，也没有 pid 记录——在不在跑看不出 |
+| `running (ours)` | Our pid record alive; probe detail follows |
+| `port busy (not ours)` | Probe ok, no live pid record |
+| `down` | No pid + probe fail |
+| `unknown` | No `health` and no pid |
 
-无存活 pid 记录时才启动：子进程**启动后立刻退出**时，输出给出其**退出码与最后几行输出**（`ssh -D 1080` 遇到被占端口时即为此处的 `bind: Address already in use`），完整输出保存在用户状态目录的 `services\<配方>.log`。
+Immediate exit → exit code + last log lines; full log under user state `services/<name>.log`.
 
-拉起的子进程**脱离当前控制台**（Windows 给 `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`，POSIX 用新会话），在同一窗口按 Ctrl-C 不会把它带走；它的输出仍重定向到上面那份日志。
+Human list may use color in a TTY; pipes and `NO_COLOR` stay plain.
 
 ## spool status
 
-一览本机 spoolkit 相关服务：一行一个服务，给出**状态 / 地址或说明 / 启动命令 / 停止命令**。**只访问本机地址**（不联网），各探测点短超时，失败时打印可读说明并返回非零退出码，不打印回溯。
+Loopback-only **card list** (title + target/note/start/stop per service; blank line between). Short probe timeouts; no stack traces.
 
-| 行 | 探测内容 |
+Human cards may use color in a TTY; `--json`, pipes, and `NO_COLOR` stay plain.
+
+| Row | Probes |
 |---|---|
-| `provider` | 生效的模型供应商（命令行 > 环境变量 > 用户配置）；未配置或生效值为 `fake` 均计为关键项，并给出应执行的命令 |
-| `model` | 本机模型（`base_url`，默认 `http://127.0.0.1:8080`）打 `/props`：**没起 / 起来了但慢**（`503`，或端口通而 HTTP 不应答）/ 正常 |
-| `web:<端口>` | 网页壳（默认探 `8765`，其他端口用 `--web-port`）：读 `GET /state`，报**监听端口、是否只读（绑了非回环地址）、当前目标**；端口上有别的东西也会说明 |
-| `bridge:<通道>` | 用户配置 `[channel.*]` 与放行记录中的通道：凭据**来自哪个文件 / 哪个环境变量**（只印来源，不印值）；桥是前台进程，"在不在跑看不出" |
-| `mcp:<名字>` | 外挂 MCP 登记了哪些；`--probe` 才真连一次（会拉起子进程，超时另算）|
-| `workspace` | 已登记的工作区数量，以及网页壳与命令行的指向 |
-| `config` / `env:user` / `env:workspace` | `config.toml`、用户级 `.env`、当前工作区 `.env` 的**路径与存在性**（只印键数，不印值）|
-| `service:<配方>` | 用户配置 `[[service]]` 中的每条配方（与 `spool service list` 同一套：**pid 记录是判据**，探针报状态；状态列写「被占用」，说明写「非本命令启动」，不谎报为本命令启动的）|
+| `provider` | Effective provider (CLI > env > config); unset/`fake` = critical |
+| `model` | `base_url` `/props`: `down` / `slow` (503 or port-without-HTTP) / `up` |
+| `web:<port>` | `GET /state` (default 8765; `--web-port`); readonly / target |
+| `bridge:<channel>` | Credential **sources** only (no values); run state usually `unknown` |
+| `mcp:<name>` | Registered servers; `--probe` connects (spawns) |
+| `workspace` | Registry count + web/cli pointers |
+| `config` / `env:*` | Path + presence (key count, never values) |
+| `service:<name>` | Same pid/probe rules as `spool service list` (`occupied` ≠ ours) |
 
-| 参数 | 说明 |
+| Flag | |
 |---|---|
-| `--json` | 给机器读：`ok` / `critical_down` / `provider` / `timeout_s` / `elapsed_ms` / `rows[]`（每条含 `name,label,state,critical,target,detail,start,stop`）；`state` 取 `up` / `slow` / `down` / `unknown` / `none` |
-| `--timeout 秒` | 每个探测点的超时（默认 `0.5`：探的都是回环地址，正常监听时毫秒级就有回音）|
-| `--web-port 端口` | 除 `8765` 外还要看哪个端口上的网页壳（可重复）|
-| `--probe` / `--mcp-timeout 秒` | 真连一次外挂 MCP（默认只列登记项）/ 连它的超时（默认 `5`：要起子进程）|
+| `--json` | `ok`, `critical_down`, `rows[]`; `state` ∈ `up\|slow\|down\|unknown\|none` |
+| `--timeout` | Per probe (default `0.5`) |
+| `--web-port` | Extra web ports |
+| `--probe` / `--mcp-timeout` | Live MCP connect (default timeout `5`) |
 
-**关键项**（表中带 ★，没起则退出码 `1`）只有三处：模型供应商未配置或生效值为 `fake`；生效 `provider` 为 `llamacpp` 时的本机模型；`[[service]]` 中写了 `command` 的配方（你声明了要拉起它）。表中其余各行只报不判（网页壳与通道桥按需起，外挂 MCP 与密钥落点不影响退出码）。退出码：`0` 关键项都在、`1` 有关键项没起、`2` 用法错或配置读不出来。
+Critical (`*`, exit `1` if down): provider unset/fake; local model when `provider=llamacpp`; `[[service]]` with `command`. Exit: `0` ok, `1` critical down, `2` usage/config error.
 
 ## spool help
 
