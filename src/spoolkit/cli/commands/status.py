@@ -12,6 +12,7 @@ import sys
 
 from spoolkit import settings
 from spoolkit import status as status_report
+from spoolkit.cli.term import print_out
 
 
 def _seconds(raw: object, flag: str, default: float) -> float | None:
@@ -21,25 +22,25 @@ def _seconds(raw: object, flag: str, default: float) -> float | None:
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        print(f"{flag} 要是秒数（例如 0.5），现在拿到的是 {raw!r}。", file=sys.stderr)
+        print(f"{flag} must be seconds (e.g. 0.5), got {raw!r}.", file=sys.stderr)
         return None
     if value <= 0:
-        print(f"{flag} 要大于 0 秒，现在是 {value:g}。", file=sys.stderr)
+        print(f"{flag} must be > 0 seconds, got {value:g}.", file=sys.stderr)
         return None
     return value
 
 
 def _ports(raw: list[int]) -> list[int] | None:
-    """`--web-port` 给的端口。越界就报错——探一个不存在的端口只会得到误导人的"没起"。"""
+    """Validate `--web-port` values."""
     ports: list[int] = []
     for item in raw or []:
         try:
             port = int(item)
         except (TypeError, ValueError):
-            print(f"--web-port 要是个端口号，现在拿到的是 {item!r}。", file=sys.stderr)
+            print(f"--web-port must be a port number, got {item!r}.", file=sys.stderr)
             return None
         if not 1 <= port <= 65535:
-            print(f"--web-port 要在 1..65535 之间，现在是 {port}。", file=sys.stderr)
+            print(f"--web-port must be in 1..65535, got {port}.", file=sys.stderr)
             return None
         ports.append(port)
     return ports
@@ -74,5 +75,5 @@ def status_command(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         print(status_report.render_json(report))
     else:
-        print(status_report.render_human(report))
+        print_out(status_report.render_human(report))
     return status_report.status_exit_code(report)

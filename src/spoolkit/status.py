@@ -30,8 +30,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+from rich.markup import escape
 
 from spoolkit import settings
+from spoolkit.cli.term import state_style
 from spoolkit import services
 from spoolkit.bridge import credentials
 from spoolkit.envfile import load_env_file
@@ -56,11 +58,11 @@ STATE_NONE = "none"
 
 #: 状态 → 面向人的字面。`--json` 给的是左边的英文（脚本按它判）。
 STATE_LABELS: dict[str, str] = {
-    STATE_UP: "在跑",
-    STATE_SLOW: "起来了但慢",
-    STATE_DOWN: "没起",
-    STATE_UNKNOWN: "看不出",
-    STATE_NONE: "没有",
+    STATE_UP: "up",
+    STATE_SLOW: "slow",
+    STATE_DOWN: "down",
+    STATE_UNKNOWN: "unknown",
+    STATE_NONE: "none",
 }
 
 #: 每个通道认的凭据**分组**：一组 = 一份密钥（QQ 的 AppID 与 AppSecret 是两份）。
@@ -140,9 +142,9 @@ def _readable_probe(detail: str) -> str:
     text = str(detail or "").strip()
     lowered = text.lower()
     if "timed out" in lowered or "timeout" in lowered:
-        return f"端口在超时内没接上（{text}）——没起，或者很慢"
+        return f"port timed out ({text}) — down or slow"
     if "refused" in lowered:
-        return f"没有东西在听这个端口（{text}）"
+        return f"nothing listening ({text})"
     return text
 
 
@@ -156,9 +158,9 @@ def _probe_tcp(host: str, port: int, timeout: float) -> tuple[str, bool]:
         with socket.create_connection((host, port), timeout=timeout):
             return "", False
     except TimeoutError:
-        return f"{host}:{port} {timeout:g}s 没接上（可能很慢，也可能被防火墙挡）", True
+        return f"{host}:{port} no accept in {timeout:g}s (slow or firewalled)", True
     except OSError as exc:
-        return f"{host}:{port} 连不上（{_one_line(exc)}）", False
+        return f"{host}:{port} connect failed ({_one_line(exc)})", False
 
 
 def _probe_http(url: str, timeout: float) -> tuple[str, str]:
@@ -180,13 +182,13 @@ def _probe_http(url: str, timeout: float) -> tuple[str, str]:
         ) as client:
             response = client.get(url)
     except httpx.TimeoutException:
-        return STATE_SLOW, f"端口在，但 {timeout:g}s 里没有 HTTP 应答（加载中？）"
+        return STATE_SLOW, f"port open, no HTTP in {timeout:g}s (loading?)"
     except Exception as exc:  # noqa: BLE001 - 面向人的失败也要说清楚
-        return STATE_DOWN, f"端口在，请求失败：{_one_line(exc)}"
+        return STATE_DOWN, f"port open, request failed: {_one_line(exc)}"
     if 200 <= response.status_code < 300:
         return STATE_UP, f"HTTP {response.status_code}"
     if response.status_code == 503:
-        return STATE_SLOW, "HTTP 503：服务在，模型还没加载完"
+        return STATE_SLOW, "HTTP 503: service up, model still loading"
     return STATE_DOWN, f"HTTP {response.status_code}"
 
 
@@ -214,40 +216,39 @@ def _provider_row(provider: str, source: str) -> Row:
     if not provider:
         return Row(
             name="provider",
-            label="模型供应商",
+            label="provider",
             state=STATE_DOWN,
-            state_label="没配",
-            target="（未设置）",
+            state_label="unset",
+            target="(unset)",
             detail=(
-                "没配过：内置默认是 fake（只会回放脚本，不能写代码）。"
-                "在 `spool config --set provider=llamacpp`（本机）"
-                "与 `spool config --set provider=gemini`（云端）之间选一个"
+                "unset: built-in default is fake (script replay only). "
+                "Set `spool config --set provider=llamacpp` or `provider=gemini`"
             ),
             start="spool config --set provider=llamacpp",
-            stop="spool config --reset <键>",
+            stop="spool config --reset <key>",
             critical=True,
         )
     if provider == "fake":
         return Row(
             name="provider",
-            label="模型供应商",
+            label="provider",
             state=STATE_DOWN,
-            state_label="只有 fake",
+            state_label="fake only",
             target="fake",
-            detail="生效值是 fake（测试回放器），真实任务要 llamacpp 或 gemini",
+            detail="effective provider is fake; use llamacpp or gemini for real work",
             start="spool config --set provider=llamacpp",
-            stop="spool config --reset <键>",
+            stop="spool config --reset <key>",
             critical=True,
         )
     return Row(
         name="provider",
-        label="模型供应商",
+        label="provider",
         state=STATE_UP,
-        state_label="已配",
+        state_label="set",
         target=provider,
-        detail=f"来源：{source}",
-        start="spool config --set provider=<名>",
-        stop="spool config --reset <键>",
+        detail=f"source: {source}",
+        start="spool config --set provider=<name>",
+        stop="spool config --reset <key>",
     )
 
 
@@ -262,22 +263,22 @@ def _model_row(
     from_default = not (base_url or "").strip()
     state, detail = _probe_http(target.rstrip("/") + "/props", timeout)
     if from_default:
-        detail += "（地址来自内置默认）"
+        detail += " (URL from built-in default)"
     else:
-        detail += f"（地址来自 {base_url_source}）"
+        detail += f" (URL from {base_url_source})"
     critical = provider.strip().lower() == "llamacpp"
     if not critical and state != STATE_UP:
-        detail += "（当前不按 llamacpp 跑，这一行不影响退出码）"
+        detail += " (not llamacpp; row ignored for exit code)"
     recipe = _recipe_for(target, recipes)
     if recipe is not None:
         start = f"spool service start {recipe.name}"
         stop = f"spool service stop {recipe.name}"
     else:
-        start = "（没配方：写 [[service]] 见文档）"
-        stop = "spool service stop <配方>"
+        start = "(no recipe: add [[service]], see docs)"
+        stop = "spool service stop <recipe>"
     return Row(
         name="model",
-        label="本机模型",
+        label="local model",
         state=state,
         target=target,
         detail=detail,
@@ -304,12 +305,12 @@ def _web_row(port: int, timeout: float) -> Row:
     if problem:
         return Row(
             name=f"web:{port}",
-            label=f"网页壳 :{port}",
+            label=f"web :{port}",
             state=STATE_SLOW if slow else STATE_DOWN,
             target=url,
             detail=problem,
             start=_web_start(port),
-            stop="Ctrl-C（前台，没有停入口）",
+            stop="Ctrl-C (foreground; no stop entry)",
         )
     try:
         with httpx.Client(timeout=timeout, trust_env=False) as client:
@@ -317,32 +318,32 @@ def _web_row(port: int, timeout: float) -> Row:
     except httpx.TimeoutException:
         return Row(
             name=f"web:{port}",
-            label=f"网页壳 :{port}",
+            label=f"web :{port}",
             state=STATE_DOWN,
             target=url,
-            detail=f"{port} 上有东西在听，但 {timeout:g}s 里没答 HTTP（不是网页壳？）",
+            detail=f"something on {port}, no HTTP in {timeout:g}s (not web shell?)",
             start=_web_start(port),
-            stop="Ctrl-C（前台，没有停入口）",
+            stop="Ctrl-C (foreground; no stop entry)",
         )
     except Exception as exc:  # noqa: BLE001 - 面向人的失败也要说清楚
         return Row(
             name=f"web:{port}",
-            label=f"网页壳 :{port}",
+            label=f"web :{port}",
             state=STATE_DOWN,
             target=url,
-            detail=f"{port} 上有东西在听，但不是网页壳（{_one_line(exc)}）",
+            detail=f"something on {port}, not web shell ({_one_line(exc)})",
             start=_web_start(port),
-            stop="Ctrl-C（前台，没有停入口）",
+            stop="Ctrl-C (foreground; no stop entry)",
         )
     if not isinstance(payload, dict) or "readonly" not in payload:
         return Row(
             name=f"web:{port}",
-            label=f"网页壳 :{port}",
+            label=f"web :{port}",
             state=STATE_DOWN,
             target=url,
-            detail=f"{port} 上有东西在答，但 /state 不是 spoolkit 的形状",
+            detail=f"HTTP on {port}, but /state is not spoolkit shape",
             start=_web_start(port),
-            stop="Ctrl-C（前台，没有停入口）",
+            stop="Ctrl-C (foreground; no stop entry)",
         )
     target_info = payload.get("target") if isinstance(payload.get("target"), dict) else {}
     root = str((target_info or {}).get("root") or "")
@@ -350,18 +351,18 @@ def _web_row(port: int, timeout: float) -> Row:
     readonly = bool(payload.get("readonly"))
     bound = str(payload.get("host") or "127.0.0.1")
     if readonly:
-        detail = f"只读（绑了非回环 {bound}：/run 与 /confirm 会 403）"
+        detail = f"readonly (bound non-loopback {bound}: /run and /confirm return 403)"
     else:
-        detail = f"可写（绑 {bound}）"
-    detail += f"；目标 {root or '还没选'}（会话 {session or '—'}）"
+        detail = f"writable (bound {bound})"
+    detail += f"; target {root or '(none)'} (session {session or '—'})"
     return Row(
         name=f"web:{port}",
-        label=f"网页壳 :{port}",
+        label=f"web :{port}",
         state=STATE_UP,
         target=url,
         detail=detail,
         start=_web_start(port),
-        stop="Ctrl-C（前台，没有停入口）",
+        stop="Ctrl-C (foreground; no stop entry)",
     )
 
 
@@ -391,33 +392,33 @@ def _bridge_row(name: str, granted: int) -> Row:
         else:
             missing.append(group[0])
     start = _CHANNEL_START.get(name, f"spool hub --channel {name}")
-    stop = "Ctrl-C（前台，没有停入口）"
+    stop = "Ctrl-C (foreground; no stop entry)"
     if missing:
         return Row(
             name=f"bridge:{name}",
-            label=f"通道桥 {name}",
+            label=f"bridge {name}",
             state=STATE_DOWN,
-            target=f"通道 {name}",
+            target=f"channel {name}",
             detail=(
-                f"缺凭据（没找到 {'、'.join(missing)}）：写进 {settings.env_path()}，"
-                f"用 `spool env set` 或直接编辑"
+                f"missing credentials ({', '.join(missing)}): write to {settings.env_path()} "
+                f"via `spool env set` or edit the file"
             ),
             start=start,
             stop=stop,
         )
     if not groups:
-        credential_note = "这条通道不需要凭据"
+        credential_note = "no credentials required"
     else:
-        credential_note = "凭据来自：" + "；".join(sources)
+        credential_note = "credentials from: " + "; ".join(sources)
     detail = credential_note
     if granted:
-        detail += f"；已放行 {granted} 人"
-    detail += "；在不在跑看不出（前台进程，没有运行登记）"
+        detail += f"; {granted} user(s) allowed"
+    detail += "; running state unknown (foreground; no run registry)"
     return Row(
         name=f"bridge:{name}",
-        label=f"通道桥 {name}",
+        label=f"bridge {name}",
         state=STATE_UNKNOWN,
-        target=f"通道 {name}",
+        target=f"channel {name}",
         detail=detail,
         start=start,
         stop=stop,
@@ -430,13 +431,13 @@ def _bridge_rows() -> list[Row]:
         return [
             Row(
                 name="bridge",
-                label="通道桥",
+                label="bridge",
                 state=STATE_NONE,
-                target="（没配任何通道）",
-                detail="用户配置的 [channel.*] 与放行记录都空；要连 QQ 就先配凭据再 spool qq",
-                start="spool qq（或 spool hub --channel <通道>）",
-                stop="Ctrl-C（前台，没有停入口）",
-                state_label="没配",
+                target="(no channels)",
+                detail="no [channel.*] and no grants; for QQ set credentials then spool qq",
+                start="spool qq (or spool hub --channel <name>)",
+                stop="Ctrl-C (foreground; no stop entry)",
+                state_label="unset",
             )
         ]
     return [_bridge_row(name, count) for name, count in sorted(channels.items())]
@@ -451,13 +452,13 @@ def _probe_mcp(config, timeout: float) -> tuple[str, str]:
         client.start()
         tools = client.list_tools()
     except McpError as exc:
-        return STATE_DOWN, f"连不上：{_one_line(exc)}"
+        return STATE_DOWN, f"unreachable: {_one_line(exc)}"
     except Exception as exc:  # noqa: BLE001 - 别人的程序，什么都可能抛
-        return STATE_DOWN, f"连不上：{_one_line(exc)}"
+        return STATE_DOWN, f"unreachable: {_one_line(exc)}"
     finally:
         client.close()
-    names = "、".join(tool.name for tool in tools) or "没有工具"
-    return STATE_UP, f"{len(tools)} 个工具：{names}"
+    names = ", ".join(tool.name for tool in tools) or "no tools"
+    return STATE_UP, f"{len(tools)} tool(s): {names}"
 
 
 def _mcp_rows(probe: bool, mcp_timeout: float) -> list[Row]:
@@ -466,13 +467,13 @@ def _mcp_rows(probe: bool, mcp_timeout: float) -> list[Row]:
         return [
             Row(
                 name="mcp",
-                label="外挂 MCP",
+                label="MCP",
                 state=STATE_NONE,
-                target="（没登记）",
-                detail=f"写进 {settings.config_path()} 的 [[mcp]]；看现状 `spool mcp-servers`",
-                start="（在 [[mcp]] 里登记，客户端拉起）",
-                stop="（从 [[mcp]] 里删掉）",
-                state_label="没登记",
+                target="(none)",
+                detail=f"add [[mcp]] in {settings.config_path()}; see `spool mcp-servers`",
+                start="(register in [[mcp]]; client spawns)",
+                stop="(remove from [[mcp]])",
+                state_label="none",
             )
         ]
     rows: list[Row] = []
@@ -480,19 +481,19 @@ def _mcp_rows(probe: bool, mcp_timeout: float) -> list[Row]:
         if probe:
             state, detail = _probe_mcp(item, mcp_timeout)
         else:
-            state, detail = STATE_UNKNOWN, "登记了，没验（加 --probe 才真连一次）"
+            state, detail = STATE_UNKNOWN, "registered; not probed (pass --probe)"
         rows.append(
             Row(
                 name=f"mcp:{item.name}",
-                label=f"外挂 MCP {item.name}",
+                label=f"MCP {item.name}",
                 state=state,
                 target=item.command,
                 detail=(
-                    (f"命令：{item.command} {' '.join(item.args)}".strip() + "；" if item.args else "")
+                    (f"cmd: {item.command} {' '.join(item.args)}".strip() + "; " if item.args else "")
                     + detail
                 ),
                 start="spool mcp-servers --check",
-                stop="（从 [[mcp]] 里删掉）",
+                stop="(remove from [[mcp]])",
             )
         )
     return rows
@@ -516,90 +517,90 @@ def _current_workspace() -> Path | None:
 def _workspace_rows() -> list[Row]:
     books = kernel_workspaces.list_workspaces()
     marks: list[str] = []
-    for key, label in (("web", "网页壳"), ("cli", "命令行")):
+    for key, label in (("web", "web"), ("cli", "cli")):
         pointer = pointers.get(key)
         if pointer is None:
             continue
-        exists = "" if Path(pointer.workspace).is_dir() else "（目录不在了）"
-        marks.append(f"{label} → {pointer.workspace}{exists}（会话 {pointer.session or '—'}）")
+        exists = "" if Path(pointer.workspace).is_dir() else " (missing dir)"
+        marks.append(
+            f"{label} → {pointer.workspace}{exists} (session {pointer.session or '—'})"
+        )
     if not books:
         return [
             Row(
                 name="workspace",
-                label="工作区",
+                label="workspace",
                 state=STATE_NONE,
-                target="（一个都没登记）",
+                target="(none registered)",
                 detail=(
-                    "登记表 " + str(kernel_workspaces.registry_path()) + " 是空的；"
-                    "在项目目录里 `spool init`"
+                    "registry " + str(kernel_workspaces.registry_path()) + " is empty; "
+                    "`spool init` in a project"
                 ),
-                start="spool init（或 spool ws add <目录>）",
-                stop="spool ws forget <名字>",
-                state_label="还没有",
+                start="spool init (or spool ws add <dir>)",
+                stop="spool ws forget <name>",
+                state_label="none",
             )
         ]
     return [
         Row(
             name="workspace",
-            label="工作区",
+            label="workspace",
             state=STATE_UP,
-            state_label="有",
-            target=f"登记 {len(books)} 个",
-            detail="；".join(marks)
-            or "（还没有任何入口指针：各入口按「往上找 .agent/ → 登记表」定）",
-            start="spool init（或 spool ws add <目录>）",
-            stop="spool ws forget <名字>",
+            state_label="ok",
+            target=f"{len(books)} registered",
+            detail="; ".join(marks)
+            or "(no client pointers; resolve via .agent/ walk → registry)",
+            start="spool init (or spool ws add <dir>)",
+            stop="spool ws forget <name>",
         )
     ]
 
 
 def _env_detail(path: Path) -> str:
-    """一份 `.env` 的现状：**只有路径、存在性与键的个数，没有值**。"""
+    """`.env` status: path / presence / key count only — never values."""
     if path.is_dir():
-        return "这个路径是个目录，不是文件"
+        return "path is a directory, not a file"
     if not path.is_file():
-        return "不存在"
+        return "missing"
     table = load_env_file(path)
     if not table:
-        return "存在，但一行都没解析出来（只认 KEY=VALUE 的文本；可能是编码问题）"
-    return f"存在（{len(table)} 个键；只印个数，不印值）"
+        return "exists but no KEY=VALUE lines parsed (encoding?)"
+    return f"exists ({len(table)} keys; count only, no values)"
 
 
 def _config_rows() -> list[Row]:
-    """配置与密钥**落在哪、在不在**。路径放进说明行（列宽会被截，路径不能被截）。
-
-    状态用「有 / 还没有」而不是「在跑 / 没起」：这几行说的不是进程在不在，
-    印成「在跑」会让人以为 `config.toml` 是个服务。
-    """
+    """Where config/secrets live. Paths go in detail (column width clips)."""
     rows: list[Row] = []
     path = settings.config_path()
     effective = settings.effective_config_path()
-    detail = f"路径：{path}；" + ("存在" if path.is_file() else "不存在（用 spool config --set 建）")
+    detail = f"path: {path}; " + (
+        "exists" if path.is_file() else "missing (create with spool config --set)"
+    )
     if effective != path and effective.is_file():
-        detail += f"；改名前的旧配置还在用：{effective}"
+        detail += f"; legacy config still in use: {effective}"
     rows.append(
         Row(
             name="config",
-            label="用户配置",
+            label="user config",
             state=STATE_UP if path.is_file() else STATE_NONE,
-            state_label="有" if path.is_file() else "还没有",
-            target="config.toml（用户级）",
+            state_label="ok" if path.is_file() else "none",
+            target="config.toml (user)",
             detail=detail,
-            start="spool config --set <键>=<值>",
-            stop="spool config --reset <键>",
+            start="spool config --set <key>=<value>",
+            stop="spool config --reset <key>",
         )
     )
     env_path = settings.env_path()
     rows.append(
         Row(
             name="env:user",
-            label="用户级 .env",
+            label="user .env",
             state=STATE_UP if env_path.is_file() else STATE_NONE,
-            state_label="有" if env_path.is_file() else "还没有",
-            target="密钥（机器级）",
-            detail=f"路径：{env_path}；{_env_detail(env_path)}；机器级服务的凭据看这一份",
+            state_label="ok" if env_path.is_file() else "none",
+            target="secrets (machine)",
+            detail=f"path: {env_path}; {_env_detail(env_path)}; machine-level credentials",
             start="spool env set KEY=VALUE",
-            stop="（直接编辑那个文件）",
+            stop="(edit the file)",
         )
     )
     current = _current_workspace()
@@ -608,16 +609,16 @@ def _config_rows() -> list[Row]:
         rows.append(
             Row(
                 name="env:workspace",
-                label="工作区 .env",
+                label="workspace .env",
                 state=STATE_UP if workspace_env.is_file() else STATE_NONE,
-                state_label="有" if workspace_env.is_file() else "还没有",
-                target="密钥（工作区）",
+                state_label="ok" if workspace_env.is_file() else "none",
+                target="secrets (workspace)",
                 detail=(
-                    f"路径：{workspace_env}；{_env_detail(workspace_env)}；"
-                    f"当前工作区 {current}"
+                    f"path: {workspace_env}; {_env_detail(workspace_env)}; "
+                    f"workspace {current}"
                 ),
-                start="spool env import --from <那个文件>",
-                stop="（直接编辑那个文件）",
+                start="spool env import --from <file>",
+                stop="(edit the file)",
             )
         )
     return rows
@@ -641,10 +642,10 @@ def _service_row(item, timeout: float) -> Row:
         row_state, label = STATE_UP, ""
         detail = state.detail
         if probe and probe != state.probe_detail:
-            detail += f"；{probe}"
+            detail += f"; {probe}"
     elif state.state == services.STATE_OCCUPIED:
-        row_state, label = STATE_UP, "被占用"
-        detail = state.detail + (f"；{probe}" if probe else "")
+        row_state, label = STATE_UP, "occupied"
+        detail = state.detail + (f"; {probe}" if probe else "")
     elif state.state == services.STATE_UNKNOWN:
         row_state, label = STATE_UNKNOWN, ""
         detail = state.detail
@@ -655,14 +656,14 @@ def _service_row(item, timeout: float) -> Row:
         start = f"spool service start {item.name}"
         stop = f"spool service stop {item.name}"
     else:
-        start = "（这条配方只探不启）"
-        stop = "（没写 command，没什么可停）"
+        start = "(probe-only)"
+        stop = "(no command)"
     return Row(
         name=f"service:{item.name}",
-        label=f"本机配方 {item.name}",
+        label=f"recipe {item.name}",
         state=row_state,
         state_label=label,
-        target=state.target or item.health or "（没写探活地址）",
+        target=state.target or item.health or "(no health URL)",
         detail=detail,
         start=start,
         stop=stop,
@@ -788,7 +789,7 @@ def _wrap(text: str, width: int) -> list[str]:
     for char in str(text or ""):
         step = _display_width(char)
         if current and used + step > width:
-            cut = max(current.rfind(spot) for spot in (" ", "；", "、", "，", "。"))
+            cut = max(current.rfind(spot) for spot in (" ", ";", ",", ".", "；", "、", "，", "。"))
             if cut > 0 and _display_width(current[:cut]) >= width // 2:
                 pieces.append(current[:cut])
                 current = current[cut + 1 :]
@@ -803,63 +804,73 @@ def _wrap(text: str, width: int) -> list[str]:
     return pieces
 
 
-#: 五列。宽度按"最要紧的内容先放得下"定：**起停方式不许被截**（那是这条
-#: 命令的一半价值），长说明走下面的缩进行（`_DETAIL_*`）。
-#: 合计 121 列 ＋ 8 个间隔 = 129；说明行最多 `_DETAIL_INDENT` + 100 列。
-_COLUMNS = ("服务", "状态", "地址 / 说明", "启动命令", "停止命令")
-_WIDTHS = (19, 11, 28, 37, 26)
-_GAP = "  "
-_DETAIL_INDENT = "  ↳ "
-_DETAIL_WIDTH = 100
+#: Card layout (not a wide 5-column table): title line + indented fields,
+#: blank line between cards. Long paths wrap under `note`.
+_LABEL_WIDTH = 22
+_DETAIL_INDENT = "    "
+_DETAIL_WIDTH = 76
+_FIELD_INDENT = "    "
 
 
-def _header() -> str:
-    line = _GAP.join(_pad(name, width) for name, width in zip(_COLUMNS, _WIDTHS))
-    rule = "-" * _display_width(line)
-    return line.rstrip() + "\n" + rule
+def _title_line(row: Row) -> str:
+    plain_mark = "* " if row.critical else "  "
+    state = row.state_label or STATE_LABELS.get(row.state, row.state)
+    plain_name = _pad(plain_mark + row.label, _LABEL_WIDTH)
+    if row.critical:
+        visible = "[accent]* [/]" + escape(plain_name[2:])
+    else:
+        visible = escape(plain_name)
+    styled_state = f"[{state_style(row.state)}]{escape(state)}[/]"
+    return f"{visible}  {styled_state}".rstrip()
+
+
+def _field(name: str, value: str) -> list[str]:
+    """One labeled field; wrap value on following lines if needed."""
+    text = str(value or "").strip()
+    if not text:
+        return []
+    label = f"[muted]{name:<7}[/]"
+    prefix_plain = f"{_FIELD_INDENT}{name:<7}"
+    pieces = _wrap(text, _DETAIL_WIDTH)
+    if not pieces:
+        return []
+    lines = [f"{_FIELD_INDENT}{label}{escape(pieces[0])}"]
+    cont = " " * _display_width(prefix_plain)
+    lines.extend(cont + escape(piece) for piece in pieces[1:])
+    return lines
 
 
 def _row_lines(row: Row) -> list[str]:
-    """一行（＋缩进的说明行）。"""
-    label = ("★ " if row.critical else "  ") + row.label
-    state = row.state_label or STATE_LABELS.get(row.state, row.state)
-    cells = (
-        label,
-        state,
-        row.target,
-        row.start,
-        row.stop,
-    )
-    lines = [_GAP.join(_pad(text, width) for text, width in zip(cells, _WIDTHS)).rstrip()]
-    if row.detail:
-        lines.extend(_DETAIL_INDENT + piece for piece in _wrap(row.detail, _DETAIL_WIDTH))
+    """One service card: title, then target / note / start / stop."""
+    lines = [_title_line(row)]
+    lines.extend(_field("target", row.target))
+    lines.extend(_field("note", row.detail))
+    lines.extend(_field("start", row.start))
+    lines.extend(_field("stop", row.stop))
     return lines
 
 
 def render_human(report: Report) -> str:
-    """面向人的表 ＋ 页脚（页脚里定义"关键"是哪些、退出码是什么意思）。"""
+    """Spaced card list + one-line footer."""
     lines = [
-        f"spoolkit 服务状态（探测用时 {report.elapsed_ms}ms，超时 {report.timeout:g}s，"
-        "只打本机地址）",
+        f"[muted]spoolkit status · {report.elapsed_ms}ms · timeout {report.timeout:g}s · loopback[/]",
         "",
-        _header(),
     ]
-    for row in report.rows:
+    for index, row in enumerate(report.rows):
+        if index:
+            lines.append("")
         lines.extend(_row_lines(row))
     down = report.critical_down()
     lines.append("")
     if down:
-        lines.append("关键项没起：" + "、".join(row.label for row in down))
+        lines.append(
+            "[bad]critical down:[/] " + ", ".join(escape(row.label) for row in down)
+        )
     else:
-        lines.append("关键项都在。")
-    lines.extend(
-        [
-            "★ = 关键项（没起 → 退出码 1）。关键只有三处：",
-            "  1) 模型供应商：没配过、或生效值是 fake（只会回放脚本）；",
-            "  2) 本机模型：仅当生效 provider 是 llamacpp；",
-            "  3) 用户配置 [[service]] 里写了 command 的配方（你声明了要拉起它）。",
-            "其余各行只报不判：网页壳 / 通道桥按需起，外挂 MCP 与密钥落点不影响退出码。",
-            "退出码：0 = 关键都在；1 = 有关键没起；2 = 用法错或配置读不出来。",
-        ]
+        lines.append("[ok]critical ok[/]")
+    footer = (
+        "* critical (exit 1 if down): provider · local model (llamacpp) · "
+        "[[service]] with command  ·  else informational  ·  exit 0/1/2"
     )
+    lines.append(f"[muted]{escape(footer)}[/]")
     return "\n".join(lines)

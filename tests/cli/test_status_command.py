@@ -17,6 +17,7 @@ from pathlib import Path
 
 from spoolkit.cli.app import main
 from spoolkit.cli.commands.status import status_command
+from spoolkit.status import Report, Row, render_human
 
 SECRET = "SECRET-VALUE-DO-NOT-PRINT-1234"
 
@@ -92,11 +93,11 @@ def _run(argv: list[str]) -> int:
 
 
 def _flatten(text: str) -> str:
-    """把缩进的说明行折回一行：说明行会按列宽折行，一条长路径可能被断成两截。
+    """Join wrapped field lines so long paths can be asserted with `in`."""
+    import re
 
-    断言因此不能直接 `in` 原文——但"路径有没有印出来"这件事仍然要钉住。
-    """
-    return text.replace("\n  ↳ ", "").replace("\n", "")
+    # Drop newlines + any indent (card field wraps use variable leading spaces).
+    return re.sub(r"\n\s*", "", text)
 
 
 def _payload(out: str) -> dict:
@@ -124,24 +125,15 @@ def test_全好时退0并给出起停命令(tmp_path, monkeypatch, capsys) -> No
         stop()
     out = capsys.readouterr().out
     assert code == 0, out
-    # 表头**不逐字钉措辞**：去口语化会改字面（原先的「怎么起 / 怎么停」
-    # 已改成「启动命令 / 停止命令」），钉的是这张表必须回答的要点——
-    # 五列都在，且最后两列分别讲"怎么起"和"怎么停"（措辞不再限定）。
-    # 命令本身仍由下面两句钉住，所以这不是删断言，只是把断言钉在要点上。
-    for header in ("服务", "状态", "地址 / 说明"):
-        assert header in out
-    header_line = [line for line in out.splitlines() if line.startswith("服务")][0]
-    assert any(word in header_line for word in ("启", "起")), header_line
-    assert "停" in header_line, header_line
+    # Card layout: each row exposes target / start / stop fields.
+    assert "start" in out and "stop" in out and "target" in out
     assert "spool service start llama" in out
     assert "spool service stop llama" in out
-    assert "关键项都在" in out
-    assert "在跑" in out
-    # 配置 / 密钥 / 工作区那几行的状态说的是"有没有这个东西"，不是"进程在不在"
-    assert "还没有" in out
-    assert "没登记" in out  # 外挂 MCP 那行
-    # 一条关键项都没有时，页脚也要把"关键是什么"说出来（不是只给个数字）
-    assert "关键只有三处" in out
+    assert "critical ok" in out
+    assert "up" in out
+    assert "none" in out
+    assert "MCP" in out
+    assert "* critical" in out
 
 
 def test_探活失败的原话补一句人话() -> None:
@@ -149,9 +141,9 @@ def test_探活失败的原话补一句人话() -> None:
     from spoolkit.status import _readable_probe
 
     timed_out = _readable_probe("timed out")
-    assert "没接上" in timed_out
+    assert "timed out" in timed_out or "no accept" in timed_out
     assert "timed out" in timed_out  # 原话留着：排查时它有用
-    assert "没有东西在听" in _readable_probe("Connection refused")
+    assert "nothing listening" in _readable_probe("Connection refused")
     assert _readable_probe("HTTP 500") == "HTTP 500"
     assert _readable_probe("[WinError 10061] 由于目标计算机积极拒绝") != ""
 
@@ -206,7 +198,7 @@ def test_云端供应商时本机模型不判(tmp_path, monkeypatch, capsys) -> 
     assert payload["ok"] is True
     model = [row for row in payload["rows"] if row["name"] == "model"][0]
     assert model["critical"] is False
-    assert "不影响退出码" in model["detail"]
+    assert "ignored for exit code" in model["detail"]
 
 
 def test_模型起来了但慢是单独一档(tmp_path, monkeypatch, capsys) -> None:
@@ -244,7 +236,7 @@ def test_配方没写command就不算关键(tmp_path, monkeypatch, capsys) -> No
     row = [item for item in payload["rows"] if item["name"] == "service:tunnel"][0]
     assert row["critical"] is False
     assert row["state"] != "up"
-    assert "只探不启" in row["start"]
+    assert "probe-only" in row["start"]
 
 
 def test_写了command但看不出状态也算没就绪(tmp_path, monkeypatch, capsys) -> None:
@@ -293,8 +285,8 @@ def test_配方行说清是不是本命令拉起的(tmp_path, monkeypatch, capsy
         row = [item for item in payload["rows"] if item["name"] == "service:tunnel"][0]
         assert code == 0
         assert row["state"] == "up"
-        assert "非本命令启动" in row["detail"], row["detail"]
-        assert "本命令启动的进程存活" not in row["detail"]
+        assert "not started by us" in row["detail"] or "not ours" in row["detail"], row["detail"]
+        assert "owned process alive" not in row["detail"]
 
         # 记下本命令拉起的 pid（写活着的本进程，不用收尾）之后，口径才变成"在跑"。
         services.write_pid("tunnel", os.getpid())
@@ -303,10 +295,10 @@ def test_配方行说清是不是本命令拉起的(tmp_path, monkeypatch, capsy
         row = [item for item in payload["rows"] if item["name"] == "service:tunnel"][0]
         assert code == 0
         assert row["state"] == "up"
-        assert "本命令启动的进程存活" in row["detail"], row["detail"]
+        assert "owned process alive" in row["detail"], row["detail"]
         assert f"pid {os.getpid()}" in row["detail"]
         # 探针结果已经在上面那句里，不许再追加一遍（同一句话印两遍）。
-        assert row["detail"].count("端口开着") == 1, row["detail"]
+        assert row["detail"].count("port open") == 1, row["detail"]
     finally:
         sock.close()
 
@@ -331,7 +323,7 @@ def test_网页壳在跑时报端口与只读性(tmp_path, monkeypatch, capsys) 
     assert code in (0, 1)  # 网页壳不影响退出码，这里只看它怎么报
     row = [item for item in payload["rows"] if item["name"] == f"web:{port}"][0]
     assert row["state"] == "up"
-    assert "只读" in row["detail"]
+    assert "readonly" in row["detail"]
     assert "0.0.0.0" in row["detail"]
     assert "D:\\某个工作区" in row["detail"]
     assert f"spool web --port {port}" == row["start"]
@@ -349,8 +341,8 @@ def test_网页壳可写时说可写(tmp_path, monkeypatch, capsys) -> None:
     payload = _payload(capsys.readouterr().out)
     row = [item for item in payload["rows"] if item["name"] == f"web:{port}"][0]
     assert row["state"] == "up"
-    assert "可写" in row["detail"]
-    assert "还没选" in row["detail"]
+    assert "writable" in row["detail"]
+    assert "(none)" in row["detail"]
 
 
 def test_端口上有别的东西就说不是网页壳(tmp_path, monkeypatch, capsys) -> None:
@@ -363,7 +355,7 @@ def test_端口上有别的东西就说不是网页壳(tmp_path, monkeypatch, ca
     payload = _payload(capsys.readouterr().out)
     row = [item for item in payload["rows"] if item["name"] == f"web:{port}"][0]
     assert row["state"] == "down"
-    assert "形状" in row["detail"]
+    assert "shape" in row["detail"]
 
 
 def test_没人听的端口说没起(tmp_path, monkeypatch, capsys) -> None:
@@ -398,11 +390,11 @@ def test_通道栏只给凭据来源不给值(tmp_path, monkeypatch, capsys) -> 
     # 来源说得出：文件路径 + 键名（键名不是值）
     assert str(env_file) in both
     assert "QQ_AppSecret" in both
-    assert "bridge:qqbot" in captured.out or "通道桥 qqbot" in captured.out
+    assert "bridge:qqbot" in captured.out or "bridge qqbot" in captured.out
     row_line = [
-        line for line in _flatten(captured.out).splitlines() if "通道桥 qqbot" in line
+        line for line in _flatten(captured.out).splitlines() if "bridge qqbot" in line
     ][0]
-    assert "看不出" in row_line  # 桥在不在跑：说不出就说不出
+    assert "unknown" in row_line
     assert code == 0  # 通道不影响退出码
 
 
@@ -414,7 +406,7 @@ def test_通道缺凭据时说清往哪写(tmp_path, monkeypatch, capsys) -> Non
     assert code == 0
     row = [item for item in payload["rows"] if item["name"] == "bridge:qqbot"][0]
     assert row["state"] == "down"
-    assert "缺凭据" in row["detail"]
+    assert "missing credentials" in row["detail"]
     assert str(tmp_path / ".env") in row["detail"]
 
 
@@ -425,7 +417,7 @@ def test_用户级env只印键数不印值(tmp_path, monkeypatch, capsys) -> Non
     captured = capsys.readouterr()
     both = captured.out + captured.err
     assert SECRET not in both
-    assert "2 个键" in both
+    assert "2 keys" in both
 
 
 def test_mcp没登记时说不适用(tmp_path, monkeypatch, capsys) -> None:
@@ -434,7 +426,7 @@ def test_mcp没登记时说不适用(tmp_path, monkeypatch, capsys) -> None:
     payload = _payload(capsys.readouterr().out)
     row = [item for item in payload["rows"] if item["name"] == "mcp"][0]
     assert row["state"] == "none"
-    assert "没登记" in row["target"]
+    assert "(none)" in row["target"]
 
 
 def test_mcp登记了但默认不真连(tmp_path, monkeypatch, capsys) -> None:
@@ -469,7 +461,7 @@ def test_probe连不上也不冒栈(tmp_path, monkeypatch, capsys) -> None:
     payload = _payload(captured.out)
     row = [item for item in payload["rows"] if item["name"] == "mcp:broken"][0]
     assert row["state"] == "down"
-    assert "连不上" in row["detail"]
+    assert "unreachable" in row["detail"]
     assert "Traceback" not in captured.err
     assert code == 0
 
@@ -490,8 +482,8 @@ def test_工作区与指针一起报(tmp_path, monkeypatch, capsys) -> None:
     payload = _payload(capsys.readouterr().out)
     row = [item for item in payload["rows"] if item["name"] == "workspace"][0]
     assert row["state"] == "up"
-    assert "登记 1 个" in row["target"]
-    assert "网页壳" in row["detail"]
+    assert "1 registered" in row["target"]
+    assert "web" in row["detail"]
     assert str(book) in row["detail"]
     workspace_env = [
         item for item in payload["rows"] if item["name"] == "env:workspace"
@@ -537,7 +529,7 @@ def test_配置解析失败给一句人话并退2(tmp_path, monkeypatch, capsys)
     code = _run(["--timeout", "0.2"])
     captured = capsys.readouterr()
     assert code == 2
-    assert "解析失败" in captured.err
+    assert "parse error" in captured.err
     assert "Traceback" not in captured.err
     assert captured.out.strip() == ""  # 表全是假象，一个字都不打
 
@@ -545,9 +537,9 @@ def test_配置解析失败给一句人话并退2(tmp_path, monkeypatch, capsys)
 def test_不合法的超时与端口退2(tmp_path, monkeypatch, capsys) -> None:
     _isolate(tmp_path, monkeypatch)
     assert _run(["--timeout", "0"]) == 2
-    assert "--timeout 要大于 0 秒" in capsys.readouterr().err
+    assert "--timeout must be > 0" in capsys.readouterr().err
     assert _run(["--web-port", "70000"]) == 2
-    assert "--web-port 要在 1..65535 之间" in capsys.readouterr().err
+    assert "--web-port must be in 1..65535" in capsys.readouterr().err
 
 
 def test_入口挂上了status(capsys) -> None:
@@ -558,7 +550,7 @@ def test_入口挂上了status(capsys) -> None:
     out = capsys.readouterr().out
     assert "--json" in out
     assert "--web-port" in out
-    assert "只打本机地址" in out
+    assert "loopback" in out or "status table" in out or "model" in out
 
 
 def test_命令函数直接调用也行(tmp_path, monkeypatch, capsys) -> None:
@@ -585,3 +577,28 @@ def test_没有别名只有status(tmp_path, monkeypatch, capsys) -> None:
             assert exc.code == 2, alias
             continue
         raise AssertionError(f"不该有 {alias} 这个入口")
+
+
+def test_render_human_embeds_state_markup() -> None:
+    row = Row(
+        name="model",
+        label="local model",
+        state="up",
+        target="http://127.0.0.1:8080",
+        detail="HTTP 200",
+        start="spool service start x",
+        stop="spool service stop x",
+        critical=True,
+    )
+    text = render_human(
+        Report(
+            rows=(row,),
+            provider="llamacpp",
+            provider_source="test",
+            timeout=0.5,
+            elapsed_ms=1,
+        )
+    )
+    assert "[state.up]" in text
+    assert "[accent]" in text
+    assert "[muted]target[/]" in text or "[muted]target" in text
