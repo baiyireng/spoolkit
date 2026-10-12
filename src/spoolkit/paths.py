@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from spoolkit.errors import PathOutsideProjectError
+from spoolkit.prompt_sanitize import restore_temp_placeholder
 
 
 def resolve_within(root: Path, candidate: str) -> Path:
@@ -17,6 +18,11 @@ def resolve_within(root: Path, candidate: str) -> Path:
     """
     if not candidate or not candidate.strip():
         raise PathOutsideProjectError("路径为空")
+
+    # 模型看到的提示词里临时路径被抹成了 `<临时目录>`，它照抄当路径用是
+    # 合理行为——在这里认回来（fix-bug 探针：模型照抄占位符当 cwd，
+    # 连撞「工作目录不存在」）。
+    candidate = restore_temp_placeholder(candidate.strip())
 
     base = root.resolve()
     raw = Path(candidate)
@@ -54,6 +60,7 @@ def resolve_readable(
     if not candidate or not candidate.strip():
         raise PathOutsideProjectError("路径为空")
 
+    candidate = restore_temp_placeholder(candidate.strip())
     raw = Path(candidate)
     allowed = [root.resolve(), *(item.resolve() for item in extra_roots)]
     target = raw if raw.is_absolute() else allowed[0] / raw

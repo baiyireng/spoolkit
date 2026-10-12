@@ -46,6 +46,7 @@
 import os
 import re
 import tempfile
+from pathlib import Path
 
 # 占位符。刻意用 `<…>`：它一眼能看出「这里原本是个路径/名字」，而且不含
 # 冒号、反斜杠与数字——不会被本模块的第二遍清理再改一次（幂等）。
@@ -212,3 +213,30 @@ def for_prompt(text: str) -> str:
     return _MKSTEMP_SUFFIX.sub(
         lambda match: f"{match.group(1)}{RANDOM_PLACEHOLDER}{match.group(2)}", body
     )
+
+
+def restore_temp_placeholder(text: str) -> str:
+    """把 `<临时目录>` 占位符还原成本次运行的真实临时根。
+
+    fix-bug 探针真机现场：工作区落在 %TEMP% 下的沙箱里，提示词里的根路径
+    被抹成了 `<临时目录>`，模型照抄它当 `run_command` 的 cwd——
+    「工作目录不存在: <临时目录>\\spoolkit-probes\\…」。抹除是为了可复现性
+    （换随机副本名重跑提示词逐字相同），不该以「模型照抄的路径跑不通」
+    为代价：照抄它看到的字符串是合理行为，解析层要认得回来。
+
+    还原策略：逐个根拼回去，**拼出来真实存在**的优先；都不存在时用第一个
+    根（通常就是 %TEMP% 本身——路径不存在会让工具报「目录不存在」，
+    那句报错现在带真实绝对路径与目录清单，比占位符有信息量）。
+    `<试跑副本>`/`<随机名>` 这类一对多的占位符无法精确还原，不动——
+    它们指向的是验证器内部的临时位置，模型本来就不该直接碰。
+    """
+    if not text or TEMP_PLACEHOLDER not in text:
+        return text
+    roots = run_roots()
+    if not roots:
+        return text
+    for root in roots:
+        candidate = text.replace(TEMP_PLACEHOLDER, root)
+        if Path(candidate).exists():
+            return candidate
+    return text.replace(TEMP_PLACEHOLDER, roots[0])

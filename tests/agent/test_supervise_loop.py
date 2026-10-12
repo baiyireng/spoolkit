@@ -423,6 +423,54 @@ def test_它带着理由拒绝督导时表态被记下来(tmp_path: Path) -> Non
     ), result.trace
 
 
+def test_督导判可收尾时由模型写结论(tmp_path: Path) -> None:
+    """finish 把话交给模型写 final，不把督导的话当成模型结论。
+
+    现场：材料已经够，督导 action=finish，message 是「请直接写 final」。
+    旧行为当场收尾，model_final 为空，报告里那句是督导对模型说的话。
+    """
+    message = "请基于已有事实直接写 final，不要再读文件。"
+    written = "两份实现可以互补：一边有输入队列，一边有结束层。"
+    loop = _build(
+        tmp_path,
+        [
+            _turn("看", [_look()]),
+            _turn("看", [_look()]),
+            _verdict("finish", reason="结论已可写出", message=message),
+            _turn("写完", final=written),
+        ],
+    )
+    result = loop.run("做点什么")
+    assert result.model_final == written
+    assert result.concluded
+    assert result.finished is True
+    prompt = "\n".join(item.content for item in loop.gateway.requests[-1].messages)
+    assert message in prompt
+    assert "直接给出结论" in prompt
+    assert "请用 assessment" not in prompt
+
+
+def test_督导交还后它仍调工具则不执行并沿用原话(tmp_path: Path) -> None:
+    """交还的这一轮只接受结论。再读文件不能执行，否则又回到分段读取。"""
+    message = "请直接写 final。"
+    loop = _build(
+        tmp_path,
+        [
+            _turn("看", [_look()]),
+            _turn("看", [_look()]),
+            _verdict("finish", reason="结论已可写出", message=message),
+            _turn("再看", [_look()]),
+        ],
+    )
+    result = loop.run("做点什么")
+    assert result.model_final == ""
+    assert not result.concluded
+    assert result.finished is True
+    assert message in result.final
+    assert any("调用未执行" in line for line in result.trace)
+    assert len(loop.gateway.requests) == 4
+
+
 def test_督导说完成后按成功收尾(tmp_path: Path) -> None:
     """「事情已经做完、只是它自己没宣告」要有出路——这条是实测逼出来的。
 
@@ -436,12 +484,13 @@ def test_督导说完成后按成功收尾(tmp_path: Path) -> None:
             _turn("看", [_look()]),
             _turn("看", [_look()]),
             _verdict("finish", reason="自动验证已通过，该做的都做了"),
+            _turn("写完", final="自动验证已通过，该做的都做了"),
         ],
     )
     result = loop.run("做点什么")
     assert result.finished is True
-    assert "自动验证已通过" in result.final
-    assert any("督导判断已完成" in line for line in result.trace)
+    assert result.model_final == "自动验证已通过，该做的都做了"
+    assert any("交给模型写 final" in line for line in result.trace)
 
 
 def test_名字环触发督导(tmp_path: Path) -> None:
@@ -529,11 +578,136 @@ def test_督导说完成时带上它给的话(tmp_path: Path) -> None:
                 reason="都做完了",
                 message="8 个目录逐个跑 pytest 都通过，任务已完成。",
             ),
+            _turn("写完", final="8 个目录逐个跑 pytest 都通过，任务已完成。"),
         ],
     )
     result = loop.run("做点什么")
     assert result.finished is True
-    # 它给的那句话原样落在结论里；有落盘时后面才附最终状态与验证结果
-    # （第 7 条：收手/收尾时也要报真实状态）。这条脚本一处改动都没有，
-    # 所以结论原样——只读运行不该拖一句「这次没改过任何文件」。
+    # 督导的话进下一轮提示，结论由模型写。只读运行不该拖一句
+    # 「这次没改过任何文件」。
+    prompt = "\n".join(item.content for item in loop.gateway.requests[-1].messages)
+    assert "8 个目录逐个跑 pytest 都通过，任务已完成。" in prompt
+    assert result.model_final == "8 个目录逐个跑 pytest 都通过，任务已完成。"
     assert result.final == "8 个目录逐个跑 pytest 都通过，任务已完成。"
+
+
+def test_暂存之后再读会说明磁盘仍是旧文件(tmp_path: Path) -> None:
+    """大重写先暂存，read_file 仍读磁盘。回执必须说明这不是暂存失败。"""
+    from spoolkit.tools.edit import PendingChanges, write_file_spec
+
+    old = "".join(f'<p id="p{index}">ONLY_ON_DISK {index}</p>\n' for index in range(12))
+    new = "<html>\n<p>STAGED_BODY</p>\n</html>\n"
+    (tmp_path / "snake.html").write_text(old, encoding="utf-8")
+    pending = PendingChanges(tmp_path)
+    staged = write_file_spec(tmp_path, pending).handler(
+        {"path": "snake.html", "content": new, "rewrite_reason": "合并重复段落"}
+    )
+    assert staged.ok, staged.content[:200]
+    token = pending.staged_items()[0].token
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path, pending))
+    loop = AgentLoop(
+        gateway=FakeModel(
+            script=[
+                _turn("看", [{"name": "read_file", "arguments": {"path": "snake.html"}}]),
+                _turn("记下"),
+            ],
+            tokenizer=OfflineTokenCounter(),
+        ),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=Config(
+            project_root=tmp_path, context_window=4096, max_steps=2, supervise=False
+        ),
+        pending=pending,
+    )
+    loop.run("合并")
+    prompt = "\n".join(item.content for item in loop.gateway.requests[-1].messages)
+    assert "ONLY_ON_DISK" in prompt
+    assert "STAGED_BODY" not in prompt
+    assert "暂存未落盘" in prompt
+    assert token in prompt
+    assert "confirm_rewrite" in prompt
+    assert "不要再 write_file" in prompt
+    assert (tmp_path / "snake.html").read_text(encoding="utf-8") == old
+
+
+def test_收尾交还时确认暂存并写出结论(tmp_path: Path) -> None:
+    """finish 不能要求把全文再写进 final，也不能丢掉 confirm_rewrite。"""
+    from spoolkit.tools.edit import PendingChanges, confirm_rewrite_spec, write_file_spec
+
+    old = "".join(f'<p id="p{index}">第 {index} 行</p>\n' for index in range(12))
+    new = "<html>\n<p id=\"p0\">第 0 行</p>\n</html>\n"
+    (tmp_path / "snake.html").write_text(old, encoding="utf-8")
+    pending = PendingChanges(tmp_path)
+    staged = write_file_spec(tmp_path, pending).handler(
+        {"path": "snake.html", "content": new, "rewrite_reason": "合并重复段落"}
+    )
+    assert staged.ok, staged.content[:200]
+    record = pending.staged_items()[0]
+    token = record.token
+    dropped = [f"{one}：重复段落，合并时去掉了" for one in record.ids()]
+    written = "合并完成：重复的第二份已去掉。"
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path, pending))
+    registry.register(confirm_rewrite_spec(tmp_path, pending))
+    loop = AgentLoop(
+        gateway=FakeModel(
+            script=[
+                _turn("看", [{"name": "read_file", "arguments": {"path": "snake.html"}}]),
+                _verdict(
+                    "finish",
+                    reason="合并版已经暂存",
+                    message="请把合并后的 snake.html 完整代码写进 final。",
+                ),
+                _turn(
+                    "确认清单",
+                    [{
+                        "name": "confirm_rewrite",
+                        "arguments": {"token": token, "dropped": dropped},
+                    }],
+                    final=written,
+                ),
+            ],
+            tokenizer=OfflineTokenCounter(),
+        ),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=Config(
+            project_root=tmp_path, context_window=4096, max_steps=1, supervise=True
+        ),
+        pending=pending,
+    )
+    result = loop.run("合并优化代码")
+    handoff = "\n".join(item.content for item in loop.gateway.requests[-1].messages)
+    assert "confirm_rewrite" in handoff
+    assert "不要把全文写进 final" in handoff
+    assert result.model_final == written
+    assert result.finished is True
+    assert pending.staged_items() == []
+    landed = pending.items()
+    assert [one.path for one in landed] == ["snake.html"]
+    assert landed[0].new_text == new
+
+
+def test_结论里的整份源码不会当成已经落盘(tmp_path: Path) -> None:
+    """把文件贴进 final 只是一句话。不写 write_file，磁盘不会变。"""
+    lines = "\n".join(f"<p>line {index}</p>" for index in range(40))
+    pasted = f"合并后的代码如下：\n```html\n<html>\n{lines}\n</html>\n```"
+    (tmp_path / "snake.html").write_text("<html>\nOLD\n</html>\n", encoding="utf-8")
+    loop = _build(
+        tmp_path,
+        [
+            _turn("贴源码", final=pasted),
+            _turn("改口", final="还没写入文件。"),
+        ],
+        max_steps=4,
+        supervise=False,
+    )
+    result = loop.run("合并优化代码")
+    prompt = "\n".join(item.content for item in loop.gateway.requests[-1].messages)
+    assert "不会落盘" in prompt
+    assert "write_file" in prompt
+    assert result.model_final == "还没写入文件。"
+    assert "line 0" not in result.model_final
+    assert (tmp_path / "snake.html").read_text(encoding="utf-8") == "<html>\nOLD\n</html>\n"

@@ -26,11 +26,20 @@ def _read_file(root: Path, args: dict, pending=None, read_roots=()) -> ToolResul
         # 删除也要出一句人话：只说「文件不存在」时，模型分不清是它自己刚
         # 删掉的（那是预期状态）、还是路径写错了（那是要改的）。
         if target.resolve() in view.deleted_paths():
+            # fix-bug 真机现场：模型误删文件后想恢复，反复 read 同一个路径
+            # 9 次——它以为「读不到 = 出问题了，再读一次」。必须把出路写死：
+            # 删除还没落盘，磁盘上的旧内容还在；要恢复就重新 write_file
+            # 写回内容（旧内容可以先用 run_command 跑 `type`/`cat` 读磁盘拿到，
+            # 因为 read_file 看的是「改动生效后」的视图，而 run_command 看的
+            # 是真实磁盘）。
             return ToolResult(
                 ok=False,
                 content=(
                     f"{args['path']} 已在待确认改动里被删除（还没落盘）——"
-                    "现在读不到它，这是删除生效后的正常状态。"
+                    "现在读不到它，这是删除生效后的正常状态，**再读多少次都一样**。\n"
+                    "如果删除是误操作、想恢复它：磁盘上的旧文件还在，"
+                    "用 run_command 跑 `type <路径>`（Windows）或 `cat <路径>`（POSIX）"
+                    "拿到旧内容，再用 write_file 写回去——新写入会顶替掉那处待确认的删除。"
                 ),
             )
         return ToolResult(ok=False, content=f"文件不存在: {args['path']}")

@@ -1,0 +1,299 @@
+"""从真实探针跑分里挖出来的回归场景。
+
+这些用例直接对应 `scripts/probe.py` 在真实模型下暴露的失败轨迹：
+不是模型能力问题，而是主循环在「护栏放行」「上下文压缩」「督导改道」
+交界处的行为把任务拖进死胡同。把它们钉成单元测试，复跑成本才可控。
+"""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from spoolkit.agent.loop import AgentLoop
+from spoolkit.config import Config
+from spoolkit.llm.fake import FakeModel
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.fs import read_file_spec
+from spoolkit.tools.registry import ToolRegistry
+
+
+def _turn(thought: str, calls=None, final=None) -> str:
+    return json.dumps(
+        {
+            "thought": thought,
+            "tool_calls": calls or [],
+            "state": None,
+            "done": final is not None,
+            "final": final,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _read(path: str) -> dict:
+    return {"name": "read_file", "arguments": {"path": path}}
+
+
+def _build(tmp_path: Path, script: list, **kwargs) -> AgentLoop:
+    registry = ToolRegistry()
+    registry.register(read_file_spec(tmp_path))
+    return AgentLoop(
+        gateway=FakeModel(script=script, tokenizer=OfflineTokenCounter()),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=Config(
+            project_root=tmp_path,
+            context_window=4096,
+            max_steps=16,
+            supervise=False,
+            **kwargs,
+        ),
+    )
+
+
+def _patch_bump_revision(monkeypatch, loop: AgentLoop) -> None:
+    """每次调用前把上下文版本推一格，模拟真实运行里的压缩/重置。
+
+    注意：循环在 `_invoke_guarded` 返回之后才会把 `_seen_at_revision`
+    更新成当前版本号。如果我们在返回后再加，seen 会永远等于最新版本，
+    刷新判据就永远不成立。真实时序是「下一次调用之前压缩已经发生」。
+    """
+    real = AgentLoop._invoke_guarded
+
+    def wrapped(self, call, repeats, seen=1):
+        self._context_revision += 1
+        return real(self, call, repeats, seen)
+
+    monkeypatch.setattr(AgentLoop, "_invoke_guarded", wrapped)
+
+
+def test_读取非法语法_py_文件不会炸循环(tmp_path: Path) -> None:
+    """真机现场：工作区里可能混着非代码的 .py 文件（测试夹具、失败摘要）。
+
+    `_functions` 原来直接调 `ast.parse`，一遇到 SyntaxError 就把整个 AgentLoop
+    炸掉。这里只要求它平静地跳过这段，让任务继续跑。
+    """
+    (tmp_path / "services.py").write_text(
+        "AssertionError: assert service.stopped is True\nvalue = 1\n",
+        encoding="utf-8",
+    )
+    loop = _build(
+        tmp_path,
+        [
+            _turn("读失败摘要", [_read("services.py")]),
+            _turn("收尾", final="这段不是代码，跳过即可。"),
+        ],
+    )
+    result = loop.run("看看失败摘要")
+    assert result.finished is True
+    assert "跳过即可" in result.final
+
+
+def test_查询类工具重复不被误判成判不出(tmp_path: Path) -> None:
+    """rename-cross-file 真机现场：find_callers 第一次成功，第二次原样重发
+    就被「没有可比较的内容对象」硬拦，第三次直接停用组合。
+
+    查询类工具（find_callers / search_code 等）的可比对象不是文件内容，
+    而是「参数 + 待确认清单」。参数没变、清单没变时重跑才是无用重复；
+    清单变了（比如模型已经提出了改名），重跑就有理由。
+    """
+    (tmp_path / "pipeline.py").write_text(
+        "def get_rows(source):\n    pass\n\ndef render(source):\n    return get_rows(source)\n",
+        encoding="utf-8",
+    )
+    script = [
+        _turn("查引用", [{"name": "find_callers", "arguments": {"name": "get_rows", "depth": 2}}]),
+        _turn("再查一次", [{"name": "find_callers", "arguments": {"name": "get_rows", "depth": 2}}]),
+        _turn("收尾", final="查完了"),
+    ]
+    registry = ToolRegistry()
+    from spoolkit.index.tools import find_callers_spec
+    registry.register(find_callers_spec(tmp_path / ":memory:", root=tmp_path))
+    loop = AgentLoop(
+        gateway=FakeModel(script=script, tokenizer=OfflineTokenCounter()),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=Config(
+            project_root=tmp_path,
+            context_window=4096,
+            max_steps=8,
+            supervise=False,
+        ),
+    )
+    result = loop.run("看看 get_rows 被谁用")
+    # 第一次执行成功；第二次因为参数与清单都没变，应判成**无用重复**硬拦，
+    # 而不是「判不出」。无用重复与判不出的处置都是拒绝，但理由字段不同。
+    assert any("完全相同" in line or "无用重复" in line for line in result.trace), (
+        f"第二次 find_callers 应判成无用重复，trace：{result.trace}"
+    )
+    assert not any("没有可比较的内容对象" in line for line in result.trace), (
+        f"查询类工具不应再被判不出，trace：{result.trace}"
+    )
+
+
+def test_confirm_rewrite_接受_write_file_的_acked_disappeared_别名(tmp_path: Path) -> None:
+    """merge-html 真机现场：模型把 write_file 的参数名 acked_disappeared
+    原样搬进 confirm_rewrite，被参数校验直接打回，确认回合卡死。
+
+    confirm_rewrite 的正式参数名是 `acked`，但应该兼容别名——模型看不清
+    两个工具参数名的细微差别，系统不能因此把任务卡住。
+    """
+    from spoolkit.tools.edit import (
+        PendingChanges,
+        confirm_rewrite_spec,
+        write_file_spec,
+    )
+
+    old = "".join(f'<p id="p{index}">第 {index} 行</p>\n' for index in range(12))
+    new = "<html>\n<p id=\"p0\">第 0 行</p>\n</html>\n"
+    target = tmp_path / "snake.html"
+    target.write_text(old, encoding="utf-8")
+    pending = PendingChanges(tmp_path)
+    staged = write_file_spec(tmp_path, pending).handler(
+        {"path": "snake.html", "content": new, "rewrite_reason": "合并重复段落"}
+    )
+    assert staged.ok, staged.content[:200]
+    record = pending.staged_items()[0]
+    token = record.token
+
+    # 用 write_file 的参数名 acked_disappeared 来确认——这是真机现场。
+    spec = confirm_rewrite_spec(tmp_path, pending)
+    result = spec.handler(
+        {"token": token, "acked_disappeared": [item.token for item in record.items]}
+    )
+    assert result.ok, result.content[:300]
+    assert pending.staged_items() == []
+    assert [one.path for one in pending.items()] == ["snake.html"]
+
+
+def test_假完成_接下来将进行_被退回(tmp_path: Path) -> None:
+    """rename-cross-file 真机现场：模型第 5 步说「load_rows 不存在，可以安全
+    地重命名。接下来将进行重命名操作。」——一个文件没改就 done=true，
+    terminated_by 直接收了「模型完成」。
+
+    结论里出现「接下来/将/准备」却没有任何落盘证据时，必须把 done 退回，
+    让它继续动手。改过东西再说「接下来」不算假完成（可能只是说明下一步）。
+    """
+    (tmp_path / "pipeline.py").write_text(
+        "def get_rows(source):\n    pass\n",
+        encoding="utf-8",
+    )
+    script = [
+        _turn("查过了，load_rows 不存在，可以安全地重命名", final="接下来将进行重命名操作。"),
+        # 被退回后模型改口直接收尾（这里只关心第一步的拦截）
+        _turn("收尾", final="已确认 get_rows 无外部引用。"),
+    ]
+    loop = _build(tmp_path, script)
+    result = loop.run("把 get_rows 改名成 load_rows")
+    # 第一次 done 必须被退回，trace 里要留下「结论没有落盘」的记录。
+    assert any("结论没有落盘" in line for line in result.trace), (
+        f"假完成应被退回，trace：{result.trace}"
+    )
+    # 第二次 done 时模型没再说「接下来」，应该放行。
+    assert result.finished is True
+    assert "已确认" in result.final
+
+
+def test_谎称完成_宣称改了没改的文件_被退回(tmp_path: Path) -> None:
+    """rename-cross-file 第二轮真机现场：模型只改了 fetch.py，final 却说
+    「pipeline/report.py 文件中的 render 函数已更新为 load_rows。请检查并
+    确认改动。」——report.py 一个字没动，false_completion 记下 1。
+
+    谎称完成比「接下来将进行」更狠：它用过去式，听上去像已经做完了。
+    必须把 final 里宣称改了但 changed_paths 里没有的文件名抓出来退回。
+    """
+    (tmp_path / "pipeline").mkdir()
+    (tmp_path / "pipeline" / "fetch.py").write_text(
+        "def load_rows(source):\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pipeline" / "report.py").write_text(
+        "from pipeline.fetch import get_rows\n",
+        encoding="utf-8",
+    )
+    script = [
+        # 第一步：模型改了 fetch.py（模拟已经落盘）
+        _turn("改 fetch.py", [{"name": "write_file", "arguments": {
+            "path": "pipeline/fetch.py",
+            "content": "def load_rows(source):\n    pass\n",
+            "rewrite_reason": "重命名",
+        }}]),
+        # 第二步：模型谎称改了 report.py
+        _turn("收尾", final="pipeline/report.py 文件中的 render 函数已更新为 load_rows。请检查并确认改动。"),
+        # 被退回后模型改口说实话
+        _turn("收尾", final="已把 fetch.py 里的 get_rows 改名为 load_rows。"),
+    ]
+    loop = _build(tmp_path, script)
+    result = loop.run("把 get_rows 改名成 load_rows")
+    # 谎称完成必须被退回，trace 里要留下「结论没有落盘」的记录。
+    assert any("结论没有落盘" in line for line in result.trace), (
+        f"谎称完成应被退回，trace：{result.trace}"
+    )
+    assert result.finished is True
+
+
+def test_组合停用上报督导按二的幂退避(tmp_path: Path) -> None:
+    """fix-bug 真机现场：read_file 同一组合被拦 9 次，每一次都把督导叫起来，
+    督导 8 次给出逐字相同的建议——每次督导调用都真花钱，模型对同一句话
+    也早已免疫。同一组合的停用上报必须按 2 的幂退避（第 1、2、4、8… 次
+    才惊动督导），中间的拦截只走机械话术。
+    """
+    from spoolkit.agent.protocol import ToolCall
+
+    loop = _build(tmp_path, [])
+    call = ToolCall(name="read_file", arguments={"path": "a.txt"}, intent="读")
+    signature = "sig-1"
+    # 同一组合连拦 8 次：第 1 次还是普通拦截（count <= block_at），
+    # 第 2 次起组合停用；停用证据只在第 2、4、8 次（2 的幂）留给督导。
+    evidence_set_at: list[int] = []
+    for count in range(1, 9):
+        loop._reroute_evidence = ""
+        loop._refuse(call, signature, "被拒", ())
+        if loop._reroute_evidence:
+            evidence_set_at.append(count)
+    assert evidence_set_at == [2, 4, 8], (
+        f"停用上报应在 2/4/8 次时留给督导，实际：{evidence_set_at}"
+    )
+
+
+def test_刷新读取到上限后硬拦不再执行(tmp_path: Path, monkeypatch) -> None:
+    """真实轨迹：模型反复读同一个文件，因为每次结果都被上下文压缩丢弃。
+
+    护栏允许前 3 次刷新重取（给模型补救机会），但第 4 次起必须硬拦，
+    否则它会一直把预算烧到收敛/步数上限，根本没机会写文件。
+    变异：把「额度用满后照常执行」那一条改回去，这条会红——
+    实际执行次数会超过 4 次，而且blocked_refund 不会触发。
+    """
+    (tmp_path / "a.txt").write_text("内容\n" * 50, encoding="utf-8")
+    loop = _build(
+        tmp_path,
+        [
+            _turn("读", [_read("a.txt")]),
+            _turn("再读", [_read("a.txt")]),
+            _turn("还读", [_read("a.txt")]),
+            _turn("又读", [_read("a.txt")]),
+            _turn("继续读", [_read("a.txt")]),
+            _turn("还在读", [_read("a.txt")]),
+            _turn("收尾", final="不玩了"),
+        ],
+    )
+    _patch_bump_revision(monkeypatch, loop)
+
+    executed: list[str] = []
+    real_invoke = loop.registry.invoke
+
+    def counting(call):
+        executed.append(call.name)
+        return real_invoke(call)
+
+    loop.registry.invoke = counting
+
+    result = loop.run("看看 a.txt")
+    # 初始 1 次 + 3 次放行刷新 = 4 次真正执行；第 5 次起硬拦。
+    assert executed.count("read_file") == 4, (
+        f"刷新额度用满后仍在执行：read_file 实际执行 {executed.count('read_file')} 次"
+    )
+    # 硬拦的步数必须退还，不占用有效预算。
+    assert any("这一步的调用全部被硬拦" in line for line in result.trace), result.trace
+    assert any("已退还" in line for line in result.trace), result.trace

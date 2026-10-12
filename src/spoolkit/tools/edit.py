@@ -1352,6 +1352,11 @@ def confirm_rewrite_spec(root: Path, pending: PendingChanges) -> ToolSpec:
             )
 
         acked = args.get(ACKED_PARAM)
+        if acked is None:
+            # write_file 的参数名是 `acked_disappeared`，模型常把同一个名字
+            # 照搬到 confirm_rewrite。这里把它当作 `acked` 的别名收下来，
+            # 避免一次参数名校验失败就把确认回合卡死（merge-html 真机探针）。
+            acked = args.get(ACK_PARAM)
         acked_list = [str(item) for item in acked] if isinstance(acked, list) else []
         pairs, why_bad = _split_dropped(args.get(DROPPED_PARAM))
         if why_bad:
@@ -1448,6 +1453,15 @@ def confirm_rewrite_spec(root: Path, pending: PendingChanges) -> ToolSpec:
                     "items": {"type": "string"},
                     "description": "确认保留的清单项 id（如 [\"d1\",\"d2\"]）",
                 },
+                ACK_PARAM: {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "`acked` 的别名，效果完全相同。"
+                        "保留它是因为 write_file 的参数名是 `acked_disappeared`，"
+                        "模型容易把同一个名字搬到 confirm_rewrite。"
+                    ),
+                },
                 DROPPED_PARAM: {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1493,6 +1507,8 @@ def _stale_token_text(pending: PendingChanges, token: str, why: str) -> str:
             f"{REFUSAL_MARKER}：没有这个令牌 {token}"
             "（可能抄错了，也可能来自上一次运行——令牌只在提出它的那次运行里有效）。"
             "这次确认没有执行，也没有改动任何文件。\n"
+            "**你没有可确认的重写**：confirm_rewrite 只能确认 write_file 返回的真实令牌，"
+            "不能凭空发起。要改文件，必须先调 write_file 拿到新令牌。\n"
         )
     live = pending.staged_items()
     if live:
@@ -2397,7 +2413,17 @@ def _propose(
     )
     change = pending.propose(stored, new_text, declared=declared)
     verb = "新建" if change.is_new_file else "修改"
-    body = f"已生成{verb}预览（尚未写入，需用户确认）："
+    # add-feature 真机现场：模型看到「需用户确认」就以为自己该拿令牌
+    # confirm_rewrite——可这条路径没有令牌（改动已进待确认清单，
+    # confirm_rewrite 只对「暂存重写」那种带令牌的用）。它只能幻觉一个
+    # rw-xxxxxx 反复试，被判不出拦到预算烧完。必须明说：这条路径
+    # 不需要 confirm_rewrite。
+    body = (
+        f"已生成{verb}预览（尚未写入磁盘）：\n"
+        "这处改动**已经进了待确认清单**，收尾时会随其它改动一起落盘——\n"
+        "**不需要、也不要调 confirm_rewrite**（那是给「暂存重写」用的，\n"
+        "这条路径没有令牌）。继续改下一个文件，或者改完了就给结论："
+    )
     if change.declared:
         body += f"\n{change.declared}"
     body += f"\n{change.diff}"

@@ -264,7 +264,13 @@ def _problem_in_span(problem: str, start: int, end: int) -> bool:
 def _functions(path: str, chunk: str, start: int) -> list[tuple[str, int]]:
     found: list[tuple[str, int]] = []
     seen: set[str] = set()
-    for symbol in extractor_for(path).extract(chunk, path):
+    try:
+        symbols = extractor_for(path).extract(chunk, path)
+    except SyntaxError:
+        # 工作区里可能包含非代码的 .py 文件（测试夹具、损坏草稿、从输出里
+        # 截取的失败摘要）。这一段只看函数声明，解析失败就当作没有函数。
+        return found
+    for symbol in symbols:
         if symbol.kind != "function" or symbol.name in seen:
             continue
         seen.add(symbol.name)

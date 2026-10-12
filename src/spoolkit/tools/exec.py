@@ -367,7 +367,22 @@ def _execute(
     except PathOutsideProjectError as exc:
         return ToolResult(ok=False, content=str(exc))
     if not cwd.is_dir():
-        return ToolResult(ok=False, content=f"工作目录不存在: {cwd_arg}")
+        # 报错话术必须带绝对路径 + 工作区里实际有什么——模型只拿到
+        # 「不存在」三个字时，下一步只会换个写法猜同一个错路径（fix-bug
+        # 真机现场：连续 3 次 run_command 都报同一句话，最后还是没进去）。
+        available = sorted(
+            (item.name + "/" if item.is_dir() else item.name)
+            for item in base.iterdir()
+        )[:20]
+        listing = "、".join(available) if available else "（空目录）"
+        return ToolResult(
+            ok=False,
+            content=(
+                f"工作目录不存在: {cwd_arg}（解析后：{cwd}）。\n"
+                f"工作区根目录 {base} 下有：{listing}\n"
+                "请用上面列出的真实目录名重试。"
+            ),
+        )
 
     env = None
     if extra_env:

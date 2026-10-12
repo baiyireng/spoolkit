@@ -543,6 +543,7 @@ def test_督导说finish时也带上最终状态(tmp_path: Path) -> None:
     )
     # 脚本顺序就是真实调用顺序：改完那一步之后步数预算见底（max_steps=1），
     # 循环在**下一步的步首**叫督导——所以督导的回答是脚本里的**第二条**。
+    # finish 再把同一轮交给模型写 final，那是**第三条**。
     # 顺序写反的话，督导那次调用会拿不到脚本（fake 会抛「脚本已耗尽」）。
     loop = AgentLoop(
         gateway=FakeModel(
@@ -551,6 +552,7 @@ def test_督导说finish时也带上最终状态(tmp_path: Path) -> None:
                              "arguments": {"path": "a.html",
                                            "content": "<html>\n<body>\n</html>\n"}}]),
                 verdict,
+                _turn("写完", final="8 个目录逐个跑 pytest 都通过，任务已完成。"),
             ],
             tokenizer=OfflineTokenCounter(),
         ),

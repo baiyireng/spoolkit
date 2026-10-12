@@ -102,6 +102,11 @@ class Evidence:
     # 那些字不是它的判断（`survey` 的失败话术里就有「意图」「先读后计划」
     # 这类字眼），拿它们去凑关键词会让兜底在没有依据时触发。
     reason: str = ""
+    # 这次运行真正注册的工具名。vague-optimize 真机现场：督导照 SUPERVISE
+    # 模板里的示例建议「按批交给 dispatch」，而那个运行根本没注册 dispatch——
+    # 模型拿到一个不存在工具的建议，原地空转。清单必须来自注册表，
+    # 不能是模板里的静态举例。
+    tools: tuple[str, ...] = ()
     # 只给它看最近这些行。再往前翻，它看到的是同一些动作的重复。
     trace_tail: int = 40
 
@@ -130,6 +135,7 @@ class Evidence:
             "cycle": self.cycle,
             "oscillations": self.oscillations,
             "same_query": self.same_query,
+            "tools": "、".join(self.tools) if self.tools else "（未提供）",
         }
 
     def _asking_with_history(self) -> str:

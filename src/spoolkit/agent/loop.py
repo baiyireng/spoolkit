@@ -9,6 +9,7 @@
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -146,6 +147,7 @@ from spoolkit.tools.capabilities import (
     COMMIT_TOOLS,
     EDIT_TOOLS,
     PROGRESS_TOOLS,
+    READ_TOOLS,
     WRITE_TOOLS,
 )
 from spoolkit.tools.capabilities import of_spec as capability_of_spec
@@ -233,9 +235,9 @@ def converge_step(converge_at_steps: int, limit: int) -> int:
 
     `converge_at_steps <= 0` 时返回 0——`state.step` 从 1 起，所以 0 永远不会
     触发，那就是**关掉**（变异对照与「我只想看老行为」时用它）。
-    这个数是**每步都会读到**的（主循环里那一个比较），所以它不许依赖
-    `limit` 在运行中被放大之后的值：收束点按启动时的预算定下来，
-    预算中途被放大也不会让收束点往后跑。
+    这个数是**每步都会读到**的（主循环里那一个比较），所以它必须跟得上
+    `limit` 在运行中被督导续期放大之后的值：续期后收束点同步后移，
+    否则续出来的那几步会被收束态直接吃掉（rename-cross-file 真机现场）。
     """
     if converge_at_steps <= 0:
         return 0
@@ -496,6 +498,81 @@ def _content_fingerprint(text: str) -> str:
     """
     digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
     return f"{digest}/{len(text.splitlines())}行"
+
+
+def _final_holds_source(text: str) -> bool:
+    """结论里夹着一整份源码。这种正文不会进入落盘。"""
+    body = text or ""
+    chunks: list[str] = []
+    rest = body
+    while "```" in rest:
+        rest = rest.split("```", 1)[1]
+        if "```" not in rest:
+            break
+        chunk, rest = rest.split("```", 1)
+        if "\n" in chunk:
+            chunk = chunk.split("\n", 1)[1]
+        chunks.append(chunk)
+    if not chunks:
+        chunks = [body]
+    for chunk in chunks:
+        lines = [line for line in chunk.splitlines() if line.strip()]
+        if len(lines) >= 25:
+            return True
+        if "<html" in chunk.lower() and len(lines) >= 8:
+            return True
+    return False
+
+
+def _final_is_promising(text: str) -> bool:
+    """结论里写着「接下来/将/准备/打算」却没有任何落盘证据。
+
+    rename-cross-file 真机现场：模型说「load_rows 不存在，可以安全地重命名
+    get_rows 为 load_rows。接下来将进行重命名操作。」——它把「确认可行」
+    当成了「完成任务」，一个文件都没改就宣称完成。
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    promising = ("接下来", "将", "准备", "打算", "计划", "然后")
+    if not any(marker in body for marker in promising):
+        return False
+    # 「将」字单独出现太宽：很多正常结论也会用（「将文件改为了…」）。
+    # 必须同时满足「没有任何已落盘的动作」才算假完成——调用方判。
+    return True
+
+
+def _final_lies_about_changes(text: str, changed_paths: Sequence[str]) -> str:
+    """结论里宣称改了某文件，但那个文件根本不在落盘账本里。
+
+    rename-cross-file 真机现场（第二轮）：模型只改了 fetch.py，final 却说
+    「pipeline/report.py 文件中的 render 函数已更新为 load_rows。请检查并
+    确认改动。」——report.py 一个字没动，`false_completion` 记下 1。
+
+    判据：final 里出现「<路径> 已更新/已改/已落盘/已写入」式句式，而那个
+    路径不在 `changed_paths` 里。返回空串表示没撒谎；否则返回被抓到的那个
+    路径（给退回话术用）。
+    """
+    body = (text or "").strip()
+    if not body:
+        return ""
+    # 「已更新/已改/已落盘/已写入/已重命名」等过去式宣称。
+    claim_markers = ("已更新", "已改", "已落盘", "已写入", "已重命名", "已修改", "已完成")
+    if not any(marker in body for marker in claim_markers):
+        return ""
+    # 从 final 里抓「路径 动词」式宣称。路径形如 a/b/c.py 或 a\b\c.py。
+    claimed = set(re.findall(r"([\w./\\-]+\.(?:py|js|ts|html|css|md|txt|json|yaml|yml))", body))
+    if not claimed:
+        return ""
+    # 归一化成正斜杠小写，跟 changed_paths 同一口径。
+    landed = {str(p).replace("\\", "/").lower() for p in changed_paths}
+    for path in claimed:
+        normalized = path.replace("\\", "/").lower()
+        # 全路径或尾部匹配都算落过盘（changed_paths 可能只存了相对路径的尾部）。
+        if any(normalized == one or normalized.endswith(one) or one.endswith(normalized) for one in landed):
+            continue
+        return path
+    return ""
 
 
 def _flat_line(text: str) -> str:
@@ -1608,6 +1685,10 @@ class AgentLoop:
         # 收束态里已经用掉几次「写成果」的额度（默认值是 0，所以常态就是
         # 「一次也不放行」；只有把它调成正数才数得着）。同样每次进入收束时归零。
         self._converge_writes_used = 0
+        # 督导续期额外给的写额度。默认 0；督导每续一次加 min(grants, 3)。
+        # 收束点随督导续期后移，但写额度默认是 0——不加这个，续出来的步数
+        # 踩进收束线时模型想改也改不了（rename-cross-file 真机现场）。
+        self._converge_write_bonus = 0
         # 素材卡：已经真的执行过的调用（去重键, 工具名, 输出正文）。硬重置把
         # 历史丢掉时，卡片从**这里**现算——它不依赖历史还剩什么，所以
         # 「先丢再拼」的顺序不会影响它。每次 run() 开头清空。
@@ -1889,15 +1970,14 @@ class AgentLoop:
             )
         ]
         feedback: str | None = None
-        # 收束的触发点（第几步起改发 `CONVERGE_NOW`）。按 `converge_at_steps`
-        # 在**启动时**算一次：这样「哪一步开始收束」是这次运行的一个事实，
-        # 而不是每步都要重算一遍的口径；`converge_at_steps=0` 时它是 0，
-        # 而 `state.step` 从 1 起，所以那等于关掉（变异对照用的就是它）。
-        # 收束那几轮的开销（168 字）**只在这里出现**，system 区段一个 token
-        # 都没涨——固定税与「快没预算时才说的话」不该共用一份预算。
-        converge_at = converge_step(
-            int(self.config.limit("converge_at_steps")), limit
-        )
+        # 收束的触发点（第几步起改发 `CONVERGE_NOW`）。每步按**当前 limit**
+        # 重算：督导续期之后收束点同步后移，不然续出来的预算会被收束态
+        # 物理吃掉（rename-cross-file 第 7 步同时出现「收束」与「续 3 步」）。
+        # `converge_at_steps=0` 时它是 0，而 `state.step` 从 1 起，所以那等于
+        # 关掉（变异对照用的就是它）。收束那几轮的开销（168 字）**只在收束步
+        # 出现**，system 区段一个 token 都没涨——固定税与「快没预算时才说的话」
+        # 不该共用一份预算。
+        converge_at = 0
         converged_told = False
         # 这次运行**失败**的原因（空串 = 没失败）。它不是异常出口：模型那一步
         # 报错时循环在这里记下来、走正常的收尾路径返回，于是三条出口
@@ -1916,6 +1996,11 @@ class AgentLoop:
         # 督导让主循环改道时说的话。单独放一个变量，是因为 feedback 会被
         # 强制收敛那几处覆盖掉——而改道的话比通用提醒具体，不能被覆盖。
         redirect: str | None = None
+        # 督导判「结论已可写出」之后，同一轮把话交给模型。它写了 final 才算
+        # 模型结论；这一轮它不写，才沿用督导的话收尾。
+        awaiting_final = False
+        offered_final = ""
+        handoff: str | None = None
         resets = 0
         compactions = 0
         # 压过的那一份素材文本。它有两个用处：① 压完装得下就直接用它重建历史；
@@ -1943,6 +2028,7 @@ class AgentLoop:
         self._converge_remaining = None
         self._converge_grace_used = 0
         self._converge_writes_used = 0
+        self._converge_write_bonus = 0
         self._material_notes.clear()
         # 机械审查的去重集合与证据缺口计数也是**本次运行**的：上一次 run() 发过
         # 的那几条不该把这一次的同类发现压掉。
@@ -2158,10 +2244,32 @@ class AgentLoop:
                 elif stuck_on_query:
                     asking = f"同一检索词已经查了 {report.same_query} 次"
                 elif stuck_on_failed_repeat:
+                    # 督导证据里必须写清「失败的是哪个动作」——否则它只能从
+                    # trace 里猜。rename-cross-file 真机现场：模型打转的是「想改
+                    # report.py 但没写出 write_file」，督导却以为它在「确认
+                    # load_rows 是否存在」上打转，8 次改道全在错误方向。
+                    failed_action = f"{call.name}"
+                    if call.name and call.arguments:
+                        try:
+                            args_brief = json.dumps(call.arguments, ensure_ascii=False)[:120]
+                            failed_action = f"{call.name}({args_brief})"
+                        except Exception:
+                            pass
                     asking = (
                         f"同一个动作已经连续失败 {failed_streak} 次，"
+                        f"失败的动作是：{failed_action}。"
                         "每次都在同一个坑里换说法重试"
                     )
+                    # 幻觉令牌是 rename-cross-file 的真机死法：模型跳过 write_file
+                    # 直接拿假令牌 confirm_rewrite，失败之后还继续试同一个令牌。
+                    # 督导看到「confirm_rewrite 失败」时，第一反应应该是「先去
+                    # write_file 拿真实令牌」，而不是「再确认一次」。
+                    if call.name == CONFIRM_TOOL:
+                        asking += (
+                            "；注意：confirm_rewrite 失败多半是因为没有真实令牌——"
+                            "模型可能跳过了 write_file 直接幻觉了一个令牌。"
+                            "下一步应该调 write_file 拿到新令牌，而不是再试 confirm_rewrite"
+                        )
                 elif stuck_on_roam:
                     asking = (
                         f"它已经连续 {no_progress_steps} 步只看不写，"
@@ -2251,55 +2359,37 @@ class AgentLoop:
                     trace.append(f"step{state.step}: 督导建议收手——{stopped_by}")
                     break
                 elif verdict.action == FINISH:
-                    # 「它已经做完了，只是自己没宣告」。这条以前不存在，
-                    # 于是出现自相矛盾的收尾（「任务没做完，收手的原因：
-                    # 任务已完成」），而后果是这次工作被记成失败——
-                    # 派发路径里就表现为「审查没得出结论」。
-                    done_text = verdict.message or verdict.reason
+                    # 结论还没写出来。督导的 message 是交给模型的话，不是结论。
+                    # 同一轮里接着让模型写 final；它不写，才沿用这句话收尾，
+                    # 免得分析任务停在「请直接写 final」上，也免得已完成的
+                    # 工作被记成失败。
+                    offered_final = (verdict.message or verdict.reason or "").strip()
+                    awaiting_final = True
+                    hold = self._staged_hold_text()
+                    handoff = (
+                        f"{offered_final}\n\n{hold}" if offered_final and hold
+                        else (hold or offered_final)
+                    )
                     trace.append(
-                        f"step{state.step}: 督导判断已完成——{verdict.reason}"
-                    )
-                    # 说「做完了」之前也要对最终文件跑一次验证：这是用户点名的
-                    # 第 7 条（收手与落盘抢跑）。已经落成（进待确认清单）的改动
-                    # 是真实产出，结论里必须带上它的实际状态。
-                    done_text = self._with_final_state(
-                        done_text,
-                        state,
-                        trace,
-                        changed_paths,
-                        # 督导判「已完成」也要过「不许宣称完成」那一关：这一条
-                        # 路径原先 `gate` 默认 False，于是**督导说完成就绕过了
-                        # 审查**——实测（探针 set5 的 `vague-optimize-r1`）L2 报出
-                        # 高严重度「变快但结果坏」，`final_ok` 仍是 True。机器
-                        # 拦的正是这句声明，谁说的都不例外（§3.1）。
-                        gate=True,
-                        announce_block=True,
-                    )
-                    self._archive(state, "success", trace, done_text)
-                    clear_state(checkpoint)
-                    return LoopResult(
-                        finished=True,
-                        final=done_text,
-                        state=state,
-                        steps=state.step,
-                        resets=resets,
-                        compactions=compactions,
-                        trace=trace,
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        model_calls=model_calls,
-                        model_seconds=model_seconds,
-                        tool_seconds=tool_seconds,
-                        assemble_seconds=assemble_seconds,
-                        verify_seconds=verify_seconds,
-                        state_seconds=state_seconds,
-                        supervisor_seconds=supervisor_seconds,
-                        lessons_pushed=tuple(item[0] for item in pushed),
-                        environment_blocked=self.environment_blocked,
+                        f"step{state.step}: 督导判断结论已可写出，交给模型写 final"
+                        f"——{verdict.reason}"
                     )
                 else:
                     if verdict.grants:
                         limit = state.step + verdict.grants
+                        # 督导续期 = 它判断这事还有救。但收束期写额度默认是 0，
+                        # 续出来的步数如果正好踩进收束线，模型想改也改不了——
+                        # 续出来的预算被物理吃掉（rename-cross-file 真机现场：
+                        # 督导续到 23 步，step 21 踩进收束线，write_file 被
+                        # 「额度 0/0」拒掉，report.py 永远改不了）。
+                        # 续几步给几次写额度（封顶 3 次，避免无限写），让续出来
+                        # 的步数有机会真的把改动落盘。
+                        extra = min(verdict.grants, 3)
+                        self._converge_write_bonus += extra
+                        trace.append(
+                            f"step{state.step}: 督导续期，收束期写额度"
+                            f" +{extra}（共 +{self._converge_write_bonus}）"
+                        )
                     if verdict.message:
                         redirect = verdict.message
                         # 记下「我们转给它的那段原话」：下一次叫督导时要
@@ -2355,6 +2445,9 @@ class AgentLoop:
             # 0）。这里必须显式判 `> 0`：`state.step` 从 1 起，`state.step >= 0`
             # **每一步都成立**——那会变成「全程收束」，与「关掉」正好相反。
             #
+            # 收束点每步按**当前 limit** 重算：督导续期之后 limit 变了，
+            # 收束点同步后移，不然续出来的预算会被收束态物理吃掉。
+            #
             # **为什么这一段不能直接拼进 feedback**（真机实测抓出来的）：
             # 下面那条预算守卫在硬触发时会把 `feedback` 清成 None 再重新装配，
             # 于是收束指令在**真正需要它的那一步**被自己人丢掉了。P0 真机小样本
@@ -2363,6 +2456,9 @@ class AgentLoop:
             # 也被丢掉**；第 6-8 步它在重新 list_dir，最后一次模型调用里
             # 根本没有那句指令，最后一句判词是「已达步数上限」。
             # 收束与「丢掉历史」是两件事：后者清掉的是历史，不是我们对它说的话。
+            converge_at = converge_step(
+                int(self.config.limit("converge_at_steps")), limit
+            )
             converging = converge_at > 0 and state.step >= converge_at
             # 工具层收束用的现场：**这一步**算不算收束态、还剩几步预算。
             # 与上面那行同一个判据（一处判定、两处兑现：注入的话 + 拒掉的动作），
@@ -2375,6 +2471,11 @@ class AgentLoop:
                 # 说的是这一次收束，不是每一步各一次。「写成果」的额度同理。
                 self._converge_grace_used = 0
                 self._converge_writes_used = 0
+            elif not converging and converged_told:
+                # 督导续期把 limit 抬上去之后，收束点会后移——如果这一步又
+                # 落回收束线之前，之前那句「已要求用现有素材给结论」就不再
+                # 成立。把 converged_told 复位，等真正进入收束时再记一次。
+                converged_told = False
             # **收束是追加，不是替换**：`feedback` 上可能已经挂着督导的改道建议
             # （或是审查发现、截断说明），那些话比这条更具体。实测抓出来的代价：
             # 直接覆盖时，收束那一步把「这一轮本来该照做的那句话」挤掉了
@@ -2411,7 +2512,13 @@ class AgentLoop:
             # 收手了）。要求表态之后，接受与不接受都会留下理由，而那段理由
             # 会进 trace、进状态块、进下一次督导的证据——「它到底为什么那样做」
             # 这件事才第一次可查。
-            if redirect is not None:
+            if handoff is not None:
+                # finish 不走表态：表态允许它拒绝并继续读。
+                # 有暂存重写时先确认清单，不把 FORCE_CONCLUDE 的「只写结论」盖在确认前面。
+                tail = T.STAGED_CONCLUDE if self._staged_hold_text() else T.FORCE_CONCLUDE
+                feedback = f"{handoff}\n\n{tail}" if handoff else tail
+                handoff = None
+            elif redirect is not None:
                 feedback = f"{redirect}\n\n{T.SUPERVISOR_ASK}"
                 redirect = None
             _assemble_started = time.time()
@@ -2786,10 +2893,58 @@ class AgentLoop:
                     )
             history.append(Message(role="assistant", content=response.text))
 
+            confirm_only = bool(
+                awaiting_final
+                and turn.tool_calls
+                and all(call.name == CONFIRM_TOOL for call in turn.tool_calls)
+            )
+            if awaiting_final and not turn.done and not confirm_only:
+                # 交还的这一轮没有写出结论。工具不执行，沿用督导的话收尾，
+                # 避免再读一轮文件，也避免把已完成的工作记成失败。
+                if turn.tool_calls:
+                    trace.append(
+                        f"step{state.step}: 这一轮只接受结论，调用未执行"
+                    )
+                awaiting_final = False
+                done_text = self._with_final_state(
+                    offered_final,
+                    state,
+                    trace,
+                    changed_paths,
+                    gate=True,
+                    announce_block=True,
+                )
+                self._archive(state, "success", trace, done_text)
+                clear_state(checkpoint)
+                return LoopResult(
+                    finished=True,
+                    final=done_text,
+                    state=state,
+                    steps=state.step,
+                    resets=resets,
+                    compactions=compactions,
+                    trace=trace,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    model_calls=model_calls,
+                    model_seconds=model_seconds,
+                    tool_seconds=tool_seconds,
+                    assemble_seconds=assemble_seconds,
+                    verify_seconds=verify_seconds,
+                    state_seconds=state_seconds,
+                    supervisor_seconds=supervisor_seconds,
+                    lessons_pushed=tuple(item[0] for item in pushed),
+                    environment_blocked=self.environment_blocked,
+                    verified=self._final_verify[0] if self._final_verify else None,
+                    verify_summary=(
+                        self._final_verify[1] if self._final_verify else ""
+                    ),
+                )
+
             edits_before_step = edits_made
             blocked_all = False
             edited = False
-            if turn.tool_calls:
+            if turn.tool_calls and (not awaiting_final or confirm_only):
                 _tools_started = time.time()
                 outputs = []
                 repeated = 0
@@ -3170,8 +3325,30 @@ class AgentLoop:
             # 那一步有没有产出」（同一步里既改东西又宣告完成的不给自动修：
             # 那一轮它已经动过了，判词进的是运行报告）。
             if turn.done:
-                trace.append(f"step{state.step}: 完成")
                 conclusion_text = turn.final or ""
+                bounced = self._bounce_unwritten(conclusion_text, changed_paths)
+                if bounced:
+                    trace.append(
+                        f"step{state.step}: 结论没有落盘，退回让它写入文件"
+                    )
+                    # 退回话术必须作为 user 消息进 history——否则 history 末尾
+                    # 是上一步的 assistant，下一步又 append assistant，llama.cpp
+                    # 的 grammar 约束直接 400「Cannot have 2 or more assistant
+                    # messages at the end of the list」（rename-cross-file 真机
+                    # 现场：假完成被退回后 step 7 整条调用炸掉）。
+                    history.append(Message(role="user", content=bounced))
+                    feedback = bounced
+                    awaiting_final = False
+                    self._emit(
+                        "note",
+                        {
+                            "text": bounced.splitlines()[0][:180],
+                            "ok": False,
+                            "kind": "unwritten_final",
+                        },
+                    )
+                    continue
+                trace.append(f"step{state.step}: 完成")
                 concluded_by = "模型完成"
                 # 它自己宣告完成时也一样要报最终状态：用户点名的第 7 条
                 # （收手与落盘抢跑）不区分「谁收的手」。已经落成的改动、
@@ -3778,18 +3955,27 @@ class AgentLoop:
         观察里若已有同一文件两段的声明对照，对比材料已经在，不该据此收手。
         """
         observed = self.observations.render()
-        if not observed:
+        hold = self._staged_hold_text()
+        if not observed and not hold:
             return asking
-        if len(observed) > 1500:
-            observed = observed[:1500] + "\n…（观察还有更多）"
-        return (
-            asking
-            + "\n观察里已经记下的事实（压缩对话不会丢掉）：\n"
-            + observed
-            + "\n轨迹里被拦住的读取，不表示这些事实没有。"
-            "若声明对照已经按段列出同一文件里的两份文档，对比材料已经在，"
-            "让它根据观察给结论，不要判成「第二份还没读」。"
-        )
+        parts = [asking]
+        if observed:
+            if len(observed) > 1500:
+                observed = observed[:1500] + "\n…（观察还有更多）"
+            parts.append(
+                "观察里已经记下的事实（压缩对话不会丢掉）：\n"
+                + observed
+                + "\n轨迹里被拦住的读取，不表示这些事实没有。"
+                "若声明对照已经按段列出同一文件里的两份文档，对比材料已经在，"
+                "让它根据观察给结论，不要判成「第二份还没读」。"
+            )
+        if hold:
+            parts.append(
+                hold
+                + "\n下一步是 confirm_rewrite，只发项 id。"
+                "不要让它把全文写进 final，确认前磁盘仍是旧文件。"
+            )
+        return "\n".join(parts)
 
     def _ask_supervisor(
         self,
@@ -3846,6 +4032,7 @@ class AgentLoop:
             same_query=same_query,
             assessment=assessment,
             suggestion=suggestion,
+            tools=self.registry.names(),
         )
         with wait_phase("督导"):
             verdict, conflicts = supervise(
@@ -4109,35 +4296,44 @@ class AgentLoop:
                     ),
                     _remedies(self._failed_output.get(signature, "")),
                 )
-            # 剩下的一类退回「提醒」路径（照常执行）：判得出有理由、但放行额度
-            # 已经用满。事件流里照旧留下理由，不把「没判」说成「判过」。
+            # 判得出有理由、但放行额度已经用满。实测（merge-html / fix-bug /
+            # vague-optimize）这里继续「提醒后照常执行」会让模型把预算一直烧到
+            # 收敛/步数上限，根本没机会写文件。既然已经给过 {_REFRESH_LIMIT} 次
+            # 补救机会，再重跑就不再有意义，按「没有新信息」处置：硬拦。
             line = (
                 f"⟳ 重复调用判得出有理由（{reason}），但放行已到上限"
                 f"（{self._refreshes_used}/{_REFRESH_LIMIT}）："
-                "本次只提醒、不再额外放行"
-            )
-            note_kind = GUARD_UNDECIDED_KIND
-            extra: dict = {"decision": decision, "tool": call.name, "capped": True}
-            warn_note = (
-                "注意：这个调用在最近几步里已经执行过；"
-                "它这次确实可能拿到新内容，但同一处已经放过几次了。"
+                "不再放行，避免把预算烧成无限循环"
             )
             self._log(line)
-            self._emit("note", {"text": line, "ok": True, "kind": note_kind, **extra})
-            result = self.registry.invoke(call)
-            self._note_guard_result(call, result)
-            if not result.ok:
-                self._remember_failure(signature, result.content)
-            if repeats >= self.config.limit("repeat_warn_at"):
-                return ToolResult(
-                    ok=result.ok,
-                    content=(
-                        warn_note
-                        + "如果它没有帮你推进，就换一种做法。\n"
-                        + result.content
-                    ),
-                )
-            return result
+            self._emit(
+                "note",
+                {
+                    "text": line,
+                    "ok": False,
+                    "kind": GUARD_UNDECIDED_KIND,
+                    "decision": decision,
+                    "tool": call.name,
+                    "capped": True,
+                },
+            )
+            return self._refuse(
+                call,
+                signature,
+                (
+                    f"{BLOCKED_PREFIX}这个调用已连续 {_REFRESH_LIMIT} 次"
+                    "因上下文压缩或内容变化被放行刷新，额度已用完，"
+                    "继续重跑不会再拿到新内容，只会消耗预算，所以这一次没有执行。"
+                    f"你这次重发的参数（与上一次逐字相同）：{_render_args(call)}"
+                    "下一步三选一：① 换一种参数或换一个工具；"
+                    "② 基于手上已有素材直接给结论；"
+                    "③ 若确实需要这份内容，先做一处真正的改动让上下文有变化。"
+                    "不要只重复一句『再看一遍』——那不算下一步。"
+                    + _reverse_clause()
+                    + (f"\n{_intent_clause(call)}" if call.intent else "")
+                ),
+                _remedies(self._failed_output.get(signature, "")),
+            )
         result = self.registry.invoke(call)
         self._note_guard_result(call, result)
         if not result.ok:
@@ -5295,6 +5491,82 @@ class AgentLoop:
             return False
         return key in item.span_keys or item.withheld
 
+    def _bounce_unwritten(self, final: str, changed_paths: Sequence[str] = ()) -> str:
+        """宣告完成但文件还不会落盘时，返回要退回的那句话。空串表示可以收。
+
+        changed_paths：本次运行到这一步为止真正落过盘的路径清单（run 的累积
+        账本）。只有它为空时，「接下来将进行…」才算假完成——改过东西的模型
+        说「接下来」多半只是说明下一步，不该拦。
+        """
+        pending = self.pending
+        if pending is not None and pending.staged_count():
+            hold = self._staged_hold_text()
+            return f"{hold}\n\n{T.STAGED_CONCLUDE}" if hold else T.STAGED_CONCLUDE
+        if pending is not None and len(pending) > 0:
+            return ""
+        if _final_holds_source(final):
+            return T.CODE_IN_FINAL
+        # 「接下来将进行」式假完成：一个文件都没改，却用将来时收尾。
+        # 必须放在「有 pending 就放行」之后——真有改动时模型说「接下来」
+        # 可能只是说明还要做下一步，不算假完成。
+        if not changed_paths and _final_is_promising(final):
+            return (
+                "你说了「接下来/将/准备」要做，但一个文件都还没改。"
+                "宣告完成之前必须真的调 write_file 把改动落盘；"
+                "如果还没开始改，就把 done 设为 false 继续动手。"
+            )
+        # 谎称完成：final 宣称改了某文件，但那个文件根本不在落盘账本里。
+        # 比「接下来将进行」更狠——这次它用的是过去式，听上去像已经做完了。
+        lied_path = _final_lies_about_changes(final, changed_paths)
+        if lied_path:
+            landed = "、".join(changed_paths) if changed_paths else "（一个都没有）"
+            return (
+                f"你说「{lied_path} 已更新/已改」，但那个文件这次运行里**根本没被改过**。"
+                f"真正落过盘的只有：{landed}。"
+                "final 里只能写真正落盘的改动；没改的文件不要宣称改了。"
+                "把 done 设为 false，继续把剩下的文件改完。"
+            )
+        return ""
+
+    def _staged_for(self, path: str):
+        """这个路径上还没交代完的暂存重写。确认前它不在读取视图里。"""
+        if self.pending is None or not path:
+            return None
+        try:
+            stored = str(self.pending.path_of(path))
+        except Exception:
+            stored = path
+        for record in self.pending.staged_items():
+            if record.path in (stored, path):
+                return record
+        return None
+
+    def _staged_note(self, path: str) -> str:
+        record = self._staged_for(path)
+        if record is None:
+            return ""
+        return (
+            f"暂存未落盘：{record.path} 的重写已收下 {record.lines} 行，"
+            f"令牌 {record.token}，消失清单还有 {len(record.ids())} 项没交代。"
+            "这次读到的是磁盘上的旧文件，不是这份暂存。"
+            "下一步用 confirm_rewrite 只发项 id。"
+            "不要再 write_file，也不要按这次的行号判断暂存失败。"
+        )
+
+    def _staged_hold_text(self) -> str:
+        if self.pending is None:
+            return ""
+        notes = [
+            self._staged_note(record.path) for record in self.pending.staged_items()
+        ]
+        return "\n".join(note for note in notes if note)
+
+    def _with_staged_note(self, path: str, shown: str) -> str:
+        note = self._staged_note(path)
+        if not note or note in shown:
+            return shown
+        return f"{shown}\n{note}" if shown else note
+
     def _present_read(self, call: ToolCall, result: ToolResult) -> str:
         """模型在对话里看到的工具正文。
 
@@ -5344,9 +5616,9 @@ class AgentLoop:
                     path, text, item.problems, int(first_s), int(last_s)
                 )
                 if facts:
-                    return card + "\n" + facts
-            return card
-        return result.content
+                    return self._with_staged_note(path, card + "\n" + facts)
+            return self._with_staged_note(path, card)
+        return self._with_staged_note(path, result.content)
 
     def _record_observation(
         self,
@@ -5483,17 +5755,23 @@ class AgentLoop:
         text = self._text_of(path)
         if text is None:
             return shown
+        mark = "暂存未落盘："
+        note = shown[shown.index(mark):] if mark in shown else ""
         total = len(text.splitlines())
         ranged, key, width = _requested_span(call, total)
         if ranged:
-            return (
+            pointer_line = (
                 f"{path} 第 {key.replace('-', '–')} 行已读取（{width} 行）。"
                 "正文只在当轮工具结果里，不入素材。"
             )
-        return (
-            f"{path} 已读取（{total} 行）。"
-            "正文只在当轮工具结果里，不入素材。"
-        )
+        else:
+            pointer_line = (
+                f"{path} 已读取（{total} 行）。"
+                "正文只在当轮工具结果里，不入素材。"
+            )
+        if note:
+            return f"{pointer_line}\n{note}"
+        return pointer_line
 
     def _note_material(self, call: ToolCall, content: str) -> None:
         """把一次**真的执行过**的调用记进素材卡原料（供硬重置后复用）。
@@ -5532,6 +5810,9 @@ class AgentLoop:
         cap = int(self.config.limit("converge_write_grace"))
         if cap < 0:
             return ("allow", "")
+        # 督导续期额外给的额度：cap 是配置值，bonus 是督导续出来的。
+        # 续期说明督导判断这事还有救，那续出来的步数就得有机会真的改东西。
+        cap += self._converge_write_bonus
         used = self._converge_writes_used
         if used < cap:
             self._converge_writes_used = used + 1
@@ -5765,8 +6046,15 @@ class AgentLoop:
           `_pending_state_key()` 那条独立证据回答（模型提出的改动都记在里面），
           所以这里只需要把命令指纹化——S9 之前这里返回空串，同一条命令在没改过
           任何东西的情况下重跑，就那样从「判不出」的通道里过去了。
+        - **查询类工具**（`find_callers` / `search_code` / `find_symbol` /
+          `file_symbols` / `request_diagnosis` / `search_history` 等）：它们
+          问的不是「盘上某一版内容」，而是**索引 / 搜索状态 / 台账**。
+          这些状态不在 `_text_of` / `_listing_of` / `staged_rewrite_key` 的
+          覆盖范围里，但**待确认清单**（pending）一变，查询结果就可能变。
+          所以这里把「参数 + 待确认清单指纹」作为可比对象：参数没变、
+          清单没变，重跑就是同一份结果；清单变了，重跑就有理由。
 
-        真的取不到对象（既没有正文、也没有可读路径、也不是一条命令）仍然是空串：
+        真的取不到对象（既不是写、不是读、不是命令、也不是查询）仍然是空串：
         护栏如实说「判不出」，但**处置是拒绝**（`_invoke_guarded` 那一支），
         不再是旧口径的「判不出就照常执行」。
         """
@@ -5806,6 +6094,19 @@ class AgentLoop:
         command = _command_of(call)
         if command:
             return _content_fingerprint(command)
+        # 查询类工具（看 / 查 / 诊 / 记忆检索）：它们没有 path/content/command，
+        # 但**待确认清单**是它们共同的可变状态。参数 + 清单指纹就是这次调用的
+        # 可比对象——清单没变、参数没变，重跑就是同一份结果。
+        if call.name in READ_TOOLS or call.name in (
+            "request_diagnosis",
+            "search_history",
+            "read_diagnosis",
+            "tool_help",
+            "recall",
+        ):
+            pending_key = self._pending_state_key() if self.pending is not None else ""
+            args_key = _content_fingerprint(_render_args(call))
+            return f"query|{pending_key}|{args_key}"
         return ""
 
     def _guard_repeat_decision(
@@ -5924,9 +6225,26 @@ class AgentLoop:
                         "声明对照已经够下结论，就直接给结论。不要原样重发这一段"
                     )
                 else:
-                    where = "判断仍在观察里（压缩只丢了对话，没有丢掉这份事实）"
+                    # 全文读被观察层扣留（只给了声明对照，正文没进对话）。
+                    # vague-optimize 真机现场：模型要改写函数体，必须拿到正文，
+                    # 重读被拦时只听见「判断仍在观察里」——它读不出「正文不在
+                    # 你手里」，于是空转到预算烧完。必须明说：正文还没取到，
+                    # 窄读（start_line/end_line ≤ limit 行）可以拿到，而且那是
+                    # 新参数、不受这次重复拦截。
+                    where = (
+                        "观察里只有这份文件的声明对照（结构），**正文还没取到**"
+                        "（压缩只丢了对话，没有丢掉这份事实）。"
+                        "要改代码需要正文：用 read_file 带 start_line/end_line"
+                        f"（每次 ≤ {int(self.config.limit('observation_inline_lines'))} 行）"
+                        "对准声明对照里的行号窄读——那是新参数，不受这次重复拦截。"
+                        "声明对照已经够下结论，就直接给结论。"
+                    )
             else:
                 where = "上一次的结果仍在你的上下文里，待确认清单也没有动过"
+            if isinstance(path, str):
+                note = self._staged_note(path)
+                if note:
+                    where = f"{where}。{note}"
             return (
                 REPEAT_USELESS,
                 f"{what}自上次调用以来一字未变（指纹 {current}），"
@@ -6059,7 +6377,13 @@ class AgentLoop:
             "该组合已停用；已经给过的替代方案："
             + "；".join(remedies or ("换参数 / 换工具 / 先看别的 / 直接给结论",))
         )
-        self._reroute_evidence = evidence
+        # 同一组合的停用上报按 2 的幂退避：第 1、2、4、8… 次才留给督导。
+        # fix-bug 真机现场：read_file 同一组合被拦 9 次，每一次都设证据、
+        # 每一步都把督导叫起来，而督导 8 次给出逐字相同的建议——每次督导
+        # 调用都是真花钱，模型对同一句话也早已免疫。退避后中间的拦截
+        # 只走机械话术，不再惊动督导。
+        if count & (count - 1) == 0:
+            self._reroute_evidence = evidence
         self._log(f"组合停用：{call.name}（第 {count} 次被拦）——{evidence}")
         self._emit(
             "note",

@@ -599,6 +599,9 @@ def probe_env(sandbox):
     env["SPOOLKIT_STATE"] = str(state)
     env["SPOOLKIT_CONFIG"] = str(sandbox / ".agent" / "probe-config.toml")
     env["SPOOLKIT_ENV_FILE"] = str(sandbox / ".agent" / "probe.env")
+    # 跑 llama.cpp 的本机服务，别让系统代理把回环流量劫走：环境自检只警告、
+    # 不改环境，而子进程 httpx 虽然 trust_env=False，别的读环境路径仍会走代理。
+    _envcheck().isolate_local_http(env)
     for stale in ("AGENTS_DEV_CONFIG", "AGENTS_DEV_ENV_FILE", "AGENTS_DEV_STATE"):
         env.pop(stale, None)
     env["PYTHONPATH"] = os.pathsep.join(
