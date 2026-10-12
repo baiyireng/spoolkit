@@ -820,7 +820,9 @@ def _title_line(row: Row) -> str:
         visible = "[accent]* [/]" + escape(plain_name[2:])
     else:
         visible = escape(plain_name)
-    styled_state = f"[{state_style(row.state)}]{escape(state)}[/]"
+    # occupied keeps row.state=up for exit code, but colors like service list (caution yellow).
+    style_key = "slow" if row.state_label == "occupied" else row.state
+    styled_state = f"[{state_style(style_key)}]{escape(state)}[/]"
     return f"{visible}  {styled_state}".rstrip()
 
 

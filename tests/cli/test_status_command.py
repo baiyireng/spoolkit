@@ -602,3 +602,27 @@ def test_render_human_embeds_state_markup() -> None:
     assert "[state.up]" in text
     assert "[accent]" in text
     assert "[muted]target[/]" in text or "[muted]target" in text
+
+
+def test_render_human_occupied_uses_slow_style() -> None:
+    row = Row(
+        name="service:tunnel",
+        label="recipe tunnel",
+        state="up",
+        state_label="occupied",
+        target="http://127.0.0.1:9999",
+        detail="port busy",
+        start="spool service start tunnel",
+        stop="spool service stop tunnel",
+        critical=True,
+    )
+    text = render_human(
+        Report(
+            rows=(row,),
+            provider="llamacpp",
+            provider_source="test",
+            timeout=0.5,
+            elapsed_ms=1,
+        )
+    )
+    assert "[state.slow]occupied[/]" in text

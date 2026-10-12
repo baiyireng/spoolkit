@@ -80,6 +80,7 @@ STATE_LABELS: dict[str, str] = {
 }
 
 #: `service list` state labels → existing `state.*` theme keys (no new theme entries).
+#: STATE_OCCUPIED → slow (caution yellow); `spool status` uses the same for display.
 _LIST_STATE_STYLE: dict[str, str] = {
     STATE_OURS: "up",
     STATE_OCCUPIED: "slow",
