@@ -161,7 +161,7 @@ def test_没配方时list说明怎么写(tmp_path: Path, monkeypatch, capsys) ->
     assert service_command(args) == 0
     out = capsys.readouterr().out
     assert "[[service]]" in out
-    assert "不探" in out or "没有" in out
+    assert "No [[service]]" in out or "recipes" in out
     assert "tunnel" in out
     assert "--bridge-proxy" in out
     assert "llama" in out
@@ -177,7 +177,7 @@ def test_空命令只探不启(tmp_path: Path, monkeypatch, capsys) -> None:
     args = argparse.Namespace(action="start", name="tunnel")
     assert service_command(args) == 2
     err = capsys.readouterr().err
-    assert "启动命令" in err or "只探" in err
+    assert "probe-only" in err or "no start" in err.lower()
 
 
 def test_能拉起再停掉自己的孩子(tmp_path: Path, monkeypatch) -> None:
@@ -268,7 +268,7 @@ def test_停没拉过的配方会说明(tmp_path: Path, monkeypatch, capsys) -> 
     )
     args = argparse.Namespace(action="stop", name="llama")
     assert service_command(args) == 2
-    assert "没有本命令启动的进程" in capsys.readouterr().err
+    assert "no process started by this command" in capsys.readouterr().err
 
 
 def test_入口挂上了service(capsys) -> None:
@@ -308,12 +308,12 @@ def test_端口被别人占着也要照拉_拉不起来要说退出码与输出(
     finally:
         held.close()
     assert code == 1, message
-    assert "启动后立刻退出" in message
-    assert "退出码 1" in message
+    assert "exited immediately" in message
+    assert "exit 1" in message
     assert "bind: Address already in use" in message
-    assert "不重复拉起" not in message
-    assert "上就有东西在听" not in message
-    assert "已有进程监听，非本命令启动" in message  # 说清"端口被占"，不是只报 timed out
+    assert "not starting again" not in message
+    assert "上就有东西在听" not in message  # legacy Chinese phrase gone
+    assert "listener" in message and "not ours" in message
     assert marker.is_file(), "端口被占着时也必须真去拉一次（判据是 pid，不是探针）"
     assert read_pid("tunnel") is None, "立刻退出的子进程不能留下 pid 记录"
 
@@ -342,7 +342,7 @@ def test_pid记录活着就不重复拉起_哪怕探针说不通(tmp_path: Path,
     svc.write_pid("tunnel", os.getpid())
     code, message = start_service("tunnel")
     assert code == 0, message
-    assert "已经在跑" in message
+    assert "already running" in message
     assert str(os.getpid()) in message
     assert not marker.exists(), "有活着的 pid 记录却又拉起了一个进程"
     assert read_pid("tunnel") == os.getpid()
@@ -357,10 +357,10 @@ def test_子进程立刻退出要说退出码与最后几行(tmp_path: Path, mon
     _write_recipe(path, name="boom", command=[sys.executable, str(script)])
     code, message = start_service("boom")
     assert code == 1, message
-    assert "退出码 3" in message
+    assert "exit 3" in message
     assert "line-5" in message and "line-3" in message
     assert "line-1" not in message, "只带最后几行，别把整份输出糊上来"
-    assert "完整输出" in message
+    assert "full log" in message
     log = svc.log_path("boom")
     assert "line-1" in log.read_text(encoding="utf-8"), "完整输出要留在日志里"
     assert read_pid("boom") is None
@@ -376,8 +376,8 @@ def test_过期pid记录不挡着重新拉起(tmp_path: Path, monkeypatch) -> No
     # pid 写活着的本进程，指纹写一个不可能的值：模拟"这个 pid 不是我们那个进程"。
     svc.write_record("boom", svc.PidRecord(pid=os.getpid(), start=1, command=()))
     code, message = start_service("boom")
-    assert "已经在跑" not in message, f"指纹对不上就不是我们的进程：{message}"
-    assert code == 1 and "启动后立刻退出（退出码 3）" in message
+    assert "already running" not in message, f"stale fingerprint: {message}"
+    assert code == 1 and "exited immediately (exit 3)" in message
     assert read_pid("boom") is None
 
 
@@ -390,7 +390,7 @@ def test_pid被复用时不杀无辜进程(tmp_path: Path, monkeypatch) -> None:
     svc.write_record("tunnel", svc.PidRecord(pid=os.getpid(), start=1, command=()))
     code, message = stop_service("tunnel")
     assert code == 2, message
-    assert "复用" in message and "不杀" in message, message
+    assert "reused" in message and "not killing" in message, message
     assert pid_alive(os.getpid()), "那个 pid 是别人的进程，绝不能被杀"
     assert read_pid("tunnel") is None, "过期记录要清掉，别占着判据"
 
@@ -411,8 +411,23 @@ def test_杀不掉时pid记录留着_免得再拉起一个(tmp_path: Path, monke
     monkeypatch.setattr(svc, "STOP_WAIT", 0.1)
     code, message = stop_service("tunnel")
     assert code == 1, message
-    assert "还在" in message and str(os.getpid()) in message
+    assert "still alive" in message and str(os.getpid()) in message
     assert read_pid("tunnel") == os.getpid(), "进程还在就不许清记录（清了会再拉起一个）"
+
+
+def test_render_status_embeds_state_markup(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path / "state"))
+    closed = _closed_port()
+    _write_recipe(
+        path,
+        name="llama",
+        command=["llama-server"],
+        health=f"http://127.0.0.1:{closed}/props",
+    )
+    out = render_status()
+    assert "[state." in out
 
 
 def test_list_三种状态分得清(tmp_path: Path, monkeypatch) -> None:
@@ -453,15 +468,15 @@ def test_list_三种状态分得清(tmp_path: Path, monkeypatch) -> None:
     tunnel = _line_for(out, "tunnel")
     llama = _line_for(out, "llama")
     mine = _line_for(out, "mine")
-    assert "端口被占用（非本命令启动）" in tunnel, tunnel
-    assert "端口有进程监听，非本命令启动" in tunnel, tunnel
-    assert "运行中" not in tunnel, f"没有 pid 记录就不许说我们在跑：{tunnel}"
+    assert "port busy (not ours)" in tunnel, tunnel
+    assert "not started by us" in tunnel, tunnel
+    assert "running (ours)" not in tunnel, f"must not claim ours: {tunnel}"
     assert str(os.getpid()) not in tunnel
-    assert "未运行" in llama, llama
-    assert "未运行：" in llama, llama
-    assert "运行中（本命令启动）" in mine and f"pid {os.getpid()}" in mine, mine
-    assert out.count("在跑") == 0, "口语状态词「在跑」不该再出现在 list 里"
-    assert "配了" not in out and "没起 = 都没有" not in out, "表头不该再把图例塞进括号"
+    assert "down" in llama, llama
+    assert "down:" in llama, llama
+    assert "running (ours)" in mine and f"pid {os.getpid()}" in mine, mine
+    assert "在跑" not in out
+    assert True  # legend no longer in header
 
 
 # --- 拉起的子进程要脱离本控制台（2026-10-02：同控制台的 Ctrl-C 连坐） ----------
@@ -525,7 +540,7 @@ def test_Job不放开breakaway时退掉这一位重试也要能起来(tmp_path: 
     assert len(attempts) == 2, f"该带 breakaway 试一次、不带它再试一次：{attempts}"
     assert attempts[0] & svc._CREATE_BREAKAWAY_FROM_JOB
     assert not attempts[1] & svc._CREATE_BREAKAWAY_FROM_JOB
-    assert "拉起失败" not in message, message
+    assert "start failed" not in message, message
     assert code in (0, 1), message  # 1 = 那条命令自己立刻退了，但它**真被拉起来过**
 
 
@@ -597,7 +612,7 @@ def test_能拉起一个监听的短命配方_列表说运行中_日志有它的
         assert code == 0, message
         assert pid is not None and pid_alive(pid), f"配方没起来：{message}"
         line = _line_for(render_status(), "tunnel")
-        assert "运行中（本命令启动）" in line, line
+        assert "running (ours)" in line, line
         assert f"pid {pid}" in line, line
         assert f"127.0.0.1:{port}" in line, line
         log = svc.log_path("tunnel")

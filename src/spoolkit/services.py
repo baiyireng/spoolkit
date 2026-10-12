@@ -43,8 +43,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from rich.markup import escape
+
 from spoolkit import settings
 from spoolkit import workspace
+from spoolkit.cli.term import state_style
 from spoolkit.health import PROBE_TIMEOUT_SECONDS, probe_spec
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -70,10 +73,10 @@ STATE_UNKNOWN = "unknown"
 #: 状态 → 展示词（`service list` 行里紧挨着 `[可启]` 的那一段）。
 #: 三个词各自把"是不是本命令起的"说全：图例就不必再塞进表头。
 STATE_LABELS: dict[str, str] = {
-    STATE_OURS: "运行中（本命令启动）",
-    STATE_OCCUPIED: "端口被占用（非本命令启动）",
-    STATE_DOWN: "未运行",
-    STATE_UNKNOWN: "无法判定",
+    STATE_OURS: "running (ours)",
+    STATE_OCCUPIED: "port busy (not ours)",
+    STATE_DOWN: "down",
+    STATE_UNKNOWN: "unknown",
 }
 
 #: OpenProcess 的访问位（Windows）。只要这两个：判活 + 读创建时刻。
@@ -363,25 +366,25 @@ def inspect_service(
     pid = record.pid if ours and record is not None else None
     target = ""
     probe_ok = False
-    probe_detail = "没有探活地址"
+    probe_detail = "no health URL"
     if item.health:
         probe_ok, target, probe_detail = probe_spec(
             item.health, timeout=timeout, cached=cached
         )
     if ours:
         state = STATE_OURS
-        tail = probe_detail if item.health else "这条配方没写探活地址"
-        detail = f"本命令启动的进程存活：pid {pid}；{tail}"
+        tail = probe_detail if item.health else "recipe has no health URL"
+        detail = f"owned process alive: pid {pid}; {tail}"
     elif item.health and probe_ok:
-        # 端口有进程监听，而记录里没有活着的进程：那不是本命令起的。
+        # Listener present, but no live pid record → not started by us.
         state = STATE_OCCUPIED
-        detail = "端口有进程监听，非本命令启动；改用其他端口，或先停止该进程"
+        detail = "port has a listener, not started by us; use another port or stop that process"
     elif not item.health:
         state = STATE_UNKNOWN
-        detail = "无法判定：这条配方没写探活地址，也没有本命令的 pid 记录"
+        detail = "unknown: no health URL and no pid record from this command"
     else:
         state = STATE_DOWN
-        detail = f"未运行：{probe_detail}"
+        detail = f"down: {probe_detail}"
     return ServiceState(
         name=item.name,
         state=state,
@@ -474,42 +477,41 @@ def _popen_service(command: Sequence[str], log: Path) -> subprocess.Popen:
 
 def start_service(name: str) -> tuple[int, str]:
     if not SAFE_NAME.match(name):
-        return 2, f"配方名不合法：{name}"
+        return 2, f"invalid recipe name: {name}"
     item = find_service(name)
     if item is None:
-        return 2, f"没有这个配方：{name}"
+        return 2, f"unknown recipe: {name}"
     if not item.command:
-        return 2, f"{name} 只探测、没有启动命令"
+        return 2, f"{name}: probe-only (no start command)"
 
-    # 判据一：本命令记下的 pid 还活着吗。活着就是"同一条配方最多一个进程"。
+    # Criterion: our pid record still alive → at most one process per recipe.
     record = read_record(name)
     if record is not None and record_alive(record):
-        return 0, f"{name} 已经在跑（pid {record.pid}），不重复拉起"
+        return 0, f"{name} already running (pid {record.pid}); not starting again"
     if record is not None:
-        # 过期记录：那个进程没了，或者 pid 已经被别的进程复用。清掉再拉。
+        # Stale record: process gone or pid reused. Clear, then start.
         clear_pid(name)
 
-    # 探针只用来**报状态**：端口上本来就有进程监听吗（可能是别的进程）。
+    # Probe is status-only: is something already listening (maybe not ours)?
     occupied = ""
     if item.health:
         ok, target, _detail = probe_spec(item.health, cached=False)
         if ok:
             where = target or item.health
-            occupied = f"；启动前 {where} 已有进程监听，非本命令启动"
+            occupied = f"; before start {where} already had a listener (not ours)"
 
-    # 子进程的输出落进日志：它启动后立刻退出时，那几行就是唯一的原因。
     log = log_path(name)
     try:
         proc = _popen_service(item.command, log)
     except OSError as exc:
-        return 2, f"拉起失败：{exc}"
+        return 2, f"start failed: {exc}"
     write_record(name, PidRecord.for_pid(proc.pid, item.command))
     code = _wait_start(proc)
     if code is not None:
-        # 立刻退出：pid 记录不能留，不然下次 start 会说"已经在跑"。
+        # Immediate exit: drop pid or next start will claim "already running".
         clear_pid(name)
         return 1, _exit_message(name, code, log, occupied)
-    return 0, f"已拉起 {name}（pid {proc.pid}）{occupied}"
+    return 0, f"started {name} (pid {proc.pid}){occupied}"
 
 
 def _wait_start(proc: subprocess.Popen) -> int | None:
@@ -535,44 +537,44 @@ def _tail(path: Path, lines: int = TAIL_LINES) -> list[str]:
 
 def _exit_message(name: str, code: int, log: Path, occupied: str) -> str:
     if code == 0:
-        head = f"{name} 启动后立刻退出（退出码 0：这条命令不是长驻进程？）"
+        head = f"{name} exited immediately (exit 0: not a long-running command?)"
     else:
-        head = f"{name} 启动后立刻退出（退出码 {code}）"
+        head = f"{name} exited immediately (exit {code})"
     body = [head + occupied]
     tail = _tail(log)
     if tail:
-        body.append(f"最后 {len(tail)} 行输出：")
+        body.append(f"last {len(tail)} lines:")
         body.extend(f"    {line}" for line in tail)
     else:
-        body.append("（没有输出）")
-    body.append(f"完整输出：{log}")
+        body.append("(no output)")
+    body.append(f"full log: {log}")
     return "\n".join(body)
 
 
 def stop_service(name: str) -> tuple[int, str]:
     if not SAFE_NAME.match(name):
-        return 2, f"配方名不合法：{name}"
+        return 2, f"invalid recipe name: {name}"
     record = read_record(name)
     if record is None:
-        return 2, f"{name} 没有本命令启动的进程：pid 记录为空"
+        return 2, f"{name}: no process started by this command (empty pid record)"
     if not pid_alive(record.pid):
         clear_pid(name)
-        return 2, f"{name} 之前拉起的进程（pid {record.pid}）已经不在了，pid 记录清掉"
+        return 2, f"{name}: previous process (pid {record.pid}) is gone; cleared pid record"
     if record.start is not None:
         current = process_start_token(record.pid)
         if current is not None and current != record.start:
-            # pid 被系统复用给了别的进程：**不能杀**，那不是本命令拉起的进程。
+            # Pid reused by another process — do not kill it.
             clear_pid(name)
             return 2, (
-                f"{name} 那个 pid（{record.pid}）现在不是本命令拉起的进程（pid 被复用了），"
-                "不杀它；pid 记录清掉"
+                f"{name}: pid {record.pid} was reused (not our process); "
+                "not killing; cleared pid record"
             )
     _kill(record.pid)
     if not _wait_dead(record.pid, STOP_WAIT):
-        # 记录留着：它就是"要不要拉起"的判据，清了就会再拉起一个抢同一个端口。
-        return 1, f"{name} 发过停止信号但进程还在（pid {record.pid}），pid 记录留着"
+        # Keep the record: it is the start gate; clearing would start a second process.
+        return 1, f"{name}: stop signal sent but process still alive (pid {record.pid}); pid record kept"
     clear_pid(name)
-    return 0, f"已停 {name}"
+    return 0, f"stopped {name}"
 
 
 def _wait_dead(pid: int, timeout: float) -> bool:
@@ -608,44 +610,49 @@ def _kill(pid: int) -> None:
 
 def render_status() -> str:
     path = settings.config_path()
-    lines = [f"配方表：{path}" + ("" if path.is_file() else "（还没有）"), ""]
+    head = f"recipes: {path}" + ("" if path.is_file() else " (missing)")
+    lines = [f"[muted]{escape(head)}[/]", ""]
     items = settings.load_services()
     if not items:
-        lines.extend(
-            [
-                "没有配置外接服务。没写这张表时，隧道不探、不拉；",
-                "模型仍按 provider / base_url 探活。",
-                "",
-                "写进上面的文件（路径、主机换成你自己的）：",
-                "",
-                "  # llama：本机语言模型。hub 按 provider/base_url 探活；",
-                "  # 这条只方便 spool service start/stop：判据是本命令记下的 pid，",
-                "  # 有活着的就不重复拉起（端口通不通只作参考）。",
-                "  [[service]]",
-                '  name = "llama"',
-                '  command = ["llama-server", "-m", "你的模型.gguf", "--port", "8080"]',
-                '  health = "http://127.0.0.1:8080/props"',
-                "",
-                "  # tunnel：通道出网的本机 SOCKS（ssh -D），不是模型代理。",
-                "  # QQ 有 IP 白名单时借跳板固定出口；hub 配 --bridge-proxy socks5://127.0.0.1:1080。",
-                "  [[service]]",
-                '  name = "tunnel"',
-                '  command = ["ssh", "-N", "-D", "1080", "你的跳板"]',
-                '  health = "tcp:127.0.0.1:1080"',
-                "",
-                "command 可空：空则只探测、不启动。",
-                "拉起：spool service start llama",
-            ]
-        )
+        for para in (
+            "No [[service]] recipes. Without them, tunnels are not probed or started;",
+            "the model is still probed via provider / base_url.",
+            "",
+            f"Add to {path}:",
+            "",
+            "  # llama: local LLM. hub probes provider/base_url;",
+            "  # start/stop use our pid record (alive => do not start again).",
+            "  [[service]]",
+            '  name = "llama"',
+            '  command = ["llama-server", "-m", "model.gguf", "--port", "8080"]',
+            '  health = "http://127.0.0.1:8080/props"',
+            "",
+            "  # tunnel: channel SOCKS (ssh -D), not the model --proxy.",
+            "  # hub: --bridge-proxy socks5://127.0.0.1:1080",
+            "  [[service]]",
+            '  name = "tunnel"',
+            '  command = ["ssh", "-N", "-D", "1080", "jump-host"]',
+            '  health = "tcp:127.0.0.1:1080"',
+            "",
+            "Empty command = probe only. Start: spool service start llama",
+        ):
+            lines.append(f"[muted]{escape(para)}[/]")
         return "\n".join(lines)
-    lines.append(f"本机配方 {len(items)} 条：")
+    lines.append(escape(f"{len(items)} recipe(s):"))
     for item in items:
         state = inspect_service(item, cached=False)
-        how = "只探" if not item.command else "可启"
-        where = state.target or "（无探活）"
+        how = "probe" if not item.command else "start"
+        where = state.target or "(no health)"
+        label = STATE_LABELS[state.state]
+        styled = f"[{state_style(state.state)}]{escape(label)}[/]"
         lines.append(
-            f"  - {item.name} [{how}] {STATE_LABELS[state.state]}  {where}  {state.detail}"
+            f"  - {escape(item.name)} [{how}] {styled}  "
+            f"{escape(where)}  {escape(state.detail)}"
         )
     lines.append("")
-    lines.append("拉起：spool service start <名>    停掉：spool service stop <名>")
+    lines.append(
+        "[muted]"
+        + escape("start: spool service start <name>    stop: spool service stop <name>")
+        + "[/]"
+    )
     return "\n".join(lines)
