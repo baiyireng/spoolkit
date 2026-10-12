@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import os
 
 from rich.console import Console
 
@@ -29,7 +28,8 @@ def test_state_style_maps_and_falls_back() -> None:
     assert term.state_style("nope") == "state.unknown"
 
 
-def test_force_terminal_emits_ansi() -> None:
+def test_force_terminal_emits_ansi(monkeypatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
     term.reset_consoles()
     buf = io.StringIO()
     c = Console(file=buf, theme=term.THEME, force_terminal=True, color_system="truecolor")
