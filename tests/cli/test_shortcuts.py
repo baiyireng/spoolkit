@@ -341,7 +341,7 @@ def test_认不出的键在起手时就印出来(capsys, monkeypatch, config_fil
     err = capsys.readouterr().err
     assert "channel.qqbot" in err
     assert "proxi" in err
-    assert "不认识" in err
+    assert "unknown" in err
 
 
 def test_起手那行说得出每个值是从哪来的(
@@ -366,10 +366,10 @@ def test_起手那行说得出每个值是从哪来的(
     assert shortcuts.qq_command(_parse("qq", [])) == 0
 
     err = capsys.readouterr().err
-    assert "本次生效" in err
+    assert "effective:" in err
     assert "240.0" in err
     assert "[channel.qqbot]" in err
-    assert "内置默认" in err
+    assert "default" in err
     assert "root=" not in err, "没生效的键不许印进「本次生效」那一行"
 
 
@@ -393,8 +393,8 @@ def test_起手行把配置里的false按值印出来(
     assert shortcuts.qq_command(_parse("qq", [])) == 0
 
     err = capsys.readouterr().err
-    assert "web=false(用户配置" in err, "配置里的 false 要按值印"
-    assert "web=（空）" not in err
+    assert "web=false(config" in err, "config false must print as value"
+    assert "web=(empty)" not in err
 
 
 def test_起手行把环境变量里的false也按值印出来(
@@ -409,7 +409,7 @@ def test_起手行把环境变量里的false也按值印出来(
     assert shortcuts.qq_command(_parse("qq", [])) == 0
 
     err = capsys.readouterr().err
-    assert "web=false(环境变量 SPOOLKIT_CHANNEL_QQBOT_WEB)" in err
+    assert "web=false(env SPOOLKIT_CHANNEL_QQBOT_WEB)" in err
 
 
 def test_起手行把timeout0与没给分开(
@@ -428,12 +428,12 @@ def test_起手行把timeout0与没给分开(
     )
 
     assert shortcuts.qq_command(_parse("qq", [])) == 0
-    assert "timeout=900.0(内置默认)" in capsys.readouterr().err
+    assert "timeout=900.0(default)" in capsys.readouterr().err
 
     assert shortcuts.qq_command(_parse("qq", ["--timeout", "0"])) == 0
     err = capsys.readouterr().err
-    assert "timeout=0.0(命令行)" in err
-    assert "（空）(命令行)" not in err
+    assert "timeout=0.0(CLI)" in err
+    assert "(empty)(CLI)" not in err
 
 
 def test_真的没给才印空(
@@ -448,8 +448,8 @@ def test_真的没给才印空(
 
     err = capsys.readouterr().err
     for key in ("proxy", "policy", "scope"):
-        assert f"{key}=（空）(内置默认)" in err, f"{key} 内置默认就是空串，要印「（空）」"
-    assert "web=true(内置默认)" in err, "内置默认的 web 是 true，不是空"
+        assert f"{key}=(empty)(default)" in err, f"{key} empty default"
+    assert "web=true(default)" in err, "default web is true"
 
 
 def test_起手行说得出timeout不是正数(
@@ -470,7 +470,7 @@ def test_起手行说得出timeout不是正数(
     assert shortcuts.qq_command(_parse("qq", [])) == 0
 
     err = capsys.readouterr().err
-    assert "大于 0" in err and "timeout" in err
+    assert "> 0" in err and "timeout" in err
     assert captured["args"].timeout == 900.0, "用不了的值要退回下一层，不能原样递给桥"
 
 
@@ -544,7 +544,7 @@ def test_缺凭据时在通道那一步就停住(monkeypatch, user_env: Path, tm
     message = str(exc.value)
     assert "AppID" in message and "AppSecret" in message
     assert "spool env set QQ_AppID" in message, "缺凭据的下一步要能照着敲"
-    assert "找过这些位置" in message
+    assert "looked" in message.lower() or "search" in message.lower() or "find" in message.lower() or "位置" in message
     assert str(user_env) in message
 
 

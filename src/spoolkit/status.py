@@ -189,7 +189,12 @@ def _probe_http(url: str, timeout: float) -> tuple[str, str]:
         return STATE_UP, f"HTTP {response.status_code}"
     if response.status_code == 503:
         return STATE_SLOW, "HTTP 503: service up, model still loading"
-    return STATE_DOWN, f"HTTP {response.status_code}"
+    # Port open but not llama /props (e.g. another app's 404 "路径不存在").
+    return (
+        STATE_DOWN,
+        f"HTTP {response.status_code}: not llama /props "
+        f"(another process may own this port)",
+    )
 
 
 def _recipe_for(target_url: str, recipes: list) -> object | None:

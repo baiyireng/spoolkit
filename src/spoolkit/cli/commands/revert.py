@@ -16,10 +16,10 @@
 """
 
 import argparse
-import sys
 from pathlib import Path
 
 from spoolkit import runlog
+from spoolkit.cli.term import print_err, print_out
 from spoolkit.tools.edit import load_baseline, revert
 
 
@@ -35,7 +35,7 @@ def _revert_last_write(project_root: Path) -> int:
     baseline_path = project_root / ".agent" / "last_change.json"
     baseline = load_baseline(baseline_path)
     if baseline is None:
-        print("没有可回滚的记录。", file=sys.stderr)
+        print_err("没有可回滚的记录。", markup=False)
         return 2
 
     touched = revert(project_root, baseline)
@@ -43,8 +43,8 @@ def _revert_last_write(project_root: Path) -> int:
     # 把之后的手工改动一起冲掉。
     baseline_path.unlink()
     for path in touched:
-        print(f"已恢复：{path}")
-    print(f"共恢复 {len(touched)} 个文件。")
+        print_out(f"已恢复：{path}", markup=False, style="ok")
+    print_out(f"共恢复 {len(touched)} 个文件。", markup=False)
     return 0
 
 
@@ -54,10 +54,10 @@ def _revert_run(project_root: Path, args: argparse.Namespace) -> int:
     if not run_id:
         run_id = runlog.latest_run_id(project_root) or ""
         if not run_id:
-            print(
+            print_err(
                 "没有运行记录：这个工作区里还没有「落成过改动」的一轮。"
                 "（记录写在 .agent/runs/<id>/run.json）",
-                file=sys.stderr,
+                markup=False,
             )
             return 2
     result = runlog.revert_run(project_root, run_id, dry_run=bool(args.dry_run))
@@ -68,37 +68,47 @@ def _revert_run(project_root: Path, args: argparse.Namespace) -> int:
             if known
             else "这个工作区里还没有任何运行记录。"
         )
-        print(f"没有这条运行记录：{run_id}。{hint}", file=sys.stderr)
+        print_err(f"没有这条运行记录：{run_id}。{hint}", markup=False)
         return 2
 
     if args.dry_run:
-        print(f"预演：这一轮（{run_id}）会这样做（磁盘一个字没动）：")
+        print_out(
+            f"预演：这一轮（{run_id}）会这样做（磁盘一个字没动）：",
+            markup=False,
+        )
     else:
-        print(f"回退这一轮：{run_id}")
+        print_out(f"回退这一轮：{run_id}", markup=False)
     for step in result.steps:
-        print("  " + step.render())
+        print_out("  " + step.render(), markup=False)
 
-    print(
+    print_out(
         f"共 {len(result.steps)} 处："
         f"恢复/删除 {result.count(runlog.DONE)}、"
         f"跳过 {result.count(runlog.SKIPPED)}、"
         f"冲突 {result.count(runlog.CONFLICT)}"
         + (f"、失败 {result.count(runlog.FAILED)}" if result.count(runlog.FAILED) else "")
         + ("（预演，没有落盘）" if result.dry_run else "")
-        + "。"
+        + "。",
+        markup=False,
     )
     if result.conflicts:
         # **冲突不静默**，而且要给出人工怎么做——只报「有冲突」等于把问题
         # 还给用户，而他现在的状态正是「不知道怎么退回去」。
-        print("冲突的这几处**没有被覆盖**（它们在这一轮之后又被改过，"
-              "直接写回去会冲掉后来的改动）：")
+        print_out(
+            "冲突的这几处**没有被覆盖**（它们在这一轮之后又被改过，"
+            "直接写回去会冲掉后来的改动）：",
+            markup=False,
+            style="bad",
+        )
         for step in result.conflicts:
-            print(f"  - {step.path}：{step.detail}")
-        print(
+            print_out(f"  - {step.path}：{step.detail}", markup=False)
+        print_out(
             "人工处理：先把这些文件现在的版本备份出去（或加进版本库），"
             "再决定是保留后来的改动、还是手工把改动前的原文写回去。"
             "已经退成功的那些不受影响；处理完再跑一次同一条命令，"
-            "退过的会被跳过、没退的接着退。"
+            "退过的会被跳过、没退的接着退。",
+            markup=False,
+            style="muted",
         )
     if args.dry_run:
         return 0

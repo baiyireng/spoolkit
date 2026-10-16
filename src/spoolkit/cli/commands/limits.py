@@ -12,10 +12,10 @@ spool limits --reset repeat_block_at
 """
 
 import argparse
-import sys
 from pathlib import Path
 
 from spoolkit import limits
+from spoolkit.cli.term import print_err, print_out
 
 
 def limits_command(args: argparse.Namespace) -> int:
@@ -26,38 +26,44 @@ def limits_command(args: argparse.Namespace) -> int:
         changed = 0
         for item in args.set:
             if "=" not in item:
-                print(
+                print_err(
                     f"usage: spool limits --set <name>=<value> ({item})",
-                    file=sys.stderr,
+                    markup=False,
+                    style="bad",
                 )
                 return 2
             name, _, raw = item.partition("=")
             name = name.strip()
             entry = limits.knob(name)
             if entry is None:
-                print(f"unknown limit: {name}", file=sys.stderr)
-                print("usage: spool limits", file=sys.stderr)
+                print_err(f"unknown limit: {name}", markup=False, style="bad")
+                print_err("usage: spool limits", markup=False)
                 return 2
             if not entry.overridable:
-                print(
+                print_err(
                     f"{name} is a safety limit and cannot be overridden",
-                    file=sys.stderr,
+                    markup=False,
+                    style="bad",
                 )
                 return 2
             try:
                 overrides[name] = float(raw.strip())
             except ValueError:
-                print(f"value must be a number: {item}", file=sys.stderr)
+                print_err(f"value must be a number: {item}", markup=False, style="bad")
                 return 2
             changed += 1
         path = limits.save_overrides(project_root, overrides)
-        print(f"已写入 {path}（{changed} 项）")
+        print_out(f"已写入 {path}（{changed} 项）", markup=False, style="ok")
 
     if args.reset:
         for name in args.reset:
             overrides.pop(name, None)
         limits.save_overrides(project_root, overrides)
-        print("已恢复默认值：" + "、".join(args.reset))
+        print_out(
+            "已恢复默认值：" + "、".join(args.reset),
+            markup=False,
+            style="ok",
+        )
 
-    print(limits.render(overrides))
+    print_out(limits.render(overrides))
     return 0

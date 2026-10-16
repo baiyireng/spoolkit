@@ -52,7 +52,7 @@ def test_没写这一节时全是内置默认(config_file: Path) -> None:
     assert values.options == dict(settings.CHANNEL_KEYS)
     assert values.options["web"] is True
     assert values.options["timeout"] == 900.0, "内置默认要与 bridge --timeout 同口径"
-    assert set(values.sources.values()) == {"内置默认"}
+    assert set(values.sources.values()) == {"default"}
     assert values.unknown == ()
     assert values.notes() == ""
 
@@ -73,7 +73,7 @@ def test_写了就读得出来(config_file: Path) -> None:
     for key in ("proxy", "policy", "scope", "timeout", "web"):
         assert "[channel.qqbot]" in values.source(key), "来源要指到这一节"
         assert str(config_file) in values.source(key), "还要指到那份文件"
-    assert values.source("root") == "内置默认"
+    assert values.source("root") == "default"
 
 
 def test_每个通道各读自己那一节(config_file: Path) -> None:
@@ -96,9 +96,9 @@ def test_值读不成该有的类型要说出来(config_file: Path, written: str
 
     values = settings.channel_options("qqbot")
 
-    assert values.options["timeout"] == 900.0, "读不成还是要有值，否则桥会崩"
+    assert values.options["timeout"] == 900.0, "not a还是要有值，否则桥会崩"
     assert values.issues and "timeout" in values.issues[0]
-    assert "读不成数字" in values.issues[0], "要说清是哪一种不对（数字 vs 正数）"
+    assert "not a number" in values.issues[0]
     assert "timeout" in values.notes()
 
 
@@ -116,7 +116,7 @@ def test_policy只认命令行认的那三个取值(config_file: Path) -> None:
         values = settings.channel_options("qqbot")
 
         assert values.options["policy"] == "", "认不出的取值不许生效，退回下一层"
-        assert values.source("policy") == "内置默认"
+        assert values.source("policy") == "default"
         notes = values.notes()
         assert "policy" in notes and wrong in notes, "要指出是哪一个值不对"
         assert "ask" in notes and "auto" in notes and "deny" in notes, (
@@ -152,8 +152,8 @@ def test_timeout不是正数要说出来(config_file: Path) -> None:
 
         assert values.options["timeout"] == 900.0, "用不了的值退回内置默认"
         assert values.issues and "timeout" in values.issues[0]
-        assert "大于 0" in values.issues[0], "要说清是哪一种不对，别只说'读不成类型'"
-        assert "大于 0" in values.notes()
+        assert "> 0" in values.issues[0]
+        assert "> 0" in values.notes()
 
 
 def test_环境变量里的负timeout同样说出口(config_file: Path, monkeypatch) -> None:
@@ -164,7 +164,7 @@ def test_环境变量里的负timeout同样说出口(config_file: Path, monkeypa
     values = settings.channel_options("qqbot")
 
     assert values.options["timeout"] == 240.0, "坏的那一层跳过，好的那层照用"
-    assert values.issues and "环境变量" in values.issues[0]
+    assert values.issues and "env" in values.issues[0]
 
 
 def test_开关类型写错要说出来(config_file: Path) -> None:
@@ -175,7 +175,7 @@ def test_开关类型写错要说出来(config_file: Path) -> None:
 
     assert values.options["web"] is True, "退回内置默认"
     assert values.issues and "web" in values.issues[0]
-    assert "真假" in values.notes()
+    assert "bool" in values.notes()
 
 
 def test_开关的宽容写法照认不报错(config_file: Path) -> None:
@@ -237,16 +237,16 @@ def test_config_命令把短命令不读的键标出来(config_file: Path, capsy
     root_line = next(
         line for line in out.splitlines() if line.strip().startswith("root")
     )
-    # 注记取 `←` 之后那一段：临时目录名里带着用例名，直接断言整行会被路径骗过去。
-    note = root_line.partition("←")[2]
-    assert "短命令不读" in note, "要让这一行看起来就与生效值那几行不一样"
-    assert "--root" in note, "还要说清正确的给法在哪儿"
-    assert str(config_file) in root_line, "值本身照印，只是多了一句注记"
-    assert " 用户配置 [channel.qqbot]" in root_line, "值与来源之间至少要有一个空格"
+    # Note after `<-` (path may contain the case name; don't assert whole line).
+    note = root_line.partition("<-")[2]
+    assert "short commands ignore" in note, "mark non-effective keys clearly"
+    assert "--root" in note
+    assert str(config_file) in root_line
+    assert "config [channel.qqbot]" in root_line
     policy_line = next(
         line for line in out.splitlines() if line.strip().startswith("policy")
     )
-    assert "←" not in policy_line, "真在生效的键不许被标"
+    assert "<-" not in policy_line and "←" not in policy_line
 
 
 # --- 优先级 -----------------------------------------------------------------
@@ -265,7 +265,7 @@ def test_命令行的值到这里为止(config_file: Path, monkeypatch) -> None:
     )
 
     assert values.options["scope"] == ""
-    assert values.sources["scope"] == "命令行"
+    assert values.sources["scope"] == "CLI"
     assert values.options["proxy"] == "socks5://命令行"
 
 
@@ -276,7 +276,7 @@ def test_环境变量压过用户配置(config_file: Path, monkeypatch) -> None:
     values = settings.channel_options("qqbot")
 
     assert values.options["proxy"] == "socks5://环境变量"
-    assert values.sources["proxy"] == "环境变量 SPOOLKIT_CHANNEL_QQBOT_PROXY"
+    assert values.sources["proxy"] == "env SPOOLKIT_CHANNEL_QQBOT_PROXY"
 
 
 def test_旧前缀也认但新的优先(config_file: Path, monkeypatch) -> None:
@@ -285,13 +285,13 @@ def test_旧前缀也认但新的优先(config_file: Path, monkeypatch) -> None:
     assert settings.channel_options("qqbot").options["scope"] == "src"
     assert (
         settings.channel_options("qqbot").sources["scope"]
-        == "环境变量 AGENTS_DEV_CHANNEL_QQBOT_SCOPE"
+        == "env AGENTS_DEV_CHANNEL_QQBOT_SCOPE"
     )
 
     monkeypatch.setenv("SPOOLKIT_CHANNEL_QQBOT_SCOPE", "tests")
     values = settings.channel_options("qqbot")
     assert values.options["scope"] == "tests"
-    assert values.sources["scope"] == "环境变量 SPOOLKIT_CHANNEL_QQBOT_SCOPE"
+    assert values.sources["scope"] == "env SPOOLKIT_CHANNEL_QQBOT_SCOPE"
 
 
 def test_环境变量里的数字与开关要按类型读(config_file: Path, monkeypatch) -> None:
@@ -313,7 +313,7 @@ def test_用户配置压过内置默认(config_file: Path) -> None:
     assert values.options["web"] is False
     assert values.options["timeout"] == 30.0
     assert values.options["policy"] == "", "没写的键还是内置默认"
-    assert values.source("policy") == "内置默认"
+    assert values.source("policy") == "default"
 
 
 # --- 说不出口的那些 ---------------------------------------------------------
@@ -328,7 +328,7 @@ def test_认不出的键要说出口(config_file: Path) -> None:
     assert values.unknown == ("proxi",)
     notes = values.notes()
     assert "proxi" in notes
-    assert "不认识" in notes
+    assert "unknown" in notes
     assert "proxy" in notes, "要顺手把可用的键列出来，人才知道差在哪"
     assert values.options["proxy"] == "", "认不出的键不参与生效值"
 

@@ -465,3 +465,26 @@ def test_一个目标一个_runner(tmp_path: Path, monkeypatch) -> None:
     assert made == [(str(a), "mcp"), (str(b), "mcp")]  # 每个工作区各一个
     assert server._last_target.root == a  # 当前任务跟着最近一次 delegate 走
     assert _payload(server._call_tool("task_status", {}))["workspace"] == str(a)
+
+
+def test_派发可以按次给步数预算(tmp_path: Path) -> None:
+    """复杂任务经 MCP 派发时要能一次给足预算。
+
+    实测缺陷：MCP 那条入口指定不了 `--max-steps`（内置默认 10 步），一个
+    「读契约 + 实现 + 验收」的任务在第 8 步就踩进收束态、验收命令被拦，
+    只能靠督导 +3/+5 零敲碎打地续期。
+    """
+    server, runner = _server(tmp_path)
+    runner.extra_args = ["--policy", "auto"]  # 注入的 Runner 自带参数不能被覆盖
+
+    _call(server, "delegate_task", {"goal": "干活", "max_steps": 40, "limit": 8})
+    assert runner.extra_args == ["--policy", "auto", "--max-steps", "40", "--limit", "8"]
+
+    runner.running = False
+    _call(server, "delegate_task", {"goal": "再干活"})
+    assert runner.extra_args == ["--policy", "auto"], "不给预算就退回基线，不越积越长"
+
+    for bad in (0, -1, "40", True, None):
+        runner.running = False
+        _call(server, "delegate_task", {"goal": "还要干活", "max_steps": bad})
+        assert runner.extra_args == ["--policy", "auto"], bad

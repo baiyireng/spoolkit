@@ -117,6 +117,22 @@ def test_钉住的工作区压过点名(tmp_path: Path) -> None:
     assert free._target({"workspace": "b"}).root == b
 
 
+def test_mcp点名的名字不因_cwd_里的同名目录跑偏(tmp_path: Path, monkeypatch) -> None:
+    """MCP 服务是被客户端按配置拉起来的：它的 cwd 与调用方想在哪干活无关。
+
+    实测缺陷：cwd 里有个同名的非工作区子目录时，点名会被"向上找 `.agent/`"
+    劫持到外层工作区，登记表里的同名工作区永远轮不到。
+    """
+    target = _ws(tmp_path / "elsewhere", "snake-vue")
+    parent = _ws(tmp_path, "parent")
+    (parent / "snake-vue").mkdir()
+    kws.register(target)
+    kws.register(parent)
+    monkeypatch.chdir(parent)
+
+    assert _mcp(None)._target({"workspace": "snake-vue"}).root == target
+
+
 # --- 4. 批准不再往"没有通道维度"的旧文件里写别人的放行 -------------------------
 
 

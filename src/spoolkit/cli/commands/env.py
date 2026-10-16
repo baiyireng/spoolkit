@@ -34,11 +34,11 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from spoolkit import settings
 from spoolkit.bridge.credentials import mask
+from spoolkit.cli.term import escape, print_err, print_out
 from spoolkit.envfile import (
     EnvFileError,
     load_env_file,
@@ -77,27 +77,46 @@ def _parse_pairs(items: list[str]) -> tuple[dict[str, str], list[str]]:
 
 def _print_list() -> int:
     path = settings.env_path()
-    print(f"用户级 .env：{path}")
+    print_out(f"[muted]用户级 .env：[/][accent]{escape(str(path))}[/]")
     if path.is_dir():
-        print("  该路径是个目录，不是文件（`SPOOLKIT_ENV_FILE` 可能指向有误）。")
+        print_out(
+            "  该路径是个目录，不是文件（`SPOOLKIT_ENV_FILE` 可能指向有误）。",
+            markup=False,
+            style="bad",
+        )
     elif not path.is_file():
-        print(
-            "  不存在。两种建立方式：\n"
-            "    spool env set KEY=VALUE              直接写入\n"
-            "    spool env import --from <工作区的 .env>   从工作区已有的一份导入"
+        print_out(
+            "[muted]  不存在。两种建立方式：[/]\n"
+            "[muted]    spool env set KEY=VALUE              直接写入[/]\n"
+            "[muted]    spool env import --from <工作区的 .env>   "
+            "从工作区已有的一份导入[/]"
         )
     else:
         table = load_env_file(path)
         if table:
-            print(f"  内有 {len(table)} 个键（只印键名与形状，不印值）：")
+            print_out(
+                f"[muted]  内有 {len(table)} 个键（只印键名与形状，不印值）：[/]"
+            )
             for key in sorted(table):
-                print(f"    {key} = {mask(table[key])}")
+                shape = mask(table[key])
+                print_out(
+                    f"    [accent]{escape(key)}[/] [muted]=[/] {escape(shape)}"
+                )
         else:
-            print("  存在，但未解析出任何一行（只识别 KEY=VALUE 文本；可能是编码问题）")
-    print(f"用户级 config.toml：{settings.effective_config_path()}")
-    print(
-        "工作区级那一层随工作区变化（`<工作区>/.env`）；机器级服务（通道 / 网页壳 / MCP）"
-        "读的是用户级这一层，所以 QQ 之类的凭据放这里即可，无需关心在哪个目录启动。"
+            print_out(
+                "  存在，但未解析出任何一行（只识别 KEY=VALUE 文本；可能是编码问题）",
+                markup=False,
+                style="muted",
+            )
+    cfg = settings.effective_config_path()
+    print_out(f"[muted]用户级 config.toml：[/]{escape(str(cfg))}")
+    print_out(
+        "[muted]"
+        + escape(
+            "工作区级那一层随工作区变化（`<工作区>/.env`）；机器级服务（通道 / 网页壳 / MCP）"
+            "读的是用户级这一层，所以 QQ 之类的凭据放这里即可，无需关心在哪个目录启动。"
+        )
+        + "[/]"
     )
     return 0
 
@@ -107,49 +126,55 @@ def _do_set(items: list[str]) -> int:
     if bad:
         # **点名个数，不点名内容**：打错的常常就是密钥本身（少了个 `=`），
         # 原样回显等于把它打进终端。
-        print(
+        print_err(
             f"有 {len(bad)} 个参数不是 KEY=VALUE 的形状（不回显，以免把值写入终端）。",
-            file=sys.stderr,
+            markup=False,
         )
-        print(USAGE, file=sys.stderr)
+        print_err(USAGE, markup=False)
         return 2
     if not updates:
-        print("未给出 KEY=VALUE。", file=sys.stderr)
-        print(USAGE, file=sys.stderr)
+        print_err("未给出 KEY=VALUE。", markup=False)
+        print_err(USAGE, markup=False)
         return 2
     path = settings.env_path()
     update_env_file(path, updates)
-    print(f"已写入 {path}（只印形状，不印值）：")
+    print_out(
+        f"[ok]已写入 [/]{escape(str(path))}[muted]（只印形状，不印值）：[/]"
+    )
     for key, value in updates.items():
-        print(f"  {key} = {mask(value)}")
-    print("避免密钥进入 shell 历史：用 `spool env import --from <工作区的 .env>`。")
+        print_out(
+            f"    [accent]{escape(key)}[/] [muted]=[/] {escape(mask(value))}"
+        )
+    print_out(
+        "[muted]避免密钥进入 shell 历史：用 `spool env import --from <工作区的 .env>`。[/]"
+    )
     return 0
 
 
 def _do_import(source_raw: str, only: list[str]) -> int:
     source_raw = str(source_raw or "").strip()
     if not source_raw:
-        print("需要指定来源。", file=sys.stderr)
-        print(USAGE, file=sys.stderr)
+        print_err("需要指定来源。", markup=False)
+        print_err(USAGE, markup=False)
         return 2
     wanted = [str(item).strip() for item in only]
     if any(not item for item in wanted):
         # `--only ""` 会被当成"给了一个名字叫空串的键"，然后输出说"没搬"，
         # 那句话说明不了问题出在哪。
-        print("`--only` 的值不能为空。", file=sys.stderr)
-        print(USAGE, file=sys.stderr)
+        print_err("`--only` 的值不能为空。", markup=False)
+        print_err(USAGE, markup=False)
         return 2
     source = Path(source_raw).expanduser()
     if not source.is_file():
         # 路径要印出来（不然人不知道它找的是哪儿）；这里印的是**参数本身**，
         # 不是内容——与"不回显值"那条不冲突。
-        print(f"来源路径不是文件：{source}", file=sys.stderr)
+        print_err(f"来源路径不是文件：{source}", markup=False)
         return 1
     table = load_env_file(source)
     if not table:
-        print(
+        print_err(
             f"{source} 未解析出任何一行（只识别 KEY=VALUE 文本；可能是编码问题）",
-            file=sys.stderr,
+            markup=False,
         )
         return 1
     picked = {key: value for key, value in table.items() if not wanted or key in wanted}
@@ -158,20 +183,35 @@ def _do_import(source_raw: str, only: list[str]) -> int:
         # **`--only` 的值一律不印**：它可能就是一个密钥（人少打了键名），而
         # "像不像键名"根本判不出来——`sk_live_…`、`AKIA…`、`github_pat_…` 全长得像。
         # 要印就印**文件里真有哪些键**（那是文件自己的内容，`list` 早就印了）。
-        print(
+        print_err(
             f"{len(wanted)} 个 `--only` 在来源里一个都没找到（不回显所给的值）。",
-            file=sys.stderr,
+            markup=False,
         )
-        print(f"{source} 里有这些键：{'、'.join(sorted(table))}", file=sys.stderr)
+        print_err(
+            f"{source} 里有这些键：{'、'.join(sorted(table))}",
+            markup=False,
+        )
         return 1
     target = settings.env_path()
     update_env_file(target, picked)
-    print(f"从 {source} 导入 {target}（{len(picked)} 个键；来源文件未修改）：")
+    print_out(
+        f"[ok]从 [/]{escape(str(source))}[ok] 导入 [/]{escape(str(target))}"
+        f"[muted]（{len(picked)} 个键；来源文件未修改）：[/]"
+    )
     for key in sorted(picked):
-        print(f"  {key} = {mask(picked[key])}")
+        print_out(
+            f"    [accent]{escape(key)}[/] [muted]=[/] "
+            f"{escape(mask(picked[key]))}"
+        )
     if missing:
-        print(f"另有 {len(missing)} 个 `--only` 来源里没有，未导入（不回显所给的值）。")
-        print(f"{source} 里可用的键：{'、'.join(sorted(table))}")
+        print_out(
+            f"[muted]另有 {len(missing)} 个 `--only` 来源里没有，未导入"
+            "（不回显所给的值）。[/]"
+        )
+        print_out(
+            f"[muted]{escape(str(source))} 里可用的键："
+            f"{escape('、'.join(sorted(table)))}[/]"
+        )
     return 0
 
 
@@ -179,7 +219,7 @@ def env_command(args: argparse.Namespace) -> int:
     action = str(getattr(args, "action", "list") or "list")
     try:
         if action == "path":
-            print(settings.env_path())
+            print_out(settings.env_path(), markup=False)
             return 0
         if action == "set":
             return _do_set([str(item) for item in (getattr(args, "items", []) or [])])
@@ -194,7 +234,7 @@ def env_command(args: argparse.Namespace) -> int:
         # 读写不了就说一句人话，别把回溯甩给人（这类失败都是"路径/权限/编码不对"，
         # 回溯里那几十行对判断下一步毫无帮助）。**读路径与写路径都要罩住**——
         # 二轮评审发现的另一条 Critical 就是"只读路径罩了，写路径漏了"。
-        print(str(exc), file=sys.stderr)
+        print_err(str(exc), markup=False)
         return 1
-    print(USAGE, file=sys.stderr)
+    print_err(USAGE, markup=False)
     return 2

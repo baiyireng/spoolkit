@@ -413,7 +413,9 @@ class WebState:
         name = str(workspace or "").strip()
         if name:
             try:
-                root = kernel_workspaces.resolve_workspace(name)
+                # `use_cwd=False`：网页壳是机器级服务，它的启动目录不该决定"我叫的
+                # 那个名字是谁"——与 MCP 同一条理由（点名 b 却在 a 里干活最难查）。
+                root = kernel_workspaces.resolve_workspace(name, use_cwd=False)
             except WorkspaceError as exc:
                 # 名字对不上时给出可读说明：抛回溯等于让页面显示一整段调用栈，
                 # 而人需要的是"登记表里现在有这些"。

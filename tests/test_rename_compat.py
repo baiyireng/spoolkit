@@ -57,7 +57,7 @@ def test_旧环境变量还被认出来而且报的是真名(monkeypatch) -> Non
 def test_新环境变量优先于旧(monkeypatch) -> None:
     monkeypatch.setenv("AGENTS_DEV_PROVIDER", "llamacpp")
     monkeypatch.setenv("SPOOLKIT_PROVIDER", "gemini")
-    assert settings.resolve("provider") == ("gemini", "环境变量 SPOOLKIT_PROVIDER")
+    assert settings.resolve("provider") == ("gemini", "env SPOOLKIT_PROVIDER")
 
 
 def test_旧诊断密钥位置还认(monkeypatch, tmp_path: Path) -> None:

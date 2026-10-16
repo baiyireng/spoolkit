@@ -13,10 +13,12 @@
    同一条配方最多一个进程；记录里那个进程没了（或 pid 被复用）才动手拉起。
 2. 探针只用来报状态：`service list` 把三种情形分开写——**运行中（本命令启动）/
    端口被占用（非本命令启动）/ 未运行**。没有 pid 记录时绝不谎报"本命令在跑"。
-3. 子进程**启动后立刻退出**时，把它的退出码与最后几行输出带出来，完整输出留在
-   `<用户状态目录>/services/<配方>.log`：`ssh -D 1080` 撞上被占的端口正是
-   "bind: Address already in use" 然后死掉，改之前那一个字都看不到。
-4. 拉起的子进程**脱离本控制台**（Windows 给 `creationflags`，POSIX 给
+3. `start` 在动手前再看 **health 地址的 TCP 是否已有人听**（不要求 HTTP 探活
+   成功——别的服务占着端口常回 404）。有监听且非本命令 → **拒绝拉起**，文案
+   引导腾端口或改配方 `--port` / `health` / `base_url`。避免大模型白加载后绑不上。
+4. 子进程**启动后立刻退出**时，把它的退出码与最后几行输出带出来，完整输出留在
+   `<用户状态目录>/services/<配方>.log`。
+5. 拉起的子进程**脱离本控制台**（Windows 给 `creationflags`，POSIX 给
    `start_new_session=True`，见 `spawn_flags`）：不给的话，用户在**同一个窗口**
    按 Ctrl-C，控制台会把 CTRL_C_EVENT 广播给服务进程——"`spool qq` 之后隧道
    自己没了"就是这么来的（`start_new_session` 在 Windows 上被忽略）。
@@ -62,8 +64,9 @@ TAIL_LINES = 3
 
 #: 一条配方现在的样子。三种**要分得清**的情形（`state`）：
 #: - `STATE_OURS`：本命令启动的进程还活着（pid 记录就是判据）→ 运行中（本命令启动）
-#: - `STATE_OCCUPIED`：探针通，但不是本命令起的——地址被别的进程占着
-#: - `STATE_DOWN`：没有本命令的活进程，探针也不通 → 未运行
+#: - `STATE_OCCUPIED`：health 地址的 TCP 已有人听，但不是本命令起的
+#:   （HTTP 探活失败如 404/超时也算占用——别的服务常占着端口却不是 /props）
+#: - `STATE_DOWN`：没有本命令的活进程，TCP 也没人听 → 未运行
 #: - `STATE_UNKNOWN`：这条配方没写探活地址，也没有 pid 记录 → 无法判定
 STATE_OURS = "ours"
 STATE_OCCUPIED = "occupied"
@@ -385,14 +388,27 @@ def inspect_service(
         probe_ok, target, probe_detail = probe_spec(
             item.health, timeout=timeout, cached=cached
         )
+    endpoint = health_listen_target(item.health) if item.health else None
+    tcp_busy = bool(
+        endpoint and port_has_listener(endpoint[0], endpoint[1], timeout=timeout)
+    )
     if ours:
         state = STATE_OURS
         tail = probe_detail if item.health else "recipe has no health URL"
         detail = f"owned process alive: pid {pid}; {tail}"
-    elif item.health and probe_ok:
+    elif item.health and (probe_ok or tcp_busy):
         # Listener present, but no live pid record → not started by us.
+        # TCP alone counts: foreign HTTP apps often answer 404/timeout on /props.
         state = STATE_OCCUPIED
-        detail = "port has a listener, not started by us; use another port or stop that process"
+        where = (
+            describe_listeners(endpoint[0], endpoint[1])
+            if endpoint is not None
+            else (target or item.health)
+        )
+        detail = (
+            f"port has a listener, not started by us ({where}); "
+            f"stop that process or `spool service stop {item.name} --force`"
+        )
     elif not item.health:
         state = STATE_UNKNOWN
         detail = "unknown: no health URL and no pid record from this command"
@@ -489,6 +505,154 @@ def _popen_service(command: Sequence[str], log: Path) -> subprocess.Popen:
             )
 
 
+def health_listen_target(spec: str) -> tuple[str, int] | None:
+    """从 `health` 抽出要听的 host:port。http(s) 与 tcp: 都认；认不出给 None。"""
+    spec = (spec or "").strip()
+    if not spec:
+        return None
+    lowered = spec.lower()
+    if lowered.startswith("tcp:"):
+        body = spec.split(":", 1)[1]
+        if body.startswith("//"):
+            body = body[2:]
+        if body.startswith("["):
+            return None
+        host, sep, port_s = body.rpartition(":")
+        if not sep or not host or not port_s.isdigit():
+            return None
+        return host, int(port_s)
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        from urllib.parse import urlparse
+
+        parsed = urlparse(spec)
+        host = parsed.hostname or "127.0.0.1"
+        if parsed.port is not None:
+            port = int(parsed.port)
+        else:
+            port = 443 if (parsed.scheme or "").lower() == "https" else 80
+        return host, port
+    return None
+
+
+def port_has_listener(host: str, port: int, timeout: float = PROBE_TIMEOUT_SECONDS) -> bool:
+    """试连一下：通 = 已有进程在听（不一定是本配方）。"""
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def listening_pids(host: str, port: int) -> list[int]:
+    """谁在听这个端口（尽力而为；认不出就空列表）。"""
+    if os.name == "nt":
+        return _listening_pids_windows(port)
+    return _listening_pids_posix(host, port)
+
+
+def _listening_pids_windows(port: int) -> list[int]:
+    try:
+        completed = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    needle = f":{port}"
+    found: list[int] = []
+    for line in completed.stdout.splitlines():
+        if "LISTENING" not in line.upper():
+            continue
+        if needle not in line:
+            continue
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            pid = int(parts[-1])
+        except ValueError:
+            continue
+        if pid > 0 and pid not in found:
+            found.append(pid)
+    return found
+
+
+def _listening_pids_posix(host: str, port: int) -> list[int]:
+    try:
+        completed = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    found: list[int] = []
+    for line in completed.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        if pid > 0 and pid not in found:
+            found.append(pid)
+    return found
+
+
+def process_label(pid: int) -> str:
+    """给人看的短标签：`pid 123 python.exe`。"""
+    name = ""
+    if os.name == "nt":
+        try:
+            completed = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            row = (completed.stdout or "").strip().splitlines()
+            if row and row[0].startswith('"'):
+                name = row[0].split(",")[0].strip('"')
+        except (OSError, subprocess.TimeoutExpired):
+            name = ""
+    else:
+        try:
+            name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+        except OSError:
+            name = ""
+    return f"pid {pid}" + (f" {name}" if name else "")
+
+
+def describe_listeners(host: str, port: int) -> str:
+    """`127.0.0.1:8080 (pid 17360 python.exe)`；认不出 pid 就只写地址。"""
+    where = f"{host}:{port}"
+    pids = listening_pids(host, port)
+    if not pids:
+        return where
+    labels = ", ".join(process_label(pid) for pid in pids)
+    return f"{where} ({labels})"
+
+
+def _occupied_refuse_message(name: str, host: str, port: int) -> str:
+    where = describe_listeners(host, port)
+    return (
+        f"{name}: {where} already has a listener (not ours); not starting.\n"
+        f"That is usually another app — not a spool-managed llama. "
+        f"Free the port (`spool service stop {name} --force`), "
+        f"or change [[service]] --port / health and base_url, then retry.\n"
+        f"Check: spool service list"
+    )
+
+
 def start_service(name: str) -> tuple[int, str]:
     if not SAFE_NAME.match(name):
         return 2, f"invalid recipe name: {name}"
@@ -506,13 +670,13 @@ def start_service(name: str) -> tuple[int, str]:
         # Stale record: process gone or pid reused. Clear, then start.
         clear_pid(name)
 
-    # Probe is status-only: is something already listening (maybe not ours)?
-    occupied = ""
-    if item.health:
-        ok, target, _detail = probe_spec(item.health, cached=False)
-        if ok:
-            where = target or item.health
-            occupied = f"; before start {where} already had a listener (not ours)"
+    # Port already taken (TCP), even if HTTP health fails (e.g. foreign 404):
+    # refuse — do not spawn a doomed bind / waste a model load.
+    endpoint = health_listen_target(item.health)
+    if endpoint is not None:
+        host, port = endpoint
+        if port_has_listener(host, port):
+            return 1, _occupied_refuse_message(name, host, port)
 
     log = log_path(name)
     try:
@@ -524,8 +688,8 @@ def start_service(name: str) -> tuple[int, str]:
     if code is not None:
         # Immediate exit: drop pid or next start will claim "already running".
         clear_pid(name)
-        return 1, _exit_message(name, code, log, occupied)
-    return 0, f"started {name} (pid {proc.pid}){occupied}"
+        return 1, _exit_message(name, code, log, "")
+    return 0, f"started {name} (pid {proc.pid})"
 
 
 def _wait_start(proc: subprocess.Popen) -> int | None:
@@ -565,20 +729,47 @@ def _exit_message(name: str, code: int, log: Path, occupied: str) -> str:
     return "\n".join(body)
 
 
-def stop_service(name: str) -> tuple[int, str]:
+def stop_service(name: str, *, force: bool = False) -> tuple[int, str]:
     if not SAFE_NAME.match(name):
         return 2, f"invalid recipe name: {name}"
     record = read_record(name)
     if record is None:
-        return 2, f"{name}: no process started by this command (empty pid record)"
+        if force:
+            return _force_stop_health_listener(name)
+        return 2, (
+            f"{name}: no process started by this command (empty pid record); "
+            f"if the health port is busy: spool service stop {name} --force"
+        )
     if not pid_alive(record.pid):
         clear_pid(name)
+        if force:
+            return _force_stop_health_listener(name)
+        # Stale record: still try to free our health port (orphan listener).
+        port_code, port_note = _reclaim_health_listener(name, require_listener=False)
+        if port_note and port_code == 0:
+            return 0, (
+                f"{name}: previous process (pid {record.pid}) is gone; "
+                f"cleared pid record; {port_note}"
+            )
+        if port_code != 0:
+            return port_code, (
+                f"{name}: previous process (pid {record.pid}) is gone; "
+                f"cleared pid record; {port_note}"
+            )
         return 2, f"{name}: previous process (pid {record.pid}) is gone; cleared pid record"
     if record.start is not None:
         current = process_start_token(record.pid)
         if current is not None and current != record.start:
             # Pid reused by another process — do not kill it.
             clear_pid(name)
+            if force:
+                return _force_stop_health_listener(name)
+            port_code, port_note = _reclaim_health_listener(name, require_listener=False)
+            if port_note and port_code == 0:
+                return 0, (
+                    f"{name}: pid {record.pid} was reused (not our process); "
+                    f"cleared pid record; {port_note}"
+                )
             return 2, (
                 f"{name}: pid {record.pid} was reused (not our process); "
                 "not killing; cleared pid record"
@@ -588,7 +779,63 @@ def stop_service(name: str) -> tuple[int, str]:
         # Keep the record: it is the start gate; clearing would start a second process.
         return 1, f"{name}: stop signal sent but process still alive (pid {record.pid}); pid record kept"
     clear_pid(name)
+    # Success = pid dead AND health port free. Detached/breakaway children can keep
+    # the port after taskkill of the recorded pid — reclaim those listeners too.
+    port_code, port_note = _reclaim_health_listener(name, require_listener=False)
+    if port_code != 0:
+        return port_code, f"stopped {name} pid, but {port_note}"
+    if port_note:
+        return 0, f"stopped {name}; {port_note}"
     return 0, f"stopped {name}"
+
+
+def _force_stop_health_listener(name: str) -> tuple[int, str]:
+    """按 health 端口杀监听进程（非本命令 pid 记录）。显式 --force 才走这里。"""
+    code, note = _reclaim_health_listener(name, require_listener=True)
+    if code == 0 and note:
+        return 0, f"force-stopped {name} {note}"
+    if code == 0:
+        return 0, note
+    return code, f"{name}: {note}" if not note.startswith(name) else note
+
+
+def _reclaim_health_listener(
+    name: str, *, require_listener: bool
+) -> tuple[int, str]:
+    """杀掉 health 地址上的监听进程。
+
+    `require_listener=False`：stop 收尾——没人听算成功（空 note）；
+    `require_listener=True`：`--force`——没人听算失败。
+    """
+    item = find_service(name)
+    if item is None:
+        return 2, f"unknown recipe: {name}"
+    endpoint = health_listen_target(item.health)
+    if endpoint is None:
+        if require_listener:
+            return 2, "--force needs a health URL with host:port"
+        return 0, ""
+    host, port = endpoint
+    if not port_has_listener(host, port):
+        if require_listener:
+            return 2, f"no listener on {host}:{port}"
+        return 0, ""
+    pids = listening_pids(host, port)
+    if not pids:
+        return 1, (
+            f"{host}:{port} still accepts connections but "
+            "could not resolve a pid to kill"
+        )
+    labels = [process_label(pid) for pid in pids]
+    for pid in pids:
+        _kill(pid)
+    dead = all(_wait_dead(pid, STOP_WAIT) for pid in pids)
+    if not dead or port_has_listener(host, port):
+        return 1, (
+            f"cleared pid but {host}:{port} still busy "
+            f"({', '.join(labels)})"
+        )
+    return 0, f"also cleared listener on {host}:{port} ({', '.join(labels)})"
 
 
 def _wait_dead(pid: int, timeout: float) -> bool:
@@ -666,7 +913,10 @@ def render_status() -> str:
     lines.append("")
     lines.append(
         "[muted]"
-        + escape("start: spool service start <name>    stop: spool service stop <name>")
+        + escape(
+            "start: spool service start <name>    "
+            "stop: spool service stop <name> [--force]"
+        )
         + "[/]"
     )
     return "\n".join(lines)

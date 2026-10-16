@@ -2,7 +2,7 @@ import io
 import json
 
 from spoolkit.cli.events import EventWriter
-from spoolkit.web.protocol import FINAL, parse_line
+from spoolkit.web.protocol import FINAL, NOTE, parse_line
 
 
 def test_输出一行JSON() -> None:
@@ -69,4 +69,37 @@ def test_handle能带kind字段() -> None:
     assert payload["type"] == "note"
     assert payload["kind"] == "audit"
     assert payload["text"] == "旧名仍有残留"
+
+
+def test_emit能带kind字段() -> None:
+    """同一个坑的第二处：`emit` 的 `kind` 必须是**位置限定**的。
+
+    `handle` 在 2026-10-04 修好之后，`run.py` 里还留着两处
+    `writer.emit(NOTE, text=..., kind="escalation")` / `kind="pending_actions"`
+    ——形参与载荷字段同名 → `TypeError: got multiple values for keyword
+    argument 'kind'`（一处被上层吞掉，一处能把收尾打断）。
+
+    这里的修法不是"再提醒一次"，而是**把约束写进签名**
+    （`def emit(self, kind: str, /, **data)`）：位置限定之后，`kind=`
+    一律落进 `**data`，那个写法从"会炸"变成"就是对的"。把 `/` 去掉，
+    这条用例立刻红。
+    """
+    buffer = io.StringIO()
+    EventWriter(buffer).emit(NOTE, text="有动作挂起待批", ok=False, kind="pending_actions")
+    payload = json.loads(buffer.getvalue().strip())
+    assert payload["type"] == "note"
+    assert payload["kind"] == "pending_actions"
+    assert payload["text"] == "有动作挂起待批"
+
+
+def test_emit_note把kind当载荷字段() -> None:
+    buffer = io.StringIO()
+    EventWriter(buffer).emit_note("高风险改动挂起", ok=False, kind="escalation")
+    payload = json.loads(buffer.getvalue().strip())
+    assert payload == {
+        "type": "note",
+        "text": "高风险改动挂起",
+        "ok": False,
+        "kind": "escalation",
+    }
 

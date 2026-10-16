@@ -82,15 +82,30 @@ def remove(root: Path | str, directory: str) -> tuple[list[str], str]:
 
 
 def render(root: Path | str) -> str:
+    """列表文案（含 Rich markup；命令侧 `print_out` 渲染）。"""
+    from rich.markup import escape
+
     roots = load(root)
     if not roots:
         return (
-            "当前没有关联目录。要放开：在服务器上敲 spool extra add 加目录"
-            "（聊天里加不了）。"
+            "[muted]"
+            + escape(
+                "当前没有关联目录。要放开：在服务器上敲 spool extra add 加目录"
+                "（聊天里加不了）。"
+            )
+            + "[/]"
         )
-    lines = ["关联目录（读放开，写要确认后才落盘）："]
+    lines = [
+        "[muted]"
+        + escape("关联目录（读放开，写要确认后才落盘）：")
+        + "[/]"
+    ]
     for item in roots:
-        mark = "" if Path(item).is_dir() else "（已不存在）"
-        lines.append(f"  {item}{mark}")
-    lines.append("撤销：spool extra remove <目录>")
+        if Path(item).is_dir():
+            lines.append(f"  [accent]{escape(item)}[/]")
+        else:
+            lines.append(
+                f"  [muted]{escape(item)}[/][bad]（已不存在）[/]"
+            )
+    lines.append("[muted]" + escape("撤销：spool extra remove <目录>") + "[/]")
     return "\n".join(lines)

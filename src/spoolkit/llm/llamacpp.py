@@ -38,15 +38,24 @@ DEFAULT_TEMPERATURE = 0.0
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
 
 
-def proxy_for(base_url: str) -> str | None:
-    """按服务地址决定用不用系统代理。"""
+def proxy_for(base_url: str, explicit: str | None = None) -> str | None:
+    """按服务地址决定用不用代理：**本机地址一律不走代理**，其余用显式给的或系统代理。
+
+    为什么 `explicit` 也要过这一关：调用方（`cli/runtime.py`）会把
+    `system_proxy()` 当成"显式值"传进来，而原先两个构造点写的是
+    `proxy if proxy is not None else proxy_for(base_url)`——只要这个值非空，
+    本机地址就照样被套上代理。实测（代理对 loopback 回 502）：
+    `context_window()` 拿到 None，spool 于是报「无法连接 llama.cpp 服务：
+    http://127.0.0.1:8080 …先确认服务已启动」，把一次代理配置问题说成了
+    "服务没起"，排查方向被整个带偏。**本机这条规则优先于"显式"**。
+    """
     try:
         host = httpx.URL(base_url).host
     except (httpx.InvalidURL, ValueError):
-        return system_proxy()
+        return explicit or system_proxy()
     if host in _LOCAL_HOSTS:
         return None
-    return system_proxy()
+    return explicit or system_proxy()
 
 
 class LlamaCppError(RuntimeError):
@@ -111,11 +120,9 @@ class LlamaCppGateway:
             transport=transport,
             # 显式给了 transport（测试用的 MockTransport）就别再套代理：
             # 两者同时给的时候请求不走 transport，测试会去真的打网络。
-            proxy=(
-                None
-                if transport is not None
-                else (proxy if proxy is not None else proxy_for(base_url))
-            ),
+            # 本机地址一律不走代理——连显式传进来的 `proxy` 也要过这一关，
+            # 否则调用方把 `system_proxy()` 当显式值传进来就绕过了下面那条规则。
+            proxy=(None if transport is not None else proxy_for(base_url, proxy)),
             # 代理已经由 proxy_for 自己判完了（本机地址一律不走代理），
             # 不能再让 httpx 去读环境变量：环境里只要有一个 `NO_PROXY=...,[::1]`，
             # httpx 0.28 在**构造这一步**就会抛 `InvalidURL: Invalid port: ':1]'`，
@@ -247,7 +254,7 @@ class LlamaCppTokenCounter:
             base_url=base_url.rstrip("/"),
             timeout=timeout,
             transport=transport,
-            proxy=proxy if proxy is not None else proxy_for(base_url),
+            proxy=None if transport is not None else proxy_for(base_url, proxy),
             # 同上：分词器连的也是本机 llama-server，不让 httpx 读环境代理。
             trust_env=False,
         )

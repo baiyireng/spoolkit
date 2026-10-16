@@ -665,7 +665,8 @@ def test_有意丢弃带理由可落盘且留痕可见(tmp_path: Path) -> None:
     assert "消失清单" in declared
     assert "有意丢弃" in declared
     assert "第二份文档整段是重复脚本" in declared
-    assert "确认保留" in declared
+    assert "同意去掉" in declared
+    assert "新正文里已经没有它们" in declared, "留痕不能读成「这些还在」"
     # 模型这一侧也要看得到（报告里那份 diff 预览带着 declared）。
     assert "有意丢弃" in result.content
     assert "第二份文档整段是重复脚本" in result.content

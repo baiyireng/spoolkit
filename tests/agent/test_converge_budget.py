@@ -611,3 +611,76 @@ def test_确认暂存与心算不受写额度管(tmp_path: Path) -> None:
     assert verdict == "block"
     assert "预算收束" in message and "额度（0 次）" in message
 
+
+def test_收束态放行一次验收命令(tmp_path: Path) -> None:
+    """收束拦的是「再开一个收集方向」，而**验收命令是结论的证据**。
+
+    实测缺陷（Vue 项目、`max_steps=10`）：模型跑 `node acceptance/smoke.mjs` 看到
+    失败 → 读判据 → 重写实现 → 想重跑同一条验收时正好进了收束态，命令被拒；
+    它只能凭「系统自动测试通过」写下完成结论，而那条验收实际有 6 项断言不过
+    （独立复验）。给 1 次额度：够把「改完到底过没过」问清楚，又不足以拿它探索。
+    """
+    from spoolkit.tools.types import ToolCall
+
+    loop = _build(
+        tmp_path,
+        [_turn("够了", final="结论：跑完了。")],
+        overrides={"converge_at_steps": 3, "converge_write_grace": 0},
+    )
+    loop._converging = True
+    loop._converge_remaining = 2
+    loop._trace = []  # `run()` 开始时才建；这里是单元测试，自己给一份
+
+    run = ToolCall("run_command", {"command": ["node", "acceptance/smoke.mjs"]})
+    assert loop._converge_blocked_call(run) == "", "第一次验收必须放行"
+    assert loop._converge_runs_used == 1
+    assert any("放行一次验收命令" in line for line in loop._trace), loop._trace
+
+    again = loop._converge_blocked_call(run)
+    assert "预算收束" in again, "额度用完照旧拒"
+    assert "跑一次验收" in again, "话术要点明这笔额度"
+
+    # 读的额度是另一笔账：用掉验收额度不该吃掉「补一次素材」
+    read = ToolCall("read_file", {"path": "a.py", "start_line": 1, "end_line": 2})
+    assert loop._converge_blocked_call(read) == ""
+
+    # 对照：搜索这类「再开一个方向」的动作照旧被拒
+    search = ToolCall("search_code", {"pattern": "x"})
+    assert "预算收束" in loop._converge_blocked_call(search)
+
+
+def test_收束话术不许说没发生的用完(tmp_path: Path) -> None:
+    """额度读数**只在真的用完时**才是「用完」（实测抓到过反例）。
+
+    现场：被拒的是 `list_dir`，两笔额度都还是 0/1，话术却说
+    「已经用完（0/1）」——自相矛盾，而模型据此以为"改完再验一次也没用"，
+    恰好把那条证据通道自己关掉了。变异：把条件句改回无条件的「已经用完」，
+    这条会红。
+
+    这里用 `search_code` 造那次拒绝：它既不是「补素材」那一类（读 / 列），
+    也不是验收命令，两笔额度都还没动。
+    """
+    from spoolkit.tools.types import ToolCall
+
+    loop = _build(
+        tmp_path,
+        [_turn("够了", final="结论：跑完了。")],
+        overrides={"converge_at_steps": 3, "converge_write_grace": 0},
+    )
+    loop._converging = True
+    loop._converge_remaining = 2
+    loop._trace = []
+
+    refused = loop._converge_blocked_call(ToolCall("search_code", {"pattern": "x"}))
+    assert "预算收束" in refused
+    assert loop._converge_grace_used == 0 and loop._converge_runs_used == 0
+    assert "已经用完" not in refused, refused
+    assert "还留着 1 次" in refused, refused
+
+    # 用掉其中一笔：只有那一笔说「用完」，另一笔仍是「还留着」。
+    run = ToolCall("run_command", {"command": ["node", "smoke.mjs"]})
+    assert loop._converge_blocked_call(run) == ""
+    again = loop._converge_blocked_call(run)
+    assert "跑一次验收」的额度已经用完" in again, again
+    assert "补一次素材」还留着 1 次" in again, again
+

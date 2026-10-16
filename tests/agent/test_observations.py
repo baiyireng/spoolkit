@@ -76,7 +76,7 @@ def test_超长html整份读取留下结构事实且正文不进对话(tmp_path:
 
     loop._context_revision += 1
     call = ToolCall("read_file", {"path": "snake.html"})
-    decision, reason = loop._guard_repeat_decision(call_signature(call), call)
+    decision, reason, _cause = loop._guard_repeat_decision(call_signature(call), call)
     assert decision == "useless", reason
     assert "观察" in reason
 
@@ -139,7 +139,7 @@ def test_整段行号读取不把全文送回对话且压缩后不再重读(tmp_
         "read_file",
         {"path": "snake.html", "start_line": 1, "end_line": last},
     )
-    decision, reason = loop._guard_repeat_decision(call_signature(call), call)
+    decision, reason, _cause = loop._guard_repeat_decision(call_signature(call), call)
     assert decision == "useless", reason
     assert "观察" in reason
     assert "收窄" in reason
@@ -181,7 +181,7 @@ def test_按行读取的那一段留在观察里(tmp_path: Path) -> None:
         "read_file",
         {"path": "snake.html", "start_line": 3, "end_line": 3},
     )
-    decision, reason = loop._guard_repeat_decision(call_signature(call), call)
+    decision, reason, _cause = loop._guard_repeat_decision(call_signature(call), call)
     assert decision == "refresh", reason
 
 

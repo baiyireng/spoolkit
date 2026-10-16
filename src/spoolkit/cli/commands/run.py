@@ -153,7 +153,19 @@ def _events_approver(writer: EventWriter, reader=None):
 
     def approver(argv, reason: str) -> str:
         command = " ".join(argv)
-        writer.emit(AWAIT, count=1, command=command, reason=reason)
+        # 这条 `reason` 原先直接放的是**默认策略的拒绝理由**（例如「node 只允许
+        # --check」）。读的人（外部 agent、MCP 客户端、页面）会把它读成"批准也没用"，
+        # 于是放弃申请——实测我自己就是这么判的。它其实是**升级申请的说明**：
+        # 批准之后这条命令照常执行。所以文案必须说清"这是要你批准"这件事。
+        writer.emit(
+            AWAIT,
+            count=1,
+            command=command,
+            reason=(
+                f"这条命令需要你批准才执行（默认策略不允许它：{reason}）。"
+                "y=只允许这一次，a=始终允许，b=本轮全拒，其它=拒绝。"
+            ),
+        )
         answer = ""
         try:
             answer = (source.readline() or "").strip().lower()
@@ -206,7 +218,7 @@ def _events_escalation_reviewer(writer: EventWriter, reader=None):
             rollback=request.summary.get("rollback", ""),
             fingerprint=request.fingerprint,
         )
-        writer.emit(NOTE, text=text, ok=False, kind="escalation")
+        writer.emit_note(text, ok=False, kind="escalation")
         answer = ""
         try:
             answer = (source.readline() or "").strip()
@@ -719,10 +731,10 @@ def _settle_pending(args, project_root, pending, result=None, writer=None) -> No
     # 挂起待批的动作清单：**成果已经落盘**，挂起的只是那些没执行的动作
     # （§3.2.3）。所以它必须在 `settle` 的 early-return **之前**说一次——
     # 一条「有动作在等批复」的话被漏掉，用户就以为这一轮是普通收工。
-    actions = pending_actions_note(project_root)
+    actions = pending_actions_note(project_root, getattr(args, "session", "") or "")
     if actions:
         if writer is not None:
-            writer.emit(NOTE, text=actions, ok=False, kind="pending_actions")
+            writer.emit_note(actions, ok=False, kind="pending_actions")
         else:
             print("---")
             print(actions)

@@ -114,7 +114,12 @@ def _ask_which(candidates: Iterable[Path]) -> Path:
     print("当前目录不是工作区，登记表里有这几个：")
     for index, item in enumerate(items, start=1):
         print(f"  {index}) {item}")
-    raw = input("选哪个 [1]：").strip() or "1"
+    try:
+        raw = input("选哪个 [1]：").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        # 交给 CLI `main` 统一安静退 130；这里只保证提示行后换行。
+        print()
+        raise
     try:
         return items[int(raw) - 1]
     except (ValueError, IndexError):

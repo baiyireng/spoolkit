@@ -177,6 +177,39 @@
         "不许出现拦读死锁（**未被拦的**读取类重复必须为 0；被拦的读取次数单独记录）",
         "验收：沙箱里任何文本文件都不再有旧名字、新名字在抓取层被定义、项目测试至少跑 4 条且全过、命令行端到端数字不变"
       ]
+    },
+    {
+      "id": "vue3-engineering",
+      "shape": "create-project",
+      "title": "从零搭一个 Vue3 后台前端（重点工程化结构）",
+      "seed": "seeds/vue3-engineering",
+      "expected": "expected/vue3-engineering",
+      "goal": "我们要新起一个后台管理的前端项目，Vue3 + TypeScript + Vite。这轮不用写业务，先把工程骨架立起来——重点在工程化那一层要齐：目录分层、路由、状态、请求层、环境变量、lint/格式化、单测、CI。页面用示例的就行。依赖先别装，我这边网络不方便，你把文件和配置写对就好。",
+      "goal_variants": [
+        "新起个后台管理前端，技术栈固定 Vue3 + TS + Vite。先别管业务，把现代前端该有的工程化结构搭出来：分层目录、路由、Pinia、请求层、环境变量、代码检查和格式化、单测、CI 都要有，页面放示例内容。依赖不用装，我回头自己装。",
+        "帮我起一个 Vue3 的后台前端工程骨架（TS + Vite）。重点是工程化：目录别堆在一起，路由/状态/接口/组合式函数/工具各自分层，tsconfig 严格模式、路径别名、环境变量、eslint+prettier、vitest、CI 一个都别少。业务先不写，页面用示例的。别装依赖。"
+      ],
+      "check": {
+        "script": "checks/vue3_engineering.py",
+        "timeout_seconds": 120
+      },
+      "guard_hashes": {},
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_repeat_blocks_unblocked": 0,
+        "max_read_blocks_unblocked": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（**未被拦的**重复必须为 0；被护栏拦下、没有执行的重复单独记录，不套 0 线）",
+        "不许出现拦读死锁（**未被拦的**读取类重复必须为 0；被拦的读取次数单独记录）",
+        "验收（入口链）：index.html 有 #app 并引到 /src/main.ts；main.ts createApp + 接 Pinia/路由 + mount；App.vue 是 `<script setup lang=\"ts\">` 且含 RouterView",
+        "验收（分层）：views ≥2、components ≥1、router（createRouter + history + ≥2 条路由）、stores（defineStore）、请求层（src/api|services 有导出封装）、composables、utils、全局样式并被引入——每一层都要非空且非占位",
+        "验收（配置）：tsconfig strict + `@`→src 的 paths；vite 配置用 @vitejs/plugin-vue 且别名与 tsconfig 一致；.env.example 有 VITE_ 变量且 src 下有 ImportMetaEnv 类型；eslint/prettier/.editorconfig/.gitignore 齐；Vitest 单测 ≥1；CI 里 install 之后至少跑两件（lint/test/build/typecheck）",
+        "验收（一致性）：src 里 import 的 vue / vue-router / pinia 都在 package.json 声明；README 提到的脚本必须真实存在；package.json 与 tsconfig 不许带 BOM",
+        "工具链复验由人工在能出网的环境跑 `--with-toolchain`（装依赖 + `vue-tsc --noEmit`）：本机受限沙箱里 esbuild 的服务进程 `spawn EPERM`，所以 `vite build` / `vitest run` **不在**判据里，也不假装验过"
+      ]
     }
   ]
 }

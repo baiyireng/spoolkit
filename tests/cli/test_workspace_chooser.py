@@ -61,6 +61,29 @@ def test_问不了就照老文案报错(tmp_path: Path, monkeypatch, capsys) -> 
     assert "用 `--root <路径>` 指定一个。" in err
 
 
+def test_选工作区时CtrlC安静退出(tmp_path: Path, monkeypatch) -> None:
+    """人在「选哪个」处按 Ctrl-C：退出码 130，不把 KeyboardInterrupt 摔成 traceback。"""
+    _stand_outside_two(tmp_path, monkeypatch)
+    monkeypatch.setattr(workspace, "_interactive", lambda: True)
+
+    def _cancel(_prompt: str = "") -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", _cancel)
+    assert cli_app.main(["session"]) == 130
+
+
+def test_选工作区时EOF安静退出(tmp_path: Path, monkeypatch) -> None:
+    _stand_outside_two(tmp_path, monkeypatch)
+    monkeypatch.setattr(workspace, "_interactive", lambda: True)
+
+    def _eof(_prompt: str = "") -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _eof)
+    assert cli_app.main(["session"]) == 130
+
+
 def test_显式给出root时不问也不报错(tmp_path: Path, monkeypatch, capsys) -> None:
     left, right = _stand_outside_two(tmp_path, monkeypatch)
     sessions.create_session(left, title="左边那条")

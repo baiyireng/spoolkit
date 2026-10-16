@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from rich.markup import escape
 
 from spoolkit.cli.commands.init import init_command
-from spoolkit.cli.term import print_out
+from spoolkit.cli.term import print_err, print_out
 from spoolkit.kernel import pointers, workspaces
 from spoolkit.kernel.workspaces import WorkspaceError
 
@@ -28,21 +27,24 @@ def ws_command(args: argparse.Namespace) -> int:
             return init_command(argparse.Namespace(path=name or "."))
         if action == "forget":
             root = workspaces.forget(name)
-            print(f"removed from registry: {root} (directory unchanged)")
+            print_out(
+                f"removed from registry: {root} (directory unchanged)",
+                markup=False,
+            )
             return 0
         if action == "alias":
             alias = str(getattr(args, "value", "") or "").strip()
             root = workspaces.resolve_workspace(name)
             workspaces.set_alias(root, alias)
-            print(f"{root}  alias = {alias}")
+            print_out(f"{root}  alias = {alias}", markup=False, style="ok")
             return 0
     except WorkspaceError as exc:
-        print(str(exc), file=sys.stderr)
+        print_err(str(exc), markup=False)
         return 2
     except OSError as exc:
-        print(f"failed to write state: {exc}", file=sys.stderr)
+        print_err(f"failed to write state: {exc}", markup=False)
         return 2
-    print(f"unknown: ws {action}", file=sys.stderr)
+    print_err(f"unknown: ws {action}", markup=False)
     return 2
 
 
@@ -83,7 +85,7 @@ def _list() -> int:
 
 def _use(name: str) -> int:
     if not name:
-        print("usage: spool ws use <name|index|path>", file=sys.stderr)
+        print_err("usage: spool ws use <name|index|path>", markup=False)
         return 2
     root = workspaces.resolve_workspace(name)
     session = ""
@@ -91,7 +93,11 @@ def _use(name: str) -> int:
     if existing is not None and existing.workspace == root:
         session = existing.session
     pointers.set(CLIENT, root, session)
-    print(f"pointer → {root}")
+    print_out(f"pointer → {root}", markup=False, style="ok")
     if not session:
-        print("(no session yet; first message creates one, or: spool session use …)")
+        print_out(
+            "(no session yet; first message creates one, or: spool session use …)",
+            markup=False,
+            style="muted",
+        )
     return 0

@@ -9,11 +9,11 @@
 """
 
 import argparse
-import sys
 from datetime import datetime
 from pathlib import Path
 
 from spoolkit import limits
+from spoolkit.cli.term import escape, print_err, print_out
 from spoolkit.kernel import pointers, sessions
 from spoolkit.memory.transcript import (
     no_hits_text,
@@ -57,40 +57,50 @@ def session_command(args: argparse.Namespace) -> int:
         made = sessions.create_session(root, title=title or name)
         pointers.set(CLIENT, root, made)
         heading = title or name
-        print(f"新会话：{made}" + (f"（{heading}）" if heading else ""))
+        print_out(
+            f"[ok]新会话：[/][accent]{escape(made)}[/]"
+            + (f"（{escape(heading)}）" if heading else "")
+        )
         return 0
     if action == "use":
         try:
             picked = sessions.resolve_session(root, name)
         except sessions.SessionError as exc:
-            print(str(exc), file=sys.stderr)
+            print_err(str(exc), markup=False, style="bad")
             return 2
         pointers.set(CLIENT, root, picked)
-        print(f"现在用会话：{picked}")
+        print_out(f"[ok]现在用会话：[/][accent]{escape(picked)}[/]")
         return 0
     if action == "rename":
         if not title:
             # 不给新标题就**报错，绝不静默清空**：标题是这个会话唯一的"人认得的名字"，
             # 而它没有历史可回滚（全分支评审判它是唯一"照常使用就会损坏数据"的一条）。
-            print(
+            print_err(
                 "改名要给新标题：`spool session rename <id|序号> 新标题`。",
-                file=sys.stderr,
+                markup=False,
+                style="bad",
             )
             return 2
         try:
             sessions.rename_session(root, name, title)
         except sessions.SessionError as exc:
-            print(str(exc), file=sys.stderr)
+            print_err(str(exc), markup=False, style="bad")
             return 2
-        print(f"已改名：{name} → {title}")
+        print_out(
+            f"[ok]已改名：[/]{escape(name)} → [accent]{escape(title)}[/]"
+        )
         return 0
     if action == "archive":
         try:
             sessions.archive_session(root, name)
         except sessions.SessionError as exc:
-            print(str(exc), file=sys.stderr)
+            print_err(str(exc), markup=False, style="bad")
             return 2
-        print("已归档（数据仍保留，默认不再列出；`spool session --all` 可见）")
+        print_out(
+            "已归档（数据仍保留，默认不再列出；`spool session --all` 可见）",
+            markup=False,
+            style="ok",
+        )
         return 0
     return _list(root, include_archived=bool(getattr(args, "all", False)))
 
@@ -121,12 +131,12 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
     某一条。工作区边界不动：跨工作区依旧不查。
     """
     if not query:
-        print("需要关键词：`spool session search <关键词>`。", file=sys.stderr)
+        print_err("需要关键词：`spool session search <关键词>`。", markup=False)
         return 2
 
     path = root / ".agent" / "memory.db"
     if not path.is_file():
-        print("这个工作区还没有任何会话。", file=sys.stderr)
+        print_err("这个工作区还没有任何会话。", markup=False)
         return 2
 
     overrides = limits.load_overrides(root)
@@ -134,7 +144,7 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
     max_limit = int(limits.resolve("history_search_max", overrides)[0])
     # `0` = 没给（argparse 的默认值），按标定值；给了就越界判定，别静默改成别的数。
     if wanted and not 1 <= wanted <= max_limit:
-        print(f"--limit 必须在 1 到 {max_limit} 之间（不给 = 按标定值）。", file=sys.stderr)
+        print_err(f"--limit 必须在 1 到 {max_limit} 之间（不给 = 按标定值）。", markup=False)
         return 2
     limit = wanted or int(limits.resolve("history_search_limit", overrides)[0])
     snippet_chars = int(limits.resolve("history_snippet_chars", overrides)[0])
@@ -148,10 +158,10 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
         named = "*"
     current = _default_session(root)
     if not named and not current:
-        print(
+        print_err(
             "这个工作区还没有会话，说不出「当前会话」是哪个："
             "用 `--all-sessions` 查全部，或 `--from-session <会话>` 点名一条。",
-            file=sys.stderr,
+            markup=False,
         )
         return 2
     scope = resolve_scope(named, current)
@@ -169,7 +179,7 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
             else None
         )
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        print_err(str(exc), markup=False)
         return 2
 
     conn = open_db(path)
@@ -187,17 +197,18 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
         conn.close()
 
     if not hits:
-        print(
+        print_out(
             no_hits_text(
                 query, scope_said=scope.description, cross_session=cross_session
-            )
+            ),
+            markup=False,
         )
         # 没命中给 1：脚本里"搜到没搜到"要能直接判，别混进"用法错"(2)。
         return 1
     titles = {
         item.id: item.title for item in sessions.list_sessions(root, include_archived=True)
     }
-    print(
+    print_out(
         render_history_hits(
             hits,
             titles,
@@ -206,7 +217,8 @@ def _search(root: Path, query: str, args: argparse.Namespace) -> int:
             # 这一份是**给人看的**：保留精确到分钟的实际时刻（进提示的那一份
             # 才要归一化，见 transcript.prompt_stamp 那一段）。
             exact_time=True,
-        )
+        ),
+        markup=False,
     )
     return 0
 
@@ -218,35 +230,45 @@ def _list(root: Path, include_archived: bool = False) -> int:
     everything = sessions.list_sessions(root, include_archived=True)
     if not everything:
         if not (root / ".agent" / "memory.db").exists():
-            print("这个工作区还没有任何会话。", file=sys.stderr)
+            print_err("这个工作区还没有任何会话。", markup=False)
             return 2
-        print("还没有会话记录。", file=sys.stderr)
+        print_err("还没有会话记录。", markup=False)
         return 2
 
     here = _current_session(root)
-    print(f"{'会话':<18}{'标题':<24}{'模型':<20}{'窗口':>7}{'最近活跃':>14}")
+    header = f"{'会话':<18}{'标题':<24}{'模型':<20}{'窗口':>7}{'最近活跃':>14}"
+    print_out(f"[muted]{escape(header)}[/]")
     shown = 0
     for index, item in enumerate(everything, start=1):
         if item.archived and not include_archived:
             continue
         shown += 1
-        marks = []
+        marks: list[str] = []
         if item.id == here:
-            marks.append("当前")
+            marks.append("[accent]当前[/]")
         if item.archived:
-            marks.append("已归档")
-        tail = f"  ← {'、'.join(marks)}" if marks else ""
-        print(
+            marks.append("[muted]已归档[/]")
+        tail = f"  ← {', '.join(marks)}" if marks else ""
+        body = (
             f"{index:>3}) {item.id:<14}{(item.title or '—'):<24}"
             f"{(item.model or '—'):<20}{item.context_limit:>7}"
-            f"{_stamp(item.last_active):>14}{tail}"
+            f"{_stamp(item.last_active):>14}"
         )
+        print_out(f"{escape(body)}{tail}")
 
-    print()
+    print_out("")
     if shown == 0:
-        print(f"共 {len(everything)} 个会话，均已归档。`spool session --all` 可见。")
+        print_out(
+            f"[muted]共 {len(everything)} 个会话，均已归档。"
+            "`spool session --all` 可见。[/]"
+        )
     elif include_archived:
-        print(f"共 {len(everything)} 个会话（含已归档）。用 `spool session use <序号|id>` 切。")
+        print_out(
+            f"[muted]共 {len(everything)} 个会话（含已归档）。"
+            "用 `spool session use <序号|id>` 切。[/]"
+        )
     else:
-        print(f"共 {shown} 个会话。用 `spool session use <序号|id|latest>` 切。")
+        print_out(
+            f"[muted]共 {shown} 个会话。用 `spool session use <序号|id|latest>` 切。[/]"
+        )
     return 0

@@ -693,7 +693,11 @@ def open_memory(
     memory = build_memory(project_root, window, session_id, overrides=overrides)
     warning = check_binding(memory._conn, session_id, str(project_root))
     if warning:
-        print(f"提示：{warning}")
+        # **提示走 stderr**（与 `bind_model_wait` 的心跳同一档）：`--events` 时
+        # stdout 上只能有 JSON 行，而这条提示与「哪一步 / 哪个工具」无关，
+        # 它是诊断，不是命令的输出。产物通道（`spool plan` 的计划正文之类）
+        # 仍然走 stdout。
+        print(f"提示：{warning}", file=sys.stderr)
     record_session(memory._conn, session_id, str(project_root), model, window)
     return memory
 
@@ -769,7 +773,11 @@ def settle_lessons(memory: MemorySession, pushed, succeeded: bool) -> None:
     record_outcome(memory._conn, list(pushed), succeeded=succeeded)
     pruned = prune_lessons(memory._conn)
     if pruned:
-        print(f"已把 {len(pruned)} 条长期无效的教训移出推送池（仍保留可检索）。")
+        # 同上：这是诊断（教训库的清理读数），走 stderr，别混进事件通道。
+        print(
+            f"已把 {len(pruned)} 条长期无效的教训移出推送池（仍保留可检索）。",
+            file=sys.stderr,
+        )
 
 
 def build_approver(project_root: Path):

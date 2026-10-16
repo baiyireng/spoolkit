@@ -1,8 +1,8 @@
 """`spool service`：按本机配方拉起 / 停掉 / 列出。不写死某台机器。
 
-这一批用例钉的是**口径**（2026-10-01 改）：要不要拉起，看**本命令自己记下的
-pid**，不看探针——端口被别人（Clash 之类）占着时探针也是"通"，拿它当判据就会
-"已经通了，不重复拉起"，于是用户以为自己有隧道、其实一个子进程都没起。
+这一批用例钉的是**口径**：要不要拉起，先看**本命令自己记下的 pid**；活着就不
+重复拉。pid 空时再看 health 地址的 **TCP 是否已有人听**——有则拒绝 start 并
+给出腾端口 / 改配方端口的指引（HTTP 探活失败如 404 也算占用，避免大模型白加载）。
 
 **不许起长驻进程**：当配方的都是**立刻退出的短命进程**，或用本进程里的一个监听
 socket 扮演"端口被占"。清理一律在 `finally` 里。
@@ -180,6 +180,7 @@ def test_空命令只探不启(tmp_path: Path, monkeypatch, capsys) -> None:
     assert "probe-only" in err or "no start" in err.lower()
 
 
+@pytest.mark.needs("process_kill")
 def test_能拉起再停掉自己的孩子(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "config.toml"
     monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
@@ -201,6 +202,7 @@ def test_能拉起再停掉自己的孩子(tmp_path: Path, monkeypatch) -> None:
     assert read_pid("sleepy") is None
 
 
+@pytest.mark.needs("process_kill")
 def test_停的时候信号杀不掉也要能停(tmp_path: Path, monkeypatch) -> None:
     """本机 ssh 真跑：os.kill(SIGTERM) 在 Windows 上失败，pid 文件清了进程还在。"""
     import os
@@ -284,12 +286,12 @@ def test_入口挂上了service(capsys) -> None:
 # --- 判据是 pid 记录，不是探针（2026-10-01） ---------------------------------
 
 
-def test_端口被别人占着也要照拉_拉不起来要说退出码与输出(tmp_path: Path, monkeypatch) -> None:
-    """真现场：1080 被 Clash 占着，`ssh -D 1080` 绑不上就死。
+def test_端口被别人占着时拒绝启动并给出处理指引(tmp_path: Path, monkeypatch) -> None:
+    """真现场：1080 被 Clash 占着——不要再照拉一个注定绑不上的进程。
 
-    改之前：探针说"通" → 回一句"已经通了，不重复拉起"，**一个子进程都没起**，
-    用户以为自己有隧道。改之后：pid 记录里没有活着的进程 → 照拉 → 子进程真跑过
-    （印记文件），并且把它的退出码与 stderr 带出来。
+    旧口径曾"照拉再报 exit/stderr"；加载大模型时浪费明显，且 HTTP health 返回
+    404（别的服务在听）时旧探针不算 occupied。现口径：health 地址的 TCP 已有
+    监听且非本命令 pid → 拒绝 start，文案引导用户腾端口或改配方端口。
     """
     path = tmp_path / "config.toml"
     monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
@@ -308,14 +310,165 @@ def test_端口被别人占着也要照拉_拉不起来要说退出码与输出(
     finally:
         held.close()
     assert code == 1, message
-    assert "exited immediately" in message
-    assert "exit 1" in message
-    assert "bind: Address already in use" in message
-    assert "not starting again" not in message
-    assert "上就有东西在听" not in message  # legacy Chinese phrase gone
+    assert "not starting" in message
     assert "listener" in message and "not ours" in message
-    assert marker.is_file(), "端口被占着时也必须真去拉一次（判据是 pid，不是探针）"
-    assert read_pid("tunnel") is None, "立刻退出的子进程不能留下 pid 记录"
+    assert str(port) in message
+    assert "Free that port" in message or "change" in message.lower()
+    assert "spool service list" in message
+    assert "already running" not in message
+    assert not marker.exists(), "端口被占时不得再拉子进程"
+    assert read_pid("tunnel") is None
+
+
+def test_http健康404但端口已有监听也要拒绝启动(tmp_path: Path, monkeypatch) -> None:
+    """别的 HTTP 服务占着端口：/props → 404，旧逻辑不算 occupied，仍去 start。"""
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path / "state"))
+    port, held = _hold_port()
+    marker = tmp_path / "ran.txt"
+    script = _script(
+        tmp_path / "llama.py",
+        "import pathlib, sys\npathlib.Path(sys.argv[1]).write_text('ran', encoding='utf-8')\n",
+    )
+    _write_recipe(
+        path,
+        name="llama",
+        command=[sys.executable, str(script), str(marker)],
+        health=f"http://127.0.0.1:{port}/props",
+    )
+    try:
+        code, message = start_service("llama")
+    finally:
+        held.close()
+    assert code == 1, message
+    assert "not starting" in message
+    assert "listener" in message and "not ours" in message
+    assert not marker.exists()
+    assert read_pid("llama") is None
+
+
+def test_list_http探活失败但tcp占用显示port_busy(tmp_path: Path, monkeypatch) -> None:
+    """TCP 有人听、HTTP /props 失败时不得标 down——否则用户以为可以 start。"""
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path / "state"))
+    port, held = _hold_port()
+    try:
+        _write_recipe(
+            path,
+            name="llama",
+            command=["llama-server"],
+            health=f"http://127.0.0.1:{port}/props",
+        )
+        out = render_status()
+    finally:
+        held.close()
+    line = _line_for(out, "llama")
+    assert "port busy (not ours)" in line, line
+    assert "[state.down]down[/]" not in line
+    assert "not started by us" in line
+
+
+@pytest.mark.needs("process_kill")
+def test_stop后若health端口仍被占要一并清掉(tmp_path: Path, monkeypatch) -> None:
+    """杀完 pid 记录后端口仍被占（脱离进程树的孤儿）→ 不得报 stopped 却留占用。"""
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path / "state"))
+    # 本命令"登记"的短命进程（会被 stop 杀掉）
+    wrapper = _script(
+        tmp_path / "wrapper.py",
+        "import time\ntime.sleep(60)\n",
+    )
+    holder = _script(
+        tmp_path / "holder.py",
+        "import socket, time\n"
+        "s=socket.socket(); s.bind(('127.0.0.1', 0)); s.listen(1)\n"
+        "print(s.getsockname()[1], flush=True)\n"
+        "time.sleep(60)\n",
+    )
+    import subprocess
+
+    wrap = subprocess.Popen(
+        [sys.executable, str(wrapper)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    hold = subprocess.Popen(
+        [sys.executable, str(holder)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        assert hold.stdout is not None
+        port = int(hold.stdout.readline().strip())
+        _write_recipe(
+            path,
+            name="llama",
+            command=["llama-server"],
+            health=f"tcp:127.0.0.1:{port}",
+        )
+        svc.write_pid("llama", wrap.pid)
+        code, message = stop_service("llama")
+        assert code == 0, message
+        assert "stopped" in message
+        assert _wait_for(lambda: wrap.poll() is not None, 3.0)
+        assert _wait_for(lambda: hold.poll() is not None, 3.0), (
+            f"orphan listener survived stop: {message}"
+        )
+        assert read_pid("llama") is None
+        assert not svc.port_has_listener("127.0.0.1", port)
+    finally:
+        for proc in (wrap, hold):
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+
+
+@pytest.mark.needs("process_kill")
+def test_stop_force杀掉health端口上的非本命令监听(tmp_path: Path, monkeypatch) -> None:
+    """empty pid 时普通 stop 拒杀；--force 按 health 端口回收监听方。"""
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv("SPOOLKIT_CONFIG", str(path))
+    monkeypatch.setenv("SPOOLKIT_STATE", str(tmp_path / "state"))
+    # 子进程占端口：force 杀的是它，不是本 pytest 进程
+    port_holder = _script(
+        tmp_path / "hold.py",
+        "import socket, time\n"
+        "s=socket.socket(); s.bind(('127.0.0.1', 0)); s.listen(1)\n"
+        "print(s.getsockname()[1], flush=True)\n"
+        "time.sleep(60)\n",
+    )
+    proc = __import__("subprocess").Popen(
+        [sys.executable, str(port_holder)],
+        stdout=__import__("subprocess").PIPE,
+        stderr=__import__("subprocess").DEVNULL,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        port_line = proc.stdout.readline().strip()
+        port = int(port_line)
+        _write_recipe(
+            path,
+            name="llama",
+            command=["llama-server"],
+            health=f"http://127.0.0.1:{port}/props",
+        )
+        code, message = stop_service("llama")
+        assert code == 2
+        assert "empty pid record" in message
+        code, message = stop_service("llama", force=True)
+        assert code == 0, message
+        assert "force-stopped" in message
+        assert str(port) in message
+        assert _wait_for(lambda: proc.poll() is not None, 3.0), "listener still alive"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
 
 
 def test_pid记录活着就不重复拉起_哪怕探针说不通(tmp_path: Path, monkeypatch) -> None:
@@ -496,12 +649,12 @@ def test_list_三种状态分得清(tmp_path: Path, monkeypatch) -> None:
     assert "port busy (not ours)" in tunnel, tunnel
     assert "not started by us" in tunnel, tunnel
     assert "running (ours)" not in tunnel, f"must not claim ours: {tunnel}"
-    assert str(os.getpid()) not in tunnel
+    assert "owned process alive" not in tunnel
+    # listener pid may appear in occupied detail (this test holds the socket)
     assert "down" in llama, llama
     assert "down:" in llama, llama
     assert "running (ours)" in mine and f"pid {os.getpid()}" in mine, mine
     assert "在跑" not in out
-    assert True  # legend no longer in header
 
 
 # --- 拉起的子进程要脱离本控制台（2026-10-02：同控制台的 Ctrl-C 连坐） ----------

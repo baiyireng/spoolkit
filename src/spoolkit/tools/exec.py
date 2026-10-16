@@ -589,12 +589,47 @@ def _run(
     # 有未落盘的改动时，在试跑副本里执行：模型以为文件已经改了，
     # 那就让它在试跑环境里确实已经改了。真实工作区全程一动不动。
     if pending is not None and len(pending):
-        with trial_workspace(root, pending.items()) as work_root:
+        report: dict = {}
+        with trial_workspace(root, pending.items(), report=report) as work_root:
             _restore_originals(work_root, pending, revert)
-            return _execute(
+            result = _execute(
                 work_root, resolved, requested, cwd_arg, timeout, max_output, extra_env
             )
+        return _with_trial_notice(result, report)
     return _execute(root, resolved, requested, cwd_arg, timeout, max_output, extra_env)
+
+
+def _with_trial_notice(result: ToolResult, report: dict) -> ToolResult:
+    """把"这条命令跑在试跑副本里"说在输出最前面。
+
+    不说明的症状（实测，Vue 项目）：`npm run build` 报
+    `Cannot find module '<试跑副本>\\…\\node_modules\\vite'`——`prompt_sanitize`
+    会把副本路径抹成占位符，但"为什么找不到"一个字都没有，于是模型判定
+    "依赖没装"，接着 `npm install`（装进临时副本）、`npx`（拉了个版本不对的包）
+    连烧几步预算，最后把"构建失败、node_modules 缺入口"写进结论。
+    """
+    linked = [str(item) for item in (report.get("linked") or [])]
+    skipped = [str(item) for item in (report.get("skipped") or [])]
+    head = [
+        "（本次命令在**试跑副本**里执行：真实工作区全程未被改动；"
+        "`.git` 与缓存目录不在副本里。）"
+    ]
+    if linked:
+        head.append(f"依赖目录已经接进副本：{'、'.join(linked)}。")
+    if skipped:
+        head.append(
+            f"**没能接进副本**的依赖目录：{'、'.join(skipped)}——"
+            "这些目录里的东西（例如 `node_modules` 里的包）在副本里不存在，"
+            "依赖类命令因此会报「找不到模块」，那是**副本**造成的，"
+            "不是工作区里没装依赖；不要把这种失败当成「依赖缺失」去重装。"
+        )
+    return ToolResult(
+        ok=result.ok,
+        content="\n".join(head) + "\n" + result.content,
+        facts=result.facts,
+        usage=result.usage,
+        raw=result.raw,
+    )
 
 
 def _restore_originals(work_root: Path, pending, paths: object) -> None:

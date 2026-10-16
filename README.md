@@ -97,22 +97,51 @@ Windows `%APPDATA%\spoolkit\.env`），**非密钥默认值只放 `config.toml`*
 
 ## 文档
 
-| 文档 | 讲什么 |
+索引与写法：[`docs/README.md`](docs/README.md)。
+
+| 文档 | 内容 |
 |---|---|
-| [`docs/getting-started.md`](docs/getting-started.md) | 装、配、第一个任务、卡住先查哪条 |
-| [`docs/cli.md`](docs/cli.md) | 每条命令与参数 |
-| [`docs/manual.md`](docs/manual.md) | 使用手册：工作区／权限／记忆／长任务／通道／排错 |
-| [`docs/bridge.md`](docs/bridge.md) · [`docs/mcp.md`](docs/mcp.md) | 两个方向的外部接口 |
-| [`docs/rationale.md`](docs/rationale.md) | 设计取舍与实测教训 |
-| [`docs/benchmarking.md`](docs/benchmarking.md) | 怎么量、量到什么 |
-| [`docs/dogfooding.md`](docs/dogfooding.md) | 每次改动的原因与结果（含实测账）|
-| [`docs/superpowers/specs/`](docs/superpowers/specs/) | 设计文档 |
+| [getting-started](docs/getting-started.md) | 安装 · 首跑 · 故障表 |
+| [cli](docs/cli.md) | 命令参数 |
+| [manual](docs/manual.md) | 运行机制契约 |
+| [agent-loop-flow](docs/agent-loop-flow.md) | 主循环控制流 |
+| [bridge](docs/bridge.md) · [mcp](docs/mcp.md) | 通道 / MCP |
+| [rationale](docs/rationale.md) | 设计取舍（结论+指针） |
+| [benchmarking](docs/benchmarking.md) · [dogfooding](docs/dogfooding.md) | 基准 · 实测日志 |
+| [handoff](docs/handoff.md) | **交接：接下来要做的**（关口用法 · 已做完 · 待办） |
+| [superpowers/specs](docs/superpowers/specs/) | 历史设计档 |
 
 ## 开发与许可
 
-```powershell
-$env:PYTHONIOENCODING='utf-8'
-uv run pytest -q -p no:cacheprovider --basetemp="$env:TEMP\agents-dev-pytest"
+关口只有一条命令，两个平台都一样（`scripts/gate.py` 是唯一的实现；
+`scripts\gate.ps1` / `scripts\pytest.ps1` 是 Windows 习惯用的薄壳）：
+
+```bash
+uv sync --extra dev          # 装开发依赖（含 mypy，版本在 uv.lock 里锁死）
+python scripts/gate.py             # 全套：环境体检 + 测试 + 类型检查
+python scripts/gate.py --only doctor   # 只做环境体检（受限环境下先看它）
+python scripts/gate.py --only tests    # 只跑测试
+python scripts/gate.py --only types    # 只跑类型检查
 ```
+
+**环境问题与代码回归要分得开**（这是关口最重要的性质）：
+
+- 环境准备只有一处实现：`scripts/dev_env.py`（能力体检 + 环境变量 + 临时目录
+  补丁），`pytest.ps1` / `gate.ps1` / 探针都调它，不再各写一份；
+- 用例自己声明宿主依赖：`@pytest.mark.needs("process_kill")` → 缺能力就**跳过
+  并说明缺什么**（受限沙箱里杀进程被拒就是这种情况）；能力在时照常跑，
+  红了就是真回归；
+- 兜底清单 `tools/known-env-failures.json`：每条带 `requires` / `evidence` /
+  `expires`；**能力回来即失效**、**非受限环境整体失效**、**过期直接让关口红**。
+
+**类型检查带基线棘轮**：存量的 161 条发现记在 `tools/mypy-baseline.json` 里，
+关口**只对新增报红**；修掉的条目下次刷新基线时收账。刷新基线
+（`--update-baseline`）等于承认这一批债务，必须是一次显式提交——换 mypy
+版本同理（基线里记着版本号，对不上会提示）。
+
+为什么是 mypy 而不是 pyright：pyright 在 Node 生态里（PyPI 的包装包也要
+Node，除非再拉 40MB 的 nodejs 轮子），而本仓是纯 Python——`uv sync` 一条命令
+就能在任何只有 Python 的机器上跑起来。这是"同一份代码在多数开发者手里都能
+便利开发"的一部分。
 
 basetemp 放仓库外，避免被当成工作区根。License：MIT。

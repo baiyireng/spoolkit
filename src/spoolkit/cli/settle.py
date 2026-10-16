@@ -30,6 +30,7 @@ def settle(
     ask: Callable[[str], str] = input,
     non_interactive: bool = False,
     header: str = "",
+    out: Callable[[str], None] = print,
 ) -> tuple[str, list[str]]:
     """按策略处理待落盘改动，返回（结果动作，已写入路径）。
 
@@ -38,23 +39,27 @@ def settle(
     而不是埋在下面。顺序就是这条要求本身，所以它由这里保证，而不是靠调用方
     记得先 print 一次。
 
+    `out` 是人读散文的出口（默认 stdout）。计划/自主那条路上 stdout 是事件
+    通道（`--events` 时一行一个 JSON），所以那里由调用方把出口换成 stderr
+    ——diff、留档、拒绝说明一条都不能混进事件流。
+
     「没确认完的暂存重写」在任何清理**之前**取一次读数，最后统一说一句：
     deny 会把暂存一起清掉，那一句如果放到后面就永远打不出来——而它正是
     「没有静默丢弃」这条要求的落点。
     """
     note = unconfirmed_note(pending)
     if header:
-        print(header)
+        out(header)
     outcome, written = _settle(
-        pending, policy, scope, baseline_path, ask, non_interactive
+        pending, policy, scope, baseline_path, ask, non_interactive, out
     )
     if note:
-        print(note)
+        out(note)
     # **扣成果也要说出来**：给不出基线的改动没有落盘（见 `PendingChanges.apply`），
     # 静默跳过会让人以为改好了——而那是最坏的一种报告。
     refused = refused_note(pending)
     if refused:
-        print(refused)
+        out(refused)
     return outcome, written
 
 
@@ -65,14 +70,15 @@ def _settle(
     baseline_path: Path | None = None,
     ask: Callable[[str], str] = input,
     non_interactive: bool = False,
+    out: Callable[[str], None] = print,
 ) -> tuple[str, list[str]]:
     if len(pending) == 0:
         return NONE, []
 
     if policy == DENY:
-        _show(pending)
+        _show(pending, out)
         pending.discard()
-        print("当前策略为只读（deny），这些改动已被丢弃。")
+        out("当前策略为只读（deny），这些改动已被丢弃。")
         return DENIED, []
 
     if policy == AUTO:
@@ -81,10 +87,10 @@ def _settle(
             if pending.is_linked(change.path) and change.path not in blocked:
                 blocked.append(change.path)
         if not blocked:
-            return AUTO_APPLIED, apply_with_audit(pending, baseline_path)
+            return AUTO_APPLIED, apply_with_audit(pending, baseline_path, out=out)
         # 越界就退回确认：auto 只覆盖它被允许的范围，
         # 不等于「这次运行整体被信任」。
-        print("以下改动超出允许范围，需要逐项确认：" + "、".join(blocked))
+        out("以下改动超出允许范围，需要逐项确认：" + "、".join(blocked))
         if non_interactive:
             # 无人值守时不能弹问题。这里只丢**越界的那几处**，范围内的照落。
             #
@@ -92,30 +98,30 @@ def _settle(
             # 修改被一起丢掉，审查据此判它「测试尚未通过」，整份计划在
             # 43/49 处中止——剩下 6 题连试都没试。谨慎不等于把对的一起扔。
             dropped = pending.drop(blocked)
-            print(f"无人值守运行：范围外的 {len(dropped)} 处已丢弃，范围内的照常落盘。")
+            out(f"无人值守运行：范围外的 {len(dropped)} 处已丢弃，范围内的照常落盘。")
             if len(pending) == 0:
                 return DENIED, []
-            return AUTO_APPLIED, apply_with_audit(pending, baseline_path)
+            return AUTO_APPLIED, apply_with_audit(pending, baseline_path, out=out)
 
     # 无人值守时不能弹问题——没有人会回答。没有自动授权的策略下，
     # 一律拒绝，并把原因说清楚，而不是静默丢弃。
     if non_interactive:
-        _show(pending)
+        _show(pending, out)
         pending.discard()
-        print("无人值守运行，且本次运行没有自动授权，已拒绝。")
+        out("无人值守运行，且本次运行没有自动授权，已拒绝。")
         return DENIED, []
 
     applied, written = review_and_apply(
-        pending, ask=ask, baseline_path=baseline_path
+        pending, ask=ask, baseline_path=baseline_path, out=out
     )
     return (CONFIRMED if applied else DECLINED), written
 
 
-def _show(pending: PendingChanges) -> None:
+def _show(pending: PendingChanges, out: Callable[[str], None] = print) -> None:
     for change in pending.items():
         if change.declared:
-            print(f"# {change.path}：{change.declared}")
-        print(change.diff)
+            out(f"# {change.path}：{change.declared}")
+        out(change.diff)
 
 
 def unconfirmed_note(pending: PendingChanges) -> str:
@@ -159,16 +165,30 @@ def refused_note(pending: PendingChanges) -> str:
     )
 
 
-def pending_actions_note(root: Path) -> str:
+def pending_actions_note(root: Path, session: str = "") -> str:
     """挂起待批的动作清单（没有就返回空串）。
 
     **它落在会话目录里，不是工作区里**（`config.state_dir` 按会话分），
     所以这里按「哪个会话」去找，而不是 `.agent/` 下一个固定名字——两个
     会话共用一份挂起清单会让 A 的批复去执行 B 的动作。
+
+    `session` **必须由调用方给**：不给就等于按默认会话找。实测（真机探针
+    `--session probe`）那份清单就在 `.agent/sessions/probe/review/` 里，
+    而这里原先用默认会话找 `.agent/sessions/cli/review/`——找不到就返回空串，
+    于是「有 1 个动作挂起待批」那句**静默消失**，用户以为这一轮是普通收工。
+    写的那一侧（`loop` 的 `pending_path`）一直是带会话的，只有读的这一侧没有。
     """
+    from spoolkit import session_state
     from spoolkit.config import Config
 
-    path = Config(project_root=Path(root)).state_dir / "review" / "pending-actions.json"
+    path = (
+        Config(
+            project_root=Path(root),
+            session=session or session_state.DEFAULT_SESSION,
+        ).state_dir
+        / "review"
+        / "pending-actions.json"
+    )
     if not path.is_file():
         return ""
     try:

@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+from spoolkit.cli.term import print_out
 from spoolkit import limits
 from spoolkit.memory.gate import Verdict, content_hash, judge, normalize_policy
 from spoolkit.memory.hot import read_hot, write_hot
@@ -338,10 +339,10 @@ def migrate(args: argparse.Namespace) -> int:
             conn.close()
 
     if not hot_path.exists():
-        print(f"{hot_path} 不存在：无可迁移（没有创建任何文件）。")
+        print_out(f"{hot_path} 不存在：无可迁移（没有创建任何文件）。", markup=False)
         return 0
 
-    print(render_report(report, hot_path=hot_path, dry_run=not execute))
+    print_out(render_report(report, hot_path=hot_path, dry_run=not execute), markup=False)
     if not execute:
         return 0
 
@@ -353,9 +354,10 @@ def migrate(args: argparse.Namespace) -> int:
     hot_path.rename(backup)
     # ② 再写新文件。
     write_hot(hot_path, kept)
-    print(f"  原文件已保留为：{backup.name}（逐字节等于迁移前的 memory.md）")
-    print(
+    print_out(f"  原文件已保留为：{backup.name}（逐字节等于迁移前的 memory.md）", markup=False)
+    print_out(
         "  新 memory.md 写入完成：只含「收进热记忆」的 "
-        f"{sum(len(items) for items in kept.values())} 条。"
+        f"{sum(len(items) for items in kept.values())} 条。",
+        markup=False,
     )
     return 0

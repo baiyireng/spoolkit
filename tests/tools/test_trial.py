@@ -102,3 +102,63 @@ def test_试跑副本不靠测试侧补丁也能建出来(
         base = work.parent
     assert not base.exists()  # 摘掉补丁也不影响退出时清理
 
+
+# --- 依赖目录：接进副本，而不是"整个拿掉" ------------------------------------
+
+
+def _with_deps(tmp_path: Path) -> None:
+    _project(tmp_path)
+    pkg = tmp_path / "node_modules" / "some-pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "index.js").write_text("export const x = 1\n", encoding="utf-8")
+
+
+def test_依赖目录接进副本(tmp_path: Path) -> None:
+    """Node 项目的依赖就在 `node_modules` 里，且不是全局的——副本里没有它，
+    `npm run build` 必然报"找不到模块"，模型会把这当成"依赖没装"去重装。
+    实测（Vue 项目）白烧了 6 步预算。链接不占空间、副本里的相对路径照旧成立。
+    """
+    _with_deps(tmp_path)
+    report: dict = {}
+    with trial_workspace(tmp_path, [], report=report) as work:
+        assert (work / "node_modules" / "some-pkg" / "index.js").is_file()
+        assert "node_modules" in report["linked"]
+        assert report["skipped"] == []
+        assert (work / "calc.py").exists()  # 项目内容照旧
+    # 最要紧的一条：清理副本不许顺着链接把真实依赖删掉
+    assert (tmp_path / "node_modules" / "some-pkg" / "index.js").is_file()
+    assert (tmp_path / "calc.py").exists()
+
+
+def test_接不上的依赖目录会被如实报出来(tmp_path: Path, monkeypatch) -> None:
+    """接不上（没有建链接的权限）就退回"副本里没有它"，但必须记下来——
+    调用方要靠它把"这是副本造成的"说给模型听。"""
+    import spoolkit.tools.trial as trial_mod
+
+    _with_deps(tmp_path)
+    monkeypatch.setattr(trial_mod, "_link_dir", lambda source, target: "拒绝访问")
+    report: dict = {}
+    with trial_workspace(tmp_path, [], report=report) as work:
+        assert not (work / "node_modules").exists()
+        assert "node_modules" in report["skipped"]
+
+
+def test_试跑输出开头说明自己在副本里(tmp_path: Path) -> None:
+    _with_deps(tmp_path)
+    pending = PendingChanges(tmp_path)
+    replace_lines_spec(tmp_path, pending).handler(
+        {"path": "calc.py", "start_line": 2, "end_line": 2,
+         "content": "    return a + b\n", "expect": "    return a - b"}
+    )
+    result = run_command_spec(tmp_path, pending).handler(
+        {"command": ["python", "-m", "pytest", "-q"], "timeout": 120}
+    )
+    assert "试跑副本" in result.content
+    assert "node_modules" in result.content
+    assert "1 passed" in result.content  # 结论照旧在
+    # 没有待落盘改动时原地执行，不该出现这段说明
+    plain = run_command_spec(tmp_path, PendingChanges(tmp_path)).handler(
+        {"command": ["python", "-m", "pytest", "-q"], "timeout": 120}
+    )
+    assert "试跑副本" not in plain.content
+

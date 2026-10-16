@@ -281,7 +281,7 @@ WORKFLOW_WRITE_SAFE = (
 # 第二版（r4 之后）：正文与举证分两个回合。这一条现在管四件事——
 # ① 带 rewrite_reason 的写调用会收下正文并返回令牌（文件尚未落盘）；
 # ② 清单用 confirm_rewrite **只发项 id** 补，绝不重发正文（这是关键，写死）；
-# ③ 每一项二选一：确认保留（acked）或声明有意丢弃（dropped + 理由）；
+# ③ 每一项二选一：同意去掉（acked）或声明有意丢弃并写明理由（dropped + 理由）；
 # ④ 两者都没给的项不落盘；没声明的大重写照旧拦下；同一份正文原样重提会被硬拦。
 WORKFLOW_REWRITE_DECLARE = (
     "- 整份重写使行数减少一半以上时必须带 rewrite_reason（合并、去重、搬运"
@@ -290,7 +290,7 @@ WORKFLOW_REWRITE_DECLARE = (
     "与短令牌 token；正文只发这一次。\n"
     "- 用 confirm_rewrite 逐项补清单，"
     '**只发项 id、不重发正文**：confirm_rewrite(token="rw-xxxxxx", acked=["d1"])。'
-    "每项二选一：保留填 acked，不要了填 dropped 并写明理由"
+    "每项二选一：同意它从新正文里消失就填 acked，确属有意去掉就填 dropped 并写明理由"
     '（["d3：这段重复脚本整段删掉"]）；两项都没给的项还在就不会落盘；'
     "一次凑齐就写 acked_disappeared。\n"
     "- 令牌只在本次运行内有效；**没带 rewrite_reason 被拒时没有令牌**，"

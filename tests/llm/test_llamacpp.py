@@ -214,6 +214,46 @@ def test_非本机地址仍按系统代理走() -> None:
         module.system_proxy = original
 
 
+def test_显式代理也要过本机这一关() -> None:
+    """**显式传进来的代理同样不能套到本机地址上**——这才是真出事的那个口子。
+
+    `cli/runtime.py` 把 `system_proxy()` 当"显式值"传给网关，而构造点原先写的是
+    `proxy if proxy is not None else proxy_for(base_url)`：只要这个值非空，本机地址
+    就绕过判定被套上代理。实测（代理对 loopback 回 502）→ `context_window()` 拿到
+    None → spool 报「无法连接 llama.cpp 服务…先确认服务已启动」，把代理问题说成了
+    "服务没起"。
+    """
+    assert proxy_for("http://127.0.0.1:8080", "http://127.0.0.1:7890") is None
+    assert proxy_for("http://[::1]:8080", "http://127.0.0.1:7890") is None
+    assert (
+        proxy_for("https://api.example.com", "http://127.0.0.1:7890")
+        == "http://127.0.0.1:7890"
+    )
+
+
+def test_网关构造时本机地址不带代理(monkeypatch) -> None:
+    """把规则钉在**构造点**上：光有 `proxy_for` 判对了不够，调用点绕过它才是病根。"""
+    import httpx as httpx_module
+
+    import spoolkit.llm.llamacpp as module
+
+    captured: dict = {}
+    real = httpx_module.Client
+
+    def spy(*args, **kwargs):
+        captured.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module.httpx, "Client", spy)
+    module.LlamaCppGateway("http://127.0.0.1:8080", proxy="http://127.0.0.1:7890")
+    assert captured["proxy"] is None
+    assert captured["trust_env"] is False
+
+    captured.clear()
+    module.LlamaCppTokenCounter("http://127.0.0.1:8080", proxy="http://127.0.0.1:7890")
+    assert captured["proxy"] is None
+
+
 def test_上下文超长单独成类() -> None:
     """它和「测试没通过」那种失败不是一回事：请求根本没进去。
 

@@ -28,8 +28,11 @@ FROZEN_PLACEHOLDERS = {
     "WORKFLOW_READ_ROOTS": ["roots"],
     "OUTPUT_TRUNCATED": ["limit"],
     "SUPERVISE": [
+        # `tools`：督导的证据包里带注册表全量清单（它的建议必须出自这份清单），
+        # 模板里因此有 `{tools}`。黄金表此前漏了它——**表落后于模板**，
+        # 不是模板多写了占位符（渲染一直正常，缺的话每条督导用例都会 KeyError）。
         "asking", "goal", "step", "limit", "ceiling", "room", "state", "trace",
-        "edits", "calls", "resets", "repeats", "no_edit", "tokens", "cycle",
+        "tools", "edits", "calls", "resets", "repeats", "no_edit", "tokens", "cycle",
         "oscillations", "same_query",
     ],
     "DECOMPOSE": ["goal", "context", "limit"],

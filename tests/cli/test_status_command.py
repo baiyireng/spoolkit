@@ -144,7 +144,7 @@ def test_探活失败的原话补一句人话() -> None:
     assert "timed out" in timed_out or "no accept" in timed_out
     assert "timed out" in timed_out  # 原话留着：排查时它有用
     assert "nothing listening" in _readable_probe("Connection refused")
-    assert _readable_probe("HTTP 500") == "HTTP 500"
+    assert "HTTP 500" in _readable_probe("HTTP 500")
     assert _readable_probe("[WinError 10061] 由于目标计算机积极拒绝") != ""
 
 

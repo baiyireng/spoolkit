@@ -99,10 +99,10 @@ Theme 键（固定集合，命令不得硬编码颜色码）：
 
 ---
 
-## 6. 后续（明确留给二期）
+## 6. 后续
 
-- chat / 模型回复：`Markdown` / `Syntax` / 可选 `Live`
-- 其它子命令逐步改用 `print_out` / `print_err`
+- **已推进**：列表/检查类命令走 `print_out`/`print_err`，并上语义色（`config` `env` `session` `policy` `limits` `init` `extra` `diagnose` `mcp-servers` `ws` `status` `service` `shortcuts` 起手行等；`--json` 仍裸 `print`）。
+- **仍待做**：`chat` / `run` / `plan` / `settle` / `bridge` / `hub` / `bench` 与模型正文：`Markdown` / `Syntax` / 可选 `Live`
 
 ---
 

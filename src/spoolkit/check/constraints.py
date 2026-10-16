@@ -106,7 +106,19 @@ def check_source(
     path: str = "<memory>",
     limits: Limits | None = None,
 ) -> list[Violation]:
-    """检查一段源码。语法错误时返回一条 error，不抛异常。"""
+    """检查一段源码。语法错误时返回一条 error，不抛异常。
+
+    **只对 Python 文件判语法**：拿 `ast.parse` 去解 `.vue` / `.css` / HTML，
+    必然在第 1 行报「语法错误」——实测（Vue 项目）这条误报把模型误导去核对
+    落盘内容（`<template>` 怎么会是 Python 语法错？），白花好几步。
+    判不了就**不判**，不冒充检查过。
+    """
+    name = str(path)
+    dot = name.rfind(".")
+    suffix = name[dot:].lower() if dot != -1 else ""
+    if suffix and suffix not in (".py", ".pyi"):
+        return []
+
     active = limits or Limits()
     try:
         tree = ast.parse(source, filename=path)

@@ -319,7 +319,9 @@ def _ws_switch(name: str) -> str:
     if not name:
         return "需要指定目标，例如 `/ws use 2` 或 `/ws use 我的项目`"
     try:
-        root = workspaces.resolve_workspace(name)
+        # 聊天里 `/ws use <名字>` 指的是**登记表里的名字**，不是"聊天进程 cwd 下的
+        # 相对路径"；cwd 一旦碰巧有同名目录，点名就会被劫持到别的工作区。
+        root = workspaces.resolve_workspace(name, use_cwd=False)
     except WorkspaceError as exc:
         return str(exc)
     session = ""

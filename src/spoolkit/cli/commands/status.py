@@ -8,11 +8,10 @@
 from __future__ import annotations
 
 import argparse
-import sys
 
 from spoolkit import settings
 from spoolkit import status as status_report
-from spoolkit.cli.term import print_out
+from spoolkit.cli.term import print_err, print_out
 
 
 def _seconds(raw: object, flag: str, default: float) -> float | None:
@@ -22,10 +21,16 @@ def _seconds(raw: object, flag: str, default: float) -> float | None:
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        print(f"{flag} must be seconds (e.g. 0.5), got {raw!r}.", file=sys.stderr)
+        print_err(
+            f"{flag} must be seconds (e.g. 0.5), got {raw!r}.",
+            markup=False,
+        )
         return None
     if value <= 0:
-        print(f"{flag} must be > 0 seconds, got {value:g}.", file=sys.stderr)
+        print_err(
+            f"{flag} must be > 0 seconds, got {value:g}.",
+            markup=False,
+        )
         return None
     return value
 
@@ -37,10 +42,16 @@ def _ports(raw: list[int]) -> list[int] | None:
         try:
             port = int(item)
         except (TypeError, ValueError):
-            print(f"--web-port must be a port number, got {item!r}.", file=sys.stderr)
+            print_err(
+                f"--web-port must be a port number, got {item!r}.",
+                markup=False,
+            )
             return None
         if not 1 <= port <= 65535:
-            print(f"--web-port must be in 1..65535, got {port}.", file=sys.stderr)
+            print_err(
+                f"--web-port must be in 1..65535, got {port}.",
+                markup=False,
+            )
             return None
         ports.append(port)
     return ports
@@ -63,7 +74,7 @@ def status_command(args: argparse.Namespace) -> int:
     if problem:
         # 配置读不出来时上面那张表**全是假象**（provider / 配方 / 通道都读不到），
         # 所以先把真正的原因说出来。与 `spool service` / `spool mcp-servers` 同一条口径。
-        print(problem, file=sys.stderr)
+        print_err(problem, markup=False)
         return 2
 
     report = status_report.build_report(
@@ -73,6 +84,7 @@ def status_command(args: argparse.Namespace) -> int:
         mcp_timeout=mcp_timeout,
     )
     if getattr(args, "json", False):
+        # Machine-readable: never colorize.
         print(status_report.render_json(report))
     else:
         print_out(status_report.render_human(report))

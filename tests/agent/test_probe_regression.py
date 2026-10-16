@@ -260,10 +260,19 @@ def test_组合停用上报督导按二的幂退避(tmp_path: Path) -> None:
 def test_刷新读取到上限后硬拦不再执行(tmp_path: Path, monkeypatch) -> None:
     """真实轨迹：模型反复读同一个文件，因为每次结果都被上下文压缩丢弃。
 
-    护栏允许前 3 次刷新重取（给模型补救机会），但第 4 次起必须硬拦，
-    否则它会一直把预算烧到收敛/步数上限，根本没机会写文件。
+    护栏允许「结果被压掉」这种重取**两次**（D6：这条账单独设份额，见
+    `loop._REFRESH_COMPACTED_LIMIT`），第 3 次重复起必须硬拦——否则它会一直把
+    预算烧到收敛/步数上限，根本没机会写文件。
+
+    为什么不是原来的 3 次：那 3 次是**一个池子**，而烧它的成因不是同一种。
+    实测形状是全给「结果被压掉」吃光，等文件真的变了、模型必须拿到新正文时，
+    账上空了 → 硬拦，而拦下的话术还说「继续重跑不会再拿到新内容」——那句在
+    那一刻是假的。分账之后总额度**一分不加**（全局仍是 `_REFRESH_LIMIT`=3），
+    只是「压掉」这一本更小，留一次给"重取真能拿到新内容"那一种
+    （`test_压缩账用完后内容真变了仍放行` 钉的就是那一次）。
+
     变异：把「额度用满后照常执行」那一条改回去，这条会红——
-    实际执行次数会超过 4 次，而且blocked_refund 不会触发。
+    实际执行次数会超过 3 次，而且 blocked_refund 不会触发。
     """
     (tmp_path / "a.txt").write_text("内容\n" * 50, encoding="utf-8")
     loop = _build(
@@ -290,10 +299,97 @@ def test_刷新读取到上限后硬拦不再执行(tmp_path: Path, monkeypatch)
     loop.registry.invoke = counting
 
     result = loop.run("看看 a.txt")
-    # 初始 1 次 + 3 次放行刷新 = 4 次真正执行；第 5 次起硬拦。
-    assert executed.count("read_file") == 4, (
+    # 初始 1 次 + 2 次放行刷新（「结果被压掉」那本账的份额）= 3 次真正执行；
+    # 第 3 次重复（总第 4 次调用）起硬拦。
+    assert executed.count("read_file") == 3, (
         f"刷新额度用满后仍在执行：read_file 实际执行 {executed.count('read_file')} 次"
     )
+    # 账目本身要读得出来：压掉这一本用满 2/2，**总账还剩 1 次**（留给新内容）。
+    assert loop._refreshes_by_cause == {"compacted": 2}, loop._refreshes_by_cause
+    assert loop._refreshes_used == 2, loop._refreshes_used
     # 硬拦的步数必须退还，不占用有效预算。
     assert any("这一步的调用全部被硬拦" in line for line in result.trace), result.trace
     assert any("已退还" in line for line in result.trace), result.trace
+    # 拒绝话术必须说清是哪一本账空了，并且**说真话**：内容真变了还有一次机会
+    # （旧话术一律写成「额度已用完」，而总账其实还剩一次）。
+    prompt = "\n".join(message.content for message in loop.gateway.requests[-1].messages)
+    assert "结果被上下文压掉」这本账已经用完" in prompt, prompt
+    assert "确实变了" in prompt, prompt
+    assert "总额度已经用完" not in prompt, prompt
+
+
+def test_压缩账用完后内容真变了仍放行(tmp_path: Path, monkeypatch) -> None:
+    """分账的那一次预留真的能用上（D6 的**行为**判据，不是读数判据）。
+
+    轨迹里刻意**先撞一次「这本账用完了」**再改文件，否则这条用例测不出预留：
+
+        读① 初始 → 读② 压掉 1/2 → 读③ 压掉 2/2 → 读④ 压掉（**这本用完，硬拦**）
+        → 文件真的变了 → 读⑤ 新内容（用掉预留的**第 3 次**，放行）
+        → 读⑥ 总额度用完（硬拦）
+
+    为什么非要多那一次「读④」：把按成因的份额整个去掉（或只查总数）时，读④
+    会照常放行成"压掉 3/3"，于是读⑤（内容变了）撞上总数上限被硬拦。少了它，
+    读⑤ 是被**全局上限**放行的，与预留无关——那样这条用例对预留就是空转的
+    （三种变异下全绿）。
+
+    所以断言盯的是账目本身（`by_cause`）与那条成因标签，而不只是执行次数；
+    总额度也不许被分账偷偷放大（仍 ≤ `_REFRESH_LIMIT`）。
+    """
+    target = tmp_path / "a.txt"
+    target.write_text("第一版\n", encoding="utf-8")
+    loop = _build(
+        tmp_path,
+        [
+            _turn("读", [_read("a.txt")]),
+            _turn("再读", [_read("a.txt")]),
+            _turn("还读", [_read("a.txt")]),      # 第 2 次重复 → 压掉账满
+            _turn("又读", [_read("a.txt")]),      # 第 3 次重复 → 这本账用完，硬拦
+            _turn("它变了吧", [_read("a.txt")]),   # 文件已改 → 走预留的那一次
+            _turn("再来一遍", [_read("a.txt")]),   # 总额度用完 → 必须硬拦
+            _turn("收尾", final="看完了"),
+        ],
+    )
+    real_guard = AgentLoop._invoke_guarded
+    attempts: list[str] = []
+
+    def wrapped(self, call, repeats, seen=1):
+        # 每次调用之前：模拟压缩（版本推进 → 原结果不在手上）。
+        self._context_revision += 1
+        # 第 5 次调用之前把文件改掉：真实轨迹里正是模型自己写完了再回头读。
+        # 判据在 `_invoke_guarded` 里算，所以改动必须发生在这之前。
+        if len(attempts) == 4:
+            target.write_text("第二版\n", encoding="utf-8")
+        attempts.append(call.name)
+        return real_guard(self, call, repeats, seen)
+
+    monkeypatch.setattr(AgentLoop, "_invoke_guarded", wrapped)
+
+    executed: list[str] = []
+    real_invoke = loop.registry.invoke
+
+    def counting(call):
+        executed.append(call.name)
+        return real_invoke(call)
+
+    loop.registry.invoke = counting
+
+    result = loop.run("看看 a.txt")
+
+    # 初始 1 + 压掉账 2 + 新内容账 1 = 4 次真正执行（= 1 + 全局上限 3，没放宽）。
+    assert executed.count("read_file") == 4, (
+        f"新内容那一次预留没被放行：{executed.count('read_file')} 次"
+    )
+    assert loop._refreshes_by_cause == {"compacted": 2, "changed": 1}, (
+        loop._refreshes_by_cause
+    )
+    assert loop._refreshes_used == 3, loop._refreshes_used
+    # 读④ 那次硬拦必须点名「这本账」（不是总额度）——它正是预留的来源。
+    assert any("这本账已经用完" in line for line in result.trace), result.trace
+    # 读⑤ 那次放行的回执必须点名它记在哪本账上（模型与 trace 都读得到）。
+    assert any("要看的东西真的变了" in line for line in result.trace), result.trace
+    # 上限仍被守住：预留用完之后，内容再变也没有额度了；而且话术**不许**再
+    # 承诺「先做一处改动再回来看」（那句在总额度用完时兑现不了）。
+    assert any("总额度已经用完" in line for line in result.trace), result.trace
+    assert not any("先做一处真正的改动再回来看" in line for line in result.trace), (
+        result.trace
+    )

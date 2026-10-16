@@ -79,6 +79,15 @@ def _isolate_user_config(tmp_path_factory, monkeypatch):
     for name in ("PROVIDER", "MODEL", "BASE_URL", "PROXY", "SCRIPT"):
         monkeypatch.delenv(f"AGENTS_DEV_{name}", raising=False)
         monkeypatch.delenv(f"SPOOLKIT_{name}", raising=False)
+    # 开发机的**代理**同理：`httpx` 默认会读这几个变量，于是"本机起的测试服务器"
+    # 走没走代理、行为可能不一样。实测（2026-10-16）：带 `HTTP_PROXY` 时
+    # `tests/test_fetch.py::test_超过大小上限就中止` 报 `DID NOT RAISE WebError`，
+    # 摘掉代理就绿——那是**这台机器的状态**，不是被测行为。
+    for name in (
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
     yield
 
 

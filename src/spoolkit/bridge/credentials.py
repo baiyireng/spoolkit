@@ -42,7 +42,7 @@ def find(root: Path | None, *names: str) -> tuple[str, str]:
 def mask(value: str) -> str:
     """给日志看的形状：够认出是哪一份，又不至于泄露。"""
     if not value:
-        return "（空）"
+        return "(empty)"
     if len(value) <= 6:
         return "*" * len(value)
     return f"{value[:3]}***{value[-2:]}"

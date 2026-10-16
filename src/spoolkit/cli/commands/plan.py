@@ -8,9 +8,9 @@
 import argparse
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Callable, Sequence
 
 from spoolkit.agents.plan import (
     BATCH_LIMIT_NOTE,
@@ -32,6 +32,7 @@ from spoolkit.agents.plan import (
     reflect_progress,
     uncovered,
 )
+from spoolkit.cli.events import EventWriter
 from spoolkit.llm.gateway import CountingGateway
 from spoolkit import limits
 from spoolkit import runlog
@@ -60,6 +61,151 @@ from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.grant import Grants
 from spoolkit.memory.gate import sanitize
 from spoolkit.memory.lessons import record_lesson
+from spoolkit.web.protocol import FINAL, START, STEP, USAGE
+
+
+def _say(line: Any = "") -> None:
+    """计划/自主这条路上**人读的散文**一律走 stderr。
+
+    stdout 在这条路上是**事件通道**：`--events` 时探针、MCP 与网页壳按行读
+    JSON（`web.protocol.parse_line`），一行散文就让录下来的文件变脏、解析器
+    要么崩、要么被迫打补丁——而"录下来的文件能直接读"是排查的第一个手段。
+
+    实测这条路上每一句进度原先都打在 stdout 上（`run --plan` / `run
+    --autonomous` 都走这里），于是"stdout 上只有 JSON 行"这条约定在这两条路上
+    从来没成立过。散文换出口、内容一个字不改：终端里 stderr 也接屏幕，人照样
+    看得见；管道那一边拿到的 stdout 终于是干净的。
+    """
+    print(line, file=sys.stderr, flush=True)
+
+
+def _events(args: argparse.Namespace) -> EventWriter | None:
+    """这一次运行要不要发事件。
+
+    开关与 `run` 那条路**同一个**（`args.events`），不另立一套：同一个策略在
+    终端、网页与 MCP 上表现不同，那种差异不会报错，只会让人困惑。
+    不开事件时 stdout 上不该出现 JSON 行，所以这里给 None。
+    """
+    return EventWriter() if getattr(args, "events", False) else None
+
+
+def _ask_on_stderr(prompt: str) -> str:
+    """确认问句也走 stderr，并把回答从 stdin 读回来。
+
+    `input()` 把提示语写在 **stdout** 上（那是 CPython 的行为），events 模式下
+    一行散文就让记录不干净；而这条路上 stdin 正是客户端用来回答的那条管道
+    （`--ask-on-stdin`）。读不到（EOF/管道关了）时按「没回答」处理——
+    比让 `input()` 抛 `EOFError` 把整轮炸掉强。
+    """
+    _say(prompt.rstrip("\n"))
+    try:
+        return sys.stdin.readline()
+    except (EOFError, OSError):
+        return ""
+
+
+@dataclass
+class _Totals:
+    """这一轮（可能多步）的用量合计。
+
+    USAGE 事件与收尾那一条都读它：按步执行那条路每一步都新建一次循环，
+    各步的用量不累计的话，客户端看到的永远是**最后一步**的账。
+    """
+
+    steps: int = 0
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    def add(self, result: Any) -> None:
+        self.steps += int(getattr(result, "steps", 0) or 0)
+        self.calls += int(getattr(result, "model_calls", 0) or 0)
+        self.prompt_tokens += int(getattr(result, "prompt_tokens", 0) or 0)
+        self.completion_tokens += int(getattr(result, "completion_tokens", 0) or 0)
+
+    def emit(self, writer: EventWriter | None) -> None:
+        if writer is None:
+            return
+        writer.emit(
+            USAGE,
+            steps=self.steps,
+            calls=self.calls,
+            prompt_tokens=self.prompt_tokens,
+            completion_tokens=self.completion_tokens,
+        )
+
+
+def _emit_start(
+    writer: EventWriter | None,
+    *,
+    session: str,
+    goal: str,
+    mode: str,
+    policy: str = "",
+    steps: int = 0,
+) -> None:
+    """开工那一条。字段与 `run` 那条路的 START 对齐（网页壳与 MCP 按它开一轮）。"""
+    if writer is None:
+        return
+    writer.emit(
+        START,
+        session=str(session or ""),
+        goal=str(goal or ""),
+        policy=str(policy or ""),
+        mode=mode,
+        steps=int(steps),
+    )
+
+
+def _emit_step(writer: EventWriter | None, step: Any, plan: Any) -> None:
+    """第几步 / 共几步 / 这一步做什么。
+
+    `n` 是网页壳与探针读的那个键（`web.runner.trace_line` 按它画「第 N 步」），
+    别改名。
+    """
+    if writer is None:
+        return
+    writer.emit(
+        STEP,
+        n=int(getattr(step, "index", 0) or 0),
+        total=len(getattr(plan, "steps", ()) or ()),
+        goal=str(getattr(step, "goal", "") or ""),
+        executor=str(getattr(step, "executor", "") or ""),
+    )
+
+
+def _emit_final(
+    writer: EventWriter | None,
+    *,
+    ok: bool,
+    text: str,
+    mode: str,
+    completed: int = 0,
+    total: int = 0,
+    seconds: float = 0.0,
+    **extra: Any,
+) -> None:
+    """收尾那一条。**每条显式出口都要发**：不发就是"卡住了"（客户端只等到进程消失）。
+
+    形状与 `run` 那条路的 FINAL 一致（`ok` + `text`，网页壳据此画最后那个气泡），
+    多带三个本来只存在于终端那句「自主运行结束：完成 3/3 步」里的读数
+    （`mode` / `completed` / `total`）——它们原先没有机读形式。
+
+    进程**带着异常**死掉时这里发不出来（没有 try/finally）：那一条由调用方兜底，
+    `web.runner` 在子进程消失且没收到 final 时会补一条（`web/runner.py`）。
+    """
+    if writer is None:
+        return
+    writer.emit(
+        FINAL,
+        ok=bool(ok),
+        text=str(text or ""),
+        mode=mode,
+        completed=int(completed),
+        total=int(total),
+        seconds=round(float(seconds), 1),
+        **extra,
+    )
 
 
 def _survey(project_root: Path, goal: str, tokenizer) -> str:
@@ -149,6 +295,7 @@ def _plan_phase(
     limit: int | None = None,
     extra: str = "",
     context: str | None = None,
+    out: Callable[[Any], None] = print,
 ) -> object:
     """拆解那一段：排完、对一遍覆盖、把这笔账说出来。
 
@@ -157,6 +304,10 @@ def _plan_phase(
 
     覆盖检查也是这一步的活：目标说「把 50 道题都做对」，计划少一道，
     原先没有任何机制会发现。
+
+    `out` 是这段散文的出口。`spool plan` 用它当**产品输出**（stdout，默认），
+    而 `run --autonomous/--plan` 那条路上 stdout 是事件通道，调用方传 stderr
+    出口（见 `_say`）——同一条路径两种通道，出口由调用方定。
     """
     counting = CountingGateway(gateway)
     # 覆盖名单由调用方给：什么算「必须覆盖」是关于目标的判断，harness 猜不准。
@@ -190,19 +341,18 @@ def _plan_phase(
     )
     elapsed = time.time() - started
     for line in steps_log:
-        print("  " + line)
-    print(
+        out("  " + line)
+    out(
         f"拆解：{counting.calls} 次调用 / {counting.prompt_tokens} 输入 + "
         f"{counting.completion_tokens} 输出 token / {elapsed:.0f}s"
     )
     missing = uncovered(plan, cover)
     if missing:
         # 补了两轮还缺就报出来——报，不猜：它可能是有意不做的。
-        print(
+        out(
             f"⚠ 计划没有覆盖这些（{len(missing)} 个）："
             + "、".join(missing[:10])
-            + ("…" if len(missing) > 10 else ""),
-            file=sys.stderr,
+            + ("…" if len(missing) > 10 else "")
         )
     return plan
 
@@ -251,6 +401,50 @@ class StepRun:
     gateway: object
     plan: object
     non_interactive: bool
+    #: 事件出口（不给 = 这条运行只有散文）。
+    #:
+    #: `--events` 时由 `autonomous` / `advance_plan` 建一个 `EventWriter` 传进来：
+    #: 循环内部的每一条事件（note / tool / guard_refresh …）与这一步的 STEP
+    #: 都从它出去。原先这条路上根本没有这个口——`assemble_loop` 收不到
+    #: `on_event`，于是计划/自主跑的网页壳与 MCP 只能看到一个黑盒：没有过程、
+    #: 没有 STEP、最后连一条 FINAL 都没有。
+    writer: EventWriter | None = None
+    #: 这一轮（可能多步）的用量合计：USAGE 事件在最后发一次，值就是它。
+    totals: _Totals = field(default_factory=_Totals)
+    #: 最后一步的结算结果与撤销命令。FINAL 事件带它们（与 `run` 那条路的
+    #: `settled` / `revert_command` 同两个字段）：网页壳据此摆一个真能点的
+    #: 撤销按钮，而不是让人去正文里正则捞命令。
+    settled: str = "none"
+    revert_command: str = ""
+
+    @property
+    def on_event(self):
+        """交给 `AgentLoop` 的那个回调（签名 `(kind, data)`，见 `EventWriter.handle`）。
+
+        循环里那条 `{"n": state.step}` 的 step 事件**在这里被挡掉**：
+
+        - 计划路径自己发 STEP（`n` = 计划序号、带 `total` / `goal`），
+        - 而循环那条 `n` 是**本次 run 内**的步数，每一步都从 0 起。
+
+        两条都发，读 `n` 的消费方（网页壳 `web/page.py`、`web/runner.py`、
+        MCP `mcp/server.py`）会在一条两步骤的计划里画出
+        「第 1/2 步 → 第 0 步 → 第 2/2 步 → 第 0 步」——两个编号空间混在
+        一条事件流里，读者没法判断"第 0 步"是什么。
+
+        循环那条在 `run` 路径上照旧发（那里它是唯一的 STEP，
+        `tests/agent/test_loop_events.py` 钉着它的形状）。其余事件一条不挡：
+        tool / note / guard_refresh 这些正是客户端要看的"过程"。
+        """
+        if self.writer is None:
+            return None
+        writer = self.writer
+
+        def handle(kind: str, data: dict) -> None:
+            if kind == STEP and set(data) == {"n"}:
+                return
+            writer.handle(kind, data)
+
+        return handle
 
 
 def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants=None):
@@ -259,7 +453,10 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
 
     args, project_root, gateway = ctx.args, ctx.project_root, ctx.gateway
     plan = ctx.plan
-    report_policy(resolve_policy(args, project_root), scope)
+    if ctx.writer is None:
+        # 授权范围那一句只在散文通道上说（与 `run` 那条路的 guard 同一个口径）：
+        # `--events` 时 stdout 只能有 JSON 行，而这份读数已经在 START 事件上。
+        report_policy(resolve_policy(args, project_root), scope, out=_say)
     window = resolve_window(gateway, args.window)
     read_roots, _ = _resolve_read_roots(args, project_root)
     pending = PendingChanges(
@@ -300,6 +497,10 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
             # 这一步要动哪儿由计划声明，执行时把它交给预取——
             # 否则预取只能靠整段提示词里的关键词猜，实测会猜偏到测试文件上。
             prefetch_anchors=tuple(step.scope or scope),
+            # 事件出口（D3）：接上就按行发给探针 / MCP / 网页壳；不接就只有
+            # trace 与收尾报告。**这条不能在计划路径上漏**：漏了的表现不是
+            # 报错，是客户端看到一个没有过程的黑盒。
+            on_event=ctx.on_event,
         ),
     )
     # 必须在**装配完那一刻**就读走：晚一步（比如等 run 回来再读）量到的
@@ -316,9 +517,11 @@ def execute_step(ctx: StepRun, step, scope: Sequence[str], approver=None, grants
     if memory is not None:
         settle_lessons(memory, result.lessons_pushed, result.finished)
 
+    # 用量进这一轮的合计：USAGE 是**整轮**的账，不是最后一步的账。
+    ctx.totals.add(result)
     for line in result.trace:
-        print(line)
-    print(result.usage())
+        _say(line)
+    _say(result.usage())
     return result, pending
 
 
@@ -383,10 +586,19 @@ def _delegate_step(ctx: StepRun, step, loop, pending) -> object:
     )
 
 
-def record_step(ctx: StepRun, step, result, pending, scope: Sequence[str]) -> None:
-    """记录步骤结果并按策略处理待落盘改动。"""
+def record_step(
+    ctx: StepRun, step, result, pending, scope: Sequence[str]
+) -> tuple[str, str]:
+    """记录步骤结果并按策略处理待落盘改动。
+
+    返回 `(结算结果, 撤销命令)`：撤销命令必须在 settle **之前**取（settle 会把
+    待确认清单清空，之后再问只会拿到「没有可退的」），而事件通道的 FINAL 要
+    带上它——网页壳据此摆一个真能点的按钮（与 `run` 那条路同一个字段）。
+    """
     project_root, plan = ctx.project_root, ctx.plan
     note = (result.final or "").strip().splitlines()[0][:80] if result.final else ""
+    outcome = "none"
+    undo = undo_command(pending)
 
     dropped: list[str] = []
     if len(pending):
@@ -395,7 +607,7 @@ def record_step(ctx: StepRun, step, result, pending, scope: Sequence[str]) -> No
         policy = resolve_policy(ctx.args, project_root)
         if policy == AUTO and ctx.non_interactive:
             dropped = out_of_scope([item.path for item in pending.items()], scope)
-        settle(
+        outcome, _written = settle(
             pending,
             policy,
             scope,
@@ -405,8 +617,15 @@ def record_step(ctx: StepRun, step, result, pending, scope: Sequence[str]) -> No
             header=verification_header(
                 getattr(result, "verified", None),
                 getattr(result, "verify_summary", ""),
-                undo_command(pending),
+                undo,
             ),
+            # 人读的散文（diff、留档、留档被拒的理由）走 stderr：这条路上
+            # stdout 是事件通道，一大片 diff 混进去就等于 `--events` 的记录
+            # 不能再直接读（`settle_with_events` 里 diff 走 stderr 是同一个理由）。
+            out=_say,
+            # 确认问句同样不能落在 stdout 上（`input()` 的提示语写 stdout）。
+            # 只在事件通道上换：散文通道保持 `input` 的原样提示。
+            ask=_ask_on_stderr if ctx.writer is not None else input,
         )
     if dropped:
         # **越界被丢掉这件事必须进记录**。实测代价：第 3 步改的是
@@ -421,14 +640,44 @@ def record_step(ctx: StepRun, step, result, pending, scope: Sequence[str]) -> No
     plan.mark(step.index, DONE if result.finished else FAILED, note=note)
     # `record_step` 只收 ctx，没有独立的 args——会话名从 ctx.args 拿。
     save_plan(plan_path(project_root, getattr(ctx.args, "session", "cli")), plan)
+    return outcome, undo
 
 
 def advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
     """执行计划中下一个待办步骤，并记录结果。"""
-    plan = load_plan(plan_path(project_root, getattr(args, "session", "cli")))
+    writer = _events(args)
+    totals = _Totals()
+    started = time.time()
+    session = getattr(args, "session", "cli")
+    plan = load_plan(plan_path(project_root, session))
     if plan is None:
-        print("还没有计划，请先用 `plan --goal` 生成。", file=sys.stderr)
+        # 「没有计划」也要先发 START 再发 FINAL（与下面正常那条同一个形状）：
+        # 只发一条 FINAL 的话，按 START 建占位的客户端会看到一个没有开头的收尾。
+        _emit_start(
+            writer,
+            session=session,
+            goal=str(getattr(args, "goal", "") or ""),
+            mode="plan",
+            policy=resolve_policy(args, project_root),
+        )
+        _say("还没有计划，请先用 `plan --goal` 生成。")
+        _emit_final(
+            writer,
+            ok=False,
+            text="还没有计划，请先用 `plan --goal` 生成。",
+            mode="plan",
+            seconds=time.time() - started,
+        )
         return 2
+
+    _emit_start(
+        writer,
+        session=session,
+        goal=str(getattr(plan, "goal", "") or ""),
+        mode="plan",
+        policy=resolve_policy(args, project_root),
+        steps=len(plan.steps),
+    )
 
     blocked = plan.blocked_by()
     if blocked is not None:
@@ -438,41 +687,76 @@ def advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
         if blocked.retries < 1:
             blocked.status = PENDING
             blocked.retries += 1
-            save_plan(plan_path(project_root, getattr(args, "session", "cli")), plan)
-            print(
+            save_plan(plan_path(project_root, session), plan)
+            _say(
                 f"第 {blocked.index} 步上次失败，自动重试"
                 f"（第 {blocked.retries} 次）：{blocked.goal}"
             )
             step = blocked
         else:
-            print(plan.render())
-            print(
+            _say(plan.render())
+            _say(
                 f"\n计划被第 {blocked.index} 步阻塞：{blocked.goal}\n"
                 f"原因：{blocked.note or '未记录'}\n"
                 f"已自动重试 {blocked.retries} 次仍未通过。"
-                "先处理它，或者用 `plan --goal` 重新生成计划。",
-                file=sys.stderr,
+                "先处理它，或者用 `plan --goal` 重新生成计划。"
+            )
+            _emit_final(
+                writer,
+                ok=False,
+                text=(
+                    f"计划被第 {blocked.index} 步阻塞：{blocked.goal}"
+                    f"（{blocked.note or '未记录'}）"
+                ),
+                mode="plan",
+                total=len(plan.steps),
+                seconds=time.time() - started,
+                blocked_step=int(blocked.index),
             )
             return 1
     else:
         step = plan.next_pending()
         if step is None:
-            print(plan.render())
-            print("\n计划已全部完成。")
+            _say(plan.render())
+            _say("\n计划已全部完成。")
+            _emit_final(
+                writer,
+                ok=True,
+                text="计划已全部完成。",
+                mode="plan",
+                completed=len(plan.steps),
+                total=len(plan.steps),
+                seconds=time.time() - started,
+            )
             return 0
 
-    print(f"执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
+    _say(f"执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
     # 打印的是**这一步实际生效**的范围，不是运行级默认值：
     # 安全边界的输出报错比不输出更糟——看到「**」会以为整个项目都放行了。
     scope = resolve_scope(args, step.scope, default=())
-    approver, grants = build_approver(project_root)
+    if writer is None:
+        approver, grants = build_approver(project_root)
+    else:
+        # 事件通道：命令授权要么走 stdin 上问一句（客户端能回答，见
+        # `--ask-on-stdin`），要么干脆不装（无人值守一律拒绝、把动作挂起）。
+        # **绝不能装终端那个 approver**——它把问句打在 stdout 上（污染事件流）
+        # 并 `input()` 等人，而这条通道上没有人会看见那句话。
+        from spoolkit.cli.commands.run import _events_approver
+
+        approver = (
+            _events_approver(writer) if getattr(args, "ask_on_stdin", False) else None
+        )
+        grants = Grants(project_root / ".agent" / "grants.json")
     ctx = StepRun(
         args=args,
         project_root=project_root,
         gateway=gateway,
         plan=plan,
         non_interactive=False,
+        writer=writer,
+        totals=totals,
     )
+    _emit_step(writer, step, plan)
     result, pending = execute_step(
         ctx,
         step,
@@ -480,8 +764,27 @@ def advance_plan(args: argparse.Namespace, project_root: Path, gateway) -> int:
         approver=approver,
         grants=grants,
     )
-    record_step(ctx, step, result, pending, scope)
-    print(plan.render())
+    outcome, undo = record_step(ctx, step, result, pending, scope)
+    _say(plan.render())
+    # USAGE 在 FINAL 之前发（与 `run` 那条路同一个次序：账在收尾之前）。
+    totals.emit(writer)
+    _emit_final(
+        writer,
+        ok=bool(result.finished),
+        text=str(getattr(result, "report_text", "") or result.final or ""),
+        mode="plan",
+        completed=1 if result.finished else 0,
+        total=len(plan.steps),
+        seconds=time.time() - started,
+        concluded=bool(getattr(result, "concluded", False)),
+        terminated_by=str(getattr(result, "terminated_by", "") or ""),
+        failed_reason=str(getattr(result, "failed_reason", "") or ""),
+        model_final=str(getattr(result, "model_final", "") or ""),
+        # 结算结果与撤销命令：网页壳据此摆一个真能点的按钮（与 `run` 那条路
+        # 的 FINAL 同两个字段）。撤销命令在 settle 之前取——之后清单就空了。
+        settled=outcome,
+        revert_command=undo,
+    )
     return 0 if result.finished else 1
 
 
@@ -515,14 +818,36 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
     唯一不能交给模型的是**授权范围**：如果它既能提范围又能批范围，
     就等于自己给自己发许可证。所以范围必须由 --scope 给出，
     模型只能在里面收窄，不能扩大。
+
+    **每条显式出口都要发 FINAL**（`--events` 时）：客户端是等这一条来收尾的，
+    少了它，一次正常的「没能拆出步骤」看起来与"进程挂了"没有区别。进程级异常
+    没有 try/finally 兜（与 `run` 那条路同一个口径），由 `web.runner` 在子进程
+    消失且没收到 final 时补一条。
     """
+    writer = _events(args)
+    totals = _Totals()
+    started = time.time()
+    session = getattr(args, "session", "cli")
     granted = tuple(part.strip() for part in args.scope.split(",") if part.strip())
+    _emit_start(
+        writer,
+        session=session,
+        goal=args.goal,
+        mode="autonomous",
+        policy=resolve_policy(args, project_root),
+    )
     if not granted:
-        print(
+        _say(
             "自主模式必须用 --scope 指定授权范围。\n"
             "授权必须来自你——让模型自己定范围，等于它自己给自己发许可证。\n"
-            "例如：--scope scratch_lab/",
-            file=sys.stderr,
+            "例如：--scope scratch_lab/"
+        )
+        _emit_final(
+            writer,
+            ok=False,
+            text="自主模式必须用 --scope 指定授权范围。",
+            mode="autonomous",
+            seconds=time.time() - started,
         )
         return 2
 
@@ -532,7 +857,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
     #（dogfood：贪吃蛇 9 步计划第 2 步 write_file 死循环）。
     # 检测到就跳过拆解，构造单步计划直接执行，一次写完绕开 patch。
     if _looks_like_single_file_task(args.goal):
-        print("检测到单文件任务，跳过拆解直接执行（一次写完，绕开 patch 死循环）")
+        _say("检测到单文件任务，跳过拆解直接执行（一次写完，绕开 patch 死循环）")
         plan = Plan(
             goal=args.goal,
             steps=[PlanStep(
@@ -541,17 +866,42 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
                 scope=granted, executor=SELF,
             )],
         )
-        save_plan(plan_path(project_root, getattr(args, "session", "cli")), plan)
-        print(f"授权范围：{'、'.join(granted)}")
-        print(plan.render())
+        save_plan(plan_path(project_root, session), plan)
+        _say(f"授权范围：{'、'.join(granted)}")
+        _say(plan.render())
         ctx = StepRun(
             args=args, project_root=project_root,
             gateway=gateway, plan=plan, non_interactive=True,
+            writer=writer, totals=totals,
         )
         if _run_one_step(ctx, granted, plan.steps[0], plan):
-            print(f"\n自主运行结束：完成 1/1 步。")
+            _say(f"\n自主运行结束：完成 1/1 步。")
+            totals.emit(writer)
+            _emit_final(
+                writer,
+                ok=True,
+                text="自主运行结束：完成 1/1 步。",
+                mode="autonomous",
+                completed=1,
+                total=1,
+                seconds=time.time() - started,
+                settled=ctx.settled,
+                revert_command=ctx.revert_command,
+            )
             return 0
-        print(plan.render())
+        _say(plan.render())
+        totals.emit(writer)
+        _emit_final(
+            writer,
+            ok=False,
+            text="自主运行结束：完成 0/1 步。",
+            mode="autonomous",
+            completed=0,
+            total=1,
+            seconds=time.time() - started,
+            settled=ctx.settled,
+            revert_command=ctx.revert_command,
+        )
         return 1
     # 分批推进时第一批只排 batch 步：一次排满就没有「复盘这一批」的机会了。
     # 材料读一次，第一批与后面的续排共用——不给续排材料，它排出来的
@@ -566,13 +916,22 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         # 并成一条步骤（实测那一步跑了 191 秒）。
         extra=BATCH_LIMIT_NOTE.format(limit=batch) if rolling else "",
         context=context,
+        # 自主路径的散文走 stderr（stdout 是事件通道）。
+        out=_say,
     )
     if not plan.steps:
-        print("没能拆出任何带验收标准的步骤。", file=sys.stderr)
+        _say("没能拆出任何带验收标准的步骤。")
+        _emit_final(
+            writer,
+            ok=False,
+            text="没能拆出任何带验收标准的步骤。",
+            mode="autonomous",
+            seconds=time.time() - started,
+        )
         return 1
-    save_plan(plan_path(project_root, getattr(args, "session", "cli")), plan)
-    print(f"授权范围：{'、'.join(granted)}")
-    print(plan.render())
+    save_plan(plan_path(project_root, session), plan)
+    _say(f"授权范围：{'、'.join(granted)}")
+    _say(plan.render())
 
     completed = 0
     ctx = StepRun(
@@ -581,6 +940,8 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         gateway=gateway,
         plan=plan,
         non_interactive=True,
+        writer=writer,
+        totals=totals,
     )
     # 教训要写进记忆库：分批推进的复盘结论只有存下来，才能在后面的同类任务里
     # 被主动推送（那才是"在任务中成长"）。--no-memory 时不建，也不留状态。
@@ -590,7 +951,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         else open_memory(
             project_root,
             resolve_window(gateway, getattr(args, "window", 0)),
-            getattr(args, "session", "cli"),
+            session,
             model=f"{getattr(args, 'provider', '')}:{getattr(args, 'model', '') or '默认'}",
         )
     )
@@ -599,6 +960,7 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
     # 这样每一批都能吃到前一批的**实际结果**（某个接口不是那样、某个约束
     # 计划里没料到），而不是把五十步一次排死。要看完整目标时才用 --no-roll。
     cursor = 0
+    failed_step = 0
     while True:
         steps = plan.steps[cursor:]
         if not steps:
@@ -606,18 +968,20 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         for step in steps:
             cursor = plan.steps.index(step) + 1
             if not _run_one_step(ctx, granted, step, plan):
-                print(plan.render())
-                return 1
+                failed_step = int(step.index)
+                break
             completed += 1
+        if failed_step:
+            break
         if not rolling or completed >= int(getattr(args, "limit", 0) or 0):
             break
         # 这一批做完了：复盘这一批，再排下一批。
         reflection, lessons = reflect_progress(gateway, plan.goal, plan.steps)
         if reflection:
-            print(f"\n这一批复盘：{reflection}")
+            _say(f"\n这一批复盘：{reflection}")
         stored = _keep_lessons(lessons, lesson_memory)
         if stored:
-            print(f"（记下 {stored} 条教训——后面同类任务会主动推给它）")
+            _say(f"（记下 {stored} 条教训——后面同类任务会主动推给它）")
         fresh = extend_plan(
             gateway,
             plan,
@@ -629,17 +993,33 @@ def autonomous(args: argparse.Namespace, project_root: Path, gateway) -> int:
         )
         if not fresh:
             # 它说没有更多步骤了。这是**它的判断**，如实报出来。
-            print("\n续排：模型认为目标已经排完（没有更多步骤）。")
+            _say("\n续排：模型认为目标已经排完（没有更多步骤）。")
             break
         for step in fresh:
             step.index = len(plan.steps) + 1
             plan.steps.append(step)
-        save_plan(plan_path(project_root, getattr(args, "session", "cli")), plan)
-        print(plan.render())
+        save_plan(plan_path(project_root, session), plan)
+        _say(plan.render())
 
-    print(plan.render())
-    print(f"\n自主运行结束：完成 {completed}/{len(plan.steps)} 步。")
-    return 0 if completed == len(plan.steps) else 1
+    _say(plan.render())
+    summary = f"\n自主运行结束：完成 {completed}/{len(plan.steps)} 步。"
+    _say(summary)
+    totals.emit(writer)
+    _emit_final(
+        writer,
+        ok=not failed_step and completed == len(plan.steps),
+        text=summary.strip(),
+        mode="autonomous",
+        completed=completed,
+        total=len(plan.steps),
+        seconds=time.time() - started,
+        # 最后一步的结算结果与撤销命令（多步时也只给最后一个：撤销按钮
+        # 一次退的是一整轮运行，见 `undo_command` 的 run_id 口径）。
+        settled=ctx.settled,
+        revert_command=ctx.revert_command,
+        **({"failed_step": failed_step} if failed_step else {}),
+    )
+    return 0 if not failed_step and completed == len(plan.steps) else 1
 
 
 def _keep_lessons(lessons, memory) -> int:
@@ -670,15 +1050,15 @@ def _run_one_step(ctx, granted: tuple[str, ...], step, plan) -> bool:
     """跑一步并记账。返回它是否做完了。"""
     blocked = plan.blocked_by()
     if blocked is not None:
-        print(
+        _say(
             f"\n计划被第 {blocked.index} 步阻塞：{blocked.goal}"
-            f"（{blocked.note or '未记录'}）",
-            file=sys.stderr,
+            f"（{blocked.note or '未记录'}）"
         )
         return False
 
     effective = _effective_scope(granted, step)
-    print(f"\n执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
+    _emit_step(ctx.writer, step, plan)
+    _say(f"\n执行第 {step.index}/{len(plan.steps)} 步：{step.goal}")
     _step_started = time.time()
     result, pending = execute_step(
         ctx,
@@ -688,7 +1068,7 @@ def _run_one_step(ctx, granted: tuple[str, ...], step, plan) -> bool:
         grants=Grants(path=ctx.project_root / ".agent" / "grants.json"),
     )
     _step_seconds = time.time() - _step_started
-    record_step(ctx, step, result, pending, effective)
+    ctx.settled, ctx.revert_command = record_step(ctx, step, result, pending, effective)
     _settle_seconds = time.time() - _step_started - _step_seconds
     _report_step_cost(result, _step_seconds, _settle_seconds)
     return bool(result.finished)
@@ -712,7 +1092,7 @@ def _report_step_cost(result, step_seconds: float, settle_seconds: float) -> Non
         + settle_seconds
     )
     other = max(0.0, step_seconds + settle_seconds - known)
-    print(
+    _say(
         f"本步墙钟 {step_seconds + settle_seconds:.1f}s ｜ "
         f"模型 {result.model_seconds:.1f} 装配循环 {result.wiring_seconds:.1f} "
         f"装配上下文 {result.assemble_seconds:.1f} 工具 {result.tool_seconds:.1f} "
@@ -736,7 +1116,7 @@ def _effective_scope(granted: tuple[str, ...], step) -> tuple[str, ...]:
     """
     effective, rejected = narrow_scope(granted, step.scope or granted)
     if rejected:
-        print(
+        _say(
             f"第 {step.index} 步提出的范围超出授权，已收窄："
             + "、".join(rejected)
         )

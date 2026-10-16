@@ -798,12 +798,25 @@ def save_overrides(project_root: Path, overrides: Mapping[str, float]) -> Path:
 
 
 def render(overrides: Mapping[str, float] | None = None) -> str:
-    """现在生效的是多少、从哪来。"""
-    lines = [f"{'值':>8}  {'来源':<6} {'能不能改':<8} 名字", "-" * 72]
+    """现在生效的是多少、从哪来（Rich markup；TTY 上色，管道无色）。"""
+    from rich.markup import escape
+
+    head = f"{'值':>8}  {'来源':<6} {'能不能改':<8} 名字"
+    lines = [
+        f"[muted]{escape(head)}[/]",
+        f"[muted]{escape('-' * 72)}[/]",
+    ]
     for entry in KNOBS:
         value, source = resolve(entry.name, overrides)
         shown = f"{value:g}"
         can = "可覆盖" if entry.overridable else "写死"
-        lines.append(f"{shown:>8}  {source:<6} {can:<8} {entry.name}")
-        lines.append(f"{'':>8}  {entry.note}")
+        row = f"{shown:>8}  {source:<6} {can:<8} {entry.name}"
+        note = f"{'':>8}  {entry.note}"
+        if source == "配置":
+            lines.append(f"[accent]{escape(row)}[/]")
+        elif not entry.overridable:
+            lines.append(f"[muted]{escape(row)}[/]")
+        else:
+            lines.append(escape(row))
+        lines.append(f"[muted]{escape(note)}[/]")
     return "\n".join(lines)

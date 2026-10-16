@@ -23,6 +23,11 @@ from spoolkit.mcp.server import serve_stdio
 def mcp_command(args: argparse.Namespace) -> int:
     project_root = Path(args.root).resolve() if str(args.root or "").strip() else None
     extra = extra_from_serve_args(args)
+    # `--limit` 只有这条入口转发：它管的是自主编排**拆几步**（`run --autonomous --limit`），
+    # 别的入口没有同名参数，从 `serve` 的参数表里顺手带过去会串味。
+    limit = getattr(args, "limit", None)
+    if limit:
+        extra += ["--limit", str(limit)]
 
     # 不在这里建一个固定 Runner：工作区是**按调用**定的，所以 Runner 由服务端
     # 按 (工作区, 会话) 各建一个（见 `McpServer._runner_for`）。

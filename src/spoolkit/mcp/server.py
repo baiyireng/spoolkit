@@ -98,6 +98,21 @@ TOOLS: tuple[dict[str, Any], ...] = (
                         "（需要先设好 scope）；plan=推进已有计划的下一个待办步骤"
                     ),
                 },
+                "max_steps": {
+                    "type": "integer",
+                    "description": (
+                        "这次任务的步数预算（不给 = 服务启动时的 `--max-steps`，"
+                        "再不给 = 内置 10）。复杂任务要一次给足：默认 10 步会让它"
+                        "很快踩进收束态、反复靠督导续期。"
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        "mode=autonomous 时最多拆几步（不给 = 服务启动参数，"
+                        "再不给 = 内置 10）。"
+                    ),
+                },
             },
             "required": ["goal"],
         },
@@ -186,6 +201,7 @@ class McpServer:
         self.extra_args = tuple(extra_args)
         self._runners: dict[str, Runner] = {}
         self._active: Runner | None = runner
+        self._baselines: dict[int, list[str]] = {}
         self._last_target: Target | None = None
         # 调用方给的进度令牌（tools/call 的 _meta.progressToken）。
         # 有它才推通知：没要进度还一直推，对方只是多收一堆噪音。
@@ -256,10 +272,12 @@ class McpServer:
         named = str(arguments.get("workspace") or "").strip()
         workspace: Path | None
         if named:
-            # 名字 / 序号 / 别名 / 路径都认（`resolve_workspace` 那四条规则）。
+            # 名字 / 序号 / 别名 / 路径都认（`resolve_workspace` 那几条规则）。
             # 不能直接把名字当路径丢给 `resolve_target`：`Path("查无此区")` 会
             # 变成本机下的一个路径，于是"点名一个不存在的工作区"变成悄悄新建。
-            resolved = kernel_workspaces.resolve_workspace(named)
+            # `use_cwd=False`：这条入口的 cwd 是"服务被谁从哪里拉起"的副产品，
+            # 与调用方想在哪干活无关——拿它当路径线索会点名 b 却在 a 里干活（实测过）。
+            resolved = kernel_workspaces.resolve_workspace(named, use_cwd=False)
             if self.project_root is not None and resolved != Path(self.project_root).resolve():
                 # `--root` 是主人给的**收紧手段**（MCP 这条入口没有身份级放行，
                 # `--root` 就是唯一的范围限制），所以它必须真的压得住点名，
@@ -307,6 +325,31 @@ class McpServer:
         self._active = runner
         self._last_target = target
         return runner
+
+    def _extra_with_budget(self, arguments: dict) -> list[str]:
+        """把这次调用给的步数预算接到服务启动参数后面（`max_steps` / `limit`）。
+
+        只认正整数：0、负数、字符串一律当没给——**不许悄悄把预算改成 0**，
+        那会让一次派发直接收束，看起来像"它自己不肯干"。
+        """
+        extra: list[str] = []
+        for key, flag in (("max_steps", "--max-steps"), ("limit", "--limit")):
+            value = arguments.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                extra += [flag, str(value)]
+        return extra
+
+    def _runner_baseline(self, runner: Runner) -> list[str]:
+        """这个 Runner **本来就带的**转发参数（第一次用到时记下来）。
+
+        为什么要记：按次给的预算要**接在**它自己的参数后面，而不是把它覆盖掉
+        （注入进来的 Runner 可能自带 `--policy` 等）；而且要能"这次不给就退回基线"，
+        否则连着派发几次会让参数越积越长。
+        """
+        key = id(runner)
+        if key not in self._baselines:
+            self._baselines[key] = list(getattr(runner, "extra_args", ()) or ())
+        return self._baselines[key]
 
     def _active_or_none(self) -> Runner | None:
         return self._active
@@ -421,6 +464,10 @@ class McpServer:
                 is_error=True,
             )
         runner.mode = mode
+        # 按次覆盖步数预算：`delegate_task` 一次派发就可能要几十步，而服务启动
+        # 参数是固定的——复杂任务不该只能靠督导 +3/+5 续期零敲碎打（实测：
+        # 默认 10 步的任务在第 8 步就进了收束态，最后连验收命令都被拦）。
+        runner.extra_args = self._runner_baseline(runner) + self._extra_with_budget(arguments)
         # _meta 由调用方给（协议里就长这样）；有令牌就按进度推。
         meta = arguments.get("_meta") if isinstance(arguments, dict) else None
         if isinstance(meta, dict) and meta.get("progressToken") is not None:

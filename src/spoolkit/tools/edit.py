@@ -965,9 +965,13 @@ def _declaration_note(
     if shrink:
         parts.append(f"行数减少超过一半（{REWRITE_SHRINK_RATIO:.0%} 线），走声明通道")
     if acked:
+        # 「确认保留」是这里的老话，它与事实**相反**：清单里的项按定义已经不在新正文里。
+        # 实测（Vue 项目，修复轮）这条痕迹被原样写进了结论报告——「确认保留 5 项：
+        # const paused、const onKey …」，读起来像"这些功能都还在"，而它们全被删掉了。
+        # acked 的真实含义是「同意这一项从新正文里消失」，痕迹必须这么说，且带上类型。
         parts.append(
-            f"消失清单逐项交代：确认保留 {len(acked)} 项："
-            + "、".join(item.token for item in acked)
+            f"消失清单逐项交代：同意去掉 {len(acked)} 项（新正文里已经没有它们）："
+            + "、".join(f"{item.kind} {item.token}" for item in acked)
         )
     if dropped:
         parts.append(
@@ -1170,7 +1174,8 @@ def _refusal_text(
         if reason:
             parts.append(
                 f"清单必须**逐项交代**才放行：给每一项填进 {ACK_PARAM}"
-                f"（项 id，如 {ids}），或用 {DROPPED_PARAM} 声明有意丢弃并写明理由；"
+                f"（项 id，如 {ids}）表示**同意它从新正文里消失**，"
+                f"或用 {DROPPED_PARAM} 声明有意丢弃并写明理由；"
                 "两者都没给的项，这次重写不会落盘。\n"
             )
         else:
@@ -1433,7 +1438,7 @@ def confirm_rewrite_spec(root: Path, pending: PendingChanges) -> ToolSpec:
     return ToolSpec(
         name=CONFIRM_TOOL,
         description=(
-            "给已暂存的大重写逐项交代消失清单：acked 是确认保留，"
+            "给已暂存的大重写逐项交代消失清单：acked 是**同意它从新正文里消失**，"
             "dropped 是声明有意丢弃（每项都要写理由）。"
             "只发项 id 与理由，**不要重发正文**——正文在你带 rewrite_reason "
             "的那次写调用里已经收下了。两者都没给的项只要还在，就不会落盘。"

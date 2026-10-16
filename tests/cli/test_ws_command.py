@@ -18,7 +18,7 @@ def test_列表标出当前(tmp_path: Path, monkeypatch, capsys) -> None:
     assert main(["ws"]) == 0
     out = capsys.readouterr().out
     assert str(root) in out
-    assert "当前" in out
+    assert "current" in out
 
 
 def test_用名字切会写指针(tmp_path: Path, monkeypatch) -> None:

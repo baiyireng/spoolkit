@@ -177,13 +177,13 @@ def probe_spec(
 
 def _probe_spec_uncached(spec: str, timeout: float) -> tuple[bool, str, str]:
     if not spec:
-        return False, "", "没有探活地址"
+        return False, "", "no health URL"
     lowered = spec.lower()
     if lowered.startswith("tcp:"):
         return _probe_tcp(spec, timeout)
     if lowered.startswith("http://") or lowered.startswith("https://"):
         return _probe_http(spec, timeout)
-    return False, spec, "不认这种探活（只要 http(s) 或 tcp:host:port）"
+    return False, spec, "unsupported health (use http(s) or tcp:host:port)"
 
 
 def _probe_tcp(spec: str, timeout: float) -> tuple[bool, str, str]:
@@ -193,15 +193,15 @@ def _probe_tcp(spec: str, timeout: float) -> tuple[bool, str, str]:
     if body.startswith("//"):
         body = body[2:]
     if body.startswith("["):
-        return False, spec, "暂不探 IPv6"
+        return False, spec, "IPv6 probe not supported"
     host, sep, port_s = body.rpartition(":")
     if not sep or not host or not port_s.isdigit():
-        return False, spec, "tcp 地址要写成 tcp:host:port"
+        return False, spec, "tcp health must be tcp:host:port"
     port = int(port_s)
     target = f"{host}:{port}"
     try:
         with socket.create_connection((host, port), timeout=timeout):
-            return True, target, "端口开着"
+            return True, target, "port open"
     except OSError as exc:
         detail = str(exc).strip() or type(exc).__name__
         return False, target, detail

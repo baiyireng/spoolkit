@@ -179,8 +179,28 @@ def _as_workspace(root: Path, raw: str) -> Path:
     )
 
 
-def resolve_workspace(name_or_path: str | Path) -> Path:
-    """名字、别名、序号（1 起）或路径。找不到就抛 `WorkspaceError`，**不猜**。"""
+def _looks_like_path(raw: str) -> bool:
+    """这个字符串是不是**路径写法**（而不是一个名字）。
+
+    判据只认写法：绝对路径（含盘符）、带分隔符、或以 `./` `../` `~/` 开头。
+    **不拿"它恰好存在"当判据**——那会让同一个名字在不同 cwd 下解析成不同的工作区，
+    而 MCP 那条入口的 cwd 跟调用方想在哪干活毫无关系（见 `kernel/target.py`）。
+    """
+    if raw.startswith(("./", "../", "~/", ".\\", "..\\", "~\\")):
+        return True
+    if os.path.isabs(raw) or os.path.splitdrive(raw)[0]:
+        return True
+    return "/" in raw or "\\" in raw
+
+
+def resolve_workspace(name_or_path: str | Path, *, use_cwd: bool = True) -> Path:
+    """名字、别名、序号（1 起）或路径。找不到就抛 `WorkspaceError`，**不猜**。
+
+    `use_cwd=False`：这条入口**不看进程 cwd**。MCP 服务是被客户端按配置拉起来的
+    （`spool mcp` 常常从任意目录启动），它的启动目录跟调用方想在哪干活没有关系；
+    这时**纯名字**只认登记表，路径写法（绝对路径 / 带分隔符 / `./`）照旧可用——
+    那是调用方显式写的，不是从 cwd 猜的。
+    """
     raw = str(name_or_path).strip()
     if not raw:
         raise WorkspaceError("没有给工作区名字或路径")
@@ -189,8 +209,33 @@ def resolve_workspace(name_or_path: str | Path) -> Path:
     if raw in aliases:
         return _as_workspace(aliases[raw], raw)
 
+    path_like = _looks_like_path(raw)
+    items = list_workspaces()
+
+    # 纯名字/序号**必须先查登记表**，再考虑"它恰好存在"：
+    # 反过来的话，cwd 里只要碰巧有个同名目录，点名就会被劫持到那个目录所属的工作区，
+    # 登记表里真正叫这个名字的工作区永远轮不到。实测过：向 MCP 点名 `snake-vue`，
+    # 服务进程 cwd 在 `agents_dev` 下、那里恰好有个 `snake-vue\` 子目录，
+    # 于是"向上找 .agent/"把它解析成了 `agents_dev` —— 点名 b 却在 a 里干活。
+    if not path_like:
+        if raw.isdigit():
+            index = int(raw)
+            if 1 <= index <= len(items):
+                return _as_workspace(items[index - 1].root, raw)
+            raise WorkspaceError(f"只有 {len(items)} 个登记过的工作区，没有第 {index} 个。")
+
+        exact = [item for item in items if item.root.name == raw or item.alias == raw]
+        if len(exact) == 1:
+            return _as_workspace(exact[0].root, raw)
+        if len(exact) > 1:
+            listed = "\n".join(f"  {item.root}" for item in exact)
+            raise WorkspaceError(
+                f"有多个工作区都叫 {raw}：\n{listed}\n"
+                f"用完整路径，或起个别名：`spool ws alias <路径> {raw}`"
+            )
+
     candidate = Path(raw)
-    if candidate.exists():
+    if candidate.exists() and (path_like or use_cwd):
         found = find_root(candidate)
         if found is not None:
             return found
@@ -199,23 +244,12 @@ def resolve_workspace(name_or_path: str | Path) -> Path:
             f"要在那里干活先 `spool ws add {candidate.resolve()}`。"
         )
 
-    items = list_workspaces()
-
-    if raw.isdigit():
-        index = int(raw)
-        if 1 <= index <= len(items):
-            return _as_workspace(items[index - 1].root, raw)
-        raise WorkspaceError(f"只有 {len(items)} 个登记过的工作区，没有第 {index} 个。")
-
-    exact = [item for item in items if item.root.name == raw or item.alias == raw]
-    if len(exact) == 1:
-        return _as_workspace(exact[0].root, raw)
-    if len(exact) > 1:
-        listed = "\n".join(f"  {item.root}" for item in exact)
+    if path_like:
         raise WorkspaceError(
-            f"有多个工作区都叫 {raw}：\n{listed}\n"
-            f"用完整路径，或起个别名：`spool ws alias <路径> {raw}`"
+            f"{candidate.resolve()} 不是一个存在的工作区（没有 {MARK}/）。"
+            f"要用它先建好目录并 `spool ws add {candidate.resolve()}`。"
         )
+
     if not items:
         raise WorkspaceError(
             f"没有叫 {raw} 的工作区，登记表也是空的。先 `spool ws add <路径>`。"

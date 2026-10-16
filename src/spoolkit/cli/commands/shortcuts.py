@@ -69,10 +69,11 @@ def _report_channel(values: settings.ChannelValues, *, stream=None) -> None:
     pytest 的 capsys、Web 壳都在**调用时**换掉 `sys.stderr`。绑死的后果是这几行
     跑到别处去了，恰恰是"起手第一屏看不见它"这个最难查的形状。
     """
-    out = sys.stderr if stream is None else stream
+    from rich.console import Console
+
+    from spoolkit.cli.term import THEME, escape, print_err
+
     notes = values.notes()
-    if notes:
-        print(notes, file=out)
     # 只报**这一层真的应用了的**那几个键（`_CHANNEL_OPTION_KEYS`）：这行写的是
     # "本次生效"，把没生效的键印成生效值，就正是这套东西要消灭的那种病
     # （"终端说用它、实际跑另一条"）。`root` 因此不在这一行里——它由 `main()`
@@ -81,15 +82,34 @@ def _report_channel(values: settings.ChannelValues, *, stream=None) -> None:
     # 但 `web = false` 必须印 `false`、`--timeout 0` 必须印 `0.0`——按真假判空
     # 会把这两个真实取值印成「（空）」，与"根本没给"在字面上不可区分
     # （`docs/bridge.md` 的样例写的是 `web=false(用户配置 …)`，那才是对的）。
-    print(
-        f"[channel.{values.name}] 本次生效："
-        + "、".join(
+    plain = (
+        f"[channel.{values.name}] effective: "
+        + ", ".join(
             f"{key}={settings.display_channel_value(values.options[key])}"
             f"({values.source(key)})"
             for key, _ in _CHANNEL_OPTION_KEYS
-        ),
-        file=out,
+        )
     )
+    styled = (
+        f"[accent][channel.{escape(values.name)}][/] [muted]effective:[/] "
+        + ", ".join(
+            f"[accent]{escape(key)}[/]="
+            f"{escape(settings.display_channel_value(values.options[key]))}"
+            f"[muted]({escape(values.source(key))})[/]"
+            for key, _ in _CHANNEL_OPTION_KEYS
+        )
+    )
+    if stream is None:
+        if notes:
+            print_err(notes, markup=False, style="bad")
+        print_err(styled)
+        return
+    # Tests / callers may redirect; honor the stream without the shared console.
+    # Keep plain text for redirected streams so substring asserts stay stable.
+    con = Console(file=stream, theme=THEME, highlight=False, soft_wrap=True)
+    if notes:
+        con.print(escape(notes), markup=True, highlight=False)
+    con.print(escape(plain), markup=True, highlight=False)
 
 
 def _fill_from_channel(args: argparse.Namespace, name: str) -> settings.ChannelValues:

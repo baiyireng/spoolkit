@@ -24,6 +24,8 @@ from spoolkit.agent.loop import (
     REPEAT_REFRESH_PREFIX,
     AgentLoop,
     call_signature,
+    _REFRESH_COMPACTED_LIMIT,
+    _REFRESH_LIMIT,
 )
 from spoolkit.agents.supervisor import (
     STOP,
@@ -267,7 +269,13 @@ def test_文件改过_内容判据不成立时也能放行(tmp_path: Path, monke
 
 
 def test_刷新读取有上限(tmp_path: Path, monkeypatch) -> None:
-    """放行刷新是为了不死锁，不是为了把预算变成无限。"""
+    """放行刷新是为了不死锁，不是为了把预算变成无限。
+
+    这条量的是「结果被上下文压掉」这一本账的份额（D6）：它单独更小
+    （`_REFRESH_COMPACTED_LIMIT`），因为它在病态轨迹里**每一步都成立**
+    （读一次丢一次），会把整份额度吃光。总额度另有一条全局上限，
+    两者**都不放宽**——这里同时把总数也钉住。
+    """
     (tmp_path / "a.txt").write_text("内容\n", encoding="utf-8")
     script = [_turn(f"第{i}次读", [_read("a.txt")]) for i in range(12)]
     script.append(_turn("算了", final="结束"))
@@ -284,10 +292,19 @@ def test_刷新读取有上限(tmp_path: Path, monkeypatch) -> None:
         for line in result.trace
         if REPEAT_REFRESH_PREFIX in line or GUARD_REFRESH_PREFIX in line
     ]
-    # 上界要**真的被用到**才算测到：只断言 `<= 3` 的话，把放行逻辑整个删掉
+    # 上界要**真的被用到**才算测到：只断言 `<= N` 的话，把放行逻辑整个删掉
     # （一次都不放行）也是绿的——那是「上界生效」与「功能没了」分不清。
     assert refreshes, "刷新读取一次都没发生，上界这条断言就没有意义"
-    assert len(refreshes) <= 3, f"刷新读取没有上限：{len(refreshes)}"
+    # 压掉这一本：恰好用满份额，一次都不多。
+    assert len(refreshes) == _REFRESH_COMPACTED_LIMIT, (
+        f"「结果被压掉」这本账的份额不对：{len(refreshes)}"
+    )
+    assert loop._refreshes_by_cause == {"compacted": _REFRESH_COMPACTED_LIMIT}
+    # 全局上限一分没放宽：总数仍受 `_REFRESH_LIMIT` 管，且**还剩一次**
+    # ——那一次是留给"重取真能拿到新内容"的（见 test_probe_regression 里
+    # `test_压缩账用完后内容真变了仍放行`）。
+    assert loop._refreshes_used == _REFRESH_COMPACTED_LIMIT
+    assert loop._refreshes_used < _REFRESH_LIMIT, "总额度被分账偷偷放大了"
 
 
 # ---- B：行号漂移 -----------------------------------------------------------

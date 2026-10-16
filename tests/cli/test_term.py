@@ -46,3 +46,20 @@ def test_no_color_env_strips_ansi(monkeypatch) -> None:
     c.print("[state.up]up[/]", highlight=False)
     assert "\x1b[" not in buf.getvalue()
     assert "up" in buf.getvalue()
+
+
+def test_markup_false_preserves_brackets(capsys) -> None:
+    term.reset_consoles()
+    term.print_out("see [[mcp]] and [start]", markup=False)
+    out = capsys.readouterr().out
+    assert "[[mcp]]" in out
+    assert "[start]" in out
+
+
+def test_style_wraps_escaped_plain(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    term.reset_consoles()
+    term.print_out("ok path [x]", markup=False, style="ok")
+    out = capsys.readouterr().out
+    assert "ok path [x]" in out
+    assert "[ok]" not in out  # tags consumed when TTY; non-TTY still plain text

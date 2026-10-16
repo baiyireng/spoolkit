@@ -39,6 +39,12 @@ def extra_from_serve_args(args: argparse.Namespace) -> list[str]:
         extra += ["--web-allow", domain]
     for domain in getattr(args, "web_deny", []) or []:
         extra += ["--web-deny", domain]
+    # 步数预算：MCP 派发长任务时要能一次给足——不给的话默认 10 步会把复杂任务
+    # 逼成「靠督导 +3/+5 续期」零敲碎打。`serve`/`hub` 的同名默认值与 `run` 一致，
+    # 转发不改变它们的行为。
+    max_steps = getattr(args, "max_steps", None)
+    if max_steps:
+        extra += ["--max-steps", str(max_steps)]
     return extra
 
 

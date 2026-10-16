@@ -210,12 +210,19 @@ spool qq --root D:\某个工作区              # 给了就钉住这一个工作
 
 ## spool service
 
-Local `[[service]]` recipes: `list` (default) / `start` / `stop`. Not in-repo; no hardcoded gguf/ssh host.
+Local `[[service]]` recipes in **user** `config.toml` (`spool config` 可看路径；配方不进仓库、无写死 gguf/ssh).
+
+```powershell
+spool service                 # list（默认）
+spool service start llama     # 按 name 拉起；省略 name = 启动所有带 command 的配方
+spool service stop llama      # 只杀本命令拉起的 pid
+spool service stop llama --force  # 无 pid 记录时：按 health 端口杀占用方（慎用）
+```
 
 ```toml
 [[service]]
 name = "llama"
-command = ["llama-server", "-m", "model.gguf", "--port", "8080"]
+command = ["llama-server", "-m", "model.gguf", "--host", "127.0.0.1", "--port", "8080"]
 health = "http://127.0.0.1:8080/props"
 
 [[service]]
@@ -229,8 +236,10 @@ health = "tcp:127.0.0.1:1080"
 | Empty `command` | Probe only |
 | `health` | `http(s)://…` or `tcp:host:port` |
 | Start gate | **pid record** (not probe). Alive → `already running (pid …)` |
-| Stop | Only kills pid started by `spool service start` |
+| Port busy | health 的 TCP 已有监听且非本命令 → **拒绝 start**（HTTP 404/超时也算占用）；list 显示 `port busy (not ours)` 并尽量带占用 pid |
+| Stop | 杀本命令 pid 后**再确认 health 端口已释放**；仍被占则清监听孤儿。无 pid 时用 `--force` 按端口杀（别的 App 占端口时） |
 | Detached | Windows process-group/detached; POSIX new session (Ctrl-C in same tty does not kill it) |
+| vs hub/web | 不启模型；先 `service start`，再用 `config` 的 `base_url` 探活 |
 
 `list` states:
 

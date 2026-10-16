@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "note": [
+    "环境豁免的**兜底清单**（首选是给用例打 `@pytest.mark.needs(...)`，见 scripts/pytest_needs.py）。",
+    "每条必须写清：缺哪个能力（requires）、证据（evidence）、到期日（expires）、怎么复查（recheck）。",
+    "三条硬规矩（由 scripts/gate.py 执行）：",
+    "  ① 能力可用时豁免**自动失效**——那条用例红了就是真回归；",
+    "  ② 非受限环境里**整份清单失效**（正常机器上必须绿）；",
+    "  ③ 过期条目**直接让关口红**——豁免不许变成免罪牌。"
+  ],
+  "entries": [
+    {
+      "file": "tests/cli/test_service_command.py",
+      "requires": "process_kill",
+      "evidence": "本轮实测：受限会话里 `taskkill /F /T /PID` 被拒（dev_env 的 process_kill 探测=不可用），该文件 4 条用例 exit=1。用例自身已打 `@pytest.mark.needs(\"process_kill\")`，本条目是给同文件**新增**用例的兜底。",
+      "expires": "2027-01-31",
+      "recheck": "非受限会话里跑 `python scripts/gate.py --only tests -k service_command`，应全绿；绿了就把本条目删掉。"
+    }
+  ]
+}

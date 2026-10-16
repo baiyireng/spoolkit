@@ -56,7 +56,10 @@ def test_用户级_env_在任何目录都读得到(tmp_path: Path, monkeypatch) 
     value, source = settings.resolve_secret(QQ, workspace=None)
 
     assert value == "102000000"
-    assert "用户级" in source and str(user_env) in source
+    # 别写成 `"用户级" in source`：临时目录名里**带着测试名**（`test_用户级_…0/`），
+    # 那句会被目录名意外满足，对标签什么也没断言。这里直接钉前缀。
+    assert source.startswith("user ")
+    assert str(user_env) in source
 
 
 def test_工作区那一份盖住用户级(tmp_path: Path, monkeypatch) -> None:
@@ -84,7 +87,7 @@ def test_环境变量盖住两份文件(tmp_path: Path, monkeypatch) -> None:
     value, source = settings.resolve_secret(QQ, workspace=workspace)
 
     assert value == "from-env"
-    assert "环境变量" in source
+    assert "env" in source
 
 
 def test_别名先给的先赢(tmp_path: Path, monkeypatch) -> None:
@@ -108,7 +111,7 @@ def test_机器级不认cwd_里的_env(tmp_path: Path, monkeypatch) -> None:
     value, source = settings.resolve_secret(QQ, workspace=None)
 
     assert value == ""
-    assert "没找到" in source
+    assert "not found" in source
 
 
 # --- 调用方：桥不许把 cwd 当工作区 ---
@@ -152,7 +155,7 @@ def test_显式给了root_就认那个工作区的env(tmp_path: Path, monkeypatc
     text = str(exc.value)
     assert str(workspace / ".env") in text
     # `QQ_AppID=`（键在、值空）要单独说，它最容易骗过自己：文件里"明明有这一行"
-    assert "有这些键但值是空的" in text and "QQ_AppID" in text
+    assert "keys present but empty" in text and "QQ_AppID" in text
 
 
 def test_check_在机器级下不再崩(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -171,7 +174,7 @@ def test_check_在机器级下不再崩(tmp_path: Path, monkeypatch, capsys) -> 
 
     assert code == 2
     assert "机器级" in out
-    assert "找过这些位置" in out and str(settings.env_path()) in out
+    assert "searched:" in out and str(settings.env_path()) in out
 
 
 def test_check_企业微信缺凭据时不假通过(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -192,7 +195,7 @@ def test_check_企业微信缺凭据时不假通过(tmp_path: Path, monkeypatch,
     out = capsys.readouterr().out
 
     assert code == 2
-    assert "找过这些位置" in out
+    assert "searched:" in out
 
 
 # --- 描述："我明明填了" ---
@@ -208,7 +211,7 @@ def test_找不到时说出找过哪些位置且不印值(tmp_path: Path, monkey
 
     text = settings.describe_secret_search(QQ_ALL, workspace=None)
 
-    assert f"[用户级] {user_env} —— 里面有：QQ_AppSecret" in text
+    assert f"[user] {user_env} — has: QQ_AppSecret" in text
     assert secret not in text  # 值一个字符都不许出现
 
 
@@ -221,8 +224,8 @@ def test_描述区分不存在_不是文件_解析不出(tmp_path: Path, monkeyp
 
     text = settings.describe_secret_search(QQ, workspace=tmp_path / "no-such-ws")
 
-    assert f"[工作区] {tmp_path / 'no-such-ws' / '.env'} —— 不存在" in text
-    assert "一行都没解析出来" in text and "字节" in text
+    assert f"[workspace] {tmp_path / 'no-such-ws' / '.env'} — missing" in text
+    assert "no KEY=VALUE lines parsed" in text and "字节" in text
 
 
 def test_描述说得出路径指到了目录(tmp_path: Path, monkeypatch) -> None:
@@ -233,7 +236,7 @@ def test_描述说得出路径指到了目录(tmp_path: Path, monkeypatch) -> No
 
     text = settings.describe_secret_search(QQ, workspace=None)
 
-    assert f"[用户级] {a_dir} —— 不是文件" in text
+    assert f"[user] {a_dir} — not a file" in text
 
 
 # --- `.env` 的读法（编码两条坑都来自"我明明填了"） ---
@@ -270,7 +273,7 @@ def test_通道凭据走同一条链(tmp_path: Path, monkeypatch) -> None:
     value, source = credentials.find(None, *QQ)
 
     assert value == "102000000"
-    assert f"用户级 {user_env} 里的 QQ_AppID" == source
+    assert f"user {user_env} (QQ_AppID)" == source
 
 
 def test_网页搜索的_key_也认用户级(tmp_path: Path, monkeypatch) -> None:

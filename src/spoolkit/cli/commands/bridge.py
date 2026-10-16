@@ -242,7 +242,8 @@ def _pick_workspace(root: Path | None, ws_name: str) -> Path | None:
 
     if ws_name:
         try:
-            return kernel_workspaces.resolve_workspace(ws_name)
+            # 通道是长驻进程，"启动目录"只是拉起方式的副产品，不参与点名解析。
+            return kernel_workspaces.resolve_workspace(ws_name, use_cwd=False)
         except kernel_workspaces.WorkspaceError as exc:
             print(str(exc), file=sys.stderr)
             return None

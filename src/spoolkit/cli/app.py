@@ -818,6 +818,18 @@ def _add_mcp_command(sub: argparse._SubParsersAction) -> None:
         default="",
         help="会话名。留空 = 用 mcp 的指向，没有就 mcp；单次调用还能用 session 覆盖",
     )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="每个任务的步数预算（留空 = 内置 10）。复杂任务经 MCP 派发时要给足",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="自主编排（mode=autonomous）最多拆几步（留空 = 内置 10）",
+    )
     _add_web_args(parser)
     parser.add_argument(
         "--allow-read",
@@ -946,79 +958,70 @@ def _add_extra_command(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_service_command(sub: argparse._SubParsersAction) -> None:
-    """本机外接配方：快捷拉起 / 停掉。hub 不替你启 llama / 隧道。"""
+    """Local [[service]] recipes: start / stop / list. Hub does not start them."""
     parser = sub.add_parser(
         "service",
-        help="本机外接配方（llama 模型进程、tunnel 通道 SOCKS 等：start / stop / list）",
+        help="local recipes (llama / tunnel SOCKS): start | stop | list",
     )
     parser.add_argument(
         "action",
         nargs="?",
         default="list",
         choices=["list", "start", "stop"],
-        help="list 查看，start 拉起，stop 停掉（默认 list）",
+        help="list (default), start, or stop",
     )
     parser.add_argument(
         "name",
         nargs="?",
         default="",
-        help="配方名；start/stop 不给则对全部（start 只动有 command 的）",
+        help="recipe name; omit = all (start only recipes with command)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="with stop: kill whoever listens on the recipe health port (not only our pid)",
     )
     parser.set_defaults(func=service_command)
 
 
 def _add_status_command(sub: argparse._SubParsersAction) -> None:
-    """汇总这台机器上的 spoolkit 服务状态与起停方式。
-
-    为什么值得一条顶层命令：用户报的是"**缺乏全局命令能够观察/管理服务状态**"
-    ——模型在哪、网页壳起没起、通道凭据认到没有、密钥落在哪，原先散在
-    `spool service` / `spool bridge --check` / `spool env` 三个地方，而且没有
-    一条命令回答"现在到底有没有东西在跑"。这里给一张表，最后一列是起停方式。
-
-    **只打本机地址、绝不联网**；探活超时短（默认 0.5 秒，探的是回环地址），
-    失败不抛出调用栈，退出码：0 = 关键都在，1 = 有关键没起，2 = 用法错 / 配置读不出来。
-    """
+    """Machine-wide spoolkit status table (loopback probes only)."""
     parser = sub.add_parser(
         "status",
-        help="汇总本机服务状态（模型 / 网页壳 / 通道 / MCP / 工作区 / 密钥落点）与起停方式",
+        help="local status table: model / web / bridge / MCP / workspace / secrets",
         description=(
-            "把这台机器上 spoolkit 相关的项目列成一张表：每行是服务、状态、地址或说明，"
-            "以及**起停方式**。只打本机地址（127.0.0.1），不联网；"
-            "每个探测点都是短超时，失败时给出可读说明与一非零退出码。"
-            "关键项（没起 → 退出码 1）：模型供应商没配 / 生效值是 fake、"
-            "生效 provider 是 llamacpp 时的本机模型、用户配置 [[service]] 里写了 command 的配方。"
+            "Loopback-only status table with start/stop hints. "
+            "Critical (exit 1 when down): provider unset/fake; "
+            "local model if provider=llamacpp; [[service]] recipes with command."
         ),
     )
     parser.add_argument(
-        "--json", action="store_true", help="以 JSON 输出（字段名稳定，给脚本用）"
+        "--json", action="store_true", help="JSON output (stable field names)"
     )
     parser.add_argument(
         "--timeout",
         type=float,
         default=status_report.DEFAULT_TIMEOUT,
-        help=(
-            "每个探测点的超时秒数（默认 0.5：探的都是回环地址，"
-            "正常监听时毫秒级就有回音；等模型加载完可以给大一点）"
-        ),
+        help="per-probe timeout seconds (default 0.5; raise while model loads)",
     )
     parser.add_argument(
         "--web-port",
         action="append",
         type=int,
         default=[],
-        metavar="端口",
-        help="除默认 8765 外，还要看哪个端口上的网页壳（可重复）",
+        metavar="PORT",
+        help="extra web-shell port to probe (repeatable; default 8765)",
     )
     parser.add_argument(
         "--probe",
         action="store_true",
-        help="真连一次外挂 MCP（默认只列出登记了哪些；真连会拉起它们的子进程）",
+        help="actually connect MCP servers (spawns their processes)",
     )
     parser.add_argument(
         "--mcp-timeout",
         type=float,
         default=status_report.DEFAULT_MCP_TIMEOUT,
-        help="`--probe` 连外挂 MCP 的超时秒数（默认 5：要起子进程，0.5 秒不够）",
+        help="`--probe` MCP timeout seconds (default 5)",
     )
     parser.set_defaults(func=status_command)
 
@@ -1155,7 +1158,11 @@ def _start_here(parser: argparse.ArgumentParser) -> int:
         if not onboarding.interactive():
             parser.print_help()
             return 2
-        answer = input("当前目录不是工作区，是否在此初始化？[Y/n] ").strip().lower()
+        try:
+            answer = input("当前目录不是工作区，是否在此初始化？[Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 130
         if answer not in ("", "y", "yes"):
             parser.print_help()
             return 1
@@ -1167,7 +1174,16 @@ def _start_here(parser: argparse.ArgumentParser) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI 入口。交互提示处 Ctrl-C / EOF → 安静退 130（不甩 traceback）。"""
     configure_stdio()
+    try:
+        return _run(argv)
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return 130
+
+
+def _run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="spool")
     parser.add_argument(
         # 两个名字都报出来：命令叫 `spool`，装的那个包叫 `spoolkit`，

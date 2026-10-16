@@ -136,8 +136,8 @@ def secret_paths(workspace: Path | None = None) -> list[tuple[str, Path]]:
     """
     paths: list[tuple[str, Path]] = []
     if workspace is not None:
-        paths.append(("工作区", Path(workspace) / ".env"))
-    paths.append(("用户级", env_path()))
+        paths.append(("workspace", Path(workspace) / ".env"))
+    paths.append(("user", env_path()))
     return paths
 
 
@@ -146,28 +146,25 @@ def resolve_secret(
     workspace: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> tuple[str, str]:
-    """返回（值, 来源说明）。顺序：**环境变量 → 工作区 `.env` → 用户级 `.env`**。
+    """Return (value, source). Order: env → workspace `.env` → user `.env`.
 
-    `workspace` 只表示"这次运行绑定的工作区"，**不是当前目录**：机器级入口服务
-    整台机器，"你碰巧站在哪个目录"不该改变它读哪份密钥（2026-09-27 的真实事故：
-    在 `C:\\Users\\32615` 起桥，于是它去找 `C:\\Users\\32615\\.env`，而凭据在别处）。
-
-    `names` 是别名列表，**先给的先赢**（`SPOOLKIT_QQ_APPID` 排在 `QQ_AppID` 前面）。
-
-    每次调用都重读文件，不缓存：桥与网页壳是长驻进程，凭据是会被改的。
+    `workspace` is the bound workspace for this run, not cwd. Machine-level
+    entrypoints must not pick credentials from a random cwd.
+    `names` are aliases; first match wins. Always re-read files (long-lived
+    bridge/web processes; credentials change).
     """
     environment = os.environ if env is None else env
     for name in names:
         value = (environment.get(name) or "").strip()
         if value:
-            return value, f"环境变量 {name}"
+            return value, f"env {name}"
     for label, path in secret_paths(workspace):
         table = load_env_file(path)
         for name in names:
             value = (table.get(name) or "").strip()
             if value:
-                return value, f"{label} {path} 里的 {name}"
-    return "", "没找到（环境变量、工作区 .env、用户级 .env 都没有）"
+                return value, f"{label} {path} ({name})"
+    return "", "not found (env, workspace .env, user .env)"
 
 
 def describe_secret_search(names: Sequence[str], workspace: Path | None = None) -> str:
@@ -181,24 +178,24 @@ def describe_secret_search(names: Sequence[str], workspace: Path | None = None) 
     例如记事本存的 UTF-16 或非文本文件）、**没有要找的键**（那就把文件里
     有哪些键列出来，拼写差在哪即可比对）。
     """
-    lines = ["找过这些位置："]
+    lines = ["searched:"]
     set_names = [name for name in names if (os.environ.get(name) or "").strip()]
     if set_names:
-        lines.append(f"  环境变量 —— 已设置：{'、'.join(set_names)}")
+        lines.append(f"  env — set: {', '.join(set_names)}")
     else:
-        lines.append(f"  环境变量 —— 都没设置（认这些名字：{'、'.join(names)}）")
+        lines.append(f"  env — none set (aliases: {', '.join(names)})")
     for label, path in secret_paths(workspace):
         if not path.exists():
-            lines.append(f"  [{label}] {path} —— 不存在")
+            lines.append(f"  [{label}] {path} — missing")
             continue
         if not path.is_file():
-            lines.append(f"  [{label}] {path} —— 不是文件（路径指到目录上了？）")
+            lines.append(f"  [{label}] {path} — not a file (path points at a directory?)")
             continue
         table = load_env_file(path)
         if not table:
             lines.append(
-                f"  [{label}] {path} —— 存在（{_size_hint(path)}），"
-                "但一行都没解析出来（编码？只认 KEY=VALUE 的文本）"
+                f"  [{label}] {path} — exists ({_size_hint(path)}), "
+                "but no KEY=VALUE lines parsed (encoding?)"
             )
             continue
         present = [name for name in names if (table.get(name) or "").strip()]
@@ -206,17 +203,16 @@ def describe_secret_search(names: Sequence[str], workspace: Path | None = None) 
             name for name in names if name in table and not (table.get(name) or "").strip()
         ]
         if present:
-            lines.append(f"  [{label}] {path} —— 里面有：{'、'.join(present)}")
+            lines.append(f"  [{label}] {path} — has: {', '.join(present)}")
         elif blank:
-            # `QQ_AppID=`（键写了、值空着）是最容易骗过自己的写法：文件里"明明有这一行"，
-            # 但等于没配。先说清这一种，再轮到"根本没这个键"。
+            # `QQ_AppID=` (key present, empty value) looks configured but is not.
             lines.append(
-                f"  [{label}] {path} —— 有这些键但值是空的（等于没配）："
-                f"{'、'.join(blank)}"
+                f"  [{label}] {path} — keys present but empty (unset): "
+                f"{', '.join(blank)}"
             )
         else:
             lines.append(
-                f"  [{label}] {path} —— 没有要找的键（它有：{'、'.join(sorted(table))}）"
+                f"  [{label}] {path} — missing keys (has: {', '.join(sorted(table))})"
             )
     return "\n".join(lines)
 
@@ -294,14 +290,14 @@ def read_config(path: Path | None = None) -> tuple[dict, str]:
     try:
         text = target.read_text(encoding="utf-8")
     except OSError as exc:
-        return {}, f"读不了 {target}：{exc}"
+        return {}, f"cannot read {target}: {exc}"
     try:
         return tomllib.loads(text), ""
     except tomllib.TOMLDecodeError as exc:
         return {}, (
-            f"{target} 解析失败：{exc}\n"
-            "提示：Windows 路径里的反斜杠要写成双反斜杠（D:\\\\tools\\\\x.exe）"
-            "或者用单引号字符串（'D:\\tools\\x.exe'）。"
+            f"{target} parse error: {exc}\n"
+            "hint: escape backslashes in Windows paths (D:\\\\tools\\\\x.exe) "
+            "or use a single-quoted string ('D:\\tools\\x.exe')."
         )
 
 
@@ -511,16 +507,16 @@ def _channel_value_problem(key: str, raw) -> str:
         try:
             seconds = float(raw)
         except (TypeError, ValueError):
-            return f"读不成数字（现在写的是 {raw!r}）"
-        return f"要的是大于 0 的秒数（现在写的是 {seconds:g}）"
+            return f"not a number (got {raw!r})"
+        return f"must be > 0 seconds (got {seconds:g})"
     if key in _CHANNEL_BOOL:
-        return f"读不成真假（现在写的是 {raw!r}；写 true / false）"
+        return f"not a bool (got {raw!r}; use true/false)"
     if key in _CHANNEL_ENUM:
         return (
-            f"不在认得的取值里（现在写的是 {raw!r}；"
-            f"可用：{'、'.join(_CHANNEL_ENUM[key])}）"
+            f"not in allowed set (got {raw!r}; "
+            f"allowed: {', '.join(_CHANNEL_ENUM[key])})"
         )
-    return f"读不成该有的类型（现在写的是 {raw!r}）"
+    return f"wrong type (got {raw!r})"
 
 
 def display_channel_value(value) -> str:
@@ -536,7 +532,7 @@ def display_channel_value(value) -> str:
     - 真假值印 `true` / `false`：它照 TOML 的写法，与配置文件里能对得上号。
     """
     if value is None or value == "":
-        return "（空）"
+        return "(empty)"
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
@@ -563,16 +559,16 @@ class ChannelValues:
     issues: tuple[str, ...] = ()
 
     def source(self, key: str) -> str:
-        return self.sources.get(key, "未设置")
+        return self.sources.get(key, "unset")
 
     def notes(self) -> str:
-        """展示用的一两行：这一节里有什么不对。没问题时返回空串。"""
+        """One or two lines about problems in this section; empty if none."""
         lines = []
         if self.unknown:
             lines.append(
-                f"[channel.{self.name}] 里这些键不认识（等于没配）："
-                f"{'、'.join(self.unknown)}\n"
-                f"    可用的键：{'、'.join(CHANNEL_KEYS)}"
+                f"[channel.{self.name}] unknown keys (ignored): "
+                f"{', '.join(self.unknown)}\n"
+                f"    allowed: {', '.join(CHANNEL_KEYS)}"
             )
         for problem in self.issues:
             lines.append(f"[channel.{self.name}] {problem}")
@@ -609,7 +605,7 @@ def resolve_channel_options(
     for key, builtin in CHANNEL_KEYS.items():
         if key in override:
             values[key] = override[key]
-            sources[key] = "命令行"
+            sources[key] = "CLI"
             continue
         from_env = ""
         for prefix in (ENV_PREFIX, LEGACY_ENV_PREFIX):
@@ -618,14 +614,14 @@ def resolve_channel_options(
             if raw:
                 # 来源要报**实际用上的那个名字**：报了新前缀而人设的是旧前缀，
                 # 他会去改一个本来就没设的变量。
-                from_env, from_env_source = raw, f"环境变量 {variable}"
+                from_env, from_env_source = raw, f"env {variable}"
                 break
         if from_env:
             converted = _coerce_channel_value(key, from_env)
             if converted is None:
                 issues.append(
-                    f"{key} 的环境变量 {from_env_source.removeprefix('环境变量 ')} "
-                    f"{_channel_value_problem(key, from_env)}，这一层跳过"
+                    f"{key} env {from_env_source.removeprefix('env ')} "
+                    f"{_channel_value_problem(key, from_env)}; layer skipped"
                 )
             else:
                 values[key] = converted
@@ -635,14 +631,14 @@ def resolve_channel_options(
             converted = _coerce_channel_value(key, section[key])
             if converted is None:
                 issues.append(
-                    f"{key} 的值{_channel_value_problem(key, section[key])}，这一层跳过"
+                    f"{key} value {_channel_value_problem(key, section[key])}; layer skipped"
                 )
             else:
                 values[key] = converted
-                sources[key] = f"用户配置 [channel.{name}] {effective_config_path()}"
+                sources[key] = f"config [channel.{name}] {effective_config_path()}"
                 continue
         values[key] = builtin
-        sources[key] = "内置默认"
+        sources[key] = "default"
     return ChannelValues(
         name=name,
         options=values,
@@ -667,20 +663,19 @@ def known_channels(path: Path | None = None) -> list[str]:
 
 
 def resolve(key: str, flag: str = "", env: dict[str, str] | None = None) -> tuple[str, str]:
-    """返回（值, 来源）。来源要能说出来——不然"我明明设了"就会反复出现。"""
+    """Return (value, source). Source must be printable for troubleshooting."""
     if flag:
-        return flag, "命令行"
+        return flag, "CLI"
     table = load()
     environment = os.environ if env is None else env
     for prefix in (ENV_PREFIX, LEGACY_ENV_PREFIX):
         from_env = environment.get(prefix + key.upper())
         if from_env:
-            # 来源要报**实际用上的那个名字**：报了新前缀而人设的是旧前缀，
-            # 他会去改一个本来就没设的变量。
-            return from_env, f"环境变量 {prefix}{key.upper()}"
+            # Report the name that actually won (new vs legacy prefix).
+            return from_env, f"env {prefix}{key.upper()}"
     if table.get(key):
-        return table[key], f"配置文件 {effective_config_path()}"
-    return "", "未设置"
+        return table[key], f"config {effective_config_path()}"
+    return "", "unset"
 
 
 def flag_enabled(key: str, flag: bool = False) -> bool:

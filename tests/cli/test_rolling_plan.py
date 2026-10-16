@@ -216,7 +216,10 @@ def test_自主模式分批执行并续排(tmp_path: Path, capsys) -> None:
 
     assert autonomous(_args(tmp_path), tmp_path, gateway) == 0
 
-    out = capsys.readouterr().out
+    # 自主路径的散文在 **stderr**：stdout 是事件通道（`--events` 时一行一个
+    # JSON），散文混进去就等于记录不能再直接读。终端里 stderr 也接屏幕，
+    # 人照样看得见（D3）。
+    out = capsys.readouterr().err
     # 钉要点：这一批复盘的摘要要打到终端。标签从「回头看这一批」改成「这一批复盘」，
     # 所以这里钉摘要内容 + 复盘标签，不钉整句旧字面。
     assert "第一批都做完了" in out
@@ -235,7 +238,8 @@ def test_no_roll_时一次排完(tmp_path: Path, capsys) -> None:
 
     assert autonomous(_args(tmp_path, no_roll=True), tmp_path, gateway) == 0
 
-    out = capsys.readouterr().out
+    # 同上：散文走 stderr，stdout 留给事件通道。
+    out = capsys.readouterr().err
     # 钉要点：--no-roll（一次排完）时不做复盘，终端上不该出现复盘标签。
     assert "复盘" not in out
     assert "自主运行结束：完成 2/2 步" in out

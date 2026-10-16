@@ -30,8 +30,36 @@ class EventWriter:
         self._stream.write(Event(kind, data).to_line() + "\n")
         self._stream.flush()
 
-    def emit(self, kind: str, **data: Any) -> None:
+    def emit(self, kind: str, /, **data: Any) -> None:
+        """发一个事件。`kind` 是**位置限定**的（那个 `/` 是这条不变式本身）。
+
+        为什么必须限定：`note` 的载荷里也有一个 `kind` 字段（`audit` /
+        `stale_references` / `tests_weakened` / `escalation` / `pending_actions`…），
+        而这里的形参就叫 `kind`。不限定位置时，`writer.emit(NOTE, kind="escalation")`
+        会抛 `TypeError: got multiple values for argument 'kind'`——正是 `handle`
+        那次实测事故的同一个坑（见 `handle` 的说明）。限定位置之后，`kind=`
+        一律落进 `**data`：那个写法从"会炸"直接变成"就是对的"。
+
+        **约束交给签名，不交给记性**：靠注释提醒的结果是——同一个坑修了
+        `handle` 一处，`run.py` 里还留着两处（`mypy` 的
+        `[misc] gets multiple values for keyword argument` 当场抓出来）。
+        """
         self._write(kind, dict(data))
+
+    def emit_note(
+        self, text: str, *, ok: bool = True, kind: str = "", **extra: Any
+    ) -> None:
+        """发一条 `note`。
+
+        `kind` 在这里是**载荷字段**（`audit` / `tests_weakened` / `escalation`…），
+        探针按它计数；它不是位置参数，所以不怕与 `emit` 的形参重名。
+        要带载荷字段的 note 走这一个，语义一目了然。
+        """
+        payload: dict[str, Any] = {"text": text, "ok": ok}
+        if kind:
+            payload["kind"] = kind
+        payload.update(extra)
+        self._write(NOTE, payload)
 
     def handle(self, kind: str, data: dict) -> None:
         """签名与 AgentLoop 的 on_event 一致，可直接传进去。
