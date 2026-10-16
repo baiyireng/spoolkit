@@ -273,6 +273,10 @@ def test_指纹跳过缓存目录(tmp_path):
     (root / "pkg" / "__pycache__").mkdir()
     (root / "pkg" / "__pycache__" / "a.cpython-314.pyc").write_bytes(b"\x00")
     (root / "orphan.pyc").write_bytes(b"\x00")
+    # 依赖目录同理：它是可重建的缓存，不是产物。前端任务的沙箱里
+    # `node_modules` 一动就是几万个文件，不跳的话读数当场失去意义。
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "vue.js").write_text("export default {}\n", encoding="utf-8")
     files = probe_runner.fingerprint_tree(root)
     assert list(files) == ["pkg/a.py"]
 
@@ -818,6 +822,49 @@ def test_审查读数从事件流里数得出来():
     # 审查发现 = audit + 残留 + 改弱 + 导入闭合四类 note（账本是读数，不算发现）。
     assert counters["review_findings"] == 5
     assert counters["review_findings_by_kind"]["stale_references"] == 2
+
+
+def test_路径触发披露不算审查发现():
+    """T2/T3/T4 只是披露路径命中。真发现为 0 时 review_findings 必须是 0。"""
+    text = "\n".join(
+        [
+            json.dumps(
+                {"type": "note", "text": "命中 T2", "kind": "path_trigger"},
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"type": "note", "text": "命中 T3", "kind": "path_trigger"},
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"type": "note", "text": "命中 T4", "kind": "path_trigger"},
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+    counters = probe_runner.parse_events(text)
+
+    assert counters["review_findings"] == 0
+    assert "path_trigger" not in counters["review_findings_by_kind"]
+
+
+def test_升级读数是具名触发比例不是高严重度精度():
+    """有升级、触发名都以 T 开头、输入里没有高严重度发现时，读数仍是 1.0。
+
+    1.0 只表示触发名以 T 开头。字段名因此是 trigger_named_rate。
+    """
+    fields = probe_runner.named_trigger_field(
+        {
+            "escalations": 3,
+            "escalation_triggers": {"T2": 1, "T4": 1, "T6": 1},
+        }
+    )
+
+    assert "escalation_precision" not in fields
+    assert fields["trigger_named_rate"] == 1.0
+    assert probe_runner.trigger_named_rate(1, {"mystery": 1}) == 0.0
+    assert probe_runner.trigger_named_rate(0, {}) == 1.0
 
 
 def test_没改弱没残留时读数为零():

@@ -153,6 +153,30 @@ def test_测试数据被改报出来() -> None:
 
     assert _kinds(found) == ["test_data_changed"]
     assert found[0].path == "tests/data/expected.csv"
+    assert "非代码" in found[0].detail
+
+
+def test_新建的spec文件不算测试数据被改() -> None:
+    found = _weakened(
+        path="tests/unit/x.spec.ts",
+        before="",
+        after="it('a', () => expect(1).toBe(1))\n",
+    )
+
+    assert found == []
+
+
+def test_改已有的spec文件不说成非代码golden() -> None:
+    found = _weakened(
+        path="tests/unit/x.spec.ts",
+        before="it('a', () => expect(1).toBe(1))\n",
+        after="it('a', () => expect(1).toBe(2))\n",
+    )
+    text = " ".join(f"{item.summary} {item.detail}" for item in found)
+
+    assert "test_data_changed" not in _kinds(found)
+    assert "非代码" not in text
+    assert "golden" not in text
 
 
 def test_golden_目录下的期望文件被改报出来() -> None:

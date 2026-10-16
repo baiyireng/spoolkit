@@ -742,14 +742,27 @@ _BY_NAME = {knob.name: knob for knob in KNOBS}
 
 
 def knob(name: str) -> Knob | None:
+    """按名字查找。找不到返回 None，给「用户输入的名字」那条路用。
+
+    代码里写死的名字用 `require_knob`：写错就在取用处停下，而不是把 None
+    传到 `.default` 上才炸。
+    """
     return _BY_NAME.get(name)
+
+
+def require_knob(name: str) -> Knob:
+    """代码里写死的旋钮名。返回 Knob；名字没登记则抛 KeyError。"""
+    entry = _BY_NAME.get(name)
+    if entry is None:
+        raise KeyError(f"unknown limit: {name}")
+    return entry
 
 
 def resolve(name: str, overrides: Mapping[str, float] | None = None) -> tuple[float, str]:
     """返回值与**来源**。来源要能说出来，否则调参就是猜。"""
     entry = _BY_NAME.get(name)
     if entry is None:
-        raise KeyError(f"没有登记过这个标定值: {name}")
+        raise KeyError(f"unknown limit: {name}")
     if entry.overridable and overrides and name in overrides:
         return float(overrides[name]), "配置"
     return float(entry.default), "默认"

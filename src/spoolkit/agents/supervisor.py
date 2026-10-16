@@ -46,13 +46,13 @@ FINISH = "finish"
 #
 # 默认值来自登记表（limits.KNOBS 的 supervisor_max_grant），这里留名字给外部
 # 导入；实际用多少由调用方按本次运行的覆盖给（强模型可以一次多给些）。
-MAX_GRANT = int(_limits.knob("supervisor_max_grant").default)
+MAX_GRANT = int(_limits.require_knob("supervisor_max_grant").default)
 
 # 「它说这是正常探索、却要收手」时改成续期，一次给多少步。
 #
 # 取 3 而不是上限：这条的目的是让它**落到一处改动上**，不是给出一轮新预算。
 # 给多了等于把「判断」换成「再跑一会儿」，而它下一轮还会被问一次。
-_EXPLORE_GRANT = int(_limits.knob("explore_grant_steps").default)
+_EXPLORE_GRANT = int(_limits.require_knob("explore_grant_steps").default)
 
 VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",

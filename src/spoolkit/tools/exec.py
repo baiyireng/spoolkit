@@ -42,8 +42,8 @@ from spoolkit.tools.grant import ALLOWED, ASK, DENIED, Grants, classify
 # 加上试跑副本的开销很容易翻倍。超时太小会逼着模型去瞎摸索，
 # 把步数预算浪费在恢复上，而不是任务本身。
 # 默认值来自登记表；名字留着给外部导入。
-DEFAULT_TIMEOUT = int(_limits.knob("command_timeout").default)
-MAX_TIMEOUT = int(_limits.knob("max_command_timeout").default)
+DEFAULT_TIMEOUT = int(_limits.require_knob("command_timeout").default)
+MAX_TIMEOUT = int(_limits.require_knob("max_command_timeout").default)
 MAX_OUTPUT_CHARS = 4000
 
 # 只允许只读的 git 子命令。提交、回滚、推送由人来做——

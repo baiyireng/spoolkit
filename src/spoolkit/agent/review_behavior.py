@@ -40,6 +40,7 @@ from typing import Callable, Sequence
 
 from spoolkit import sandbox_dirs
 from spoolkit.agent.audit import HIGH, INFO, Finding
+from spoolkit.agent.signals import FindingKind, NoteKind
 from spoolkit.tools.edit import PendingChange
 from spoolkit.tools.trial import copy_project
 
@@ -48,19 +49,19 @@ from spoolkit.tools.trial import copy_project
 CANNOT_CHECK = "【查不了】"
 
 #: L2.2 判据名。探针按它数 `review_findings_by_kind`。
-BEHAVIOR_CHANGED_KIND = "behavior_changed"
+BEHAVIOR_CHANGED_KIND = FindingKind.BEHAVIOR_CHANGED
 #: L2.3 判据名（CLI `--help` 那一半；公开符号那一半由 T1 报）。
-CLI_SURFACE_CHANGED_KIND = "cli_surface_changed"
+CLI_SURFACE_CHANGED_KIND = FindingKind.CLI_SURFACE_CHANGED
 #: L2.4 判据名。
-PERFORMANCE_REGRESSED_KIND = "performance_regressed"
+PERFORMANCE_REGRESSED_KIND = FindingKind.PERFORMANCE_REGRESSED
 #: 「这一步没跑成」也用 L2.2 的 kind：它是**读数**，不是发现（severity=INFO）。
-BEHAVIOR_NOT_CHECKED_KIND = "behavior_not_checked"
+BEHAVIOR_NOT_CHECKED_KIND = FindingKind.BEHAVIOR_NOT_CHECKED
 #: L2 的**过程读数**（判据原话 / 实际跑的命令 / 逐字比对的结果 / 耗时 /
 #: 「查不了」的理由）：它进事件流与 trace，供人跟踪与排查；**不是发现**
 #: （探针不按它数 `review_findings`），也**不进结论报告**——报告里出现内部
 #: 读数时，§2.5 的反向条款会跟着一起出现，于是"什么都没拦下"的那一轮里
 #: 也读得到一段无关样板（问题③在 risky-action 那一轮的形状）。
-BEHAVIOR_READINGS_KIND = "behavior_readings"
+BEHAVIOR_READINGS_KIND = NoteKind.BEHAVIOR_READINGS
 
 #: 只比这一个文件名的入口说明（README 是通用约定，不新造格式）。
 README_NAMES = ("README.md", "readme.md", "README.rst")

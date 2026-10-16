@@ -253,6 +253,33 @@ REVIEW_NOTE_KINDS = frozenset(
         SEMANTIC_FINDING_KIND,
     }
 )
+#: T2/T3/T4/T6 的路径披露。成果照落盘，不是审查发现，不进 REVIEW_NOTE_KINDS。
+PATH_TRIGGER_KIND = "path_trigger"
+
+
+def trigger_named_rate(escalations, triggers):
+    """具名触发条件（名字以 T 开头）占这次升级所用触发名的比例。
+
+    没有升级时记 1.0：没有「无触发条件的升级」可判。
+    这个数不看高严重度发现。有升级、触发名都是 T2/T4/T6、发现条数为 0 时，
+    它仍然是 1.0，所以记录字段叫 trigger_named_rate。
+    """
+    if not escalations:
+        return 1.0
+    names = list(triggers or ())
+    if not names:
+        return 0.0
+    named = sum(1 for name in names if str(name).startswith("T"))
+    return round(named / len(names), 3)
+
+
+def named_trigger_field(counters):
+    """记录里的具名触发比例。键名就是这个数实际在量的东西。"""
+    return {
+        "trigger_named_rate": trigger_named_rate(
+            counters["escalations"], counters["escalation_triggers"]
+        )
+    }
 
 #: 落盘读数时**不算产出**的前缀：这些是 harness 自己写的东西（授权、检查点、
 #: 索引、记忆库、事件流本身），不是模型的产出。把它们算成 `changes_on_disk`
@@ -475,7 +502,18 @@ def write_policy(sandbox, policy="auto"):
 # 哪个文件」这个信号会被盖掉（第一版就是这样：added 里塞满 .agent 与 .pyc）。
 # 另外**种子与期望版本里根本不该有它们**，那说明有人直接在种子目录里跑过 python，
 # 那条由 tests/test_probe_runner.py 钉着。
-CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+CACHE_DIRS = frozenset(
+    {
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        # 依赖目录也是缓存：`node_modules`（npm/pnpm 装出来的那一坨）是**可重建**的，
+        # 不是产物。前端任务的沙箱里它一动就是几万个文件，不跳的话
+        # `file_changed` / `changes_on_disk` 这些读数当场失去意义。
+        "node_modules",
+    }
+)
 
 
 def fingerprint_tree(root):
@@ -1531,22 +1569,9 @@ def run_one(
             if counters["actions_gated"] == 0
             else round(counters["blocked_actions"] / counters["actions_gated"], 3)
         ),
-        # precision = 被拦的动作里能回指具名触发条件的比例。
-        "escalation_precision": (
-            1.0
-            if counters["escalations"] == 0
-            else round(
-                len(
-                    [
-                        name
-                        for name in counters["escalation_triggers"]
-                        if name.startswith("T")
-                    ]
-                )
-                / len(counters["escalation_triggers"]),
-                3,
-            )
-        ),
+        # 具名触发名（以 T 开头）占这次升级所用触发名的比例。
+        # 不看高严重度发现：有升级、发现为 0 时，这个数仍可以是 1.0。
+        **named_trigger_field(counters),
         "file_changed": {
             "seed_digest": digest(seed_before),
             "result_digest": digest(result_files),

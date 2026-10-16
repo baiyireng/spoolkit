@@ -74,8 +74,8 @@ from spoolkit.tools.sources import SourceLog, check_numbers_spec
 # 只有符号表时，模型会一直查、始终不下手（实测本地 7B 的整条轨迹里
 # 连一次 read_file 都没有）。
 # 这两个数搬进了登记表（limits.KNOBS），这里只留名字给外部导入。
-PREFETCH_BUDGET = int(limits.knob("prefetch_budget").default)
-PREFETCH_CONTENT_BUDGET = int(limits.knob("prefetch_content_budget").default)
+PREFETCH_BUDGET = int(limits.require_knob("prefetch_budget").default)
+PREFETCH_CONTENT_BUDGET = int(limits.require_knob("prefetch_content_budget").default)
 
 
 def counter_for(gateway: ModelGateway) -> object:

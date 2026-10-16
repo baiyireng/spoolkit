@@ -822,6 +822,165 @@ def test_第一版还没有验证结论时按F4触发一次(tmp_path: Path) -> N
     assert result.finished is True
 
 
+# ---- ④b F4 的牙齿：有缺口 + 零发现 → 不给干净的 pass（机械兜底）-------------
+
+
+def _f4_review(root: Path, text: str, **over) -> RS.SemanticReport:
+    """触发条件**只由 F4 命中**的一次审查（「存在没有证据的完成声明」）。"""
+    return RS.review(
+        materials(root, **over),
+        root=root,
+        decision=RS.decide_triggers(evidence_gaps=1),
+        chat=lambda _prompt: text,
+    )
+
+
+def test_F4零发现不给干净的pass(tmp_path: Path) -> None:
+    """实测缺陷的形状：`F4 … 0 条发现；审查者结论 pass`。
+
+    零发现什么也证明不了——它既可能是"改动真的没问题"，也可能是"审查者没抓到"。
+    有缺口时这份报告不许读成前者。判据是**结论降级 + 理由点名 + 机读位 + 原话留档**
+    四样齐全。
+    """
+    report = _f4_review(tmp_path, payload([], verdict="pass"))
+
+    assert report.findings == ()
+    assert report.verdict == "fail", "有缺口而零发现时不许读成通过"
+    # 审查者原话单独留档：只留一个 verdict 的话，事后分不清是谁说的。
+    assert report.reviewer_verdict == "pass", report.reviewer_verdict
+    assert report.unclaimed_gap is True
+    assert any(
+        "F4" in item and "证据" in item for item in report.reasons
+    ), report.reasons
+    # 读数（事件流那一条的 text 就是 `render()`）自己也要说出来：
+    # 单看 `verdict=fail` 分不清是审查者判的还是判据压的。
+    text = report.render()
+    assert "降级" in text and "pass" in text, text
+
+
+def test_没有F4缺口时零发现仍是审查者的结论(tmp_path: Path) -> None:
+    """反例一：兜底不许扩大——只有 F1 触发时，零发现 + pass 原样保留。"""
+    report = RS.review(
+        materials(tmp_path),
+        root=tmp_path,
+        decision=RS.decide_triggers(finding_count=1),
+        chat=lambda _prompt: payload([], verdict="pass"),
+    )
+
+    assert report.verdict == "pass"
+    assert report.reviewer_verdict == "pass"
+    assert report.unclaimed_gap is False
+    assert RS.F4_UNCLAIMED not in report.reasons
+
+
+def test_F4但审查者报了发现时兜底不覆盖(tmp_path: Path) -> None:
+    """反例二：审查者**给了结构化发现**（不是零发现）→ 兜底让开。
+
+    发现**故意与缺口无关**（一个排序 nit）：判据是「零发现」这件事本身，
+    相关性不做机械判断——"这条发现跟缺口有没有关系"要读懂语义，那正是这一层
+    不越权替 L3 决定的事（§7.6）。所以一条不相干的 nit 也算"它给了东西"，
+    这份报告不再是"零发现 + pass"。
+    """
+    finding = [
+        {
+            "file": "pipeline/fetch.py",
+            "line": 1,
+            "problem": "imports are unsorted",
+            "severity": "low",
+            "evidence": "第 1 行的 import 顺序",
+        }
+    ]
+    report = _f4_review(tmp_path, payload(finding, verdict="pass"))
+
+    assert len(report.findings) == 1
+    assert report.verdict == "pass"
+    assert report.unclaimed_gap is False
+    assert RS.F4_UNCLAIMED not in report.reasons
+
+
+def test_缺findings键但保留了pass时也不给干净的pass(tmp_path: Path) -> None:
+    """实测抓到的**旁路**：审查者回一份没有 `findings` 键的 JSON。
+
+    `parse_review` 在这一种形状里**保留**它那句 `verdict`（「没结论，不等于
+    判不合格」），于是机读值仍是 `pass`、而"是不是干净通过"这个位原先也是
+    False——只读 `verdict` 的消费者就此读到一次干净通过，而这次审查其实
+    什么都没给。两份事实必须并存：`cannot_check` 说"没审出来"，
+    `verdict=fail` + `unclaimed_gap` 说"别当成通过"。
+    """
+    text = json.dumps({"verdict": "pass", "reasons": ["looks fine"]})
+    report = _f4_review(tmp_path, text)
+
+    assert report.cannot_check, "这一份本来就没有结论"
+    assert report.verdict == "fail", "机读值不许留成 pass"
+    assert report.reviewer_verdict == "pass", report.reviewer_verdict
+    assert report.unclaimed_gap is True
+    assert RS.F4_UNCLAIMED in report.reasons
+
+
+def test_解析不了时也照样不给干净的pass(tmp_path: Path) -> None:
+    """边界：「查不了」不是"零发现 → 干净通过"的挡箭牌。
+
+    报告同时说明两件事：`cannot_check`（这次没审出结论）与 `verdict=fail`
+    （别把它当成通过）。人读文本仍然是「查不了」那一条——两份事实不互相顶替。
+    """
+    report = _f4_review(tmp_path, "这不是 JSON")
+
+    assert report.cannot_check
+    assert report.verdict == "fail"
+    assert report.reviewer_verdict == ""
+    assert report.unclaimed_gap is True
+    assert RS.CANNOT_CHECK in report.render()
+
+
+def test_零发现的F4审查在事件读数里是降级而不是通过(tmp_path: Path) -> None:
+    """接线那一层：事件流里那一条读数必须跟着降级（探针只读事件流）。
+
+    同时钉住兜底的**边界**：它只降读数，不去动完成声明——完成声明按账本缺口
+    降级是 L4 的活（`_evidence_ledger`），两段各管一段，混起来会变成双重升级。
+    """
+    root = make_tree(tmp_path, {"note.txt": "hello\n"})
+    pending = PendingChanges(root)
+    events: list = []
+    model = _L3Model(
+        turns=[
+            _turn(
+                "写一份产出",
+                [
+                    {
+                        "name": "write_file",
+                        "arguments": {"path": "note.txt", "content": "hello world\n"},
+                        "why": "改一下",
+                    }
+                ],
+            ),
+            _turn("交卷", final="改好了"),
+        ],
+        reviews=[payload([], verdict="pass")],
+    )
+    loop = _loop(root, model, pending, events, verify=_always_green)
+
+    result = loop.run("把 note.txt 的内容改一下")
+
+    report = loop._semantic_report
+    assert report is not None and report.trigger.startswith("F4")
+    assert report.verdict == "fail" and report.unclaimed_gap is True
+
+    readings = [
+        data
+        for kind, data in events
+        if kind == "note" and data.get("kind") == "l3_readings"
+    ]
+    assert readings, events
+    assert readings[0]["verdict"] == "fail", readings
+    assert readings[0]["reviewer_verdict"] == "pass", readings
+    assert readings[0]["unclaimed_gap"] is True, readings
+    assert "降级" in str(readings[0]["text"]), readings
+
+    # 兜底不该越权：完成声明的降级仍归 L4 账本。
+    assert loop._review_blocked is False
+    assert result.finished is True
+
+
 def test_审查者说错话时那条不据以阻断(tmp_path: Path) -> None:
     """核对之后只剩降级项 → **完成声明不降级**（误报就是判据写错了，§4）。"""
     root = make_tree(

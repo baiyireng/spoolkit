@@ -50,7 +50,7 @@ class TaskState:
     #
     # 默认值来自登记表（limits.KNOBS 的 done_inline），这里留名字给外部导入；
     # 实际列几条由渲染方按本次运行的覆盖决定。
-    DONE_INLINE = int(_limits.knob("done_inline").default)
+    DONE_INLINE = int(_limits.require_knob("done_inline").default)
 
     def render(self, done_inline: int | None = None, progress_hint: str = "") -> str:
         """渲染成紧凑文本供注入。刻意省略空字段以节省 token。

@@ -28,6 +28,9 @@ Documentation = "https://github.com/baiyireng/spoolkit/tree/main/docs"
 
 [project.optional-dependencies]
 dev = [
+    # 版本写死：类型检查器的结论对版本敏感，基线（`tools/mypy-baseline.json`）
+    # 会随它漂移。升级要当一次**批次**做（刷新基线、单独提交、看 diff）。
+    "mypy==2.4.0",
     "pytest>=8.3",
 ]
 # 通道走 SOCKS 代理时需要它（httpx 的 SOCKS 支持在可选的 socksio 里）。
@@ -51,3 +54,49 @@ packages = ["src/spoolkit"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+# ---- 类型检查（开发侧关口之一，见 scripts/gate.py）----------------------------
+#
+# 为什么是 mypy 而不是 pyright：**环境依赖最少**。pyright 是 Node 生态的
+# （PyPI 那个包装包也要 Node，除非再加 `pyright[nodejs]` 拉 40MB 轮子），
+# 而本仓是纯 Python：`uv sync` 一条命令、锁在 uv.lock 里，一个只有 Python 的
+# 机器就能跑。同一份代码在多数开发者手里都能便利开发，是这一层的目的。
+#
+# 版本写死在 `[project.optional-dependencies].dev`：检查器的结论对版本敏感，
+# 基线（`tools/mypy-baseline.json`）会随它漂移。升级要当一次**批次**做。
+#
+# 严格度**分阶段**推，不一步到位压死开发：
+#   阶段 0：不要求注解，先把真错抓出来 + 基线棘轮（只对新错报红）；
+#   阶段 1（现在）：`spoolkit.agent` 开严，见下面的 overrides。
+#     不开 `disallow_untyped_defs` / `disallow_untyped_calls`：那是注解债。
+#   阶段 2：注解债还完后全局 `strict`。
+[tool.mypy]
+files = ["src/spoolkit"]
+# 取 `requires-python` 的下限：这样「用到了 3.13+ 才有的标准库/语义」会被抓出来，
+# 而不是等到别人的 3.12 机器上才炸。想按本机版本跑就注释掉这一行。
+python_version = "3.12"
+show_error_codes = true
+pretty = false
+# 本仓依赖（httpx / rich）没带 py.typed 就先当成 Any：没有这一步会满屏
+# 「跳过分析」，把真错淹掉。阶段 1 里逐条给出 stub 再说。
+ignore_missing_imports = true
+# 这几条都**不要求写注解**，但能抓出真问题：
+#   check_untyped_defs —— 没注解的函数体也检查（最容易藏 bug 的地方）
+#   possibly-undefined —— 可能未绑定的变量（mypy 默认只警告，不开就是漏）
+#   warn_unused_ignores / warn_redundant_casts —— 让过期的 `# type: ignore` 自己暴露
+check_untyped_defs = true
+enable_error_code = ["possibly-undefined"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+# 阶段 1：只对 agent 开严。这些开关抓的是「类型对不上」，不是「没写注解」。
+[[tool.mypy.overrides]]
+module = ["spoolkit.agent", "spoolkit.agent.*"]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_decorators = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true

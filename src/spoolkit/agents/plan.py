@@ -634,7 +634,7 @@ def render_step_prompt(
     """
     finished = [item.goal for item in plan.steps if item.status == DONE]
     limit = (
-        int(limits.knob("done_inline").default) if done_inline is None else done_inline
+        int(limits.require_knob("done_inline").default) if done_inline is None else done_inline
     )
     recent = finished[-max(1, limit) :]
     if not finished:

@@ -5,6 +5,9 @@
 
 预算守卫依据 demand_tokens（裁剪前的需求）而非实际装入量来判断：
 装配器最多只能装到有效预算，用实际装入量判断触发线永远不会触发。
+
+流程图（用户输入 → 步进 → 收尾）：``docs/agent-loop-flow.md``。
+控制流变更时必须同步该图（见 ``.cursor/rules/agent-loop-flow.mdc``）。
 """
 
 import hashlib
@@ -13,7 +16,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, cast
 
 import httpx
 
@@ -35,7 +38,6 @@ from spoolkit.agent.audit import (
     PASS,
     ReviewLedger,
     SEMANTIC_FINDING_KIND,
-    TESTS_WEAKENED_KIND,
     audit,
     boundary_write,
     load_protected,
@@ -60,9 +62,15 @@ from spoolkit.agent.material_compactor import (
 )
 from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
+from spoolkit.agent.signals import (
+    BEHAVIOR_KINDS,
+    FindingKind,
+    L3_KINDS,
+    MECHANICAL_KINDS,
+    NoteKind,
+)
 from spoolkit.agent.review_behavior import (
     BEHAVIOR_CHANGED_KIND,
-    BEHAVIOR_NOT_CHECKED_KIND,
     BEHAVIOR_READINGS_KIND,
     CLI_SURFACE_CHANGED_KIND,
     PERFORMANCE_REGRESSED_KIND,
@@ -135,7 +143,6 @@ from spoolkit.tools.edit import (
     REFUSAL_MARKER,
     STAGE_MARKER,
     STALE_REFERENCE_KIND,
-    STALE_REFERENCES_KIND,
     TOKEN_PARAM,
     broken_local_imports,
     is_test_path,
@@ -184,8 +191,8 @@ LOOKUP_TOOLS = ("find_symbol", "file_symbols", "find_callers")
 # 调用同一个 find_callers（参数一字不差），把 12 步预算全烧光。
 # 第二次先给提醒、不阻断——调用有时确实有意义（比如文件刚被改过）；
 # 第三次中间没有任何别的动作，结果不可能变，再执行只是在消耗步数。
-REPEAT_WARN_AT = int(_limits.knob("repeat_warn_at").default)
-REPEAT_BLOCK_AT = int(_limits.knob("repeat_block_at").default)
+REPEAT_WARN_AT = int(_limits.require_knob("repeat_warn_at").default)
+REPEAT_BLOCK_AT = int(_limits.require_knob("repeat_block_at").default)
 
 # 重复到这个次数还停不下来，就升级给督导。
 #
@@ -193,11 +200,11 @@ REPEAT_BLOCK_AT = int(_limits.knob("repeat_block_at").default)
 # 挡不住的剩下两种情况：一是它换着花样绕（每次都不同，机械计数器永远归零），
 # 二是它明知道在重复也停不下来。这两种都得看它到底在干什么才知道怎么办——
 # 交给督导判断，而不是继续加规则。
-REPEAT_INTERVENE_AT = int(_limits.knob("repeat_intervene_at").default)
+REPEAT_INTERVENE_AT = int(_limits.require_knob("repeat_intervene_at").default)
 
 # 督导给的续期加起来最多到这里（基础预算的倍数）。
 # 这不是任务预算，是安全线：没有它，一个卡住的任务能把 GPU 烧一整夜。
-STEP_CEILING_FACTOR = int(_limits.knob("step_ceiling_factor").default)
+STEP_CEILING_FACTOR = int(_limits.require_knob("step_ceiling_factor").default)
 
 
 def step_hard_cap(config: Config) -> int:
@@ -311,15 +318,15 @@ RECENT_WINDOW = 6
 # 连续多少步**白看**（查看了，窗口里一次成功都没有），就要求这一轮给结论。
 # 不收成只能写：没有新内容时逼它写，它会用写工具去读，或交一份没有依据的改动。
 # 读到了新内容的探索不进这个数。
-NO_EDIT_LIMIT = int(_limits.knob("no_edit_limit").default)
+NO_EDIT_LIMIT = int(_limits.require_knob("no_edit_limit").default)
 
 # 只看不写**不等于**打转：先读后计划本来是许多任务的第一步（「优化一下旧文件」
 # 就属于这种）。所以到干预线时先回头看这几步有没有**拿到新信息**——有任何
 # 一次成功的查看，就按正常探索处理。1 = 开，0 = 退回「只看不写即打转」。
-NO_EDIT_EXPLORE_GRACE = bool(int(_limits.knob("no_edit_explore_grace").default))
+NO_EDIT_EXPLORE_GRACE = bool(int(_limits.require_knob("no_edit_explore_grace").default))
 # 往回看几步。它与 RECENT_WINDOW 同量级，但不是同一个东西：那个管
 # 「同一个调用出现几次」，这个管「这几步里有没有新信息进来」。
-NO_EDIT_LOOK_WINDOW = int(_limits.knob("no_edit_look_window").default)
+NO_EDIT_LOOK_WINDOW = int(_limits.require_knob("no_edit_look_window").default)
 
 # 漫游到这个步数还没产出，就升级给督导。
 #
@@ -331,7 +338,7 @@ NO_EDIT_LOOK_WINDOW = int(_limits.knob("no_edit_look_window").default)
 # failed_repeat_at 那条升级路径），而「读了很多步、每一步都拿到新东西」
 # 只在超过本条阈值时交给督导**问一句**（措辞是「它还在探索」，不是
 # 「它在打转」）——两者给督导的问题不一样，结论也就不一样。
-NO_EDIT_INTERVENE_AT = int(_limits.knob("no_edit_intervene_at").default)
+NO_EDIT_INTERVENE_AT = int(_limits.require_knob("no_edit_intervene_at").default)
 
 # 同一个动作**连续失败**几次就升级给督导。
 #
@@ -339,7 +346,7 @@ NO_EDIT_INTERVENE_AT = int(_limits.knob("no_edit_intervene_at").default)
 # failed_repeat_block_at 硬拦（护栏层），而「同一个坑连着踩」是**要给判断**
 # 的事——拦住了动作，但拦不住它想干那件事。把它单独说出来，督导看到的
 # 就是「同一个失败动作反复重试」，而不是「它好几步没写代码」这种含糊信号。
-FAILED_REPEAT_AT = int(_limits.knob("failed_repeat_at").default)
+FAILED_REPEAT_AT = int(_limits.require_knob("failed_repeat_at").default)
 
 # 硬拦（没有执行）时**退还步数预算**的判据。
 #
@@ -382,7 +389,7 @@ NO_CHECKER_KIND = "verifier_no_checker"
 # 阈值取 4 而不是 2：实测阈值太小会误伤——有些题只抖动一两轮就自己走出来了，
 # 把它们一起掐掉净亏两道题。真正卡死的那种会一直复读（实测 11 次），
 # 放宽到 4 一样能兜住。
-EMPTY_TURN_LIMIT = int(_limits.knob("empty_turn_limit").default)
+EMPTY_TURN_LIMIT = int(_limits.require_knob("empty_turn_limit").default)
 
 
 def call_signature(call: ToolCall) -> str:
@@ -441,6 +448,46 @@ GUARD_REFRESH_PREFIX = "⟳ 刷新读取："
 # 没有上限的话，它只要每一步都触发一次硬拦（硬拦还退还步数预算），就能把
 # 预算变成无限。上限与 blocked_refund_limit 同一口径，只放行前几次。
 _REFRESH_LIMIT = 3
+
+# ---- 「有理由的重取」按**成因**分账（D6）--------------------------------------
+#
+# 为什么要分账：上面那份额度原先是一个池子，而**烧它的成因不是同一种**。
+# 实测形状（merge-html / fix-bug）：读一次 → 上下文把它压掉 → 再读 → 又被压掉，
+# 三次全记在「结果不在手上」这一条上；等文件真的变了、模型必须拿到新正文时，
+# 账上空了 → 硬拦，而拦下的话术还说「继续重跑不会再拿到新内容」——**那句话
+# 在那一刻是假的**（内容确实是新的）。
+#
+# 所以账按成因记。两条纪律：
+# ① **总额度一分不加**：全局上限仍是 `_REFRESH_LIMIT`，分账只解决
+#    「一个成因把整份额度吃光」，不改「一共能放行几次」；
+# ② 「重取能拿到新内容」那一类要**至少留一次**——它才是"不让模型饿死"
+#    这条通道真正要救的那一种（结果被压掉时重取拿回的是同一份内容）。
+REFRESH_CAUSE_COMPACTED = "compacted"
+REFRESH_CAUSE_CHANGED = "changed"
+REFRESH_CAUSE_PENDING = "pending"
+REFRESH_CAUSE_RETRY = "retry"
+
+#: 全局额度里**留给「重取能拿到新内容」那一类**的次数。
+#:
+#: 为什么是 1：病态轨迹里「结果被压掉」会**每一步都成立**（读一次丢一次），
+#: 给它留太多等于变相放宽上限；留一次够模型把「改完到底过没过」问清楚，
+#: 又不足以拿这条通道继续探索。
+_REFRESH_RESERVE_FOR_CHANGE = 1
+
+#: 「结果被压掉」这本账的份额＝全局额度减掉上面那一次预留。
+#:
+#: `max(1, …)` 是为了额度被标定得很小（例如 `_REFRESH_LIMIT=1`）时仍然放得行
+#: 一次：份额算出 0 等于把这条通道整个关掉，而它是"不让模型被饿死"的那条路。
+_REFRESH_COMPACTED_LIMIT = max(1, _REFRESH_LIMIT - _REFRESH_RESERVE_FOR_CHANGE)
+
+#: 账目 id → 人读的名字（trace、事件与拒绝话术里点名"是哪一本账用完了"）。
+_REFRESH_CAUSE_LABELS = {
+    REFRESH_CAUSE_COMPACTED: "结果被上下文压掉",
+    REFRESH_CAUSE_CHANGED: "要看的东西真的变了",
+    REFRESH_CAUSE_PENDING: "待确认的改动落了盘",
+    REFRESH_CAUSE_RETRY: "上一次失败后的重试",
+}
+
 
 #: 「放行一次有理由的重取」这条事件在事件流里的 kind。
 #:
@@ -571,7 +618,7 @@ def _final_lies_about_changes(text: str, changed_paths: Sequence[str]) -> str:
         # 全路径或尾部匹配都算落过盘（changed_paths 可能只存了相对路径的尾部）。
         if any(normalized == one or normalized.endswith(one) or one.endswith(normalized) for one in landed):
             continue
-        return path
+        return str(path)
     return ""
 
 
@@ -758,35 +805,32 @@ _HIT_SUMMARY = {
     BROKEN_IMPORT_KIND: "导入的本地模块不存在",
 }
 
-#: `_mechanical_review` 那几条判据产出的**发现类别**：收尾重判时要整批作废、
-#: 按终态内容重新登记（旧判词描述的是中途那一版内容，见 `_rejudge_mechanical`）。
-#: 名单必须与 `_mechanical_findings` 实际产出的 kind 一致，否则会漏撤或误撤。
-MECHANICAL_KINDS = frozenset(
-    {
-        STALE_REFERENCE_KIND,
-        DELETED_REFERENCE_KIND,
-        BROKEN_IMPORT_KIND,
-        TESTS_WEAKENED_KIND,
-    }
-)
-
-#: L2（P2 行为回归）那几条判据产出的**发现类别**。收尾重判时要按同一份终态
-#: 内容重算，所以它们和 L1 一样整批作废（见 `_rejudge_mechanical`）。
-BEHAVIOR_KINDS = frozenset(
-    {
-        BEHAVIOR_CHANGED_KIND,
-        CLI_SURFACE_CHANGED_KIND,
-        PERFORMANCE_REGRESSED_KIND,
-        BEHAVIOR_NOT_CHECKED_KIND,
-    }
-)
-
-#: L3（P2 后半，语义审查）产出的**发现类别**。它单独一份的理由与上面两组
-#: 不同：L1/L2 是每轮都能重算的机械判据，而 L3 是**一次模型调用**——它的
-#: 判词同样只对某一版内容成立（缓存键含内容指纹），但**不能**在每次收尾时
-#: 无条件重跑（那就成了「每步都跑」）。所以它的作废与重算是同一个入口
-#: （`_semantic_review`：键变了才重跑），这里只登记类别名。
-L3_KINDS = frozenset({SEMANTIC_FINDING_KIND})
+#: 收尾重判的三份名单不在这里手写，在 `agent/signals.py` 里从注册表派生。
+#:
+#: - `MECHANICAL_KINDS`：L1（残留引用、引用闭合、测试被改弱）。键必须是
+#:   **finding kind**。曾经把 note kind ``tests_weakened`` 放进来，账本里的
+#:   ``test_removed`` / ``assert_loosened`` 对不上，旧判词撤不掉，收尾和 T12
+#:   就拿一条已经不成立的判词去拦完成声明。
+#: - `BEHAVIOR_KINDS`：L2。判词只对某一版内容成立，收尾时整批作废再重算。
+#:   ``behavior_not_checked`` 也在里面：它描述的是「这一版查不了」，内容变了
+#:   就要重判，不能把上一版的「查不了」留在账本里。
+#: - `L3_KINDS`：语义审查。和上面两组不同，它是一次模型调用，不能在每次收尾
+#:   无条件重跑。作废与重算是同一个入口（`_semantic_review`：键变了才重跑），
+#:   这里只登记类别名。
+#:
+#: 越界写、中间态、迎合测试、范围回退不在这三份里。重判函数不会重新产出它们，
+#: 放进名单就会被撤掉，而且不会按终态再登记一次。
+#:
+#: 名单与 `_mechanical_findings` 实际产出的 kind 必须一致，否则会漏撤或误撤。
+#: 这条不靠人记得对：`tests/agent/test_signals.py` 把派生结果和产出集合钉在一起。
+#:
+#: `FindingKind` 与 `NoteKind` 是两个枚举。字符串有时碰巧相同
+#: （``behavior_changed`` 两边都有），``forget_kind`` 仍然只收 finding kind。
+#: 把 ``NoteKind.TESTS_WEAKENED`` 交进去，mypy 报 ``[arg-type]``——运行时
+#: 字符串相等会让「撤错一类」静默成功，类型在这里是唯一会响的那一层。
+#: 机器要计数的是 note（探针按 kind 数、不读散文）；账本里挂着的是 finding。
+#: 两套名字各写各的，映射只在注册表的 ``note`` 字段上出现一次。
+#: 派生集合见 `MECHANICAL_KINDS`、`BEHAVIOR_KINDS`、`L3_KINDS`。
 
 
 def _hit_finding(hit) -> Finding:
@@ -798,7 +842,7 @@ def _hit_finding(hit) -> Finding:
     where = hit.where()
     detail = f"{hit.name} @ {where}——{hit.detail}" if hit.detail else f"{hit.name} @ {where}"
     return Finding(
-        kind=hit.kind,
+        kind=FindingKind(hit.kind),
         severity=HIGH,
         summary=_HIT_SUMMARY.get(hit.kind, hit.kind),
         detail=detail,
@@ -1107,7 +1151,7 @@ def _render_lessons(pushed: list[tuple[int, str]]) -> str:
 
 
 def build_workflow(
-    registry: ToolRegistry, read_roots: tuple = (), *, from_channel: bool = False
+    registry: ToolRegistry, read_roots: tuple[Path, ...] = (), *, from_channel: bool = False
 ) -> str:
     """按实际注册的工具生成工作方式说明。
 
@@ -1257,6 +1301,20 @@ MATERIAL_CARD_MAX_ITEMS = 8
 #: 最多再读一次那一处」——这个数就是那句话的**机械执行口径**：说过就得做得到，
 #: 否则那句承诺是假的；给 1 又保证它不能拿这条通道继续探索下去。
 CONVERGE_GRACE_READS = 1
+
+#: 收束态允许「跑一次验收」的次数。
+#:
+#: 为什么"跑命令"不能和探索类动作一起被拦死：收束拦的是**再开一个新的收集方向**，
+#: 而验收命令是**结论的证据**——README 与系统提示反复讲「验收命令的退出码才是判据」。
+#: 实测（Vue 项目、`max_steps=10`）：模型跑 `node acceptance/smoke.mjs` 看到失败 →
+#: 读判据 → 重写 `logic.js` → 想重跑那条验收时正好进了收束态，命令被拒；
+#: 它只能凭「系统自动测试通过」写下完成结论，而那条验收实际有 6 项断言不过
+#: （独立复验）。给 1 次：够它把「改完到底过没过」问清楚，又不足以拿这条通道
+#: 继续探索（额度是**整段收束期**的，不按步重置）。
+CONVERGE_GRACE_RUNS = 1
+
+#: 收束态那次验收额度认哪条工具。`run_command` 是唯一能把判据跑起来的那条路。
+CONVERGE_RUN_TOOL = "run_command"
 
 #: 收束态还允许的其它不动工作区的动作。它们是**心算**（算数、查工具用法、
 #: 记一笔），不产出新素材、也不会变成新的探索方向，所以不占上面那次补读。
@@ -1514,7 +1572,7 @@ def _requested_span(call: ToolCall, total: int) -> tuple[bool, str, int]:
 
     def as_int(value: object, default: int) -> int:
         try:
-            return int(value)  # type: ignore[arg-type]
+            return cast(int, int(value))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return default
 
@@ -1538,15 +1596,15 @@ class AgentLoop:
         lessons: Callable[[str], list[tuple[int, str]]] | None = None,
         verify: Callable[[], ToolResult] | None = None,
         incoming: Callable[[], str] | None = None,
-        read_roots: tuple = (),
+        read_roots: tuple[Path, ...] = (),
         sources: Any | None = None,
         persona: str = "",
-        on_event: Callable[[str, dict], None] | None = None,
+        on_event: Callable[[str, dict[Any, Any]], None] | None = None,
         from_channel: bool = False,
         pending: Any | None = None,
         escalation_review: Callable[[EscalationRequest, str], tuple[str, str]] | None = None,
         gate_network: bool = True,
-        defer_final_verify: list | None = None,
+        defer_final_verify: list[dict[str, Any]] | None = None,
         compactor: Callable[[str], str] | None = None,
         compaction: bool = True,
     ) -> None:
@@ -1654,6 +1712,11 @@ class AgentLoop:
         # ① 上一次结果还在不在上下文里：装配时的历史版本号。
         self._context_revision = 0
         self._seen_at_revision: dict[str, int] = {}
+        # 「有理由的重取」放行了几次：**一次总数 + 一本按成因分的账**（D6）。
+        # 总数是全局上限（`_REFRESH_LIMIT`，一分不放宽）；分账用来阻止某一个
+        # 成因把整份额度吃光（见 `_REFRESH_CAUSE_LABELS` 上面那段注释）。
+        self._refreshes_used = 0
+        self._refreshes_by_cause: dict[str, int] = {}
         # 文件判断（指纹、检查结论、取过的行段）。活在对话外面，压缩丢不掉。
         self.observations = ObservationBook()
         # ② ③ **这中间有没有可观察的变化**：每个签名上一次真的执行时的两条指纹
@@ -1685,6 +1748,8 @@ class AgentLoop:
         # 收束态里已经用掉几次「写成果」的额度（默认值是 0，所以常态就是
         # 「一次也不放行」；只有把它调成正数才数得着）。同样每次进入收束时归零。
         self._converge_writes_used = 0
+        # 收束态里已经用掉几次「跑一次验收」（见 `CONVERGE_GRACE_RUNS`）。
+        self._converge_runs_used = 0
         # 督导续期额外给的写额度。默认 0；督导每续一次加 min(grants, 3)。
         # 收束点随督导续期后移，但写额度默认是 0——不加这个，续出来的步数
         # 踩进收束线时模型想改也改不了（rename-cross-file 真机现场）。
@@ -1715,10 +1780,10 @@ class AgentLoop:
         self.audit_log = AuditLog()
         # 最近一次验证**新加**的那几条发现。事件流按它发 note，
         # 而不是把整本账每步重发一遍（重发等于给上下文和日志灌噪声）。
-        self._last_findings: tuple = ()
+        self._last_findings: tuple[Finding, ...] = ()
         # 机械发现（残留 / 引用闭合 / 测试改弱）已经发过哪些：同一条在每个验证点
         # 会被重新算出来，不去重就会把日志灌满（设计稿 §4 的噪声控制）。
-        self._reviewed_notes: set[tuple] = set()
+        self._reviewed_notes: set[tuple[FindingKind, str, int, str]] = set()
         # ---- L2 行为回归（P2，§5 L2）------------------------------------------
         #
         # 对照运行要起子进程、还要复制两棵「改动前/后」的树，所以**一次运行
@@ -1819,7 +1884,7 @@ class AgentLoop:
                         f"命中 {record.trigger}（{record.detail}）：成果照落盘"
                     ),
                     "ok": True,
-                    "kind": AUDIT_KIND,
+                    "kind": NoteKind.PATH_TRIGGER,
                     "trigger": record.trigger,
                 },
             )
@@ -2017,6 +2082,9 @@ class AgentLoop:
         self._observed_state.clear()
         self._observed_output.clear()
         self._refreshes_used = 0
+        # 按成因分的账同样是**本次运行**的：上一次 run() 烧掉的是上一次的额度，
+        # 带过来的话这一次的第一个重复调用就会直接撞上"账空了"。
+        self._refreshes_by_cause = {}
         # 「组合停用」的计数与留给督导的证据同样是**本次运行**的：
         # 上一次 run() 停用过的组合不该把这一次的第一个同名调用直接拒掉。
         self._blocked_combos.clear()
@@ -2028,6 +2096,7 @@ class AgentLoop:
         self._converge_remaining = None
         self._converge_grace_used = 0
         self._converge_writes_used = 0
+        self._converge_runs_used = 0
         self._converge_write_bonus = 0
         self._material_notes.clear()
         # 机械审查的去重集合与证据缺口计数也是**本次运行**的：上一次 run() 发过
@@ -2471,6 +2540,7 @@ class AgentLoop:
                 # 说的是这一次收束，不是每一步各一次。「写成果」的额度同理。
                 self._converge_grace_used = 0
                 self._converge_writes_used = 0
+                self._converge_runs_used = 0
             elif not converging and converged_told:
                 # 督导续期把 limit 抬上去之后，收束点会后移——如果这一步又
                 # 落回收束线之前，之前那句「已要求用现有素材给结论」就不再
@@ -2778,7 +2848,7 @@ class AgentLoop:
                         gate=True,
                         announce_block=True,
                     )
-                    self._archive(state, "success", trace, conclusion_text)
+                    self._archive(state, self._episode_outcome(True), trace, conclusion_text)
                     clear_state(checkpoint)
                     model_final = conclusion_text
                     return LoopResult(
@@ -2914,7 +2984,7 @@ class AgentLoop:
                     gate=True,
                     announce_block=True,
                 )
-                self._archive(state, "success", trace, done_text)
+                self._archive(state, self._episode_outcome(True), trace, done_text)
                 clear_state(checkpoint)
                 return LoopResult(
                     finished=True,
@@ -3404,7 +3474,10 @@ class AgentLoop:
                     )
                     history.append(Message(role="user", content=ask))
                     continue
-                self._archive(state, "success", trace, conclusion_text)
+                settled_clean = not self.escalation_gate.pending_actions
+                episode_finished = not self._review_blocked and settled_clean
+                episode_outcome = self._episode_outcome(episode_finished)
+                self._archive(state, episode_outcome, trace, conclusion_text)
                 clear_state(checkpoint)
                 # 「模型自己写出了结论」这件事单独存一份（`turn.final` 是它写的
                 # 原文，`final_text` 是加过系统判词与账目的收尾报告）。
@@ -3414,9 +3487,8 @@ class AgentLoop:
                 # 在这里的含义是「有动作在等批复」，**不是**「成果没落盘」——
                 # 成果已经按 §2.5 落在工作区里了（§6 P1 验收口径明确反向过
                 # 旧判据：`settled != "auto"` 只表示有动作没执行）。
-                settled_clean = not self.escalation_gate.pending_actions
                 return LoopResult(
-                    finished=not self._review_blocked and settled_clean,
+                    finished=episode_finished,
                     final=final_text,
                     state=state,
                     steps=state.step,
@@ -3742,17 +3814,14 @@ class AgentLoop:
         #   ② 它对**同一份内容**只跑一次（缓存键与 L2 同口径），而自动修的
         #      每一轮内容都会变，所以那一轮会重跑一次——那正是「发现当反馈
         #      重新注入下一轮」要的（§3.1 处理顺序第 1 条）。
-        #
         # 它同样**不动落盘、不回滚任何东西**：高严重度发现只拦「完成声明」与
         # 危险动作，成果照落盘（§2.5 的硬不变量）。
-        #
         # **传进去的是「上一版内容的验证结论」**（`_final_verify`），不是这一版
         # ——这一版的验证还在下面几步之后才跑（那个 `passed` 变量此刻还是 None）。
         # 证据账本的缺口判据对它敏感：拿 None 去算的话**每一轮都会报一条「没跑」
         # 的缺口**，于是 L3 在小改动上也永远触发——那是「每步都跑」的另一种写法
         # （实测抓出来的：一次 `note.txt` 单文件小改也被判成 F4）。第一次收尾时
-        # 这里为 None，账本如实说「没跑」并按 F4 触发一次，那是**对的**：
-        # 那一刻确实还拿不到结论。
+        # 这里为 None，账本如实说「没跑」并按 F4 触发一次，那是对的。
         prior_verified = self._final_verify[0] if self._final_verify else None
         self._semantic_review(list(changed), prior_verified=prior_verified)
         # 越界写那类高危发现要进收尾报告：它回答的是「这次运行动了不该动的
@@ -4098,8 +4167,10 @@ class AgentLoop:
           （`kind=guard_repeat_undecided`，`refused=True`）——不许假装判过，
           也不许把「判不出」当成免检通道（S9 之前正是这样放行的）。
 
-        放行有上限：`_REFRESH_LIMIT`，否则「不断被拦」+ 硬拦退还预算就成了
-        无限预算。
+        放行有上限：总数是 `_REFRESH_LIMIT`（否则「不断被拦」+ 硬拦退还预算就成了
+        无限预算），而且**按成因分账**（D6）：「结果被压掉」那一本份额更小
+        （`_REFRESH_COMPACTED_LIMIT`），至少留一次给"重取真能拿到新内容"那种
+        ——一个成因把整份额度吃光，真正需要新正文的那一次就会被冤枉地硬拦。
         """
         signature = call_signature(call)
         # ---- 收束态：工具层强制（P0 修①，先于其它一切闸门）-------------------
@@ -4223,8 +4294,8 @@ class AgentLoop:
             #
             # 判据不许无脑拦：刚写完再读一遍、文件真的变了之后再查一遍，
             # 都是合法的重取（判据二成立 → 有理由的重取）。
-            decision, reason = self._guard_repeat_decision(signature, call)
-            if decision == REPEAT_USELESS:
+            repeat_kind, reason, cause = self._guard_repeat_decision(signature, call)
+            if repeat_kind == REPEAT_USELESS:
                 return self._refuse(
                     call,
                     signature,
@@ -4244,14 +4315,14 @@ class AgentLoop:
                     ),
                     _remedies(self._failed_output.get(signature, "")),
                 )
-            if decision == REPEAT_REFRESH and self._refreshes_used < _REFRESH_LIMIT:
+            if repeat_kind == REPEAT_REFRESH and self._refresh_allowed(cause):
                 return self._guard_allow_repeat(
-                    call, signature, level, reason, REPEAT_REFRESH
+                    call, signature, level, reason, REPEAT_REFRESH, cause
                 )
             # 剩下的两类都退回「提醒」路径（照常执行），区别只在事件流与 trace
             # 里留下的**理由**：一类是「判不出」，一类是「判得出有理由但放行
             # 额度用满了」。两者混成一句话，就等于把「没判」说成「判过」。
-            if decision == REPEAT_UNDECIDED:
+            if repeat_kind == REPEAT_UNDECIDED:
                 # 「判不出」不再等于「放行」（S9）。
                 #
                 # 旧口径这一支照常执行、只打一句提醒，于是所有**没有可比对象**
@@ -4271,7 +4342,7 @@ class AgentLoop:
                         "text": line,
                         "ok": False,
                         "kind": GUARD_UNDECIDED_KIND,
-                        "decision": decision,
+                        "decision": repeat_kind,
                         "tool": call.name,
                         "refused": True,
                         "repeats": repeats,
@@ -4296,13 +4367,47 @@ class AgentLoop:
                     ),
                     _remedies(self._failed_output.get(signature, "")),
                 )
-            # 判得出有理由、但放行额度已经用满。实测（merge-html / fix-bug /
+            # 判得出有理由、但账上没余额了。实测（merge-html / fix-bug /
             # vague-optimize）这里继续「提醒后照常执行」会让模型把预算一直烧到
-            # 收敛/步数上限，根本没机会写文件。既然已经给过 {_REFRESH_LIMIT} 次
-            # 补救机会，再重跑就不再有意义，按「没有新信息」处置：硬拦。
+            # 收敛/步数上限，根本没机会写文件。既然账已经空了，再重跑就不再有
+            # 意义，按「没有新信息」处置：硬拦。
+            #
+            # **话术必须说清是哪一本账空了**（D6）。总额度用完与「结果被压掉」
+            # 这一本用完是两回事：后者还留着一次给"内容真的变了"那一种，
+            # 说成「额度已用完」就把一条**还能走的路**说死了——实测模型听到
+            # 那句之后不再重读，而它要的正文确实是新的。
+            total_left = max(0, _REFRESH_LIMIT - self._refreshes_used)
+            label = _REFRESH_CAUSE_LABELS.get(cause, cause or "未分账")
+            capped_by = (
+                "total" if self._refreshes_used >= _REFRESH_LIMIT else "cause"
+            )
+            if capped_by == "total":
+                account = (
+                    f"刷新的总额度已经用完（{self._refreshes_used}/"
+                    f"{_REFRESH_LIMIT}：{self._refresh_ledger_note()}）"
+                )
+                # 总额度用完时**任何**成因都不再放行（`_refresh_allowed` 先查总数），
+                # 所以这里不许再说「先做一处真正的改动再回来看」——那句话兑现不了
+                # （实测：总数 3/3 时 `_refresh_allowed("changed")` 为假）。
+                tail = (
+                    "下一步三选一：① 换一种参数或换一个工具（新参数不算重复）；"
+                    "② 基于手上已有素材直接给结论；"
+                    "③ 把已经想好的改动写下来（写成果不受这条账管）。"
+                    "不要只重复一句『再看一遍』——那不算下一步。"
+                )
+            else:
+                account = (
+                    f"「{label}」这本账已经用完"
+                    f"（{self._refreshes_by_cause.get(cause, 0)}/"
+                    f"{self._refresh_budget(cause)}，总数还剩 {total_left} 次）"
+                )
+                tail = (
+                    "下一步三选一：① 如果你要的东西**确实变了**（改了文件、"
+                    "或暂存的改动落了盘），原样重发一次会被放行；"
+                    "② 换一种参数或换一个工具；③ 基于手上已有素材直接给结论。"
+                )
             line = (
-                f"⟳ 重复调用判得出有理由（{reason}），但放行已到上限"
-                f"（{self._refreshes_used}/{_REFRESH_LIMIT}）："
+                f"⟳ 重复调用判得出有理由（{reason}），但{account}："
                 "不再放行，避免把预算烧成无限循环"
             )
             self._log(line)
@@ -4312,23 +4417,27 @@ class AgentLoop:
                     "text": line,
                     "ok": False,
                     "kind": GUARD_UNDECIDED_KIND,
-                    "decision": decision,
+                    "decision": repeat_kind,
                     "tool": call.name,
                     "capped": True,
+                    # 哪一本账空的：`total`（总额度）或 `cause`（某一种成因的份额）。
+                    # 探针据此把"额度真的用完了"与"这一类不许再用了"分开数。
+                    "capped_by": capped_by,
+                    "cause": cause,
+                    "used": self._refreshes_used,
+                    "limit": _REFRESH_LIMIT,
                 },
             )
             return self._refuse(
                 call,
                 signature,
                 (
-                    f"{BLOCKED_PREFIX}这个调用已连续 {_REFRESH_LIMIT} 次"
-                    "因上下文压缩或内容变化被放行刷新，额度已用完，"
-                    "继续重跑不会再拿到新内容，只会消耗预算，所以这一次没有执行。"
-                    f"你这次重发的参数（与上一次逐字相同）：{_render_args(call)}"
-                    "下一步三选一：① 换一种参数或换一个工具；"
-                    "② 基于手上已有素材直接给结论；"
-                    "③ 若确实需要这份内容，先做一处真正的改动让上下文有变化。"
-                    "不要只重复一句『再看一遍』——那不算下一步。"
+                    f"{BLOCKED_PREFIX}这个调用这次是「有理由的重取」（{reason}），"
+                    f"但{account}。"
+                    "继续按同样的路重跑不会再拿到新内容，只会消耗预算，"
+                    f"所以这一次没有执行。你这次重发的参数（与上一次逐字相同）："
+                    f"{_render_args(call)}"
+                    + tail
                     + _reverse_clause()
                     + (f"\n{_intent_clause(call)}" if call.intent else "")
                 ),
@@ -4346,8 +4455,46 @@ class AgentLoop:
         # 第一次执行（level == 1）不加任何提醒话术：它本来就不是重复。
         return result
 
+    def _refresh_budget(self, cause: str) -> int:
+        """这一本账的份额。
+
+        **全局上限始终是 `_REFRESH_LIMIT`**：分账不放大它（`_refresh_allowed`
+        先查总数）。只有「结果被压掉」那一本更小——它是最容易每一步都成立的
+        那一种，留出的一次是给"重取真能拿到新内容"的。
+        """
+        if cause == REFRESH_CAUSE_COMPACTED:
+            return _REFRESH_COMPACTED_LIMIT
+        return _REFRESH_LIMIT
+
+    def _refresh_allowed(self, cause: str) -> bool:
+        """这一次「有理由的重取」放不放行。两本账都要有余额，缺一不可。"""
+        if self._refreshes_used >= _REFRESH_LIMIT:
+            # 总额度：一次都不放宽（这条是"预算不会变成无限"的保证）。
+            return False
+        return self._refreshes_by_cause.get(cause, 0) < self._refresh_budget(cause)
+
+    def _refresh_ledger_note(self) -> str:
+        """这一轮放行过的账目，按成因逐条列出来（trace 与拒绝话术都用它）。
+
+        为什么话术里要点名：**"额度用完了"必须说得出是哪一本账用完了**。
+        实测缺陷就是所有成因混成一句「已连续 3 次因上下文压缩或内容变化被
+        放行刷新」——真话只有一半，而模型据此以为"改完再读也没用"。
+        """
+        if not self._refreshes_by_cause:
+            return "一次都没放行"
+        return "、".join(
+            f"{_REFRESH_CAUSE_LABELS.get(cause, cause)} {used} 次"
+            for cause, used in self._refreshes_by_cause.items()
+        )
+
     def _guard_allow_repeat(
-        self, call: ToolCall, signature: str, level: int, reason: str, decision: str
+        self,
+        call: ToolCall,
+        signature: str,
+        level: int,
+        reason: str,
+        decision: str,
+        cause: str = "",
     ) -> ToolResult:
         """判明「有理由的重取」之后放行一次，并把理由留在三处可见的地方。
 
@@ -4358,16 +4505,26 @@ class AgentLoop:
           分开——前者是护栏判过的放行，后者才是空转；
         - **trace**：督导看的日志。
 
+        `cause` 是这一笔记在哪本账上（见 `REFRESH_CAUSE_*`）：总数与按成因的
+        那一本**同时**加。分账要能解释"额度去哪了"，两处读数都得出得来。
+
         「放行过就要更新它看过什么」这条同样重要：不更新的话，下一次同签名进来
         时判据仍然成立，会连着放行到上限——那是把一次性补救当成了常规通道。
         重取之后**又失败**时还要记一笔失败（`_remember_failure`）：这是
         `failed_repeat_block_at` 那道闸数「重试过几次」的唯一来源。
         """
         self._refreshes_used += 1
+        if cause:
+            self._refreshes_by_cause[cause] = (
+                self._refreshes_by_cause.get(cause, 0) + 1
+            )
+        label = _REFRESH_CAUSE_LABELS.get(cause, cause or "未分账")
         trace_line = (
             f"{REPEAT_REFRESH_PREFIX}同一个调用第 {level} 次，"
             f"但{reason}，因此重新执行一次"
-            f"（已放行 {self._refreshes_used}/{_REFRESH_LIMIT}）"
+            f"（{label} {self._refreshes_by_cause.get(cause, 0)}/"
+            f"{self._refresh_budget(cause)}，"
+            f"总数 {self._refreshes_used}/{_REFRESH_LIMIT}）"
         )
         self._log(trace_line)
         self._emit(
@@ -4380,6 +4537,13 @@ class AgentLoop:
                 "reason": reason,
                 "level": level,
                 "tool": call.name,
+                # 探针按它把"烧在哪一本账上"分开数（原先只有总数，分不出
+                # 一次放行是"结果被压掉"还是"内容真的变了"）。
+                "cause": cause,
+                "cause_used": self._refreshes_by_cause.get(cause, 0),
+                "cause_limit": self._refresh_budget(cause),
+                "used": self._refreshes_used,
+                "limit": _REFRESH_LIMIT,
             },
         )
         result = self.registry.invoke(call)
@@ -4396,7 +4560,10 @@ class AgentLoop:
             ok=result.ok,
             content=(
                 f"{REPEAT_REFRESH_PREFIX}{reason}，所以这一次重新取了一遍"
-                f"（{decision}：已放行 {self._refreshes_used}/{_REFRESH_LIMIT}）。"
+                f"（{decision}：{label} "
+                f"{self._refreshes_by_cause.get(cause, 0)}/"
+                f"{self._refresh_budget(cause)}，"
+                f"总数 {self._refreshes_used}/{_REFRESH_LIMIT}）。"
                 f"{self._file_state_note(call)}"
                 + (f"\n{intent}" if intent else "")
                 + f"\n{result.content}"
@@ -4454,7 +4621,7 @@ class AgentLoop:
         而不是「高危发现」那张表（那张表列的是**问题**）。
         """
         finding = Finding(
-            kind=f"escalation_{request.trigger.lower()}",
+            kind=FindingKind(f"escalation_{request.trigger.lower()}"),
             severity=INFO,
             summary=(
                 f"触发条件 {request.trigger}（{request.note}）：{request.detail}"
@@ -5913,6 +6080,26 @@ class AgentLoop:
             return ""
         if call.name in CONVERGE_ALLOWED_EXTRAS:
             return ""
+        # 验收命令单独一笔账：它是**结论的证据**，不是新的探索方向。放在读取
+        # 额度**之前**判——两者是不同的通道，各有一份额度、互不占用。
+        if call.name == CONVERGE_RUN_TOOL and self._converge_runs_used < CONVERGE_GRACE_RUNS:
+            self._converge_runs_used += 1
+            trace_line = (
+                f"收束态：放行一次验收命令（{call.name}，"
+                f"已用 {self._converge_runs_used}/{CONVERGE_GRACE_RUNS}）"
+            )
+            self._log(trace_line)
+            self._emit(
+                "note",
+                {
+                    "text": trace_line,
+                    "ok": True,
+                    "kind": CONVERGE_KIND,
+                    "tool": call.name,
+                    "run_used": self._converge_runs_used,
+                },
+            )
+            return ""
         remaining = self._converge_remaining
         left = "步数预算已用尽" if not remaining else f"只剩 {remaining} 步"
         if self._converge_readable(call) and (
@@ -5939,17 +6126,41 @@ class AgentLoop:
         # 「再开一个方向」的动作）——一律拒。话术要说清三件事：**这是预算
         # 收束**（不是权限问题）、**成果仍在盘上**（§2.5 反向条款）、
         # **唯一还允许的动作是什么**。
+        # 额度读数**只在真的用完时才说"用完"**（与 D6 同一条纪律：话术不许替
+        # 账目下结论）。实测抓到过反例：被拒的是 `list_dir`，两笔额度都还是
+        # 0/1，话术却说「已经用完（0/1）」——自相矛盾，而模型据此以为
+        # "改完再验一次也没用"，恰好把那条证据通道自己关掉了。
+        reads_left = max(0, CONVERGE_GRACE_READS - self._converge_grace_used)
+        runs_left = max(0, CONVERGE_GRACE_RUNS - self._converge_runs_used)
+        quota = (
+            (
+                "「补一次素材」的额度已经用完"
+                f"（{self._converge_grace_used}/{CONVERGE_GRACE_READS}）"
+                if reads_left == 0
+                else "「补一次素材」还留着 "
+                f"{reads_left} 次（{self._converge_grace_used}/"
+                f"{CONVERGE_GRACE_READS}），只在你确实缺那一处内容时用"
+            )
+            + "；"
+            + (
+                "「跑一次验收」的额度已经用完"
+                f"（{self._converge_runs_used}/{CONVERGE_GRACE_RUNS}）"
+                if runs_left == 0
+                else "「跑一次验收」还留着 "
+                f"{runs_left} 次（{self._converge_runs_used}/"
+                f"{CONVERGE_GRACE_RUNS}），用来把「改完到底过没过」问清楚"
+            )
+        )
         return (
             f"{BLOCKED_PREFIX}现在处于**预算收束**（{left}，"
             f"收束线由 `converge_at_steps` 决定），所以**探索类动作不再执行**："
-            f"这一次的 `{call.name}` 被拒了（读 / 列 / 搜 / 跑 / 出网"
+            f"这一次的 `{call.name}` 被拒了（读 / 列 / 搜 / 查历史 / 出网"
             "都属于这一类）。\n"
             "**唯一还允许的动作**：直接用你手上已有的素材给出结论——协议里"
             "写 `done=true` + `final`（收束态里只写正文也可以，循环会按结论"
             "收下）；如果还有想好的改动，就写成果（写文件 / 逐项确认暂存的"
             f"重写）。素材确实不足时**如实写明缺什么**，不要编造。"
-            f"「补一次素材」的额度已经用完（{self._converge_grace_used}/"
-            f"{CONVERGE_GRACE_READS}）——额度是**整段收束期**的，不会一步步重置。"
+            f"{quota}——两笔额度的口径都是**整段收束期**的，不会一步步重置。"
             + _reverse_clause()
             + (f"\n{_intent_clause(call)}" if call.intent else "")
         )
@@ -6111,12 +6322,15 @@ class AgentLoop:
 
     def _guard_repeat_decision(
         self, signature: str, call: ToolCall
-    ) -> tuple[str, str]:
-        """把一次「重复调用」机械地归成三类之一，返回（归类, 理由）。
+    ) -> tuple[str, str, str]:
+        """把一次「重复调用」机械地归成三类之一，返回（归类, 理由, 成因）。
+
+        第三项是**账目**（`REFRESH_CAUSE_*`）：`REPEAT_REFRESH` 放行的到底是
+        哪一种重取。它不是给模型看的，是给"额度去哪了"这个问题用的——
+        分账后每一次放行都要能回答「烧在哪一本账上」。另外两类不放行，给空串。
 
         这是整条护栏**唯一**的判据点：`_invoke_guarded` 的第一次重复与第 N 次
-        重复、以及 `_refresh_reason`（它只是包一层放行上限），走的都是这里——
-        两处各判一套的话，「第一次提醒、第三次硬拦」就会开始互相打架。
+        重复都走这里。两处各判一套的话，「第一次提醒、第三次硬拦」就会开始互相打架。
 
         判据只看能证伪的事实，不看它看起来像不像在打转：
 
@@ -6140,20 +6354,29 @@ class AgentLoop:
            例外是「上一次**执行失败**了」（签名在 `_failed_output` 里）：那一次是
            重试，归上游 `failed_repeat_block_at` 那道闸管，这里判成有理由的重取。
 
+        判成「有理由的重取」之后还要回答**是哪一种重取**（分账，D6）。判据是
+        「重取能不能拿到**新内容**」：
+
+        - 能（对象变了 / 待确认清单动了 / 上一次失败后的重试）→ 记在对应那本
+          账上，**哪怕结果同时被上下文压掉了**。旧写法把「结果被压掉」放在
+          最前面直接返回，于是"对象真的变了"也一律记成「压掉」——那一本账
+          被算错，而真正的新内容被记成"白读一遍"。
+        - 不能（对象与清单都没变，只是结果不在手上了）→ 记在「结果被压掉」
+          那一本上。它是最容易每一步都成立的一种，份额因此更小
+          （`_REFRESH_COMPACTED_LIMIT`），免得把整份额度吃光。
+
         剩下的情况（执行过 + 参数逐字相同 + 结果还在 + 两条证据都没变）就是
         **无用重复**：再跑一遍拿到的必然还是同一份结果，而它要付一次完整的
         模型生成与一次工具执行。这一类在**第一次重复**就要硬拦。
         """
         mark = self._seen_at_revision.get(signature)
-        if (
+        # 结果被上下文压掉了（不在模型手上）。**这一条不再是立即返回**：
+        # 它还要与"这中间有没有真的变化"一起决定这笔账记在哪一本上。
+        lost = (
             mark is not None
             and mark < self._context_revision
             and not self._withheld_observation(call)
-        ):
-            return (
-                REPEAT_REFRESH,
-                "上一次的结果已经被上下文压缩丢弃（它不在你手上了）",
-            )
+        )
         if signature not in self._observed_state:
             failure = self._failed_output.get(signature, "")
             if failure:
@@ -6166,6 +6389,15 @@ class AgentLoop:
                 return (
                     REPEAT_REFRESH,
                     f"上一次执行失败了（{head}…），这一次是重试，不是无事重复",
+                    REFRESH_CAUSE_RETRY,
+                )
+            if lost:
+                # 没记下「当时看到的是什么」（上一次执行失败或被别的闸拦下），
+                # 但结果确实被压掉了：仍然是"不让它饿死"的那一笔。
+                return (
+                    REPEAT_REFRESH,
+                    "上一次的结果已经被上下文压缩丢弃（它不在你手上了）",
+                    REFRESH_CAUSE_COMPACTED,
                 )
             # 它从没真的执行过（上一次这一条被别的闸拦下了）：没有「上一次的结果」
             # 可以复用，也没有对象可以比较。旧口径在这里放行（理由写作「谈不上
@@ -6174,16 +6406,30 @@ class AgentLoop:
                 REPEAT_UNDECIDED,
                 "这个签名没有真的执行过的记录（上一次它被别的闸拦下了），"
                 "既没有可复用的结果，也没有可比较的对象",
+                "",
             )
         observed_state, observed_pending = self._observed_state[signature]
         if self._pending_state_key() != observed_pending:
+            # 改动真的落成了：重跑会看到不同的结果 → 这是"能拿到新内容"那一本。
+            # 结果同时被压掉时把这件事也说上（两件事实都成立，账按**更强的那条**
+            # 记：新内容才是这次重取的价值所在）。
             return (
                 REPEAT_REFRESH,
                 "这中间有改动真的落成了（待确认清单与上次不同），"
-                "重发一次可能拿到不同的结果",
+                "重发一次可能拿到不同的结果"
+                + ("；上一次的结果也已经不在上下文里了" if lost else ""),
+                REFRESH_CAUSE_PENDING,
             )
         current = self._call_state(call)
         if not current or not observed_state:
+            if lost:
+                # 拿不到可比对象、但结果确实不在手上了：这一条仍然是"不让它饿死"
+                # 的那笔账（旧口径在这里也是放行，行为不变；变的只是账记在哪本上）。
+                return (
+                    REPEAT_REFRESH,
+                    "上一次的结果已经被上下文压缩丢弃（它不在你手上了）",
+                    REFRESH_CAUSE_COMPACTED,
+                )
             # 拿不到可比的对象（既没有正文、也没有可读路径、也不是一条命令）：
             # **如实记成判不出**，不假装判过。注意「当时拿不到」也算——两个空
             # 指纹互相「相等」，那种相等什么也证明不了。处置与无用重复相同。
@@ -6192,6 +6438,17 @@ class AgentLoop:
                 f"这个调用（{call.name}）没有可比较的内容对象"
                 "（既不带正文、也不带可读路径、也不是一条命令），"
                 "护栏判不出这次重复有没有意义",
+                "",
+            )
+        if current == observed_state and lost:
+            # 对象一字未变、只是结果被压掉了：重取拿回的**是同一份内容**，
+            # 这笔账记在「结果被压掉」那一本上（份额比全局小，见上面的注释）。
+            # 这一条必须排在"一字未变 → 无用重复"之前：结果不在手上时，
+            # 硬拦的后果是模型什么都读不到。
+            return (
+                REPEAT_REFRESH,
+                "上一次的结果已经被上下文压缩丢弃（它不在你手上了）",
+                REFRESH_CAUSE_COMPACTED,
             )
         if current == observed_state:
             path = call.arguments.get("path")
@@ -6250,23 +6507,21 @@ class AgentLoop:
                 f"{what}自上次调用以来一字未变（指纹 {current}），"
                 f"{where}"
                 f"{extra}",
+                "",
             )
+        # 对象真的变了：重取能拿到新内容 → 记在"新内容"那一本账上。
+        # 结果同时被压掉时把两件事实都说上（账按更强的那条记）。
         return (
             REPEAT_REFRESH,
-            "这次要看的对象与上次执行时不一样了，旧结果描述的是旧内容",
+            "这次要看的对象与上次执行时不一样了，旧结果描述的是旧内容"
+            + ("；而且上一次的结果已经被上下文压缩丢弃" if lost else ""),
+            REFRESH_CAUSE_CHANGED,
         )
 
-    def _refresh_reason(self, signature: str, call: ToolCall) -> str:
-        """重复调用该不该放行。放行返回**理由**，该拦返回空串。
-
-        判据全部落在 `_guard_repeat_decision` 里（一处判据、一个口径）：
-        只有它判成「有理由的重取」才返回理由，判成「无用重复」或「判不出」
-        都返回空串——两者的处置都是硬拦（「判不出」从 S9 起不再放行）。
-        """
-        if self._refreshes_used >= _REFRESH_LIMIT:
-            return ""
-        decision, reason = self._guard_repeat_decision(signature, call)
-        return reason if decision == REPEAT_REFRESH else ""
+    def _episode_outcome(self, finished: bool) -> str:
+        """归档用的结局。验收结论此刻已经在 `_final_verify` 里。"""
+        verified = self._final_verify[0] if self._final_verify else None
+        return outcome_for(finished, self._review_blocked, verified)
 
     def _file_state_note(self, call: ToolCall) -> str:
         """紧凑的文件状态摘要：行数 + 指纹。
@@ -6633,7 +6888,7 @@ class AgentLoop:
             # 记录失败不该影响任务本身：它是给人看的旁证，不是必需产物。
             pass
 
-    def _emit(self, kind: str, data: dict) -> None:
+    def _emit(self, kind: str, data: dict[Any, Any]) -> None:
         """向外部观察者发一条事件。
 
         回调异常一律吞掉：它是壳挂上来的，壳的问题不该毁掉内核的工作。
@@ -6645,7 +6900,7 @@ class AgentLoop:
         except Exception:
             pass
 
-    def _emit_final_verify(self, payload: dict) -> None:
+    def _emit_final_verify(self, payload: dict[Any, Any]) -> None:
         """「最终验证」这一条**阶段行**：该在「已应用」之后被读到。
 
         最终验证验的是"待确认清单里那批内容"，而网页壳/桥/MCP 那条路上，
@@ -6700,4 +6955,17 @@ class AgentLoop:
             f"归档: 事件#{result.episode_id}，提升 {len(result.promoted)} 条，"
             f"下沉 {len(result.demoted)} 条"
         )
+
+
+def outcome_for(
+    finished: bool, review_blocked: bool, verified: bool | None
+) -> str:
+    """episode.outcome 的唯一口径。
+
+    验收红、审查拦住完成声明、或这一轮没有完成，都不写成 success。
+    verified 为 None 表示没跑验证，不据此改判。
+    """
+    if verified is False or review_blocked or not finished:
+        return "fail"
+    return "success"
 

@@ -54,6 +54,7 @@ from spoolkit.agents.supervisor import (
     fact_conflicts,
 )
 from spoolkit.agent.audit import HIGH, INFO, Finding
+from spoolkit.agent.signals import FindingKind, NoteKind
 
 # ---- 严重度（L3 schema 的三档；与 `audit` 的两档显式对上）--------------------
 #
@@ -80,17 +81,17 @@ AUDIT_SEVERITIES = (SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW)
 # 与 L1/L2 同一套做法：判据名在产出处定义，事件流的 kind 由它映射
 # （`audit.note_kind`），探针**按 kind 数**、不读散文。
 #: L3 的发现（探针进 `review_findings`，并单独数 `l3_findings`）。
-L3_FINDING_KIND = "semantic_finding"
+L3_FINDING_KIND = FindingKind.SEMANTIC_FINDING
 #: L3 的过程读数（触发条件、跑没跑、被剔除几条、为什么没给结论）——
 #: **不是发现**，与 L2 的 `behavior_readings` 同一个口径。
-L3_READINGS_KIND = "l3_readings"
+L3_READINGS_KIND = NoteKind.L3_READINGS
 #: L3 发现的**结构化**那一份（每条带 `file`/`line`/`severity`/`evidence` 与
 #: 「过没过事实核对」）。它与上面那条发现**成对**：发现那条是给人读的一句话
 #: （与 L1/L2 同一个出口），这一条是给壳与探针读的字段。缺了它，探针就只能去
 #: 解析散文来数「每条发现过没过核对」（§4 明说不许这么干）。
-L3_DETAIL_KIND = "l3_detail"
+L3_DETAIL_KIND = NoteKind.L3_DETAIL
 #: 「L3 判了一次，结论是拦下完成声明」。
-L3_BLOCKED_KIND = "l3_blocked"
+L3_BLOCKED_KIND = NoteKind.L3_BLOCKED
 
 #: 事实核对的四种冲突形状（每条冲突带一个 id，事件与探针按它分档）。
 CONFLICT_TOOL_MISSING = "tool_missing"
@@ -516,8 +517,19 @@ class SemanticReport:
     ran: bool = False
     #: 跑没跑的理由（`TriggerDecision.note`）。
     trigger: str = ""
-    #: 审查者给出的结论（`pass` / `fail` / `""` = 没给）。
+    #: **这一份报告的结论**（`pass` / `fail` / `""` = 没给）。
+    #:
+    #: **它可能被机械判据降级**：这一轮本来就有「没有证据的完成声明」（F4），
+    #: 而审查者一条发现都没给 → 不给干净的 `pass`。降级之前审查者说的是什么，
+    #: 记在 `reviewer_verdict` 里（两个字段分开，读者才分得清"它说了什么"与
+    #: "我们据什么改了它"）。见 `unclaimed_gap` 与 `floor_unclaimed_gap`。
     verdict: str = ""
+    #: **审查者原话里的结论**（未经机械判据改动的那个值）。
+    #:
+    #: 与 `verdict` 分开是必须的：只留一个的话，兜底降级之后没人分得清
+    #: `fail` 是审查者自己判的，还是被机械判据压下去的——而"这是谁说的"
+    #: 在这套东西里一向要能回答（`model_final` / `concluded` 是同一个道理）。
+    reviewer_verdict: str = ""
     reasons: tuple[str, ...] = ()
     findings: tuple[SemanticFinding, ...] = ()
     #: 被事实核对降级的条数（探针的 `l3_unverified`）。
@@ -526,6 +538,12 @@ class SemanticReport:
     conflicts: dict[str, int] = field(default_factory=dict)
     #: 「查不了」/「没得出结论」的具体理由（空 = 给结论了）。
     cannot_check: str = ""
+    #: **这一轮有 F4 缺口、审查者却零发现**：这份报告**不构成**「完成有证据」。
+    #:
+    #: 与 `verdict` 分开记，是因为这两件事要能各自读出：「审查者说了什么」
+    #: （`reviewer_verdict`）与「我们据什么改了它」（判据）。混成一个字段的话，
+    #: 事后没人分得清这是它自己判的，还是被兜底判据压下去的。
+    unclaimed_gap: bool = False
     prompt_tokens: int = 0
     completion_tokens: int = 0
 
@@ -558,8 +576,89 @@ class SemanticReport:
         if self.unverified:
             parts.append(f"其中 {self.unverified} 条与记录不符、已降级")
         if self.verdict:
-            parts.append(f"审查者结论 {self.verdict}")
+            # 降级过就**两个都写**：只写结果会把我们的判据说成它的话，
+            # 只写它的话又会对不上 `verdict` 这个机读值。
+            if self.reviewer_verdict and self.reviewer_verdict != self.verdict:
+                parts.append(
+                    f"审查者结论 {self.reviewer_verdict}"
+                    f"（机械判据降级为 {self.verdict}）"
+                )
+            else:
+                parts.append(f"审查者结论 {self.verdict}")
+        if self.unclaimed_gap:
+            # 这条读数**必须自己说出来**：`verdict=fail` 单看分不清是审查者判的
+            # 还是机械判据压的，而"零发现 + 有缺口"这件事恰恰是最容易被读成
+            # 「审过了、很干净」的那一种。
+            parts.append("账本缺口未被认领而审查者零发现 → 不据此认定完成")
         return "；".join(parts)
+
+
+#: 「有 F4 缺口、审查者却零发现」时机械写进报告的那一句。
+#:
+#: 它是**判据的结论**，不是审查者的话：所以它排在 `reasons` 末尾，并配
+#: `SemanticReport.unclaimed_gap=True` 这个机读位（事件流的读数会照说一句）。
+F4_UNCLAIMED = (
+    "F4 完成声明缺少证据（账本缺口没有被认领），而审查者一条发现都没给——"
+    "不得据此认定完成"
+)
+
+
+def triggered_f4(decision: TriggerDecision | None) -> bool:
+    """这次触发里有没有 F4（「存在没有证据的完成声明」，设计稿 §5 第 4 条）。
+
+    机械判据：只看 `decide_triggers` 写下的理由前缀。不读散文、不看结论，
+    也不重新算一遍缺口——触发条件只有一处判据（`decide_triggers`）。
+    """
+    if decision is None or not decision.run:
+        return False
+    return any(str(reason).startswith("F4") for reason in decision.reasons)
+
+
+def floor_unclaimed_gap(
+    report: SemanticReport, decision: TriggerDecision | None
+) -> SemanticReport:
+    """报告装配之后的**机械兜底**：有 F4 缺口 + 零发现 → 不给干净的 `pass`。
+
+    为什么要有这一条（实测缺陷）：这一轮本来就有「没有证据的完成声明」
+    （账本缺口），审查者却一条问题都没报——此时 `verdict=pass` 会被读成
+    "完成声明没问题"，无证据的完成照样过关。实测两次记录都是
+    `F4 … 0 条发现；审查者结论 pass`。
+
+    为什么是机械判据、不指望审查者自觉：**零发现什么也证明不了**。它既可能是
+    "交上去的改动真的没问题"，也可能是"审查者没抓到"——而这两件事原先在报告里
+    长得一模一样。有缺口时这份报告不许读成前者，所以：结论降级为 `fail`、
+    理由里点名缺的是什么、留下 `unclaimed_gap=True` 这个机读位，审查者原话
+    留在 `reviewer_verdict` 里（谁说的要分得清）。
+
+    **它一条发现都不编**：`findings` 一个字不动。T9 那一档（高严重度发现拦完成
+    声明）的门是 `findings`，兜底不从那扇门走——"没抓到"不等于"抓到了什么"。
+    完成声明本身的降级由 L4 账本按缺口办（`loop._evidence_ledger`），两段各管各的。
+
+    三条边界：
+
+    - `ran=False`（没跑 / 没有产出 / 没接上通道）：谈不上"零发现"，跳过。
+    - **「查不了」也照样降级**：`cannot_check` 说的是"这回没审出结论"，它不能
+      成为"零发现 → 干净通过"的挡箭牌。实测抓到的旁路就是它：审查者回一份
+      没有 `findings` 键的 JSON，`parse_review` 保留它那句 `verdict`，于是
+      **机读值仍是 pass、而专用来区分干净通过的位是 False**。人读文本是安全的
+      （`render()` 说的是「查不了」），但机读消费者只读 `verdict`。
+      两份事实并存：`cannot_check` 说"没审出来"，`verdict=fail` 说"别当成通过"。
+    - 已经有 `findings` = 审查者**给出了结构化发现**（不是零发现），这一条按
+      "零发现"设的判据让开。**相关性不做机械判断**：一条不相干的 nit 也算
+      "它给了东西"，而"这条发现跟缺口有没有关系"要靠读懂语义——那正是这一层
+      不越权替 L3 决定的事（§7.6：结论必须结构化，不引入自由文本判定）。
+    """
+    if not report.ran or report.findings:
+        return report
+    if not triggered_f4(decision):
+        return report
+    return replace(
+        report,
+        # 审查者本来就判 `fail` 时不动它（那是它的结论，兜底只补齐"零发现"这件事）。
+        verdict=report.verdict if report.verdict == "fail" else "fail",
+        reasons=tuple(report.reasons) + (F4_UNCLAIMED,),
+        unclaimed_gap=True,
+    )
 
 
 #: L3 的提示词。**三项材料 + 输出契约**，仅此而已。
@@ -1001,13 +1100,22 @@ def review(
         ran=True,
         trigger=decision.note,
         verdict=parsed.verdict,
+        # 审查者原话留一份：兜底可能改 `verdict`，"这是谁说的"必须答得出来。
+        reviewer_verdict=parsed.verdict,
         reasons=parsed.reasons,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )
     if not parsed.ok:
         # 「没结论」与「判不合格」分开，两者都**不据此阻断**（理由见 parse_review）。
-        return replace(report, cannot_check=parsed.why)
+        #
+        # 机械兜底**照跑**：`parse_review` 在「有 JSON、但没有 findings 键」那一种
+        # 形状里会**保留**它那句 `verdict`，于是机读值可以是 `pass` 而这次审查
+        # 其实什么都没给——那正是兜底要拦的"读成干净通过"。两份事实并存：
+        # `cannot_check` 说"没审出来"，兜底说"别当成通过"。
+        return floor_unclaimed_gap(
+            replace(report, cannot_check=parsed.why), decision
+        )
     facts = materials.facts(tools)
     checked = check_findings(parsed.findings, facts)
     located = drop_unknown_locations(
@@ -1018,11 +1126,19 @@ def review(
     conflicts = dict(checked.conflicts)
     for key, value in located.conflicts.items():
         conflicts[key] = conflicts.get(key, 0) + value
-    return replace(
-        report,
-        findings=kept + unverified,
-        unverified=len(unverified),
-        conflicts=conflicts,
+    # ---- 报告装配之后的机械兜底（`floor_unclaimed_gap`）----------------------
+    #
+    # 位置就在这儿、而且是**最后一步**：判据看的是**装配完**的那份报告
+    # （发现过了事实核对、位置过了剔除），而不是审查者的原始输出。放在前面
+    # 的话，"审查者报了三条、全被事实核对剔掉"就会从兜底的缝里漏过去。
+    return floor_unclaimed_gap(
+        replace(
+            report,
+            findings=kept + unverified,
+            unverified=len(unverified),
+            conflicts=conflicts,
+        ),
+        decision,
     )
 
 
@@ -1102,11 +1218,16 @@ def reading_payload(report: SemanticReport) -> dict[str, Any]:
         "ran": bool(report.ran),
         "trigger": report.trigger[:400],
         "verdict": report.verdict,
+        # 审查者原话（可能被机械判据改过 `verdict`，两个都给出才分得清谁说的）。
+        "reviewer_verdict": report.reviewer_verdict,
         "cannot_check": bool(report.cannot_check),
         "findings": len(report.findings),
         "by_severity": report.by_severity(),
         "unverified": report.unverified,
         "conflicts": dict(report.conflicts),
+        # 「有缺口、审查者零发现 → 结论被机械降级」：探针据此把这种 `pass`
+        # 与"审过了、真干净"分开（`verdict` 会被降级成 `fail`，这一个说为什么）。
+        "unclaimed_gap": bool(report.unclaimed_gap),
         "blocking": len(report.blocking),
         "prompt_tokens": report.prompt_tokens,
         "completion_tokens": report.completion_tokens,
@@ -1204,6 +1325,7 @@ __all__ = [
     "CANNOT_CHECK",
     "ChangeFacts",
     "CheckedFindings",
+    "F4_UNCLAIMED",
     "L3_BLOCKED_KIND",
     "L3_DETAIL_KIND",
     "L3_FINDING_KIND",
@@ -1227,6 +1349,7 @@ __all__ = [
     "decide_triggers",
     "drop_unknown_locations",
     "finding_paths",
+    "floor_unclaimed_gap",
     "known_paths",
     "merge_reports",
     "parse_review",
@@ -1237,4 +1360,5 @@ __all__ = [
     "review",
     "review_conflicts",
     "tool_names",
+    "triggered_f4",
 ]

@@ -45,7 +45,7 @@ DEMOTE_ORDER: tuple[str, ...] = (
 # 「热记忆占多少」这个数只有一个出处：登记表。装配层那个配额
 # （budget.quota("hot_memory")）也从同一个名字取值——两处各写一份时，
 # 改一处不动另一处，比没有这个旋钮更糟。
-HOT_RATIO = float(_limits.knob("hot_memory_ratio").default)
+HOT_RATIO = float(_limits.require_knob("hot_memory_ratio").default)
 
 # ---- 分节内的重要度启发式（设计稿 §7.1 的 P0 近似，见 importance_hint）----
 

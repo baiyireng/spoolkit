@@ -42,110 +42,39 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Collection
 
-from spoolkit.tools.edit import (
-    BROKEN_IMPORT_KIND,
-    DELETED_REFERENCE_KIND,
-    STALE_REFERENCE_KIND,
-    STALE_REFERENCES_KIND,
-    is_test_path,
-)
+from spoolkit.agent.signals import FindingKind, NoteKind, NOTE_KIND_BY_KIND
+from spoolkit.tools.edit import is_test_path
 
 # 严重度。只有两档：这一轮要做的是「检测 + 报出来」，
 # 分级放行（T1–T12 那一套）是后面几层的事，这里不假装有。
 HIGH = "高"
 INFO = "提示"
 
-#: 事件流里这类发现的 note kind。探针据它统计「高危信号出现几次」。
-AUDIT_KIND = "audit"
-
-#: 「测试被改弱」这一类 note 的 kind。与 audit 分开是因为探针要单独数它
-#: （`tests_weakened` 字段），而混在 audit 里就只能靠读散文认。
-TESTS_WEAKENED_KIND = "tests_weakened"
-
-#: 「完成声明没有证据」这一类 note 的 kind（探针的 `evidence_gaps` 字段）。
-EVIDENCE_GAPS_KIND = "evidence_gaps"
-
-#: L2 行为回归（P2）三类发现的 note kind。与 L1 分开是因为探针要单独数它们
-#: （「这一轮有没有行为回归」与「残留引用几条」是两件事），而混在 `audit` 里
-#: 就只能靠读散文认。kind 名与 `agent/review_behavior.py` 的判据名逐字一致——
-#: 那边是产出处，这边是出口映射。
-BEHAVIOR_CHANGED_KIND = "behavior_changed"
-CLI_SURFACE_CHANGED_KIND = "cli_surface_changed"
-PERFORMANCE_REGRESSED_KIND = "performance_regressed"
-
-#: L3 语义审查（P2 后半）发现的 note kind。与 L1/L2 分开的理由同上：探针要
-#: **单独数** `l3_findings`（它与 `review_findings` 的总数不是一回事），
-#: 混进 `audit` 就只能靠读散文认。判据名与 `agent/review_semantic.py`
-#: 里的 `L3_FINDING_KIND` 逐字一致——那边是产出处，这边是出口映射。
-SEMANTIC_FINDING_KIND = "semantic_finding"
-
-#: L3 的**过程读数**（触发条件、跑没跑、被事实核对剔除几条、为什么没给结论）。
-#: 与 L2 的 `behavior_readings` 同一个口径：它是排查材料，**不是发现**
-#: （不进 `REVIEW_NOTE_KINDS`，也不进 `review_findings`）。
-L3_READINGS_KIND = "l3_readings"
-#: 「L3 判了一次，结论是拦下完成声明」（探针的 `l3_blocked`）。
-L3_BLOCKED_KIND = "l3_blocked"
-
-# ---- P1：风险分级放行的两个 kind ---------------------------------------------
-#
-# 两者分开是因为**探针按 kind 数的是不同的东西**（§6 字段表）：
-#   - `ESCALATE_KIND`：主动请示了一次（`escalations`），带触发条件 id 与摘要指纹；
-#   - `ACTION_BLOCK_KIND`：拦下了一个**危险动作**（`blocked_actions`），
-#     拦的是那个动作，不是成果。
-#: 「该拦的没拦」也用它 —— 带 `blocked=False` 时是**缺陷证据**（recall 的读法）。
-ESCALATE_KIND = "escalate"
-ACTION_BLOCK_KIND = "action_block"
-#: 「不许宣称完成」那一次判定（§3.1）。它**不是**「成果不许落盘」：探针按它
-#: 数 `blocked_by_review`，并与 `check_ok` 一起派生出 `blocked_but_ok`。
-BLOCKED_REVIEW_KIND = "blocked_by_review"
-#: 同上，但**拦下的理由是「L1/L2 真的报了高严重度发现」**（不是纯规模/回归）。
-#: 探针据此把「有理由的阻断」与「误报」分开：`blocked_but_ok` 量的是
-#: 「被阻断但验收绿」的那一类**误报代价**（§4），把「验收判据看不见、
-#: 而机械判据看见了」的真缺陷也算进去，那个数字就永远非零、也永远没人看。
-BLOCKED_REVIEW_HARD_KIND = "blocked_by_review_finding"
-
-#: 判据名 → 事件流里的 note kind。**探针按 kind 数，不读散文**。
-_WEAKENED_KINDS = frozenset(
-    {
-        "test_deleted",
-        "test_data_deleted",
-        "test_data_changed",
-        "test_removed",
-        "test_skipped",
-        "assert_loosened",
-        "fixture_removed",
-        "conftest_collection_changed",
-        "pytest_addopts_weakened",
-        "pytest_config_changed",
-        "pytest_config_deleted",
-    }
-)
-
-#: 判据名 → 事件流里的 note kind（探针按它数，见 `note_kind`）。
-_NOTE_KIND_BY_KIND = {
-    **{kind: TESTS_WEAKENED_KIND for kind in _WEAKENED_KINDS},
-    # 残留引用与「删掉的文件还有人引用」是同一类读数（`stale_references`）。
-    STALE_REFERENCE_KIND: STALE_REFERENCES_KIND,
-    DELETED_REFERENCE_KIND: STALE_REFERENCES_KIND,
-    BROKEN_IMPORT_KIND: BROKEN_IMPORT_KIND,
-    # L2 的三条判据各自一个 kind（探针分开数）。
-    BEHAVIOR_CHANGED_KIND: BEHAVIOR_CHANGED_KIND,
-    CLI_SURFACE_CHANGED_KIND: CLI_SURFACE_CHANGED_KIND,
-    PERFORMANCE_REGRESSED_KIND: PERFORMANCE_REGRESSED_KIND,
-    # L3 语义审查的发现（探针单独数 `l3_findings`，同时进 `review_findings`）。
-    SEMANTIC_FINDING_KIND: SEMANTIC_FINDING_KIND,
-}
+#: 下面这些名字留在本模块，是因为调用方已经按它们 import。
+#: 值全部来自 `signals` 的两个枚举，这里不再各写一份字符串。
+AUDIT_KIND = NoteKind.AUDIT
+TESTS_WEAKENED_KIND = NoteKind.TESTS_WEAKENED
+EVIDENCE_GAPS_KIND = NoteKind.EVIDENCE_GAPS
+BEHAVIOR_CHANGED_KIND = FindingKind.BEHAVIOR_CHANGED
+CLI_SURFACE_CHANGED_KIND = FindingKind.CLI_SURFACE_CHANGED
+PERFORMANCE_REGRESSED_KIND = FindingKind.PERFORMANCE_REGRESSED
+SEMANTIC_FINDING_KIND = FindingKind.SEMANTIC_FINDING
+L3_READINGS_KIND = NoteKind.L3_READINGS
+L3_BLOCKED_KIND = NoteKind.L3_BLOCKED
+ESCALATE_KIND = NoteKind.ESCALATE
+ACTION_BLOCK_KIND = NoteKind.ACTION_BLOCK
+BLOCKED_REVIEW_KIND = NoteKind.BLOCKED_BY_REVIEW
+BLOCKED_REVIEW_HARD_KIND = NoteKind.BLOCKED_BY_REVIEW_FINDING
 
 
-def note_kind(kind: str, default: str = AUDIT_KIND) -> str:
+def note_kind(kind: FindingKind, default: NoteKind = AUDIT_KIND) -> NoteKind:
     """这条发现该用哪个 note kind 发出去。
 
     **探针按这个 kind 数**（`stale_references` / `tests_weakened` /
-    `broken_import`）——映射写在一处，事件流与探针字段不会各认一套。
+    `broken_import`）——映射从注册表派生，事件流与探针字段不会各认一套。
     """
-    return _NOTE_KIND_BY_KIND.get(kind, default)
+    return NOTE_KIND_BY_KIND.get(kind, default)
 
 #: 高严重度发现要单独顶出来一行。它同时是**升级挂点**的形状：
 #: 以后接「先请示后落盘 / 阻断」时，拦的就是这一行对应的发现。
@@ -156,7 +85,7 @@ ESCALATION_MARKER = "【高危】"
 class Finding:
     """一条机械判出来的发现。"""
 
-    kind: str          # 判据名（英文标识符，事件流与测试都按它取）
+    kind: FindingKind  # 判据名（FindingKind，不是 note kind）
     severity: str      # HIGH / INFO
     summary: str       # 一句话，人看
     detail: str = ""   # 证据（谁、差了多少、哪个文件）
@@ -245,7 +174,7 @@ def landing_in_progress(
         else "测试文件的原始内容里还写着旧名"
     )
     return Finding(
-        kind="landing_in_progress",
+        kind=FindingKind.LANDING_IN_PROGRESS,
         severity=INFO,
         summary=(
             f"这是**中间态**，不是代码失败：{pairs} 已经落盘，"
@@ -293,7 +222,7 @@ def tampering_suspected(
         return None
     extra = "；这次改动里同时有名字被改（先确认变短与该改名无关）" if renamed else ""
     return Finding(
-        kind="tampering_suspected",
+        kind=FindingKind.TAMPERING_SUSPECTED,
         severity=HIGH,
         summary=(
             "测试没过，**同时业务代码被改短**——像是为了让测试通过而删逻辑。"
@@ -431,7 +360,7 @@ def boundary_write(
         # 自己造出来的产出不算越界：这条判据管的是「动了不该动的东西」。
         return None
     return Finding(
-        kind="protected_write",
+        kind=FindingKind.PROTECTED_WRITE,
         severity=HIGH,
         summary=f"这次改动了受保护路径 {path}（{reason}）",
         detail=(
@@ -455,7 +384,7 @@ def scope_fallback_note(*, fallback_reason: str) -> Finding:
     found = _SCOPE_IN_REASON.search(fallback_reason)
     scope = found.group(1) if found else "?"
     return Finding(
-        kind="scope_fallback",
+        kind=FindingKind.SCOPE_FALLBACK,
         severity=INFO,
         summary=f"验证范围从 {scope} 回退到项目根：{fallback_reason}",
         detail="结论以项目根那次为准，不是静默换了判据。",
@@ -482,7 +411,7 @@ class AuditLog:
     def extend(self, audit: Audit) -> None:
         self.findings.extend(audit.findings)
 
-    def forget_kind(self, kinds: Collection[str]) -> None:
+    def forget_kind(self, kinds: frozenset[FindingKind]) -> None:
         """撤掉某一类判词（收尾**重判**之前用，见 `loop._rejudge_mechanical`）。
 
         账本原先只累加不清，而判词描述的是**某一版内容**：中途那一版上的残留
@@ -492,7 +421,7 @@ class AuditLog:
         """
         self.findings = [item for item in self.findings if item.kind not in kinds]
 
-    def of_kind(self, kind: str) -> list[Finding]:
+    def of_kind(self, kind: FindingKind) -> list[Finding]:
         return [item for item in self.findings if item.kind == kind]
 
     def high(self) -> list[Finding]:
@@ -721,6 +650,19 @@ def _added_switches(before: str, after: str) -> list[str]:
     return out
 
 
+_TEST_SOURCE_SUFFIXES = frozenset(
+    {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte"}
+)
+
+
+def _is_test_source(pure: PurePosixPath) -> bool:
+    """`.spec.ts` / `.test.js` 是测试代码。这一层没有该语言的改弱判据。"""
+    if pure.suffix.lower() not in _TEST_SOURCE_SUFFIXES:
+        return False
+    name = pure.name.lower()
+    return ".spec." in name or ".test." in name or name.startswith(("test_", "test."))
+
+
 def _line_of(text: str, needle: str) -> int:
     """`needle` 第一次出现的行号；找不到返回 0。"""
     position = text.find(needle)
@@ -742,7 +684,7 @@ def tests_weakened(
     pure = PurePosixPath(str(path).replace("\\", "/"))
     found: list[Finding] = []
 
-    def add(kind: str, severity: str, summary: str, detail: str, line: int) -> None:
+    def add(kind: FindingKind, severity: str, summary: str, detail: str, line: int) -> None:
         found.append(
             Finding(
                 kind=kind,
@@ -757,7 +699,7 @@ def tests_weakened(
     if deleted:
         if pure.name in TEST_CONFIG_NAMES:
             add(
-                "pytest_config_deleted",
+                FindingKind.PYTEST_CONFIG_DELETED,
                 INFO,
                 f"pytest 配置 {path} 被删了",
                 "测试怎么跑是由这份配置决定的，删掉它等于换了一套验收口径。",
@@ -765,7 +707,7 @@ def tests_weakened(
             )
         elif pure.suffix == ".py":
             add(
-                "test_deleted",
+                FindingKind.TEST_DELETED,
                 HIGH,
                 f"测试文件 {path} 被删了",
                 "删除测试文件就是把这条验收标准撤掉（验证层还会按原始内容判定，"
@@ -774,7 +716,7 @@ def tests_weakened(
             )
         else:
             add(
-                "test_data_deleted",
+                FindingKind.TEST_DATA_DELETED,
                 HIGH,
                 f"测试数据 {path} 被删了",
                 "这类文件是验收标准的一部分，改动它等于改了判据。",
@@ -791,7 +733,7 @@ def tests_weakened(
         if added:
             flags = "、".join(added)
             add(
-                "pytest_addopts_weakened",
+                FindingKind.PYTEST_ADDOPTS_WEAKENED,
                 HIGH,
                 f"pytest 配置新增了跳过类开关：{flags}",
                 f"addopts 现在会缩小或跳过测试集合（{path}："
@@ -801,7 +743,7 @@ def tests_weakened(
         for key in _NARROWING_KEYS:
             if key in old and old[key] != new.get(key):
                 add(
-                    "pytest_config_changed",
+                    FindingKind.PYTEST_CONFIG_CHANGED,
                     INFO,
                     f"pytest 配置的 {key} 被改了",
                     f"{old[key]!r} → {new.get(key)!r}（这决定哪些测试会被收集）。",
@@ -810,8 +752,14 @@ def tests_weakened(
         return found
 
     if not pure.suffix == ".py":
+        # 新建文件没有「改之前」的正文，谈不上把判据改弱。
+        if not deleted and not before:
+            return found
+        # 测试源码不是 golden。没有该语言的改弱判据时不报，也不写成「非代码」。
+        if _is_test_source(pure):
+            return found
         add(
-            "test_data_changed",
+            FindingKind.TEST_DATA_CHANGED,
             INFO,
             f"测试数据 {path} 被改了",
             "非代码的测试数据/golden 文件被改：判据本身变了，不是实现变好。",
@@ -824,7 +772,7 @@ def tests_weakened(
     after_tests = _def_line_map(after, _TEST_DEF_PATTERN)
     for name in sorted(set(before_tests) - set(after_tests)):
         add(
-            "test_removed",
+            FindingKind.TEST_REMOVED,
             HIGH,
             f"测试用例 {name} 没了",
             f"改动前它在第 {before_tests[name]} 行；删用例等于撤掉验收标准。",
@@ -835,7 +783,7 @@ def tests_weakened(
         after_fixtures = _def_line_map(after, _FIXTURE_DEF_PATTERN)
         for name in sorted(set(before_fixtures) - set(after_fixtures)):
             add(
-                "fixture_removed",
+                FindingKind.FIXTURE_REMOVED,
                 HIGH,
                 f"conftest 里的 fixture {name} 没了",
                 f"改动前它在第 {before_fixtures[name]} 行；删 fixture 会让一批"
@@ -845,7 +793,7 @@ def tests_weakened(
         for hook in _COLLECT_HOOKS:
             if hook in after and hook not in before:
                 add(
-                    "conftest_collection_changed",
+                    FindingKind.CONFTEST_COLLECTION_CHANGED,
                     HIGH,
                     f"conftest 新增了收集期构造 {hook}",
                     "它在收集阶段决定跑哪些用例，是「跳过测试」的另一种写法。",
@@ -861,7 +809,7 @@ def tests_weakened(
             continue
         flag = pattern.replace("\\", "")
         add(
-            "test_skipped",
+            FindingKind.TEST_SKIPPED,
             HIGH,
             f"新增了跳过/xfail 写法（{flag}）",
             f"改动前 {old_hits} 处、现在 {len(new_hits)} 处——测试被跳过就等于"
@@ -881,7 +829,7 @@ def tests_weakened(
             }
         ]
         add(
-            "assert_loosened",
+            FindingKind.ASSERT_LOOSENED,
             INFO,
             f"断言少了 {len(old_asserts) - len(new_asserts)} 条",
             f"改动前 {len(old_asserts)} 条、现在 {len(new_asserts)} 条"

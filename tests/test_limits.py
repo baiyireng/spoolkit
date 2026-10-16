@@ -38,8 +38,15 @@ def test_安全边界不提供覆盖() -> None:
 
 
 def test_没登记过的名字要报错() -> None:
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError, match="unknown limit: 这个不存在"):
         limits.resolve("这个不存在")
+
+
+def test_require_knob没登记就抛() -> None:
+    """写死的名字不存在时在取用处停，返回值是登记表里的那一条。"""
+    with pytest.raises(KeyError, match="unknown limit: 不存在的旋钮"):
+        limits.require_knob("不存在的旋钮")
+    assert limits.require_knob("repeat_block_at").name == "repeat_block_at"
 
 
 def test_覆盖可以落盘再读回(tmp_path: Path) -> None:
