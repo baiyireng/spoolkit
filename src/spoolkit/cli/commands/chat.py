@@ -17,6 +17,7 @@ from spoolkit.cli.commands.run import (
     _settle_pending,
 )
 from spoolkit.cli.options import resolve_policy, resolve_scope, resolve_window
+from spoolkit.cli.term import print_md, print_out
 from spoolkit.cli.runtime import (
     LoopWiring,
     assemble_loop,
@@ -189,10 +190,11 @@ def _turn(args, project_root, gateway, window, memory) -> int:
             meta=f"{result.usage()}，{'完成' if result.finished else '未完成'}",
         )
     for line in result.trace:
-        print(line)
-    print("---")
+        print_out(line, markup=False, style="muted")
+    print_out("---", markup=False, style="muted")
     # 与 `spool run` 同一条口径：结论与判词分开印（见 `LoopResult.report_text`）。
-    print(result.report_text if result.report_text else result.final)
+    # TTY 下 Markdown 渲染；管道 / NO_COLOR 仍是纯文本（见 `print_md`）。
+    print_md(result.report_text if result.report_text else result.final or "")
     _settle_pending(args, project_root, pending)
     return 0 if result.finished else 1
 

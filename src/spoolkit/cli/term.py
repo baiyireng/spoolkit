@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.markup import escape
 from rich.theme import Theme
 
@@ -83,6 +84,22 @@ def print_err(
     _emit(console(stderr=True), renderable, markup=markup, style=style)
 
 
+def print_md(text: str, *, stderr: bool = False) -> None:
+    """Print model/report body as Markdown on a color TTY; plain otherwise.
+
+    Blank / whitespace-only input prints nothing (no spurious blank-only dump).
+    ``--events`` callers must not use this on the JSON stdout channel.
+    """
+    body = "" if text is None else str(text)
+    if not body.strip():
+        return
+    con = console(stderr=stderr)
+    if con.is_terminal and not con.no_color:
+        con.print(Markdown(body, code_theme="monokai"))
+        return
+    con.print(body, markup=False, highlight=False)
+
+
 def _emit(
     con: Console,
     renderable: object,
@@ -106,6 +123,7 @@ __all__ = [
     "console",
     "escape",
     "print_err",
+    "print_md",
     "print_out",
     "reset_consoles",
     "state_style",

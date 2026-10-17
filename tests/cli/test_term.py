@@ -63,3 +63,44 @@ def test_style_wraps_escaped_plain(monkeypatch, capsys) -> None:
     out = capsys.readouterr().out
     assert "ok path [x]" in out
     assert "[ok]" not in out  # tags consumed when TTY; non-TTY still plain text
+
+
+def test_print_md_force_terminal_emits_ansi(monkeypatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    term.reset_consoles()
+    buf = io.StringIO()
+    c = Console(
+        file=buf,
+        theme=term.THEME,
+        force_terminal=True,
+        color_system="truecolor",
+        soft_wrap=True,
+    )
+    # Drive the same helper path by temporarily swapping the shared console.
+    monkeypatch.setattr(term, "console", lambda *, stderr=False: c)
+    term.print_md("# Title\n\n- item\n\n`code`")
+    out = buf.getvalue()
+    assert "Title" in out
+    assert "item" in out
+    assert "code" in out
+    assert "\x1b[" in out
+
+
+def test_print_md_no_color_is_plain(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    term.reset_consoles()
+    term.print_md("# Heading\n\nplain **bold** text")
+    out = capsys.readouterr().out
+    assert "\x1b[" not in out
+    assert "Heading" in out or "plain" in out
+    assert "bold" in out or "plain" in out
+
+
+def test_print_md_blank_skips_or_empty_line(capsys) -> None:
+    term.reset_consoles()
+    term.print_md("")
+    term.print_md("   \n")
+    out = capsys.readouterr().out
+    # Empty / whitespace-only: no body text; at most blank lines.
+    assert "None" not in out
+    assert "#" not in out

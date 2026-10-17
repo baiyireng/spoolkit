@@ -43,6 +43,7 @@ from spoolkit.cli.settle import (
     verification_header,
 )
 from spoolkit.cli.events import EventWriter, settle_with_events
+from spoolkit.cli.term import print_md, print_out
 from spoolkit.kernel.target import resolve_target
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.transcript import ASSISTANT, USER, record_message
@@ -518,15 +519,16 @@ def _standard(args, project_root, gateway, window, pending) -> int:
         )
 
     for line in result.trace:
-        print(line)
-    print("---")
-    print(result.usage())
-    print("---")
+        print_out(line, markup=False, style="muted")
+    print_out("---", markup=False, style="muted")
+    print_out(result.usage(), markup=False, style="muted")
+    print_out("---", markup=False, style="muted")
     # 收尾报告走 `report_text`：模型写的结论与系统判词各占一行、各带各的
     # 标记（`【模型结论】` / `⚠`）。直接印 `final` 的话，「这一段里哪一句是
     # 模型说的」读不出来——真机对照 33 次没结论的运行里，用户读到的唯一
     # 正文就是判词「已达步数上限，任务未完成」。
-    print(result.report_text if result.report_text else result.final)
+    # Human 路径：TTY 下 Markdown；管道 / NO_COLOR 纯文本。`--events` 不走这里。
+    print_md(result.report_text if result.report_text else result.final or "")
 
     _settle_pending(args, project_root, pending, result)
     return 0 if result.finished else 1
@@ -567,27 +569,27 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
         verify=make_verifier(project_root, pending),
     )
     for line in delegated.trace:
-        print(line)
-    print("--- 实现 ---")
-    print(delegated.implementer_final)
-    print("--- 独立审查 ---")
-    print(delegated.reviewer_final)
+        print_out(line, markup=False, style="muted")
+    print_out("--- 实现 ---", markup=False, style="muted")
+    print_md(delegated.implementer_final or "")
+    print_out("--- 独立审查 ---", markup=False, style="muted")
+    print_md(delegated.reviewer_final or "")
     if delegated.rejected:
-        print("--- 审查未通过 ---")
-        print("改动还在待确认清单里，没有自动落盘。理由：")
+        print_out("--- 审查未通过 ---", markup=False, style="muted")
+        print_out("改动还在待确认清单里，没有自动落盘。理由：", markup=False)
         for reason in delegated.review.reasons:
-            print(f"  - {reason}")
+            print_out(f"  - {reason}", markup=False)
     elif delegated.review is not None and delegated.review.inconclusive:
-        print("--- 审查没有结论 ---")
-        print("审查者自己没跑完，所以这次改动既没被否定也没被确认：")
+        print_out("--- 审查没有结论 ---", markup=False, style="muted")
+        print_out("审查者自己没跑完，所以这次改动既没被否定也没被确认：", markup=False)
         for reason in delegated.review.reasons:
-            print(f"  - {reason}")
+            print_out(f"  - {reason}", markup=False)
     elif delegated.too_big:
         # 没送审，就没有「审查结论」。不单列这一支的话，上面那两行都不成立，
         # 用户会以为这次派发是正常结束的。
-        print("--- 这块活太大，子智能体没做完 ---")
-        print(delegated.too_big)
-        print("拆小之后再派，或者加 --subagent-steps 再来一次。")
+        print_out("--- 这块活太大，子智能体没做完 ---", markup=False, style="muted")
+        print_md(delegated.too_big or "")
+        print_out("拆小之后再派，或者加 --subagent-steps 再来一次。", markup=False)
     _settle_pending(args, project_root, pending, delegated)
     return 0
 

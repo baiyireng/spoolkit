@@ -105,6 +105,8 @@ Human list may use color in a TTY; pipes and `NO_COLOR` stay plain.
 | `--no-mcp` / `--no-setup` | 不挂外挂 MCP / 首次运行不弹向导（脚本、CI 用）|
 | `--web*` | 联网取用，见文末 |
 
+Human 收尾（`report_text` / 派发结论）在 TTY 下可渲染 Markdown；管道与 `NO_COLOR` 仍为纯文本。`--events` 时 stdout 仍只有 JSON 行，不受影响。
+
 ## spool plan
 
 仅拆解并把计划落盘，不执行。参数：`--goal`（**必给**）、`--session`、`--limit`、`--cover`，以及供应商参数与 `--root` / `--no-setup` / `--no-mcp`。
@@ -114,6 +116,8 @@ Human list may use color in a TTY; pipes and `NO_COLOR` stay plain.
 ## spool chat
 
 对话式使用：一行一句，多轮共用同一会话。`/history` 看记录，`/exit` 退出。参数与 `run` 基本一致（不含自主编排一组）。最近若干轮往来截断后带入本轮提示，用于理解指代；工具调用往返不带入下一轮。
+
+Human 结论在 TTY 下可渲染 Markdown；管道与 `NO_COLOR` 仍为纯文本。
 
 ## spool serve
 

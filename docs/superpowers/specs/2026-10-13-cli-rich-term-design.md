@@ -102,7 +102,8 @@ Theme 键（固定集合，命令不得硬编码颜色码）：
 ## 6. 后续
 
 - **已推进**：列表/检查类命令走 `print_out`/`print_err`，并上语义色（`config` `env` `session` `policy` `limits` `init` `extra` `diagnose` `mcp-servers` `ws` `status` `service` `shortcuts` 起手行等；`--json` 仍裸 `print`）。
-- **仍待做**：`chat` / `run` / `plan` / `settle` / `bridge` / `hub` / `bench` 与模型正文：`Markdown` / `Syntax` / 可选 `Live`
+- **二期 2a 已做**：`term.print_md`；`chat` / `run`（非 `--events`）结论文本 TTY 下 Rich Markdown；分隔线/usage/trace muted。派发路径的 implementer/reviewer final 同口径。
+- **仍待做**：`plan` `_say` / `settle` / `bridge` / `hub` / `bench`；流式 `Live`；Syntax 主题细调
 
 ---
 
