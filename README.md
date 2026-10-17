@@ -108,7 +108,6 @@ Windows `%APPDATA%\spoolkit\.env`），**非密钥默认值只放 `config.toml`*
 | [bridge](docs/bridge.md) · [mcp](docs/mcp.md) | 通道 / MCP |
 | [rationale](docs/rationale.md) | 设计取舍（结论+指针） |
 | [benchmarking](docs/benchmarking.md) · [dogfooding](docs/dogfooding.md) | 基准 · 实测日志 |
-| [handoff](docs/handoff.md) | **交接：接下来要做的**（关口用法 · 已做完 · 待办） |
 | [superpowers/specs](docs/superpowers/specs/) | 历史设计档 |
 
 ## 开发与许可

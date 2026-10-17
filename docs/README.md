@@ -10,7 +10,6 @@
 | [mcp.md](mcp.md) | MCP 被调用 / 调用外挂 |
 | [rationale.md](rationale.md) | 设计取舍（结论 + 指针，细节在 dogfooding/specs） |
 | [benchmarking.md](benchmarking.md) / [roadmap.md](roadmap.md) | 基准与路线 |
-| [handoff.md](handoff.md) | **交接：接下来要做的**（关口怎么用 / 已做完什么 / 待办清单） |
 | [dogfooding.md](dogfooding.md) | 实测日志（**不精简**，按日期追加） |
 | `superpowers/` | 历史设计/计划档 |
 
