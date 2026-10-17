@@ -67,9 +67,11 @@ pythonpath = ["src"]
 #
 # 严格度**分阶段**推，不一步到位压死开发：
 #   阶段 0：不要求注解，先把真错抓出来 + 基线棘轮（只对新错报红）；
-#   阶段 1（现在）：`spoolkit.agent` 开严，见下面的 overrides。
-#     不开 `disallow_untyped_defs` / `disallow_untyped_calls`：那是注解债。
-#   阶段 2：注解债还完后全局 `strict`。
+#   阶段 1：`spoolkit.agent` 开严，见下面的 overrides。抓的是类型对不上。
+# 不开 `disallow_untyped_defs` / `disallow_untyped_calls` / 全局 `strict`。
+# 注解只加在复杂、有歧义、或有重要注意事项的函数上。简单函数不必为了
+# 满足 mypy 的「每个函数都要注解」去补。不是严重、也不会引发严重后果的
+# 类型提示，不在这上面花批次。
 [tool.mypy]
 files = ["src/spoolkit"]
 # 取 `requires-python` 的下限：这样「用到了 3.13+ 才有的标准库/语义」会被抓出来，

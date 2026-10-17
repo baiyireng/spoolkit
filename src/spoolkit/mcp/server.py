@@ -49,7 +49,7 @@ class WorkspaceRunner(Runner):
     它是"把一件事交给它做完"，不需要调用方先了解我们的计划机制。
     """
 
-    def __init__(self, *args, mode: str = "task", **kwargs) -> None:
+    def __init__(self, *args: Any, mode: str = "task", **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.mode = mode
 

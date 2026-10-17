@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from collections.abc import Callable
 from typing import Sequence
 
 from spoolkit import health as health_mod
@@ -100,7 +101,7 @@ STOP_WAIT = 8.0
 
 def health_snapshot(
     extra_args: Sequence[str] = (),
-    extra_health=None,
+    extra_health: Callable[[], dict] | None = None,
     *,
     timeout: float = health_mod.PROBE_TIMEOUT_SECONDS,
 ) -> dict:
@@ -314,7 +315,7 @@ class Runner:
         session: str = "cli",
         extra_args: Sequence[str] = (),
         history_limit: int = HISTORY_LIMIT,
-        extra_health=None,
+        extra_health: Callable[[], dict] | None = None,
     ) -> None:
         self.project_root = project_root
         self.session = session

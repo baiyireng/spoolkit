@@ -46,7 +46,7 @@ from spoolkit.agent.audit import (
 )
 from spoolkit.agent.observations import (
     CHECKABLE_SUFFIXES,
-    ObservationBook,
+    Observation, ObservationBook,
     facts_for_span,
     feature_brief,
     pointer,
@@ -120,7 +120,7 @@ from spoolkit.agents.supervisor import (
     supervise,
 )
 from spoolkit.config import Config
-from spoolkit.context.assembler import Assembler
+from spoolkit.context.assembler import Assembler, AssembleResult
 from spoolkit.context.budget import Budget, compact_trigger
 from spoolkit.context.sections import Section
 from spoolkit.context import templates as T
@@ -144,8 +144,8 @@ from spoolkit.tools.edit import (
     STAGE_MARKER,
     STALE_REFERENCE_KIND,
     TOKEN_PARAM,
-    broken_local_imports,
-    is_test_path,
+    MechanicalHit, broken_local_imports,
+    StagedRewrite, is_test_path,
     lingering_hits,
     lingering_note,
     staged_rewrite_key,
@@ -833,7 +833,7 @@ _HIT_SUMMARY = {
 #: 派生集合见 `MECHANICAL_KINDS`、`BEHAVIOR_KINDS`、`L3_KINDS`。
 
 
-def _hit_finding(hit) -> Finding:
+def _hit_finding(hit: MechanicalHit) -> Finding:
     """把一条机械命中翻成发现：`文件:行` 落在 `detail`，判据名落在 `kind`。
 
     高严重度**不阻断**（P0 的纪律）：严重度只用于「收尾报告里顶一行」，
@@ -1901,7 +1901,7 @@ class AgentLoop:
         prefetched: str = "",
         hot: str = "",
         lesson_text: str = "",
-    ):
+    ) -> AssembleResult:
         """按当前状态与历史装配本轮上下文。
 
         预取内容与解析反馈共用 retrieval 预算：它们语义相同，都是外部检索来的内容。
@@ -5695,7 +5695,7 @@ class AgentLoop:
             )
         return ""
 
-    def _staged_for(self, path: str):
+    def _staged_for(self, path: str) -> StagedRewrite | None:
         """这个路径上还没交代完的暂存重写。确认前它不在读取视图里。"""
         if self.pending is None or not path:
             return None
@@ -5705,7 +5705,8 @@ class AgentLoop:
             stored = path
         for record in self.pending.staged_items():
             if record.path in (stored, path):
-                return record
+                # pending 在循环上仍是 Any；staged_items 的元素就是暂存重写。
+                return cast(StagedRewrite, record)
         return None
 
     def _staged_note(self, path: str) -> str:
@@ -5795,7 +5796,7 @@ class AgentLoop:
         span: str = "",
         span_key: str = "",
         text: str | None = None,
-    ):
+    ) -> Observation | None:
         if suffix_of(path) not in CHECKABLE_SUFFIXES:
             return None
         body = text if text is not None else self._text_of(path)
@@ -6845,7 +6846,7 @@ class AgentLoop:
             return 0
 
     @staticmethod
-    def _note_progress(state: TaskState, call, result) -> None:
+    def _note_progress(state: TaskState, call: ToolCall, result: ToolResult) -> None:
         """把「确实做了的事」记进状态，而不是等模型自己填。
 
         之前 done 一直空着——模型只填 current，从不记进度。指望它每次都

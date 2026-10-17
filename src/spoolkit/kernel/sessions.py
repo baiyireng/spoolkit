@@ -21,6 +21,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from spoolkit.kernel import jsonstore
 from spoolkit.memory.store import init_memory_schema, list_sessions as db_sessions
@@ -78,7 +79,7 @@ def read_meta(root: Path | str, session_id: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def write_meta(root: Path | str, session_id: str, **changes) -> dict:
+def write_meta(root: Path | str, session_id: str, **changes: Any) -> dict[str, Any]:
     """合并写：调用方只需要给要改的键。"""
 
     def mutate(payload: object) -> dict:
@@ -90,7 +91,7 @@ def write_meta(root: Path | str, session_id: str, **changes) -> dict:
     return jsonstore.update_json(meta_path(root, session_id), mutate, {})
 
 
-def _db(root: Path | str):
+def _db(root: Path | str) -> sqlite3.Connection | None:
     """只读打开记忆库；坏了、没有，就返回 None（列表少几行，不炸）。"""
     path = Path(root) / ".agent" / "memory.db"
     if not path.is_file():

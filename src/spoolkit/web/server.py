@@ -51,7 +51,7 @@ import time
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from spoolkit.health import (
     PROBE_TIMEOUT_SECONDS,
@@ -713,11 +713,11 @@ def _removed_rows(target: Target | None) -> list[dict]:
     ]
 
 
-def _handler_for(state: WebState):
+def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
-        def log_message(self, *args) -> None:
+        def log_message(self, *args: Any) -> None:
             """默认会往 stderr 刷每一行请求，本地调试时全是噪音。"""
 
         def _json(self, status: int, payload: dict) -> None:

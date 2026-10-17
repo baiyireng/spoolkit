@@ -215,7 +215,7 @@ class LlamaCppGateway:
                 return candidate
         return None
 
-    def token_counter(self):
+    def token_counter(self) -> "LlamaCppTokenCounter":
         """这个供应商能给出**真实**分词结果的计数器。
 
         预算必须建立在真实计数上：估算分词器和服务端的偏差在中文/代码混排时

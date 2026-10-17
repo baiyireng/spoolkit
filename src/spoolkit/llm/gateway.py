@@ -3,7 +3,7 @@
 import contextvars
 import threading
 import time
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from spoolkit.llm.types import ChatRequest, ChatResponse
 
@@ -51,7 +51,7 @@ class CountingGateway:
         self.completion_tokens += response.completion_tokens
         return response
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
 
@@ -102,7 +102,7 @@ class WaitingGateway:
         inner: ModelGateway,
         on_wait: Callable[[int, float | None], None] | None = None,
         heartbeat: float = HEARTBEAT_SECONDS,
-        clock=time.monotonic,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._inner = inner
         self.on_wait = on_wait
@@ -154,11 +154,13 @@ class WaitingGateway:
             return None
         return float(value)
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
 
-def attach_wait_listener(gateway, on_wait) -> None:
+def attach_wait_listener(
+    gateway: object, on_wait: Callable[[int, float | None], None]
+) -> None:
     """找到 WaitingGateway（可能被 CountingGateway 包着）并绑回调。找不到就静默。"""
     current = gateway
     for _ in range(8):

@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from spoolkit.settings import McpServer
 from spoolkit.tools.registry import ToolRegistry
@@ -252,7 +252,9 @@ def register_mcp_tools(
     return registered
 
 
-def _handler(client: McpClient, tool_name: str, announce: Any = None):
+def _handler(
+    client: McpClient, tool_name: str, announce: Any = None
+) -> Callable[[dict[str, Any]], ToolResult]:
     def call(arguments: dict) -> ToolResult:
         try:
             return ToolResult(ok=True, content=client.call_tool(tool_name, arguments))

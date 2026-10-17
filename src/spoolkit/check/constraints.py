@@ -37,7 +37,7 @@ class Violation:
     severity: str = "error"
 
 
-def _parameter_count(node) -> int:
+def _parameter_count(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
     args = node.args
     total = len(args.posonlyargs) + len(args.args) + len(args.kwonlyargs)
     if args.vararg is not None:
@@ -54,7 +54,7 @@ def _check_functions(source: str, limits: Limits) -> list[Violation]:
     tree = ast.parse(source)
     found: list[Violation] = []
 
-    def walk(body, depth: int, parent: str | None) -> None:
+    def walk(body: list[ast.stmt], depth: int, parent: str | None) -> None:
         for node in body:
             if isinstance(node, ast.ClassDef):
                 walk(node.body, depth, node.name if parent is None else f"{parent}.{node.name}")
