@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from spoolkit.cli.commands.serve import extra_from_serve_args
+from spoolkit.cli.term import print_err
 from spoolkit.kernel.target import Target, resolve_target
 from spoolkit.web.server import serve
 
@@ -80,7 +81,7 @@ def spawn_bridge(
     argv = bridge_child_argv(args, root)
     if not argv:
         return []
-    print(f"通道：{' '.join(argv[3:])}", file=sys.stderr)
+    print_err(f"通道：{' '.join(argv[3:])}", markup=False)
     return [subprocess.Popen(argv)]
 
 
@@ -100,9 +101,10 @@ def stop_children(children: list[subprocess.Popen]) -> None:
 def hub_command(args: argparse.Namespace) -> int:
     channel = str(getattr(args, "channel", "") or "").strip()
     if channel and channel not in CHANNELS:
-        print(
+        print_err(
             "未知通道：" + channel + "。可选：" + "、".join(CHANNELS),
-            file=sys.stderr,
+            markup=False,
+            style="bad",
         )
         return 2
 

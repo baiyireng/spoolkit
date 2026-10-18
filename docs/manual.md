@@ -20,7 +20,7 @@
 
 ## 配置
 
-分层表见 [getting-started.md](getting-started.md#配置与密钥)。要点：
+分层表见 [README § 配置](../README.md#配置)。要点：
 
 - 非密钥：`config.toml`（白名单键）
 - 密钥：`.env`；缺凭据报错打印「找过的位置 + 键名」，不打印值

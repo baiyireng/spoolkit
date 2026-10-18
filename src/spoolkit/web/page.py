@@ -39,10 +39,10 @@
 - **回复长在同一张消息卡片里，思考过程可折叠、事后还能回看**：一轮开始时先摆一张
   助手卡片（占位"生成中"），`final` 一到就地换成真正的回复；`/state` 稍后把同一条
   从记忆库里再送一次时**认领**同一张卡片（不新建节点、不重复一条）。步骤 / 工具调用 /
-  失败详情进这张卡片上的「思考过程」，**默认收起**（收起时一个节点都不建）。
-  刷新页面、切走再切回之后，页面按 `/state` 里每条消息带着的 `trace`（服务端**只增**
-  的字段，数据来自事件流与记忆库，没有第二份数据库）重新画出来；失败那一轮还会把
-  "哪一步 / 哪个地址 / 可能原因 / 下一步敲什么"直接画在卡片里。
+  失败详情进这张卡片上的「思考过程」：**运行中自动展开**（进度轴看得见），成功收尾后
+  再收起；历史消息默认收起（收起时一个节点都不建）。同一 phase 的 `wait` **替换**末行，
+  不堆心跳。刷新 / 切走再切回后按 `/state` 里每条消息的 `trace`（服务端只增）重画；
+  失败那一轮还会把「哪一步 / 哪个地址 / 可能原因 / 下一步敲什么」画在卡片里。
 - **会话的「移除」是两次点击**：第一下只把那一行变成确认态，第二下才发请求；
   服务端把它按**归档**处理（数据不动、可恢复），已移除的那几条在左栏单独一段里
   点「恢复」就回来。
@@ -1479,11 +1479,15 @@ function makeTrace() {
 
 function traceOpen(box) { return !box._body.classList.contains('hidden'); }
 
-function toggleTrace(box) {
-  const open = !traceOpen(box);
+function setTraceOpen(box, open) {
   box._body.classList.toggle('hidden', !open);
   box._head.setAttribute('aria-expanded', open ? 'true' : 'false');
   if (open) { drawTraceBody(box); }
+  else { box._body.replaceChildren(); }  // 收起时不占节点（与「默认收起」同口径）
+}
+
+function toggleTrace(box) {
+  setTraceOpen(box, !traceOpen(box));
 }
 
 // 标题那一行：几行 + **有没有失败**。一行都没有时也要说得出"这里现在是空的"，
@@ -1580,10 +1584,12 @@ function liveTraceLine(data) {
     };
   }
   if (kind === 'wait') {
-    const phase = data.phase ? String(data.phase) + '：' : '';
-    let text = phase + WAIT_PREFIX + ' ' + data.elapsed + 's';
+    const phase = data.phase ? String(data.phase) : '';
+    const head = phase ? phase + '：' : '';
+    let text = head + WAIT_PREFIX + ' ' + data.elapsed + 's';
     if (data.limit) { text += ' / 上限 ' + data.limit + 's'; }
-    return {type: 'wait', text: text};
+    // phase 单独带着：同一阶段的心跳要**替换**末行，不能堆几十行 15s/30s。
+    return {type: 'wait', text: text, phase: phase};
   }
   if (kind === 'await') {
     return {
@@ -1628,8 +1634,24 @@ function ensureLive() {
   wrap.appendChild(bubble);
   // `turnGoal` 是"这张卡片属于哪一轮"：刷新 / 补帧时靠它认出"还是同一轮"，
   // 不会又摆一张占位卡片出来。
-  live = {wrap: wrap, trace: trace, bubble: bubble, done: false, turnGoal: ''};
+  live = {wrap: wrap, trace: trace, bubble: bubble, done: false, turnGoal: '',
+    streamed: false};
   return live;
+}
+
+// assistant delta：第一次把「生成中」清掉，之后追加纯文本（final 再整段覆盖）。
+function appendDelta(piece) {
+  if (!piece) { return; }
+  const stick = atBottom();
+  const card = ensureLive();
+  if (!card.streamed) {
+    card.bubble.className = 'bubble';
+    card.bubble.textContent = '';
+    card.streamed = true;
+  }
+  card.bubble.textContent += piece;
+  if (stick) { scrollDown(); }
+  updateToBottom();
 }
 
 function addTraceLine(line) {
@@ -1646,11 +1668,37 @@ function addTraceLine(line) {
 // 为什么需要它：用量那条事件可能在结局**之后**才到（实测现场就是这样），
 // 那时 `live.done` 已经是 true，`ensureLive()` 会另起一张空占位卡——页面上于是
 // 多出一张只有一行用量的"幽灵回复卡"。往已有的那张追加就没有这个问题。
+//
+// wait：同一 phase 替换末行（心跳计时重置时 phase 会变，例如「输出加长」）。
+// 运行中自动展开思考过程，让进度轴看得见（设计 interactive-harness §3.4）。
 function pushTraceLine(card, line) {
   if (card === null || card === undefined || line === null || line === undefined) { return; }
-  card.trace._lines.push(line);
+  const lines = card.trace._lines;
+  if (line.type === 'wait' && lines.length) {
+    const last = lines[lines.length - 1];
+    if (last.type === 'wait'
+        && String(last.phase || '') === String(line.phase || '')) {
+      lines[lines.length - 1] = line;
+      drawTraceHead(card.trace);
+      if (traceOpen(card.trace)) {
+        const body = card.trace._body;
+        if (body.lastChild) { body.removeChild(body.lastChild); }
+        body.appendChild(traceLineNode(line));
+      }
+      // 仅 live 卡（done === false）自动展开；历史卡无 done 字段，保持默认收起。
+      if (card.done === false && !traceOpen(card.trace)) {
+        setTraceOpen(card.trace, true);
+      }
+      return;
+    }
+  }
+  lines.push(line);
   drawTraceHead(card.trace);
-  if (traceOpen(card.trace)) { drawTraceBody(card.trace); }
+  if (card.done === false && !traceOpen(card.trace)) {
+    setTraceOpen(card.trace, true);
+  } else if (traceOpen(card.trace)) {
+    drawTraceBody(card.trace);
+  }
 }
 
 /* ══ 收尾报告的**分档**：结论段进气泡，详情行折进「思考过程」 ══
@@ -1713,13 +1761,17 @@ function finishLive(ok, text, extra, stopped) {
     fillReport(card, text);
     pendingReplies.push({card: card, text: String(text || '（没有产出）')});
     if (pendingReplies.length > 4) { pendingReplies.shift(); }
+    // 跑完收起思考过程（运行中展开过）；失败则保持展开。
+    if (card.trace) { setTraceOpen(card.trace, false); }
   } else if (stopped) {
     // 手动停止**不是失败**：低调说一句，别给它套一个红色的失败块。
     card.bubble.className = 'bubble stopped';
     card.bubble.textContent = redact(text) || '本轮已停止（已产出的内容保留）';
+    if (card.trace) { setTraceOpen(card.trace, false); }
   } else {
     notifyFailure('失败：', text, explainFailure(text, extra));
     failIntoBubble(card.bubble, '失败：', text, extra);
+    if (card.trace) { setTraceOpen(card.trace, true); }
   }
   if (stick) { scrollDown(); }
   updateToBottom();
@@ -2878,8 +2930,13 @@ function onEvent(event) {
     return;
   }
   // 步骤 / 工具 / 系统说的一句话 / 等待心跳：全部进这张卡片的「思考过程」
-  // （默认收起，点开可看）。以前它们是对话流里一行行常驻的细字——那一屏既是
-  // "挤"，又让"刷新之后就再也回看不了"变成必然。
+  // （运行中自动展开；成功收尾后再收起）。
+  if (data.type === 'delta') {
+    // 正文流式：主气泡增量追加（final 再用完整文本覆盖，防漏片）。
+    setThinking(true);
+    appendDelta(String(data.text || ''));
+    return;
+  }
   if (data.type === 'step' || data.type === 'tool'
       || data.type === 'note' || data.type === 'wait') {
     // 工具回来就说明模型那一口气过去了，思考指示先灭；下一拍 wait 会再亮

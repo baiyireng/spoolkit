@@ -2742,6 +2742,11 @@ class AgentLoop:
             try:
                 _call_started = time.time()
                 with wait_phase("主循环"):
+                    self._final_tap = None
+                    # 每轮模型调用独立记账；截断重试仍复用本轮已上屏前缀。
+                    self._streamed_final = ""
+                    self._truncation_replay = False
+                    self._retry_final_acc = ""
                     response = chat_with_escalation(
                         self.gateway,
                         ChatRequest(
@@ -2749,6 +2754,8 @@ class AgentLoop:
                             max_tokens=self._budget.output_reserve(),
                             response_schema=self._schema,
                         ),
+                        on_truncated_retry=self._on_truncated_retry,
+                        on_delta=self._on_model_delta,
                     )
                 model_seconds += time.time() - _call_started
             except ContextOverflowError:
@@ -6888,6 +6895,67 @@ class AgentLoop:
         except OSError:
             # 记录失败不该影响任务本身：它是给人看的旁证，不是必需产物。
             pass
+
+    def _on_truncated_retry(self, previous: int, next_budget: int) -> None:
+        """输出被截断、放大预算再跑：给人看的一句，不只靠心跳 phase 名。"""
+        # 新一轮流式：丢掉上一轮半截 final 抽取状态。已上屏正文保留在
+        # `_streamed_final`，重试时只发超出前缀的增量，避免整段重刷。
+        self._final_tap = None
+        self._retry_final_acc = ""
+        self._truncation_replay = True
+        self._emit(
+            "note",
+            {
+                "text": (
+                    f"输出被截断，放大预算重试（max_tokens {previous} → {next_budget}）"
+                ),
+                "ok": True,
+                "kind": "truncation_retry",
+            },
+        )
+
+    def _on_model_delta(self, chunk: str) -> None:
+        """流式字节 → 只把 `final` 字段的增长发成 assistant delta。"""
+        from spoolkit.llm.stream_tap import FinalFieldTap
+
+        tap = getattr(self, "_final_tap", None)
+        if tap is None:
+            tap = FinalFieldTap()
+            self._final_tap = tap
+        piece = tap.feed(chunk)
+        if not piece:
+            return
+        text = self._delta_for_display(piece)
+        if text:
+            self._emit("delta", {"text": text, "channel": "assistant"})
+
+    def _delta_for_display(self, piece: str) -> str:
+        """截断重试时跳过与已上屏正文相同的前缀，只吐出真正的续写。
+
+        模型会整段重生成 JSON；若不跳过，CLI/Web 会把同一段可行性报告再刷一遍。
+        前缀一致则静默追赶；一旦长过已显示部分，只发多出来的后缀。
+        若与已显示内容分叉，则发完整新稿（壳层用 delta 追加；终稿事件仍会覆盖）。
+        """
+        streamed = getattr(self, "_streamed_final", "")
+        if not getattr(self, "_truncation_replay", False):
+            self._streamed_final = streamed + piece
+            return piece
+
+        acc = getattr(self, "_retry_final_acc", "") + piece
+        self._retry_final_acc = acc
+        if streamed.startswith(acc):
+            # 仍在追赶：新稿是已显示内容的前缀，不上屏。
+            return ""
+        if acc.startswith(streamed):
+            extra = acc[len(streamed) :]
+            self._streamed_final = acc
+            # 已追平或越过旧稿：后续按普通增量走即可。
+            self._truncation_replay = False
+            return extra
+        # 分叉（少见）：不再往已上屏正文上叠字，等本轮终稿覆盖。
+        self._streamed_final = acc
+        self._truncation_replay = False
+        return ""
 
     def _emit(self, kind: str, data: dict[Any, Any]) -> None:
         """向外部观察者发一条事件。

@@ -160,39 +160,47 @@ def test_常驻提示出现展开收起都不挤对话区(dom: dict) -> None:
 def test_回复到达时占位被真正的回复替换(dom: dict) -> None:
     """用户报的第二条：AI 回复之后卡片不会自动更新（要刷新才看得见）。
 
-    判据是一条**时间线**：`start` 摆出占位「生成中」→ 边跑边攒轨迹（收起，正文
-    一个节点都不建）→ 一键展开看得到那三行 → `final` 到达时**同一张卡片**里的占位
-    被换成真正的回复。整条时间线里 `.bubble` 只该有一个：不许留下占位、也不许
-    另起一张。
+    判据是一条**时间线**：`start` 摆出占位「生成中」→ 边跑边攒轨迹（**运行中展开**）
+    → 同 phase wait 替换末行 → `final` 到达时同一张卡片占位换成回复并收起思考过程。
+    整条时间线里 `.bubble` 只该有一个：不许留下占位、也不许另起一张。
     """
     placeholder = dom["reply_placeholder"]
     assert placeholder["pending"] is True, "start 之后没有摆出占位卡片"
     # 占位是**名词性**的状态词（不是拟人的"正在思考"）：它说的是"这一轮在生成"。
     assert placeholder["bubble_text"] == "生成中", f"占位不是那句话：{placeholder}"
     assert placeholder["bubbles"] == 1
-    assert placeholder["trace_nodes"] == 0, "轨迹默认就该是收起的（不占版面）"
+    assert placeholder["trace_nodes"] == 0, "start 时轨迹还该是收起的"
     assert placeholder["trace_aria"] == "false"
 
-    collapsed = dom["reply_collapsed"]
-    assert collapsed["trace_head"] == "思考过程 · 3 行 · 有失败", (
-        f"轨迹标题没有说清几行、有没有失败：{collapsed['trace_head']}"
+    live = dom["reply_live"]
+    # step + tool + 一条 wait（第二次同 phase wait 替换了第一次）→ 3 行标题。
+    assert live["trace_head"].startswith("思考过程 · 3 行"), (
+        f"轨迹标题没有说清几行：{live['trace_head']}"
     )
-    assert collapsed["trace_nodes"] == 0, "收起状态下正文节点不该存在"
-    # 对话流里正好两个气泡：我说的那条 + 这张卡片上的占位（多出来的就是重复画）。
-    assert dom["reply_collapsed_bubbles"] == 2, "边跑边攒轨迹时又多出了气泡"
+    assert "有失败" in live["trace_head"]
+    assert live["trace_aria"] == "true", "运行中思考过程应自动展开"
+    # 3 行轨迹；失败工具带 detail 子节点，所以 DOM 节点数是 4。
+    assert live["trace_nodes"] == 4, f"运行中应能看见轨迹节点：{live['trace_nodes']}"
+    assert dom["reply_live_bubbles"] == 2, "边跑边攒轨迹时又多出了气泡"
 
     opened = dom["reply_open"]
-    assert opened["trace_aria"] == "true", "点开之后 aria-expanded 没跟上"
-    assert opened["trace_nodes"] == 4, f"展开之后行数不对：{opened['trace_nodes']}"
+    assert opened["trace_aria"] == "true"
     assert "第 1 步" in opened["trace_text"]
     assert "read_file → 失败" in opened["trace_text"], "工具那一行没有说清成功还是失败"
     assert "文件不存在" in opened["trace_text"], "失败那行没有带上原因（排错要的就是它）"
-    assert "已等待 12s" in opened["trace_text"], "等待心跳没进轨迹"
+    assert "已等待 27s" in opened["trace_text"], "同 phase wait 应显示更新后的秒数"
+    assert "已等待 12s" not in opened["trace_text"], "旧 wait 行不该还在"
+
+    phased = dom["reply_wait_phases"]
+    assert "输出加长" in phased["trace_text"]
+    assert "思考过程 · 4 行" in phased["trace_head"], phased["trace_head"]
 
     done = dom["reply_done"]
     assert done["bubble_text"] == "改好了：加了校验", f"回复没有替换掉占位：{done}"
     assert done["pending"] is False, "气泡上还挂着「占位」那个类"
     assert done["bubbles"] == 1, "回复另起了一张卡片（占位那张还在）"
+    assert done["trace_aria"] == "false", "成功收尾后思考过程应收起"
+    assert done["trace_nodes"] == 0, "收起后正文节点不该占着"
 
 
 def test_库里那条回复到达时不新建节点也不重复(dom: dict) -> None:

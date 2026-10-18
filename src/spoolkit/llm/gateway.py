@@ -51,6 +51,20 @@ class CountingGateway:
         self.completion_tokens += response.completion_tokens
         return response
 
+    def chat_stream(
+        self,
+        request: ChatRequest,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ChatResponse:
+        stream = getattr(self._inner, "chat_stream", None)
+        if not callable(stream):
+            return self.chat(request)
+        response = stream(request, on_delta=on_delta)
+        self.calls += 1
+        self.prompt_tokens += response.prompt_tokens
+        self.completion_tokens += response.completion_tokens
+        return response
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
@@ -95,21 +109,40 @@ def wait_line(elapsed: int, limit: float | None, phase: str = "") -> str:
 
 
 class WaitingGateway:
-    """chat() 等待期间按固定间隔叫醒监听器。不改超时、不读流。"""
+    """chat() / chat_stream() 等待期间按固定间隔叫醒监听器。"""
 
     def __init__(
         self,
         inner: ModelGateway,
         on_wait: Callable[[int, float | None], None] | None = None,
+        on_wait_end: Callable[[], None] | None = None,
         heartbeat: float = HEARTBEAT_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._inner = inner
         self.on_wait = on_wait
+        self.on_wait_end = on_wait_end
         self._heartbeat = heartbeat
         self._clock = clock
 
     def chat(self, request: ChatRequest) -> ChatResponse:
+        return self._awaiting(request, lambda: self._inner.chat(request))
+
+    def chat_stream(
+        self,
+        request: ChatRequest,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ChatResponse:
+        stream = getattr(self._inner, "chat_stream", None)
+        if not callable(stream):
+            return self.chat(request)
+        return self._awaiting(
+            request, lambda: stream(request, on_delta=on_delta)
+        )
+
+    def _awaiting(
+        self, request: ChatRequest, call: Callable[[], ChatResponse]
+    ) -> ChatResponse:
         started = self._clock()
         limit = self._limit_for(request)
         stop = threading.Event()
@@ -126,10 +159,17 @@ class WaitingGateway:
         worker = threading.Thread(target=tick, name="spool-model-wait", daemon=True)
         worker.start()
         try:
-            return self._inner.chat(request)
+            return call()
         finally:
             stop.set()
             worker.join(timeout=1.0)
+            # 收尾在主线程：TTY 上的 Status/Live 要在这里停，不能留给心跳线程。
+            end = self.on_wait_end
+            if end is not None:
+                try:
+                    end()
+                except Exception:
+                    pass
 
     def _tick(self, stop: threading.Event, started: float, limit: float | None) -> None:
         while not stop.wait(self._heartbeat):
@@ -159,13 +199,17 @@ class WaitingGateway:
 
 
 def attach_wait_listener(
-    gateway: object, on_wait: Callable[[int, float | None], None]
+    gateway: object,
+    on_wait: Callable[[int, float | None], None],
+    on_wait_end: Callable[[], None] | None = None,
 ) -> None:
     """找到 WaitingGateway（可能被 CountingGateway 包着）并绑回调。找不到就静默。"""
     current = gateway
     for _ in range(8):
         if isinstance(current, WaitingGateway):
             current.on_wait = on_wait
+            if on_wait_end is not None:
+                current.on_wait_end = on_wait_end
             return
         current = getattr(current, "_inner", None)
         if current is None:

@@ -103,7 +103,11 @@ Theme 键（固定集合，命令不得硬编码颜色码）：
 
 - **已推进**：列表/检查类命令走 `print_out`/`print_err`，并上语义色（`config` `env` `session` `policy` `limits` `init` `extra` `diagnose` `mcp-servers` `ws` `status` `service` `shortcuts` 起手行等；`--json` 仍裸 `print`）。
 - **二期 2a 已做**：`term.print_md`；`chat` / `run`（非 `--events`）结论文本 TTY 下 Rich Markdown；分隔线/usage/trace muted。派发路径的 implementer/reviewer final 同口径。
-- **仍待做**：`plan` `_say` / `settle` / `bridge` / `hub` / `bench`；流式 `Live`；Syntax 主题细调
+- **二期 2b 已做**：`plan` `_say` → `print_err`/`print_md`（stderr，保 `--events` stdout）；`settle` 默认 `out` → `print_out`；`bridge` / `hub` / `bench` human 路径 → `print_out`/`print_err`。
+- **二期 2c 已做**：模型等待心跳 → `WaitDisplay`（TTY 上 Rich `Status` 原地刷新；管道/`NO_COLOR` 仍逐行 `print_err` muted）；`WaitingGateway.on_wait_end` 主线程收尾；`print_md` 代码高亮主题抽为 `CODE_THEME=ansi_dark`。
+- **交互 Harness（2026-10-18）**：`chat` 绑 `on_event` / `HumanProgress`；截断 note；Web wait 替换与运行中展开；见 `2026-10-18-interactive-harness-design.md`。
+- **流式（2026-10-18）**：`delta` 事件 + llamacpp/`FakeModel` `chat_stream`；主循环经 `FinalFieldTap` 只上屏 `final`；CLI Live / Web 气泡增量。见 `2026-10-18-streaming-output-design.md`。
+- **仍待做**：`chat` 交互提示行全面迁 `print_out`（可选）
 
 ---
 

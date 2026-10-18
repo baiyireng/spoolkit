@@ -130,6 +130,39 @@ def test_透过CountingGateway绑定() -> None:
     assert inner.on_wait is not None
 
 
+def test_chat结束调用on_wait_end() -> None:
+    ended: list[str] = []
+    gateway = WaitingGateway(
+        _Immediate(),
+        on_wait=lambda e, lim: None,
+        on_wait_end=lambda: ended.append("done"),
+        heartbeat=0.05,
+    )
+    assert gateway.chat(_request()).text == "ok"
+    assert ended == ["done"]
+
+
+def test_inner抛错也调用on_wait_end() -> None:
+    ended: list[str] = []
+    gateway = WaitingGateway(
+        _Boom(),
+        on_wait=lambda e, lim: None,
+        on_wait_end=lambda: ended.append("done"),
+        heartbeat=0.05,
+    )
+    with pytest.raises(RuntimeError, match="down"):
+        gateway.chat(_request())
+    assert ended == ["done"]
+
+
+def test_attach绑on_wait_end() -> None:
+    inner = WaitingGateway(_Immediate())
+    wrapped = CountingGateway(inner)
+    end = lambda: None
+    attach_wait_listener(wrapped, lambda e, lim: None, on_wait_end=end)
+    assert inner.on_wait_end is end
+
+
 def test_wait_line有无上限() -> None:
     assert wait_line(15, None) == "模型生成中，已等待 15s"
     assert wait_line(15, 180.0) == "模型生成中，已等待 15s / 上限 180s"

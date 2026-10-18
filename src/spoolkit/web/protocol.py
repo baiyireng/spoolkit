@@ -23,9 +23,24 @@ ERROR = "error"
 # 而「你的交付物里有个数找不到出处」这种事，理由才是全部内容。
 NOTE = "note"
 WAIT = "wait"
+# 面向人的正文增量（流式）。channel 先只实现 assistant。
+DELTA = "delta"
 
 KNOWN = frozenset(
-    {START, STEP, TOOL, DIFF, AWAIT, CONFIRM, USAGE, FINAL, ERROR, NOTE, WAIT}
+    {
+        START,
+        STEP,
+        TOOL,
+        DIFF,
+        AWAIT,
+        CONFIRM,
+        USAGE,
+        FINAL,
+        ERROR,
+        NOTE,
+        WAIT,
+        DELTA,
+    }
 )
 
 

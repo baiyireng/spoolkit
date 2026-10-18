@@ -1,7 +1,8 @@
 # spoolkit
 
 面向本地小模型的编程特化 Agent，命令为 `spool`。目标用户：持有 7B–27B 本地模型、
-需要在真实小中型编程任务上使用它的人。安装、第一个任务与排错见
+需要在真实小中型编程任务上使用它的人。安装与第一条任务在下面的「最短路径」。
+排错、各入口怎么认工作区、模型服务见
 [`docs/getting-started.md`](docs/getting-started.md)。
 
 现状 **可用，但仍是实验阶段**（0.0.1）。回归集的数字与测量方法见
@@ -101,7 +102,7 @@ Windows `%APPDATA%\spoolkit\.env`），**非密钥默认值只放 `config.toml`*
 
 | 文档 | 内容 |
 |---|---|
-| [getting-started](docs/getting-started.md) | 安装 · 首跑 · 故障表 |
+| [getting-started](docs/getting-started.md) | 故障表 · 工作区入口 · 模型服务 |
 | [cli](docs/cli.md) | 命令参数 |
 | [manual](docs/manual.md) | 运行机制契约 |
 | [agent-loop-flow](docs/agent-loop-flow.md) | 主循环控制流 |

@@ -75,6 +75,26 @@ def test_exit_之后不再调用模型(tmp_path: Path, capsys) -> None:
     assert "只有一轮" not in capsys.readouterr().out
 
 
+def test_无斜杠exit不进模型(tmp_path: Path, capsys) -> None:
+    """`exit` / `QUIT` 不得当成目标跑一轮「再见」。"""
+    for word in ("exit", "QUIT", "q"):
+        args = _args(tmp_path, _script(tmp_path, [_turn("不该出现")]), [word])
+        assert chat_command(args) == 0
+        out = capsys.readouterr().out
+        assert "不该出现" not in out, word
+
+
+def test_回合中进度打到stderr(tmp_path: Path, capsys) -> None:
+    """chat 绑 on_event：步骤可见，不只靠结束后的结论。"""
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    script = _script(tmp_path, [_turn("结论正文")])
+    args = _args(tmp_path, script, ["看看 a.py", "/exit"])
+    assert chat_command(args) == 0
+    captured = capsys.readouterr()
+    assert "结论正文" in captured.out
+    assert "第" in captured.err and "步" in captured.err
+
+
 def test_空行跳过_help_不调用模型(tmp_path: Path, capsys) -> None:
     script = _script(tmp_path, [_turn("答复")])
     args = _args(tmp_path, script, ["", "   ", "/help", "做点事", "/exit"])

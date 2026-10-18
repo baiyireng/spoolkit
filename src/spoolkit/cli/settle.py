@@ -11,8 +11,14 @@ import json
 
 from spoolkit.agents.plan import out_of_scope
 from spoolkit.cli.approval import apply_with_audit, review_and_apply
+from spoolkit.cli.term import print_out
 from spoolkit.policy import AUTO, DENY
 from spoolkit.tools.edit import PendingChanges
+
+
+def _default_out(line: str = "") -> None:
+    """Settle 人读散文默认走 Rich stdout（调用方可换成 stderr / events 出口）。"""
+    print_out(line, markup=False)
 
 NONE = "none"
 AUTO_APPLIED = "auto"
@@ -30,7 +36,7 @@ def settle(
     ask: Callable[[str], str] = input,
     non_interactive: bool = False,
     header: str = "",
-    out: Callable[[str], None] = print,
+    out: Callable[[str], None] = _default_out,
 ) -> tuple[str, list[str]]:
     """按策略处理待落盘改动，返回（结果动作，已写入路径）。
 
@@ -39,7 +45,7 @@ def settle(
     而不是埋在下面。顺序就是这条要求本身，所以它由这里保证，而不是靠调用方
     记得先 print 一次。
 
-    `out` 是人读散文的出口（默认 stdout）。计划/自主那条路上 stdout 是事件
+    `out` 是人读散文的出口（默认 Rich stdout）。计划/自主那条路上 stdout 是事件
     通道（`--events` 时一行一个 JSON），所以那里由调用方把出口换成 stderr
     ——diff、留档、拒绝说明一条都不能混进事件流。
 
@@ -70,7 +76,7 @@ def _settle(
     baseline_path: Path | None = None,
     ask: Callable[[str], str] = input,
     non_interactive: bool = False,
-    out: Callable[[str], None] = print,
+    out: Callable[[str], None] = _default_out,
 ) -> tuple[str, list[str]]:
     if len(pending) == 0:
         return NONE, []
@@ -117,7 +123,7 @@ def _settle(
     return (CONFIRMED if applied else DECLINED), written
 
 
-def _show(pending: PendingChanges, out: Callable[[str], None] = print) -> None:
+def _show(pending: PendingChanges, out: Callable[[str], None] = _default_out) -> None:
     for change in pending.items():
         if change.declared:
             out(f"# {change.path}：{change.declared}")

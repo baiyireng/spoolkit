@@ -5,6 +5,7 @@ from __future__ import annotations
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.markup import escape
+from rich.status import Status
 from rich.theme import Theme
 
 THEME = Theme(
@@ -21,6 +22,10 @@ THEME = Theme(
     }
 )
 
+# Markdown fenced-code highlight (Pygments name). ansi_dark stays readable on
+# both dark and light terminals without monokai's heavy background assumptions.
+CODE_THEME = "ansi_dark"
+
 STATE_STYLE_KEYS = frozenset(
     k for k in THEME.styles if k.startswith("state.")
 )
@@ -30,7 +35,9 @@ _stderr: Console | None = None
 
 
 def reset_consoles() -> None:
-    global _stdout, _stderr
+    global _stdout, _stderr, _stream_holds_tty
+    WaitDisplay.stop_active()
+    _stream_holds_tty = False
     _stdout = None
     _stderr = None
 
@@ -95,9 +102,66 @@ def print_md(text: str, *, stderr: bool = False) -> None:
         return
     con = console(stderr=stderr)
     if con.is_terminal and not con.no_color:
-        con.print(Markdown(body, code_theme="monokai"))
+        con.print(Markdown(body, code_theme=CODE_THEME))
         return
     con.print(body, markup=False, highlight=False)
+
+
+# 流式 Live 占用 TTY 时置位：心跳 Status 与 Live 同屏会互抢光标，看起来闪烁。
+_stream_holds_tty = False
+
+
+def set_stream_holds_tty(active: bool) -> None:
+    """HumanProgress 的 Live 开/关时调用；为 True 时 WaitDisplay 停转并不再刷新。"""
+    global _stream_holds_tty
+    _stream_holds_tty = bool(active)
+    if _stream_holds_tty:
+        WaitDisplay.stop_active()
+
+
+class WaitDisplay:
+    """Model-wait heartbeat: in-place Status on a color TTY; plain lines otherwise.
+
+    ``update`` may run on the wait worker thread; ``stop`` must run on the main
+    thread after the worker joins (see ``WaitingGateway.chat``).
+
+    与 assistant Live 互斥：流式上屏期间忽略心跳，避免加载符与正文轮流抢屏。
+    """
+
+    _active: WaitDisplay | None = None
+
+    def __init__(self) -> None:
+        self._status: Status | None = None
+
+    @classmethod
+    def stop_active(cls) -> None:
+        current = cls._active
+        if current is not None:
+            current.stop()
+
+    def update(self, line: str) -> None:
+        if _stream_holds_tty:
+            self.stop()
+            return
+        text = str(line)
+        con = console(stderr=True)
+        if not (con.is_terminal and not con.no_color):
+            print_err(text, markup=False, style="muted")
+            return
+        styled = f"[muted]{escape(text)}[/]"
+        if self._status is None:
+            self._status = Status(styled, console=con, spinner="dots")
+            self._status.start()
+            WaitDisplay._active = self
+        else:
+            self._status.update(styled)
+
+    def stop(self) -> None:
+        if self._status is not None:
+            self._status.stop()
+            self._status = None
+        if WaitDisplay._active is self:
+            WaitDisplay._active = None
 
 
 def _emit(
@@ -118,13 +182,16 @@ def _emit(
 
 
 __all__ = [
+    "CODE_THEME",
     "THEME",
     "STATE_STYLE_KEYS",
+    "WaitDisplay",
     "console",
     "escape",
     "print_err",
     "print_md",
     "print_out",
     "reset_consoles",
+    "set_stream_holds_tty",
     "state_style",
 ]

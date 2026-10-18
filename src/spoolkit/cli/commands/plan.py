@@ -61,6 +61,7 @@ from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.grant import Grants
 from spoolkit.memory.gate import sanitize
 from spoolkit.memory.lessons import record_lesson
+from spoolkit.cli.term import print_err, print_md
 from spoolkit.web.protocol import FINAL, START, STEP, USAGE
 
 
@@ -75,8 +76,17 @@ def _say(line: Any = "") -> None:
     --autonomous` 都走这里），于是"stdout 上只有 JSON 行"这条约定在这两条路上
     从来没成立过。散文换出口、内容一个字不改：终端里 stderr 也接屏幕，人照样
     看得见；管道那一边拿到的 stdout 终于是干净的。
+
+    多行正文（计划卡、复盘）TTY 下走 Markdown；单行进度 muted。
     """
-    print(line, file=sys.stderr, flush=True)
+    text = "" if line is None else str(line)
+    if not text.strip():
+        print_err("", markup=False)
+        return
+    if "\n" in text:
+        print_md(text, stderr=True)
+        return
+    print_err(text, markup=False, style="muted")
 
 
 def _events(args: argparse.Namespace) -> EventWriter | None:
@@ -373,7 +383,7 @@ def make_plan(args: argparse.Namespace) -> int:
 
     plan = _plan_phase(gateway, project_root, args)
     if not plan.steps:
-        print("没有拆出任何带验收标准的步骤。", file=sys.stderr)
+        _say("没有拆出任何带验收标准的步骤。")
         return 1
 
     # 计划写在**这次解析出来的会话**里，与上面那句打印同一个来源。
@@ -382,8 +392,8 @@ def make_plan(args: argparse.Namespace) -> int:
     # `NameError`，计划从来没被写下来；而"plan 排的计划 run --plan 找得到"是
     # 计划正文写死的约束。Task 5 评审的 Critical-1 抓到的就是它。
     save_plan(plan_path(project_root, str(args.session)), plan)
-    print(plan.render())
-    print(f"\n计划已保存到 {plan_path(project_root, str(args.session))}")
+    _say(plan.render())
+    _say(f"计划已保存到 {plan_path(project_root, str(args.session))}")
     return 0
 
 

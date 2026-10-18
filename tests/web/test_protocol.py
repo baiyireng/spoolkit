@@ -1,6 +1,7 @@
 from spoolkit.web.protocol import (
     AWAIT,
     CONFIRM,
+    DELTA,
     DIFF,
     FINAL,
     NOTE,
@@ -84,4 +85,15 @@ def test_wait可以没有limit() -> None:
     assert parsed is not None
     assert parsed.type == WAIT
     assert "limit" not in parsed.data
+
+
+def test_delta事件被接受() -> None:
+    """正文流式增量：未知类型会被丢掉，必须进白名单。"""
+    parsed = parse_line(
+        Event(DELTA, {"text": "一段", "channel": "assistant"}).to_line()
+    )
+    assert parsed is not None
+    assert parsed.type == DELTA
+    assert parsed.data["text"] == "一段"
+    assert parsed.data["channel"] == "assistant"
 

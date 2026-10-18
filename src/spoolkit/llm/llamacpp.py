@@ -6,9 +6,14 @@ JSON Schema，由 llama.cpp 在服务端转换成 GBNF 语法约束采样——
 「按工具动态生成约束」这件事在客户端只是把 schema 传过去。
 
 token 计数走 /tokenize，拿到的是模型真实分词结果，而不是估算。
+
+`chat_stream`：同一接口开 `stream: true`，按 SSE 增量回调；结构化 schema
+回合仍可流式收字节，上层再用 FinalFieldTap 只上屏 `final` 字段。
 """
 
+from collections.abc import Callable
 from typing import Any
+import json
 
 import httpx
 
@@ -67,6 +72,8 @@ def _to_payload(
     model: str,
     temperature: float = DEFAULT_TEMPERATURE,
     seed: int | None = None,
+    *,
+    stream: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
@@ -76,7 +83,7 @@ def _to_payload(
         ],
         "max_tokens": max(1, request.max_tokens),
         "temperature": float(temperature),
-        "stream": False,
+        "stream": bool(stream),
     }
     if seed is not None:
         # 温度 > 0 时不给种子，同一句提示词每次采样都不同——那么「这一次红」
@@ -187,6 +194,106 @@ class LlamaCppGateway:
             prompt_tokens=int(usage.get("prompt_tokens", 0)),
             completion_tokens=int(usage.get("completion_tokens", 0)),
             truncated=choices[0].get("finish_reason") in ("length", "max_tokens"),
+        )
+
+    def chat_stream(
+        self,
+        request: ChatRequest,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ChatResponse:
+        """流式生成：每段 content 调一次 on_delta，返回与 chat() 同形的完整响应。"""
+        timeout = self._timeout_for(request.max_tokens)
+        payload = _to_payload(
+            request, self.model, self.temperature, self.seed, stream=True
+        )
+        # 流式时 usage 常在末帧；要 include_usage 时部分服务支持 stream_options。
+        payload["stream_options"] = {"include_usage": True}
+        pieces: list[str] = []
+        finish_reason = ""
+        prompt_tokens = 0
+        completion_tokens = 0
+        try:
+            with self._client.stream(
+                "POST",
+                "/v1/chat/completions",
+                json=payload,
+                timeout=timeout,
+            ) as response:
+                if response.status_code != 200:
+                    body = " ".join((response.read().decode("utf-8", "replace")).split())[
+                        :300
+                    ]
+                    if "exceed_context_size" in body or "exceeds the available context" in body:
+                        raise ContextOverflowError(
+                            f"提示词超过服务端上下文上限：{body}"
+                        )
+                    raise LlamaCppError(
+                        f"服务返回 {response.status_code}：{body or '（没有说明）'}"
+                    )
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    if line.startswith("data:"):
+                        data_str = line[5:].strip()
+                    elif line.startswith("data: "):
+                        data_str = line[6:].strip()
+                    else:
+                        continue
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    usage = data.get("usage") or {}
+                    if usage:
+                        prompt_tokens = int(usage.get("prompt_tokens", prompt_tokens) or 0)
+                        completion_tokens = int(
+                            usage.get("completion_tokens", completion_tokens) or 0
+                        )
+                    for choice in data.get("choices") or []:
+                        reason = choice.get("finish_reason") or ""
+                        if reason:
+                            finish_reason = reason
+                        delta = choice.get("delta") or {}
+                        piece = delta.get("content") or ""
+                        if not piece:
+                            # 非流式兼容：偶发整段 message
+                            piece = (choice.get("message") or {}).get("content") or ""
+                        if piece:
+                            pieces.append(piece)
+                            if on_delta is not None:
+                                try:
+                                    on_delta(piece)
+                                except Exception:
+                                    pass
+        except httpx.ReadTimeout as exc:
+            raise LlamaCppError(
+                f"服务端 {timeout:.0f} 秒内没返回（max_tokens={request.max_tokens}，"
+                f"提示词约 {len(''.join(m.content for m in request.messages))} 字）。"
+                "服务多半没挂，是这次生成太长或太慢——"
+                "调小这次的输出量（把活拆开做）比调大超时更管用。"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise LlamaCppError(
+                f"无法连接 llama-server（{type(exc).__name__}），"
+                "请确认服务已启动并监听正确端口"
+            ) from exc
+
+        text = "".join(pieces)
+        if not text:
+            raise LlamaCppError(
+                "模型返回了空内容。如果这是带思考的模型（推理内容走单独的字段），"
+                "很可能是推理 token 把输出预算吃光了——用 --reasoning off "
+                "重启 llama-server，或者调大 max_tokens 再试"
+            )
+        if completion_tokens <= 0:
+            completion_tokens = max(1, len(text) // 2)
+        return ChatResponse(
+            text=text,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            truncated=finish_reason in ("length", "max_tokens"),
         )
 
     def _timeout_for(self, max_tokens: int) -> float:

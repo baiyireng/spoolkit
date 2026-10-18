@@ -11,6 +11,7 @@
 模型多半会从头重写，产出的东西即使能解析也未必接得上语义。
 """
 
+from collections.abc import Callable
 from dataclasses import replace
 
 from spoolkit.llm.gateway import ModelGateway, current_wait_phase, wait_phase
@@ -19,26 +20,51 @@ from spoolkit.llm.types import ChatRequest, ChatResponse
 DEFAULT_ATTEMPTS = 2
 DEFAULT_MULTIPLIER = 2.0
 
+# (previous_max_tokens, next_max_tokens) — 给人看的 note / 探针用。
+TruncationRetryHook = Callable[[int, int], None]
+DeltaHook = Callable[[str], None]
+
+
+def _chat_once(
+    gateway: ModelGateway,
+    request: ChatRequest,
+    on_delta: DeltaHook | None,
+) -> ChatResponse:
+    stream = getattr(gateway, "chat_stream", None)
+    if on_delta is not None and callable(stream):
+        return stream(request, on_delta=on_delta)
+    return gateway.chat(request)
+
 
 def chat_with_escalation(
     gateway: ModelGateway,
     request: ChatRequest,
     attempts: int = DEFAULT_ATTEMPTS,
     multiplier: float = DEFAULT_MULTIPLIER,
+    on_truncated_retry: TruncationRetryHook | None = None,
+    on_delta: DeltaHook | None = None,
 ) -> ChatResponse:
-    """调用模型；若输出被截断则放大预算重试。"""
-    response = gateway.chat(request)
+    """调用模型；若输出被截断则放大预算重试。
+
+    `on_delta` 有且网关支持 `chat_stream` 时走流式；否则整段 `chat()`。
+    """
+    response = _chat_once(gateway, request, on_delta)
     for _ in range(max(0, attempts - 1)):
         if not response.truncated:
             return response
-        request = replace(
-            request, max_tokens=max(1, int(request.max_tokens * multiplier))
-        )
+        previous = int(request.max_tokens)
+        next_budget = max(1, int(previous * multiplier))
+        request = replace(request, max_tokens=next_budget)
+        if on_truncated_retry is not None:
+            try:
+                on_truncated_retry(previous, next_budget)
+            except Exception:
+                pass
         # 同一次主循环里第二次生成会把等待上限翻倍。心跳仍写「主循环」时，
         # 轨迹上看起来像计时被重置了两轮。这里标明这是输出加长后的重试。
         phase = current_wait_phase()
         label = f"{phase}·输出加长" if phase else "输出加长"
         with wait_phase(label):
-            response = gateway.chat(request)
+            response = _chat_once(gateway, request, on_delta)
     return response
 

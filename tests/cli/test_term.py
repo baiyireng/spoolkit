@@ -20,6 +20,7 @@ def test_theme_has_required_keys() -> None:
         "bad",
     }
     assert required <= set(term.THEME.styles)
+    assert term.CODE_THEME == "ansi_dark"
 
 
 def test_state_style_maps_and_falls_back() -> None:
@@ -104,3 +105,57 @@ def test_print_md_blank_skips_or_empty_line(capsys) -> None:
     # Empty / whitespace-only: no body text; at most blank lines.
     assert "None" not in out
     assert "#" not in out
+
+
+def test_wait_display_plain_path_writes_stderr(capsys) -> None:
+    term.reset_consoles()
+    display = term.WaitDisplay()
+    display.update("模型生成中，已等待 15s / 上限 180s")
+    display.stop()
+    err = capsys.readouterr().err
+    assert "模型生成中，已等待 15s" in err
+
+
+def test_wait_display_status_stop_is_idempotent(monkeypatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    term.reset_consoles()
+    buf = io.StringIO()
+    c = Console(
+        file=buf,
+        theme=term.THEME,
+        force_terminal=True,
+        color_system="truecolor",
+        soft_wrap=True,
+    )
+    monkeypatch.setattr(term, "console", lambda *, stderr=False: c)
+    display = term.WaitDisplay()
+    display.update("模型生成中，已等待 15s")
+    assert display._status is not None
+    display.update("模型生成中，已等待 30s")
+    display.stop()
+    assert display._status is None
+    display.stop()  # idempotent
+
+
+def test_stream_holds_tty时wait不再刷新(monkeypatch) -> None:
+    """Live 上屏期间心跳必须让路，否则加载符与正文轮流抢屏。"""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    term.reset_consoles()
+    term.set_stream_holds_tty(False)
+    buf = io.StringIO()
+    c = Console(
+        file=buf,
+        theme=term.THEME,
+        force_terminal=True,
+        color_system="truecolor",
+        soft_wrap=True,
+    )
+    monkeypatch.setattr(term, "console", lambda *, stderr=False: c)
+    display = term.WaitDisplay()
+    display.update("模型生成中，已等待 15s")
+    assert display._status is not None
+    term.set_stream_holds_tty(True)
+    assert display._status is None
+    display.update("模型生成中，已等待 30s")
+    assert display._status is None
+    term.set_stream_holds_tty(False)

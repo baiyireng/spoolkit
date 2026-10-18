@@ -1046,18 +1046,18 @@ async function extras2() {
   out.reply_user_bubbles = streamBubbles();
   ctx.onEvent(event('start', { goal: '改一下登录页' }));
   out.reply_placeholder = cardInfo(lastCard());
-  // 边跑边攒：步骤 / 一次失败的工具调用 / 等待心跳，都进「思考过程」。
+  // 边跑边攒：步骤 / 失败工具 / 等待心跳进「思考过程」——运行中自动展开。
   ctx.onEvent(event('step', { n: 1 }));
   ctx.onEvent(event('tool', { name: 'read_file', ok: false, detail: '文件不存在：src/a.py' }));
   ctx.onEvent(event('wait', { elapsed: 12, limit: 491 }));
-  out.reply_collapsed = cardInfo(lastCard());
-  out.reply_collapsed_bubbles = streamBubbles();
-  // 一键展开：三行都要在，失败那行还要带原因。
-  // 展开键可能压根没建出来（那就是这条用例要抓的坏）：**不在假 DOM 里抛异常**，
-  // 照常放行，让下面的断言去红（抛异常会把整组变成 error 而不是 failed）。
-  const replyHead = lastCard() ? lastCard().querySelector('.trace-head') : null;
-  if (replyHead) { replyHead.onclick(); }
+  // 同 phase 再一条 wait：应替换末行，不堆第二行心跳。
+  ctx.onEvent(event('wait', { elapsed: 27, limit: 491 }));
+  out.reply_live = cardInfo(lastCard());
+  out.reply_live_bubbles = streamBubbles();
   out.reply_open = cardInfo(lastCard());
+  // phase 变了（输出加长）：追加新 wait，保留上一阶段末行。
+  ctx.onEvent(event('wait', { elapsed: 15, limit: 491, phase: '主循环·输出加长' }));
+  out.reply_wait_phases = cardInfo(lastCard());
   ctx.onEvent(event('final', { ok: true, text: '改好了：加了校验' }));
   out.reply_done = cardInfo(lastCard());
   out.reply_done_bubbles = streamBubbles();

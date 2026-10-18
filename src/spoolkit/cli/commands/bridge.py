@@ -30,6 +30,19 @@ from spoolkit import settings
 from spoolkit.bridge import credentials
 from spoolkit.health import collect_rows
 
+from spoolkit.cli.term import print_err, print_out
+
+
+def _print(*args, file=None, sep=" ", end="\n", flush=False):
+    """Human CLI print → Rich consoles (stdout/stderr)."""
+    text = sep.join(str(a) for a in args)
+    if end not in ("\n", ""):
+        text = f"{text}{end}"
+    if file is sys.stderr:
+        print_err(text, markup=False)
+    else:
+        print_out(text, markup=False)
+
 
 def _build_channel(args, log) -> object:
     """按通道建适配器。
@@ -167,7 +180,7 @@ def _fake_loop(bridge: Bridge, channel: FakeChannel, user: str) -> int:
 
     它是"今天就能用"的那条路，也是不给外部凭据时唯一能验完整链路的方式。
     """
-    print("假通道：一行一条消息，回车发送；/exit 退出。")
+    _print("假通道：一行一条消息，回车发送；/exit 退出。")
     for line in sys.stdin:
         text = line.strip()
         if not text:
@@ -176,7 +189,7 @@ def _fake_loop(bridge: Bridge, channel: FakeChannel, user: str) -> int:
             break
         channel.push(user, text)
         for reply in bridge.run_once():
-            print(f"→ {reply.text}")
+            _print(f"→ {reply.text}")
     return 0
 
 
@@ -208,13 +221,13 @@ def approve_command(root: Path, code: str) -> int:
     pairings = pairings_for(root)
     user = pairings.approve_code(code)
     if not user:
-        print(
+        _print(
             f"没有这个配对码：{code}\n"
             f"（看的是 {pairings.path}）",
             file=sys.stderr,
         )
         return 2
-    print(f"已批准 {user}（写进 {pairings.path}）")
+    _print(f"已批准 {user}（写进 {pairings.path}）")
     return 0
 
 
@@ -227,7 +240,7 @@ def approve_anywhere(code: str, root: Path | None, ws_name: str = "") -> int:
     """
     got = trust.approve_code(code)
     if got is not None:
-        print(f"已批准 {got.user}（通道 {got.channel} → {got.root}）")
+        _print(f"已批准 {got.user}（通道 {got.channel} → {got.root}）")
         return 0
 
     target = _pick_workspace(root, ws_name)
@@ -245,7 +258,7 @@ def _pick_workspace(root: Path | None, ws_name: str) -> Path | None:
             # 通道是长驻进程，"启动目录"只是拉起方式的副产品，不参与点名解析。
             return kernel_workspaces.resolve_workspace(ws_name, use_cwd=False)
         except kernel_workspaces.WorkspaceError as exc:
-            print(str(exc), file=sys.stderr)
+            _print(str(exc), file=sys.stderr)
             return None
     if root is not None:
         return root
@@ -253,10 +266,10 @@ def _pick_workspace(root: Path | None, ws_name: str) -> Path | None:
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
-        print("没有登记过任何工作区，无法批准旧式配对码。", file=sys.stderr)
+        _print("没有登记过任何工作区，无法批准旧式配对码。", file=sys.stderr)
         return None
     listed = "\n".join(f"  {item}" for item in candidates)
-    print(
+    _print(
         "登记表里有多个工作区，无法判断这个码属于哪一个；"
         "用 `spool approve <码> --ws <名字>` 指定：\n"
         f"{listed}",
@@ -286,7 +299,7 @@ def approve_entry(args: argparse.Namespace) -> int:
     if getattr(args, "forget", ""):
         return forget_command(_root_or_die(root), args.forget)
     if not args.code:
-        print("需要配对码，或用 --list / --revoke <用户>。", file=sys.stderr)
+        _print("需要配对码，或用 --list / --revoke <用户>。", file=sys.stderr)
         return 2
     return approve_anywhere(args.code, root, str(getattr(args, "ws", "") or ""))
 
@@ -328,15 +341,15 @@ def list_pairings(root: Path | None) -> int:
     """看放行了谁、还有谁在等。机器级与旧文件一起列。"""
     from spoolkit.kernel import workspaces as kernel_workspaces
 
-    print(f"工作区：{root if root is not None else '整台机器（按通道/工作区列出）'}")
+    _print(f"工作区：{root if root is not None else '整台机器（按通道/工作区列出）'}")
     grants = trust.list_grants()
-    print(f"\n已放行（{len(grants)}）：")
+    _print(f"\n已放行（{len(grants)}）：")
     for item in grants:
         where = "、".join(str(path) for path in item.roots)
         label = f"（{item.label}）" if item.label else ""
-        print(f"  {item.user}  ←  {item.channel}：{where}{label}")
+        _print(f"  {item.user}  ←  {item.channel}：{where}{label}")
     if not grants:
-        print("  （没有）")
+        _print("  （没有）")
 
     roots = [root] if root is not None else []
     seen: set[str] = set()
@@ -349,38 +362,38 @@ def list_pairings(root: Path | None) -> int:
         pairings = pairings_for(candidate)
         approved = pairings.approved
         legacy_total += len(approved)
-        print(f"\n旧配对文件：{pairings.path}")
-        print(f"  已放行（{len(approved)}）：{'、'.join(approved) or '（没有）'}")
+        _print(f"\n旧配对文件：{pairings.path}")
+        _print(f"  已放行（{len(approved)}）：{'、'.join(approved) or '（没有）'}")
 
     pending = _approve_targets(root)
-    print(f"\n等批准的码（{len(pending)}）：")
+    _print(f"\n等批准的码（{len(pending)}）：")
     for code, user, source in pending:
-        print(f"  {code}  ←  {user}　[{source}]")
+        _print(f"  {code}  ←  {user}　[{source}]")
     if not pending:
-        print("  （没有）")
+        _print("  （没有）")
     if pending:
-        print("\n批准：spool approve <码>（旧式的码要加 `--ws <名字>`）")
+        _print("\n批准：spool approve <码>（旧式的码要加 `--ws <名字>`）")
     if grants or legacy_total:
-        print("撤销某人的放行：spool approve --revoke <用户>")
+        _print("撤销某人的放行：spool approve --revoke <用户>")
     return 0
 
 
 def revoke_command(root: Path, user: str) -> int:
     pairings = pairings_for(root)
     if not pairings.revoke(user):
-        print(f"该用户不在放行名单里：{user}", file=sys.stderr)
+        _print(f"该用户不在放行名单里：{user}", file=sys.stderr)
         return 2
-    print(f"已撤销 {user}（{pairings.path}）")
-    print("该用户再发消息会重新收到配对码。")
+    _print(f"已撤销 {user}（{pairings.path}）")
+    _print("该用户再发消息会重新收到配对码。")
     return 0
 
 
 def forget_command(root: Path, code: str) -> int:
     pairings = pairings_for(root)
     if not pairings.forget_code(code):
-        print(f"没有这个待批准的码：{code}", file=sys.stderr)
+        _print(f"没有这个待批准的码：{code}", file=sys.stderr)
         return 2
-    print(f"已丢掉这个码：{code}（谁都没被放行）")
+    _print(f"已丢掉这个码：{code}（谁都没被放行）")
     return 0
 
 
@@ -494,7 +507,7 @@ def bridge_command(args: argparse.Namespace) -> int:
 
     if args.approve:
         if project_root is None:
-            print(
+            _print(
                 "`bridge --approve` 要指定工作区（旧配对文件是按工作区存的）；"
                 "用 `spool approve <码> --ws <名字>`，它会先找机器级的码。",
                 file=sys.stderr,
@@ -504,7 +517,7 @@ def bridge_command(args: argparse.Namespace) -> int:
 
     claimed = _adopt_legacy(project_root, str(args.channel))
     if claimed:
-        print(f"已从旧配对记录认领 {claimed} 条放行（原文件未改）。", file=sys.stderr)
+        _print(f"已从旧配对记录认领 {claimed} 条放行（原文件未改）。", file=sys.stderr)
 
     allowed = {str(item) for item in (getattr(args, "allow_user", []) or []) if str(item).strip()}
     access = args.access
@@ -512,12 +525,12 @@ def bridge_command(args: argparse.Namespace) -> int:
         # `--allow-user` 是"这几个人直接放行"，语义上属于名单模式。
         access = ALLOWLIST
     if access == OPEN:
-        print(
+        _print(
             "⚠ access=open：任何人都能驱动这个工作区；此档由你显式指定。",
             file=sys.stderr,
         )
     elif not allowed:
-        print(
+        _print(
             "配对模式：未放行的发送者会收到配对码。\n"
             "  放行：spool approve <码>（任意目录可用）\n"
             "  查看：spool approve --list",
@@ -525,14 +538,14 @@ def bridge_command(args: argparse.Namespace) -> int:
         )
     if pairings is not None:
         if pairings.approved:
-            print(f"已批准：{'、'.join(pairings.approved)}", file=sys.stderr)
+            _print(f"已批准：{'、'.join(pairings.approved)}", file=sys.stderr)
         if pairings.pending:
-            print(
+            _print(
                 "待配对：" + "、".join(f"{user}（码 {code}）" for code, user in pairings.pending),
                 file=sys.stderr,
             )
     if project_root is None:
-        print(
+        _print(
             "这条通道服务整台机器（未给 --root）：已放行到哪些工作区，"
             "查 spool approve --list；每条聊天各指一个工作区，"
             "在聊天里用 /ws use <名字> 切换。",
@@ -554,13 +567,13 @@ def bridge_command(args: argparse.Namespace) -> int:
         read_roots_for=read_roots_args if project_root is None else None,
         timeout=args.timeout,
     )
-    channel = _build_channel(args, lambda text: print(text, file=sys.stderr))
+    channel = _build_channel(args, lambda text: _print(text, file=sys.stderr))
     bridge = Bridge(
         channel,
         runner,
         allowed_users=allowed,
         max_chars=args.max_chars,
-        on_note=lambda text: print(f"· {text}", file=sys.stderr),
+        on_note=lambda text: _print(f"· {text}", file=sys.stderr),
         pairings=pairings,
         access=access,
         root=project_root,
@@ -573,15 +586,15 @@ def bridge_command(args: argparse.Namespace) -> int:
         return _fake_loop(bridge, channel, args.user)
 
     if notify:
-        print("断开时通知最近一次通信的聊天。", file=sys.stderr)
-    print(f"{args.channel} 通道已启动，等待消息（Ctrl-C 退出）。", file=sys.stderr)
+        _print("断开时通知最近一次通信的聊天。", file=sys.stderr)
+    _print(f"{args.channel} 通道已启动，等待消息（Ctrl-C 退出）。", file=sys.stderr)
     next_probe = 0.0
     try:
         while True:
             replies = bridge.run_once()
             for reply in replies:
                 if reply.accepted:
-                    print(f"· 已处理 {reply.user} 的消息", file=sys.stderr)
+                    _print(f"· 已处理 {reply.user} 的消息", file=sys.stderr)
             now = time.monotonic()
             if now >= next_probe:
                 next_probe = now + 5.0
@@ -592,7 +605,7 @@ def bridge_command(args: argparse.Namespace) -> int:
                 # 长轮询通道自己会等；这里只是别把 CPU 打满。
                 time.sleep(0.2)
     except KeyboardInterrupt:
-        print("\n收到中断信号，退出。", file=sys.stderr)
+        _print("\n收到中断信号，退出。", file=sys.stderr)
         return 0
     finally:
         channel.close()
@@ -612,22 +625,22 @@ def _check(project_root: Path | None, args) -> int:
     from spoolkit.bridge import credentials
 
     if project_root is None:
-        print("工作区：机器级（没给 --root，服务整台机器）")
+        _print("工作区：机器级（没给 --root，服务整台机器）")
     else:
-        print(f"工作区：{project_root}")
+        _print(f"工作区：{project_root}")
     channel = args.channel
     if channel == "qqbot":
-        print(
+        _print(
             settings.describe_secret_search(
                 credentials.QQ_APP_ID + credentials.QQ_SECRET, workspace=project_root
             )
         )
         app_id, id_source = credentials.find(project_root, *credentials.QQ_APP_ID)
         secret, secret_source = credentials.find(project_root, *credentials.QQ_SECRET)
-        print(f"AppID：{credentials.mask(app_id)}（{id_source}）")
-        print(f"AppSecret：{credentials.mask(secret)}（{secret_source}）")
+        _print(f"AppID：{credentials.mask(app_id)}（{id_source}）")
+        _print(f"AppSecret：{credentials.mask(secret)}（{secret_source}）")
         if not (app_id and secret):
-            print("\n缺少凭据。")
+            _print("\n缺少凭据。")
             return 2
         from spoolkit.bridge.qqbot import QQBotChannel
 
@@ -642,29 +655,29 @@ def _check(project_root: Path | None, args) -> int:
             proxy=getattr(args, "bridge_proxy", ""),
         )
         if getattr(args, "bridge_proxy", ""):
-            print(f"通道出网走代理：{args.bridge_proxy}")
+            _print(f"通道出网走代理：{args.bridge_proxy}")
         try:
             token = qq.access_token()
-            print(f"换到了 access_token：{credentials.mask(token)}")
-            print(f"网关地址：{qq.gateway_url()}")
+            _print(f"换到了 access_token：{credentials.mask(token)}")
+            _print(f"网关地址：{qq.gateway_url()}")
         except Exception as exc:  # noqa: BLE001 - 给人看的失败也要说清楚
-            print(f"\n连接失败或凭据错误：{exc}")
+            _print(f"\n连接失败或凭据错误：{exc}")
             return 1
         finally:
             qq.close()
-        print("\n凭据可用。去掉 --check 即为实跑。")
+        _print("\n凭据可用。去掉 --check 即为实跑。")
         return 0
     if channel == "telegram":
-        print(
+        _print(
             settings.describe_secret_search(
                 credentials.TELEGRAM_TOKEN, workspace=project_root
             )
         )
         token, source = credentials.find(project_root, *credentials.TELEGRAM_TOKEN)
-        print(f"token：{credentials.mask(token)}（{source}）")
+        _print(f"token：{credentials.mask(token)}（{source}）")
         return 0 if token else 2
     if channel == "wecom":
-        print(
+        _print(
             settings.describe_secret_search(
                 credentials.WECOM_CORP_ID
                 + credentials.WECOM_SECRET
@@ -675,18 +688,18 @@ def _check(project_root: Path | None, args) -> int:
         corp_id, _ = credentials.find(project_root, *credentials.WECOM_CORP_ID)
         secret, _ = credentials.find(project_root, *credentials.WECOM_SECRET)
         agent_id, _ = credentials.find(project_root, *credentials.WECOM_AGENT_ID)
-        print(
+        _print(
             f"corp_id：{credentials.mask(corp_id)}"
             f" / secret：{credentials.mask(secret)}"
             f" / agent_id：{credentials.mask(agent_id)}"
         )
         if not (corp_id and secret and agent_id):
-            print("\n缺少凭据。")
+            _print("\n缺少凭据。")
             return 2
         # 企业微信**发**消息本机可用；**收**消息要一个公网回调 URL。`--check` 只能验
         # 凭据在不在，验不了回调通不通——这一句必须写出来，否则又是一次
         # "检查通过、真跑失败"（`--check` 不传代理那次就是这么错判的）。
-        print("凭据齐全。接收消息还需一个公网回调 URL，见 docs/bridge.md。")
+        _print("凭据齐全。接收消息还需一个公网回调 URL，见 docs/bridge.md。")
         return 0
-    print(f"{channel} 通道不需要凭据（或由自身的 __init__ 检查）。")
+    _print(f"{channel} 通道不需要凭据（或由自身的 __init__ 检查）。")
     return 0

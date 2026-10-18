@@ -2,7 +2,7 @@
 
 | 文档 | 用途 |
 |------|------|
-| [getting-started.md](getting-started.md) | 安装 → 首跑 → 故障速查 |
+| [getting-started.md](getting-started.md) | 故障表 · 工作区入口 · 模型服务 |
 | [cli.md](cli.md) | 命令/参数速查（与 `--help` 对齐） |
 | [manual.md](manual.md) | 运行机制契约（工作区、策略、记忆、循环） |
 | [agent-loop-flow.md](agent-loop-flow.md) | 主循环控制流（mermaid；改 loop 必同步） |

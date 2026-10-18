@@ -16,6 +16,7 @@ from spoolkit.cli.commands.run import (
     _resolve_read_roots,
     _settle_pending,
 )
+from spoolkit.cli.events import HumanProgress
 from spoolkit.cli.options import resolve_policy, resolve_scope, resolve_window
 from spoolkit.cli.term import print_md, print_out
 from spoolkit.cli.runtime import (
@@ -41,6 +42,8 @@ from spoolkit.tools.edit import PendingChanges
 CLIENT = "cli"
 
 EXIT_WORDS = ("/exit", "/quit", "/q")
+# 无斜杠的退出词：进模型前拦截（否则 `exit` 会跑一轮「再见」）。
+EXIT_PLAIN = frozenset({"exit", "quit", "q"})
 HELP = """\
 直接输入要做的事，例如：
   看看 calc.py 里 sum_to 是什么
@@ -54,8 +57,16 @@ HELP = """\
 /policy    查看授权策略（写操作如何放行）
 /approve   处理聊天通道的配对请求：/approve <码>、--list、--revoke <用户>
 /help      显示本页
-/exit      退出
+/exit      退出（也可直接输入 exit / quit / q）
 """
+
+
+def _is_exit(text: str) -> bool:
+    """斜杠命令或纯 exit/quit/q（大小写不敏感）。"""
+    raw = text.strip()
+    if raw in EXIT_WORDS:
+        return True
+    return raw.casefold() in EXIT_PLAIN
 
 
 def _status_line(
@@ -151,6 +162,7 @@ def _turn(args, project_root, gateway, window, memory) -> int:
         record_message(memory._conn, args.session, USER, args.goal)
     prompt = prompt_for_turn(memory, args.session, args.goal, overrides)
 
+    progress = HumanProgress()
     loop = assemble_loop(
         project_root,
         gateway,
@@ -175,10 +187,12 @@ def _turn(args, project_root, gateway, window, memory) -> int:
             web=web_access(args, project_root),
             search=web_search_backend(args, project_root),
             mcp=not getattr(args, "no_mcp", False),
+            on_event=progress.handle,
         ),
     )
 
     result = loop.run(args.goal, prompt=prompt)
+    progress.finish()
     _report_numbers(loop, result)
     if memory is not None:
         settle_lessons(memory, result.lessons_pushed, result.finished)
@@ -189,8 +203,7 @@ def _turn(args, project_root, gateway, window, memory) -> int:
             result.final or "（没有产出）",
             meta=f"{result.usage()}，{'完成' if result.finished else '未完成'}",
         )
-    for line in result.trace:
-        print_out(line, markup=False, style="muted")
+    # 进度已在回合内经 on_event 打到 stderr；这里不再复述 result.trace。
     print_out("---", markup=False, style="muted")
     # 与 `spool run` 同一条口径：结论与判词分开印（见 `LoopResult.report_text`）。
     # TTY 下 Markdown 渲染；管道 / NO_COLOR 仍是纯文本（见 `print_md`）。
@@ -243,7 +256,7 @@ def chat_command(args: argparse.Namespace) -> int:
         text = line.strip()
         if not text:
             continue
-        if text in EXIT_WORDS:
+        if _is_exit(text):
             break
         if text == "/help":
             print(HELP)

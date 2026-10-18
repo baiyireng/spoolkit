@@ -226,7 +226,8 @@ def trace_line(event: Event) -> dict | None:
         text = f"{head}模型生成中，已等待 {data.get('elapsed', 0)}s"
         if data.get("limit"):
             text += f" / 上限 {data['limit']}s"
-        return {"type": WAIT, "text": text}
+        # phase 留给页面做「同阶段 wait 替换末行」（interactive-harness §3.4）。
+        return {"type": WAIT, "text": text, "phase": phase}
     if kind == AWAIT:
         command = str(data.get("command") or "").strip()
         if command:

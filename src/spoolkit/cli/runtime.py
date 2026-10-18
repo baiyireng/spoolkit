@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from spoolkit.cli.events import EventWriter
+from spoolkit.cli.term import WaitDisplay
 from spoolkit.llm.llamacpp import DEFAULT_TEMPERATURE
 from spoolkit.llm.providers import ProviderConfig, ProviderError, load_gateway
 from spoolkit.net import system_proxy
@@ -247,6 +248,7 @@ def provider_gateway(args, project_root):
 def bind_model_wait(gateway, args, writer=None) -> None:
     """按本次命令的输出模式绑心跳。漏绑等于今天（静默），不崩溃。"""
     events = bool(getattr(args, "events", False))
+    display = None if events else WaitDisplay()
 
     def on_wait(elapsed: int, limit: float | None) -> None:
         phase = current_wait_phase()
@@ -259,9 +261,14 @@ def bind_model_wait(gateway, args, writer=None) -> None:
             stream = writer if writer is not None else EventWriter()
             stream.emit(WAIT, **payload)
             return
-        print(wait_line(elapsed, limit, phase), file=sys.stderr, flush=True)
+        assert display is not None
+        display.update(wait_line(elapsed, limit, phase))
 
-    attach_wait_listener(gateway, on_wait)
+    def on_wait_end() -> None:
+        if display is not None:
+            display.stop()
+
+    attach_wait_listener(gateway, on_wait, on_wait_end=None if events else on_wait_end)
 
 
 def attach_index(

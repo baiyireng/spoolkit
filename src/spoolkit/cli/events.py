@@ -5,6 +5,9 @@
 
 每条都 flush：不 flush 的话输出攒在缓冲区里，UI 那边看起来像卡住了，
 而你会先去怀疑网络。
+
+散文模式（`spool chat`）用 `HumanProgress`：同源事件语义，出口是 stderr，
+不占 stdout 结论通道。`wait` 仍由 `bind_model_wait` / `WaitDisplay` 管。
 """
 
 import sys
@@ -15,9 +18,20 @@ from typing import Any, TextIO
 from spoolkit.agents.plan import out_of_scope
 from spoolkit.cli.approval import apply_with_audit
 from spoolkit.cli.settle import refused_note, unconfirmed_note
+from spoolkit.cli.term import print_err
 from spoolkit.policy import AUTO
 from spoolkit.tools.edit import PendingChanges, save_baseline
-from spoolkit.web.protocol import AWAIT, CONFIRM, DIFF, Event, NOTE
+from spoolkit.web.protocol import (
+    AWAIT,
+    CONFIRM,
+    DELTA,
+    DIFF,
+    Event,
+    NOTE,
+    STEP,
+    TOOL,
+    WAIT,
+)
 
 
 class EventWriter:
@@ -161,3 +175,134 @@ def _emit_refused(writer: EventWriter, pending: PendingChanges) -> None:
     refused = refused_note(pending)
     if refused:
         writer.emit(NOTE, text=refused, ok=False)
+
+
+class HumanProgress:
+    """把 AgentLoop 事件渲染成 stderr 进度行（chat / 散文 run 用）。
+
+    不处理 `wait`：心跳已由 `WaitingGateway` + `WaitDisplay` 输出，再画一遍会叠字。
+    `delta`：TTY 上用 Live 刷 Markdown 缓冲；非 TTY 追加纯文本。
+    """
+
+    def __init__(self) -> None:
+        self._stream: _AssistantStream | None = None
+
+    def handle(self, kind: str, data: dict) -> None:
+        if kind == DELTA:
+            text = str(data.get("text") or "")
+            if text:
+                self._ensure_stream().feed(text)
+            return
+        # 截断重试：保留已上屏正文与 Live，只打进度行。内核已跳过重复前缀，
+        # 后续 delta 只会续写；若这里关面板，会清屏再从头刷一遍。
+        if kind == NOTE and data.get("kind") == "truncation_retry":
+            line = self._line(kind, data)
+            if line:
+                print_err(line, markup=False, style="muted")
+            return
+        # 其它事件到来时先收掉流式面板，避免与步骤行打架。
+        self._close_stream()
+        line = self._line(kind, data)
+        if line:
+            print_err(line, markup=False, style="muted")
+
+    def finish(self) -> None:
+        """回合结束：停 Live，留下已刷过的正文（终稿仍由 print_md 再印一份）。"""
+        self._close_stream()
+
+    def _ensure_stream(self) -> "_AssistantStream":
+        if self._stream is None:
+            self._stream = _AssistantStream()
+        return self._stream
+
+    def _close_stream(self) -> None:
+        if self._stream is not None:
+            self._stream.close()
+            self._stream = None
+
+    def _line(self, kind: str, data: dict) -> str:
+        if kind == STEP:
+            n = data.get("n", "?")
+            return f"· 第 {n} 步"
+        if kind == TOOL:
+            name = str(data.get("name") or "工具")
+            ok = bool(data.get("ok"))
+            if data.get("no_checker"):
+                status = "跳过（不是失败）"
+            else:
+                status = "成功" if ok else "失败"
+            text = f"· {name} → {status}"
+            detail = str(data.get("detail") or "").strip()
+            if detail and (not ok or data.get("no_checker")):
+                text = f"{text}（{detail}）"
+            return text
+        if kind == NOTE:
+            text = str(data.get("text") or "").strip()
+            if not text:
+                return ""
+            mark = "!" if data.get("ok") is False else "·"
+            return f"{mark} {text}"
+        if kind in (AWAIT, CONFIRM, DIFF, WAIT):
+            return ""
+        return ""
+
+
+class _AssistantStream:
+    """assistant delta → TTY Live Markdown，或非 TTY 追加。
+
+    Live 用 ``transient=True``：回合结束停掉时清掉面板，终稿由 ``print_md``
+    再印一份完整结论。截断重试不关面板（见 ``HumanProgress.handle``），由内核
+    跳过重复前缀后只 ``feed`` 续写，避免整段重刷。
+    """
+
+    def __init__(self) -> None:
+        from spoolkit.cli.term import CODE_THEME, console, set_stream_holds_tty
+
+        self._buf = ""
+        self._live = None
+        self._plain = False
+        con = console()
+        if con.is_terminal and not con.no_color:
+            from rich.live import Live
+            from rich.markdown import Markdown
+
+            # 先占住 TTY，停掉 WaitDisplay，避免加载符与正文互抢。
+            set_stream_holds_tty(True)
+            self._Markdown = Markdown
+            self._code_theme = CODE_THEME
+            self._live = Live(
+                Markdown("", code_theme=CODE_THEME),
+                console=con,
+                refresh_per_second=8,
+                transient=True,
+            )
+            self._live.start()
+        else:
+            self._plain = True
+
+    def feed(self, piece: str) -> None:
+        self._buf += piece
+        if self._live is not None:
+            self._live.update(
+                self._Markdown(self._buf, code_theme=self._code_theme)
+            )
+        elif self._plain:
+            from spoolkit.cli.term import console
+
+            con = console()
+            con.file.write(piece)
+            con.file.flush()
+
+    def close(self) -> None:
+        from spoolkit.cli.term import set_stream_holds_tty
+
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+            set_stream_holds_tty(False)
+        elif self._plain and self._buf:
+            from spoolkit.cli.term import console
+
+            con = console()
+            con.file.write("\n")
+            con.file.flush()

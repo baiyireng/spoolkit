@@ -244,6 +244,27 @@ def test_页面显示模型等待心跳() -> None:
     assert "上限" in HTML
 
 
+def test_同phase的wait替换末行() -> None:
+    """长等不应堆几十行 15s/30s；phase 变（输出加长）才追加。"""
+    script = _script()
+    assert "last.phase" in script or "last.phase ||" in script
+    assert "lines[lines.length - 1] = line" in script
+    assert "setTraceOpen" in script
+
+
+def test_运行中展开思考过程收尾可收起() -> None:
+    script = _script()
+    assert "card.done === false" in script
+    assert "setTraceOpen(card.trace, false)" in script
+    assert "setTraceOpen(card.trace, true)" in script
+
+
+def test_页面处理delta增量() -> None:
+    script = _script()
+    assert "data.type === 'delta'" in script
+    assert "appendDelta" in script
+
+
 def test_等待心跳不占用探活那条通知() -> None:
     """探活那条（模型连不上）不是"还在生成"：两者混在一起，人会以为模型挂了。"""
     script = _script()
