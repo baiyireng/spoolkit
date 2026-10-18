@@ -8,7 +8,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from spoolkit.agent.metrics import metric_scope
 from spoolkit.context.phase_budget import HARD_CAP
@@ -19,6 +19,8 @@ MAX_SECTIONS = 7
 DECISION_CHARS = 40
 DECISIONS_PER_SECTION = 3
 DECISION_CAP = 20
+# 终稿阶段的用户插话默认不打断当前节，排到下一轮控制。
+INTERRUPT_FINAL = False
 _DECISION_LINE = re.compile(r"^决定：\s*(.*)$")
 
 OUTLINE_INSTRUCTION = (
@@ -82,6 +84,39 @@ class WritingState:
             decisions=tuple(str(item) for item in payload.get("decisions", ())),
             next_section=int(payload.get("next_section", 0)),
         )
+
+
+@dataclass(frozen=True)
+class StopEffect:
+    completed: tuple[int, ...]
+    incomplete: int | None
+    queued_note: str
+    cancel_current: bool
+
+
+def apply_user_stop(
+    state: WritingState,
+    *,
+    phase: Literal["section", "final"],
+    note: str,
+) -> StopEffect:
+    """取消当前请求。已提交的节留下。终稿插话只排队，不把某一节标成未完成。"""
+    if phase == "final" and not INTERRUPT_FINAL:
+        return StopEffect(
+            completed=state.completed,
+            incomplete=None,
+            queued_note=note,
+            cancel_current=True,
+        )
+    incomplete = (
+        None if state.next_section in state.completed else state.next_section
+    )
+    return StopEffect(
+        completed=state.completed,
+        incomplete=incomplete,
+        queued_note="",
+        cancel_current=True,
+    )
 
 
 def split_section_decisions(text: str) -> tuple[str, tuple[str, ...]]:

@@ -53,6 +53,7 @@
 | 变更单 §9 回合指标 | `request_metric` 在 `llamacpp.py` 的 chat / chat_stream 写出。阶段、任务类型、重试、恢复由调用方 `metric_scope` 标注。`turn_metric` 有 `observe_turn`，逐节提交会更新 `sections_completed` | 主循环在 v2 关闭时不在回合结束调用 `observe_turn`。`first_token_ms` / `prefill_ms` 服务端没单独给出，记录里为空。`recovery=short/split` 不另发请求 |
 | 变更单 §8.1 结构不完整再续写 | 续写再截断或空续写 → 短答，不再请求。续写完整但重复 → 重写 | `stop` 但结构不完整再补一次续写，会多一次请求，和已锁定的恢复冲突。本步不改恢复 |
 | 变更单 §8.2 decisions | 节末 `决定：` 行抽进 `WritingState.decisions`。每节最多 3 条、每条 ≤ 40 字、总数 ≤ 20，按空白归一去重 | 正文留在该节，不进约束。下一节的 system 能看见这些结论 |
+| 变更单 §8.3 用户停止 | `apply_user_stop`：已提交节保留；当前节标未完成；`interrupt_final` 为假时终稿插话只排队 | 主循环还没走长文，进行中的 HTTP 请求没有接这条取消。策略先落在写作状态上 |
 | 变更单 §8.4 跨进程恢复 | `WritingState` 只在当次进程里用 `to_dict` / `from_dict` | 重开会话不读回这份状态，长文从头开始 |
 
 ---
