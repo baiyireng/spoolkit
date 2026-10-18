@@ -4,11 +4,32 @@
 就视为整段在复述，调用方应重写而不是再接上去。
 """
 
+from collections.abc import Mapping
+
+from spoolkit import limits
+
 OVERLAP_CHARS = 200
+OVERLAP_MIN = 200
+OVERLAP_MAX = 400
+OVERLAP_KNOB = "continuation_overlap_chars"
 NGRAM_SIZE = 12
 REPEAT_RATIO = 0.5
 REPEAT_WINDOW = 400
 REWRITE_FACTOR = 1.5
+
+
+def overlap_chars(
+    value: int | None = None,
+    overrides: Mapping[str, float] | None = None,
+) -> int:
+    """续写重叠字数。默认读 continuation_overlap_chars，并夹在 200–400。"""
+    if value is None:
+        value = int(limits.resolve(OVERLAP_KNOB, overrides)[0])
+    if value < OVERLAP_MIN:
+        return OVERLAP_MIN
+    if value > OVERLAP_MAX:
+        return OVERLAP_MAX
+    return value
 
 
 def merge_continuation(head: str, tail: str, overlap: int = OVERLAP_CHARS) -> str:

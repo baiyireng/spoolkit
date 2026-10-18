@@ -45,7 +45,7 @@
 | `n_past = timings.prompt_n` | 预算已改用 P_total。客户端仍只读到 `usage.prompt_tokens`，没有单独的 `prompt_n` 与复用 token 数 | 拿到 `prompt_n` 与缓存复用数之前，把 `usage.prompt_tokens` 当作 P_total。不要用更小的重算量去放大输出预算 |
 | `cache_prompt=true` | `ChatRequest.cache_prompt` 默认关；终稿请求为真时写入 payload | 用两次请求的 `prompt_tokens` 增量验收（阈值 200）。服务端是否回 `cache_hit` 仍未接入 |
 | 终稿纯文本、无 grammar | `PROTOCOL_V2=False` 时主循环仍带 schema，结论取 `final` | v2 打开且 `done` 时，`request_final` 复用控制前缀、不带 schema、不翻倍重试 |
-| 截断后不做 ×2 整段重试 | 控制回合仍走 `chat_with_escalation`（×2） | 终稿与逐节：续写一次并按 200 字重叠拼接。续写再截断则短答，不再请求。续写完整但 12 字片段重合超过一半：逐节重写一次（原预算）；终稿按 1.5 倍预算重写一次。方案里的「再失败则拆分该节」没有拆分规则，未做 |
+| 截断后不做 ×2 整段重试 | 控制回合仍走 `chat_with_escalation`（×2） | 终稿与逐节：续写一次。重叠字数读 `continuation_overlap_chars`（默认 200，夹在 200–400）。续写再截断或空续写则短答，不再请求。续写完整但 12 字片段重合超过一半：逐节重写一次（原预算）；终稿按 1.5 倍预算重写一次。变更单写「只带重叠区 + 本节要求」：现有续写末条仍是续写指令，旧正文（含重叠区）不进 prompt，否则会改掉已锁定的末条。拆分该节仍未做 |
 | 流式事件 `final_delta` 等 | 已登记 `final_delta`；CLI / 网页与 `delta` 一样追加 | 控制回合在 v2 下仍走 `FinalFieldTap`（没有 `final` 就不上屏）。章节事件留到 P1-5 |
 | 配置 `protocol.v2` 等 | `limits.py` 无对应项 | P2-3 / 更早用 settings 或 limits 旋钮灰度 |
 | 长文子流程 WritingState | `writing_state.py` 管大纲；`sections.py` 逐节生成，截断走 `continuation.py`。主循环未调用 | 章节流式在 P1-5。开关关闭时仍是单次终稿 |

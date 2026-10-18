@@ -9,7 +9,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from spoolkit.agent.continuation import REWRITE_FACTOR, looks_repeated, merge_continuation
+from spoolkit.agent.continuation import (
+    REWRITE_FACTOR,
+    looks_repeated,
+    merge_continuation,
+    overlap_chars,
+)
 from spoolkit.context.phase_budget import Phase, compute_budget
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
@@ -113,6 +118,7 @@ def request_final(
     n_past: int = 0,
     prompt_tokens: int | None = None,
     target_tokens: int | None = None,
+    overlap: int | None = None,
     on_delta: Any = None,
 ) -> FinalDraft:
     """纯文本终稿。截断后续写一次并去掉重叠；续写若在复述，则按 1.5 倍预算重写一次。
@@ -172,7 +178,9 @@ def request_final(
         ),
         held.append if on_delta is not None else None,
     )
-    merged = merge_continuation(response.text, follow.text)
+    merged = merge_continuation(
+        response.text, follow.text, overlap=overlap_chars(overlap)
+    )
     fresh = merged[len(response.text) :]
     if follow.truncated or not follow.text.strip():
         logger.warning("终稿续写未完成，改为短答并留下继续入口")

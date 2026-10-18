@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
-from spoolkit.agent.continuation import looks_repeated, merge_continuation
+from spoolkit.agent.continuation import looks_repeated, merge_continuation, overlap_chars
 from spoolkit.agent.final_turn import CONTINUATION_INSTRUCTION, SHORT_CONTINUE
 from spoolkit.agent.writing_state import WritingState
 from spoolkit.context.phase_budget import HARD_CAP, compute_budget
@@ -46,6 +46,7 @@ def generate_section(
     n_ctx: int | None = None,
     n_past: int = 0,
     prompt_tokens: int | None = None,
+    overlap: int | None = None,
 ) -> SectionDraft:
     """写当前节。system 是大纲和约束，user 只有事实。"""
     if not 0 <= state.next_section < len(state.outline):
@@ -86,7 +87,9 @@ def generate_section(
             cache_prompt=True,
         )
     )
-    merged = merge_continuation(response.text, follow.text)
+    merged = merge_continuation(
+        response.text, follow.text, overlap=overlap_chars(overlap)
+    )
     if follow.truncated or not follow.text.strip():
         logger.warning("本节续写未完成，改为短答并留下继续入口")
         return _draft(state, section.title, follow, merged + SHORT_CONTINUE, True)

@@ -2,7 +2,7 @@
 
 import logging
 
-from spoolkit.agent.continuation import looks_repeated, merge_continuation
+from spoolkit.agent.continuation import looks_repeated, merge_continuation, overlap_chars
 from spoolkit.agent.final_turn import (
     CONTINUATION_INSTRUCTION,
     FINAL_INSTRUCTION,
@@ -68,6 +68,47 @@ def test_整段十二字重合超过一半算重复() -> None:
 def test_新内容以及刚好一半重合都不算重复() -> None:
     assert not looks_repeated("甲" * 400, "乙" * 400)
     assert not looks_repeated("A" * 12, "A" * 12 + "B")
+
+
+def test_重叠窗口二百不切更早的衔接四百才切() -> None:
+    shared = "重" * 300
+    head = ("前" * 500) + shared
+    tail = shared + "新写的后半"
+    assert merge_continuation(head, tail, overlap=200) == head + ("重" * 100) + "新写的后半"
+    assert merge_continuation(head, tail, overlap=400) == head + "新写的后半"
+
+
+def test_重叠字数默认二百并夹在二百到四百() -> None:
+    assert overlap_chars() == 200
+    assert overlap_chars(200) == 200
+    assert overlap_chars(400) == 400
+    assert overlap_chars(100) == 200
+    assert overlap_chars(900) == 400
+    assert overlap_chars(overrides={"continuation_overlap_chars": 320}) == 320
+    assert overlap_chars(overrides={"continuation_overlap_chars": 50}) == 200
+
+
+def test_本节按给定重叠窗口拼接且不带旧正文() -> None:
+    shared = "重" * 201
+    head = ("前" * 500) + shared
+    tail = shared + ("新" * 199)
+    gateway = _Script([_cut(head), _done(tail)])
+    draft = generate_section(gateway, _state(), facts=_FACTS, overlap=400)
+    assert draft.text == head + ("新" * 199)
+    assert draft.truncated is False
+    blob = "\n".join(message.content for message in gateway.requests[1].messages)
+    assert head[:-400] not in blob
+    assert shared not in blob
+    assert CONTINUATION_INSTRUCTION in gateway.requests[1].messages[-1].content
+
+
+def test_空续写降级短答不再重写() -> None:
+    gateway = _Script([_cut("半截正文"), _done("   ")])
+    draft = generate_section(gateway, _state(), facts=_FACTS)
+    assert len(gateway.requests) == 2
+    assert draft.truncated is True
+    assert "继续" in draft.text
+    assert "半截正文" in draft.text
 
 
 def test_节被截断后续写去掉重叠() -> None:

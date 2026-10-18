@@ -736,6 +736,12 @@ KNOBS: tuple[Knob, ...] = (
         "大窗口下它不生效（8K 的 28% 是 1950 > 800），这是刻意的：它的角色就是"
         "小窗口的绝对量兜底，不是第二个比例线",
     ),
+    Knob(
+        "continuation_overlap_chars", 200, CAPABILITY,
+        "续写拼接时回看的字数（变更单里的 continuation.overlapChars）。"
+        "默认 200，允许 200–400；超出由 overlap_chars 夹回这个区间。"
+        "续写提示只带这段重叠和本节要求，不把整段旧正文送回去",
+    ),
 )
 
 _BY_NAME = {knob.name: knob for knob in KNOBS}
