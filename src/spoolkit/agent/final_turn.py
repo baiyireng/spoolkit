@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from spoolkit.agent.continuation import REWRITE_FACTOR, looks_repeated, merge_continuation
 from spoolkit.context.phase_budget import Phase, compute_budget
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
@@ -111,7 +112,10 @@ def request_final(
     target_tokens: int | None = None,
     on_delta: Any = None,
 ) -> FinalDraft:
-    """纯文本终稿。截断后续写一次；仍截断则短答并留下继续入口。不翻倍重试。"""
+    """纯文本终稿。截断后续写一次并去掉重叠；续写若在复述，则按 1.5 倍预算重写一次。
+
+    续写本身再被截断就停，留下继续入口，不再加请求。
+    """
     limit = _output_limit(
         max_tokens=max_tokens,
         n_ctx=n_ctx,
@@ -144,6 +148,7 @@ def request_final(
         logger.warning("终稿续写未完成，改为短答并留下继续入口")
         return _draft(response, response.text + SHORT_CONTINUE, True)
 
+    held: list[str] = []
     follow = _complete(
         gateway,
         ChatRequest(
@@ -154,12 +159,66 @@ def request_final(
             response_schema=None,
             cache_prompt=True,
         ),
-        on_delta,
+        held.append if on_delta is not None else None,
     )
-    merged = response.text + follow.text
+    merged = merge_continuation(response.text, follow.text)
+    fresh = merged[len(response.text) :]
     if follow.truncated or not follow.text.strip():
         logger.warning("终稿续写未完成，改为短答并留下继续入口")
-        if on_delta is not None:
-            on_delta(SHORT_CONTINUE)
+        _emit(on_delta, fresh)
+        _emit(on_delta, SHORT_CONTINUE)
         return _draft(follow, merged + SHORT_CONTINUE, True)
+    if looks_repeated(response.text, follow.text):
+        logger.warning("终稿续写与已写内容重复，按 1.5 倍预算重写一次")
+        return _rewrite_final(
+            gateway,
+            prefix,
+            limit=limit,
+            n_ctx=n_ctx,
+            n_past=follow.prompt_tokens or response.prompt_tokens or n_past,
+            on_delta=on_delta,
+        )
+    _emit(on_delta, fresh)
     return _draft(follow, merged, False)
+
+
+def _rewrite_final(
+    gateway: Any,
+    prefix: Sequence[Message],
+    *,
+    limit: int,
+    n_ctx: int | None,
+    n_past: int,
+    on_delta: Any,
+) -> FinalDraft:
+    """整段重写一次。预算是原终稿的 1.5 倍，不是 2 倍。"""
+    requested = int(limit * REWRITE_FACTOR)
+    rewrite_limit = _output_limit(
+        max_tokens=requested,
+        n_ctx=n_ctx,
+        n_past=n_past,
+        phase="final",
+        target_tokens=requested,
+    )
+    if rewrite_limit <= 0:
+        logger.warning("终稿重写没有输出预算，改为短答并留下继续入口")
+        _emit(on_delta, SHORT_CONTINUE)
+        return FinalDraft(
+            text=SHORT_CONTINUE.strip(),
+            prompt_tokens=n_past,
+            completion_tokens=0,
+            truncated=True,
+        )
+    rewrite = _complete(
+        gateway, final_request(prefix, max_tokens=rewrite_limit), on_delta
+    )
+    if rewrite.truncated or not rewrite.text.strip():
+        logger.warning("终稿重写未完成，改为短答并留下继续入口")
+        _emit(on_delta, SHORT_CONTINUE)
+        return _draft(rewrite, rewrite.text + SHORT_CONTINUE, True)
+    return _draft(rewrite, rewrite.text, False)
+
+
+def _emit(on_delta: Any, text: str) -> None:
+    if on_delta is not None and text:
+        on_delta(text)

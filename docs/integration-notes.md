@@ -45,10 +45,10 @@
 | `n_past = timings.prompt_n` | 仅有 `usage.prompt_tokens`（且流式依赖 `stream_options.include_usage`） | P0-1 先用 `prompt_tokens`；缺省再退化估算；`cache_hit` 需查 llama-server 是否返回 |
 | `cache_prompt=true` | `ChatRequest.cache_prompt` 默认关；终稿请求为真时写入 payload | 用两次请求的 `prompt_tokens` 增量验收（阈值 200）。服务端是否回 `cache_hit` 仍未接入 |
 | 终稿纯文本、无 grammar | `PROTOCOL_V2=False` 时主循环仍带 schema，结论取 `final` | v2 打开且 `done` 时，`request_final` 复用控制前缀、不带 schema、不翻倍重试 |
-| 截断后不做 ×2 整段重试 | 控制回合仍走 `chat_with_escalation`（×2） | 终稿 `request_final`：续写一次（预算用 `continuation`，不 ×2）；仍截断则短答 +「继续」入口并打日志。×1.5 整段重写与重叠去重留在 P1-4 |
+| 截断后不做 ×2 整段重试 | 控制回合仍走 `chat_with_escalation`（×2） | 终稿与逐节：续写一次并按 200 字重叠拼接。续写再截断则短答，不再请求。续写完整但 12 字片段重合超过一半：逐节重写一次（原预算）；终稿按 1.5 倍预算重写一次。方案里的「再失败则拆分该节」没有拆分规则，未做 |
 | 流式事件 `final_delta` 等 | 已登记 `final_delta`；CLI / 网页与 `delta` 一样追加 | 控制回合在 v2 下仍走 `FinalFieldTap`（没有 `final` 就不上屏）。章节事件留到 P1-5 |
 | 配置 `protocol.v2` 等 | `limits.py` 无对应项 | P2-3 / 更早用 settings 或 limits 旋钮灰度 |
-| 长文子流程 WritingState | `writing_state.py` 管大纲与状态；`sections.py` 逐节生成并组装。主循环未调用 | 节内续写与重叠去重在 P1-4。开关关闭时仍是单次终稿 |
+| 长文子流程 WritingState | `writing_state.py` 管大纲；`sections.py` 逐节生成，截断走 `continuation.py`。主循环未调用 | 章节流式在 P1-5。开关关闭时仍是单次终稿 |
 
 ---
 
