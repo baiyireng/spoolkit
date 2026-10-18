@@ -16,6 +16,7 @@ from spoolkit.agent.continuation import (
     merge_continuation,
     overlap_chars,
 )
+from spoolkit.agent.structure import fences_closed
 from spoolkit.context.phase_budget import Phase, compute_budget
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
@@ -145,10 +146,14 @@ def request_final(
 
     with metric_scope(phase="final", task_type="long", n_ctx=n_ctx or 0):
         response = _complete(gateway, final_request(prefix, max_tokens=limit), on_delta)
-    if not response.truncated:
+    structural = not response.truncated and not fences_closed(response.text)
+    if not response.truncated and not structural:
         return _draft(response, response.text, False)
 
-    logger.warning("终稿被截断，续写一次")
+    if structural:
+        logger.warning("终稿结构未完成，续写一次")
+    else:
+        logger.warning("终稿被截断，续写一次")
     if response.prompt_tokens:
         follow_prompt: int | None = response.prompt_tokens
     elif prompt_tokens is not None:
@@ -196,7 +201,7 @@ def request_final(
         _emit(on_delta, fresh)
         _emit(on_delta, SHORT_CONTINUE)
         return _draft(follow, merged + SHORT_CONTINUE, True)
-    if looks_repeated(response.text, follow.text):
+    if not structural and looks_repeated(response.text, follow.text):
         logger.warning("终稿续写与已写内容重复，按 1.5 倍预算重写一次")
         return _rewrite_final(
             gateway,

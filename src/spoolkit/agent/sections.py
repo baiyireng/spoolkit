@@ -13,6 +13,7 @@ from typing import Any
 from spoolkit.agent.continuation import looks_repeated, merge_continuation, overlap_chars
 from spoolkit.agent.metrics import commit_section, metric_scope, note_retry, reset_section_progress
 from spoolkit.agent.final_turn import CONTINUATION_INSTRUCTION, SHORT_CONTINUE
+from spoolkit.agent.structure import cut_before_next_heading, fences_closed
 from spoolkit.agent.writing_state import WritingState, merge_decisions, split_section_decisions
 from spoolkit.context.phase_budget import HARD_CAP, compute_budget
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
@@ -68,7 +69,9 @@ def generate_section(
     )
     with metric_scope(phase="section", task_type="long", n_ctx=n_ctx or 0):
         response: ChatResponse = gateway.chat(request)
-    if not response.truncated:
+    kept = cut_before_next_heading(response.text)
+    structural = not response.truncated and not fences_closed(kept)
+    if not response.truncated and not structural:
         return _draft(state, section.title, response, response.text.strip(), False)
 
     follow_limit = _continuation_limit(
@@ -105,7 +108,7 @@ def generate_section(
     if follow.truncated or not follow.text.strip():
         logger.warning("本节续写未完成，改为短答并留下继续入口")
         return _draft(state, section.title, follow, merged + SHORT_CONTINUE, True)
-    if looks_repeated(response.text, follow.text):
+    if not structural and looks_repeated(response.text, follow.text):
         logger.warning("本节续写与已写内容重复，重写该节")
         with metric_scope(
             phase="section",
@@ -243,7 +246,7 @@ def _draft(
     text: str,
     truncated: bool,
 ) -> SectionDraft:
-    raw = text
+    raw = cut_before_next_heading(text)
     suffix = ""
     if raw.endswith(SHORT_CONTINUE):
         raw = raw[: -len(SHORT_CONTINUE)]
