@@ -61,6 +61,7 @@ from spoolkit.agent.material_compactor import (
     notes_from_material,
 )
 from spoolkit.agent.monitor import ToolSight, inspect
+from spoolkit.agent.final_turn import request_final
 from spoolkit.agent.protocol import ParseFailure, TurnProtocol
 from spoolkit.agent.signals import (
     BEHAVIOR_KINDS,
@@ -122,7 +123,12 @@ from spoolkit.agents.supervisor import (
 from spoolkit.config import Config
 from spoolkit.context.assembler import Assembler, AssembleResult
 from spoolkit.context.budget import Budget, compact_trigger
-from spoolkit.context.phase_budget import PROTOCOL_V2, output_tokens_for_turn
+from spoolkit.context.phase_budget import (
+    PROTOCOL_V2,
+    compute_budget,
+    output_tokens_for_turn,
+    resolve_n_past,
+)
 from spoolkit.context.sections import Section
 from spoolkit.context import templates as T
 from spoolkit.errors import ContextOverflowError, PathOutsideProjectError
@@ -3412,7 +3418,25 @@ class AgentLoop:
             # 那一步有没有产出」（同一步里既改东西又宣告完成的不给自动修：
             # 那一轮它已经动过了，判词进的是运行报告）。
             if turn.done:
-                conclusion_text = turn.final or ""
+                if self._turn_protocol.v2:
+                    # 控制回合的消息原样当前缀，终稿另一次纯文本请求。
+                    n_past = resolve_n_past(response.prompt_tokens, assembled.messages)
+                    target = (
+                        turn.answer_plan.target_tokens if turn.answer_plan else None
+                    )
+                    phase_budget = compute_budget(
+                        n_ctx=self._budget.window,
+                        n_past=n_past,
+                        phase="final",
+                        target_tokens=target,
+                    )
+                    conclusion_text = request_final(
+                        self.gateway,
+                        assembled.messages,
+                        max_tokens=phase_budget.max_tokens,
+                    ).text
+                else:
+                    conclusion_text = turn.final or ""
                 bounced = self._bounce_unwritten(conclusion_text, changed_paths)
                 if bounced:
                     trace.append(

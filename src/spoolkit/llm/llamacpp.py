@@ -90,6 +90,8 @@ def _to_payload(
         # 就没法跟「上一次绿」比较了。所以种子只在显式给出时才下发，
         # 默认保持「服务端说了算」（llama.cpp 自己会随机取）。
         payload["seed"] = int(seed)
+    if request.cache_prompt:
+        payload["cache_prompt"] = True
     if request.response_schema:
         # llama.cpp 会把这里转成 GBNF 语法做约束采样。
         payload["response_format"] = {

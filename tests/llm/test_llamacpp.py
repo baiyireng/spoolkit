@@ -71,6 +71,28 @@ def test_有schema时通过response_format下发() -> None:
     gateway.close()
 
 
+def test_cache_prompt只在打开时下发() -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(200, json=_completion())
+
+    gateway = _gateway(handler)
+    gateway.chat(_request())
+    assert "cache_prompt" not in seen["payload"]
+    gateway.chat(
+        ChatRequest(
+            messages=(Message(role="user", content="终稿"),),
+            max_tokens=100,
+            cache_prompt=True,
+        )
+    )
+    assert seen["payload"]["cache_prompt"] is True
+    assert "response_format" not in seen["payload"]
+    gateway.close()
+
+
 def test_无schema时不带response_format() -> None:
     seen: dict = {}
 
