@@ -31,9 +31,10 @@
 | 显示层：JSON `\n` 解码、Wait/Live 抢屏、截断重试整段重刷 | **已修**（`FinalFieldTap` 解码、`set_stream_holds_tty`、Live transient、内核跳过重复前缀） |
 | P0-0 代码定位 | **已完成** → `docs/integration-notes.md` |
 | P0-1 预算计算器 | **已完成**：`context/phase_budget.py`；`PROTOCOL_V2=False` 时主循环仍用 `output_reserve()` |
-| P0-2 及以后 | **未开始** |
+| P0-2 ControlTurn v2 | **已完成**：`TurnProtocol`；开关关闭时仍解析旧 `final` |
+| P0-3 及以后 | **未开始** |
 
-**下一步：P0-2 ControlTurn v2**（方案 §11），然后 P0-3…；每个任务独立提交；不要一次性重写主循环。
+**下一步：P0-3 FinalTurn 纯文本通道**（方案 §11），然后 P0-4…；每个任务独立提交；不要一次性重写主循环。
 
 ---
 
@@ -45,7 +46,7 @@
 2. docs/local-agent-long-answer-plan.md
 3. docs/integration-notes.md
 
-然后从 P0-2 开始，按方案 §11 的 P0 → P1 → P2 顺序执行。
+然后从 P0-3 开始，按方案 §11 的 P0 → P1 → P2 顺序执行。
 约束：
 - 每个任务独立提交；完成前跑对应测试；没有测试先补测试。
 - 不要一次性重写 AgentLoop；不要删除旧协议，用 protocol.v2（或等价开关）灰度。

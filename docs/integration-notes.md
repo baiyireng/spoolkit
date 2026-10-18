@@ -40,8 +40,8 @@
 | 方案假设 | 仓库现状 | 建议 |
 |---|---|---|
 | `budget.ts` / TS 模块名 | Python `spoolkit` | 已落在 `spoolkit/context/phase_budget.py` 的 `compute_budget`。`n_past` 用 `usage.prompt_tokens`，缺省按字数估算并打日志 |
-| Control JSON **无 `final`** | `TURN_SCHEMA` / `build_turn_schema` / `parse_turn` **强依赖 `final`** | P0-2 需双协议 + `protocol.v2` 开关；旧路径完整保留 |
-| `answer_plan` / `summary` 字段 | 协议中不存在 | P0-2 / P1-1 扩展 schema 与解析校验 |
+| Control JSON **无 `final`** | 旧 schema 仍含 `final` | 已加 `build_turn_schema_v2` / `TurnProtocol`。v2 去掉 `final`，保留 `state` / `assessment`（主循环还用）。`PROTOCOL_V2=False` 时仍走旧解析。连续两次旧格式降级并打日志 |
+| `answer_plan` / `summary` 字段 | v2 已解析；长文触发尚未接 | P1-1 用 `answer_plan` 决定是否走长文 |
 | `n_past = timings.prompt_n` | 仅有 `usage.prompt_tokens`（且流式依赖 `stream_options.include_usage`） | P0-1 先用 `prompt_tokens`；缺省再退化估算；`cache_hit` 需查 llama-server 是否返回 |
 | `cache_prompt=true` | 客户端**未传**该参数 | P0-3 在 payload 增加可选字段；用两次请求的 `prompt_tokens` 增量验收缓存 |
 | 终稿纯文本、无 grammar | 主循环**始终**带 `response_schema` | P0-3 新增无 schema 的第二次请求路径 |

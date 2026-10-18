@@ -61,7 +61,7 @@ from spoolkit.agent.material_compactor import (
     notes_from_material,
 )
 from spoolkit.agent.monitor import ToolSight, inspect
-from spoolkit.agent.protocol import ParseFailure, build_turn_schema, parse_turn
+from spoolkit.agent.protocol import ParseFailure, TurnProtocol
 from spoolkit.agent.signals import (
     BEHAVIOR_KINDS,
     FindingKind,
@@ -1825,7 +1825,8 @@ class AgentLoop:
         self._budget = Budget(
             window=config.context_window, overrides=config.overrides
         )
-        self._schema = build_turn_schema(registry)
+        self._turn_protocol = TurnProtocol(v2=PROTOCOL_V2)
+        self._schema = self._turn_protocol.schema(registry)
 
     def _note_landed_write(self, call: ToolCall, book: _WriteBook) -> None:
         """一次**真的落成**的写调用要记的全部账。
@@ -2815,7 +2816,9 @@ class AgentLoop:
             model_calls += 1
             prompt_tokens += response.prompt_tokens
             completion_tokens += response.completion_tokens
-            turn = parse_turn(response.text)
+            turn = self._turn_protocol.parse(response.text)
+            if self._turn_protocol.take_downgrade():
+                self._schema = self._turn_protocol.schema(self.registry)
 
             if isinstance(turn, ParseFailure):
                 # ---- 收束出口：收束态里没调工具的那段正文**就是结论** -------
