@@ -77,4 +77,17 @@
 - [x] 方案与仓库差异已列出  
 - [x] **未改任何业务代码**（仅新增本笔记 + 拷贝方案 md）
 
-**暂停点**：请确认本笔记与差异表无误后，再指示开始 **P0-1 预算计算器**。
+P0-1 起的落地状态见 `docs/long-answer-handoff.md` 第 3 节。
+
+---
+
+## 6. P0-6 回归（无新功能）
+
+`PROTOCOL_V2=False`。133 项通过：短答（`test_loop`、`test_chat_command`、`test_loop_prefetch`）、工具轮（`test_loop` 的工具后终稿、`test_loop_events`）、截断（`test_output_truncated`、`test_retry`、`test_final_truncation`、`test_delta_truncation_replay`），加上协议 / 预算 / 终稿流式单测。
+
+| 方案 §13 指标 | 这次能说的 |
+|---|---|
+| 控制 JSON 合法率 | 旧协议与 v2 单测通过；开关关闭，线上仍是旧协议 |
+| 工具正确性 | 假模型工具轮通过，不是真机实时任务 |
+| 终稿截断 / 重复生成 | 终稿路径：续写一次或短答；事件只追加。控制回合仍可 ×2 |
+| 长文完整率、截断率、首次成功率、时延、缓存命中率 | 未采集。要 8K 真机，且 `cache_hit` 尚未从服务端读出 |
