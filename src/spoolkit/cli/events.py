@@ -29,6 +29,8 @@ from spoolkit.web.protocol import (
     FINAL_DELTA,
     Event,
     NOTE,
+    SECTION_DONE,
+    SECTION_START,
     STEP,
     TOOL,
     WAIT,
@@ -193,6 +195,19 @@ class HumanProgress:
             text = str(data.get("text") or "")
             if text:
                 self._ensure_stream().feed(text)
+            return
+        if kind == SECTION_START:
+            index = int(data.get("index") or 0) + 1
+            total = data.get("total", "?")
+            title = str(data.get("title") or "")
+            print_err(f"· 第 {index}/{total} 节 {title}", markup=False, style="muted")
+            return
+        if kind == SECTION_DONE:
+            text = str(data.get("text") or "")
+            if text:
+                self._ensure_stream().feed(text)
+                if not text.endswith("\n"):
+                    self._ensure_stream().feed("\n\n")
             return
         # 截断重试：保留已上屏正文与 Live，只打进度行。内核已跳过重复前缀，
         # 后续 delta 只会续写；若这里关面板，会清屏再从头刷一遍。

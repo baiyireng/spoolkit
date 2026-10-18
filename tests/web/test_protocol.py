@@ -88,6 +88,26 @@ def test_wait可以没有limit() -> None:
     assert "limit" not in parsed.data
 
 
+def test_章节事件被接受() -> None:
+    started = parse_line(
+        Event(
+            "section_start",
+            {"index": 1, "title": "方案", "total": 3, "state": "draft"},
+        ).to_line()
+    )
+    assert started is not None
+    assert started.type == "section_start"
+    assert started.data["title"] == "方案"
+    done = parse_line(
+        Event(
+            "section_done",
+            {"index": 1, "title": "方案", "text": "本节正文", "state": "final"},
+        ).to_line()
+    )
+    assert done is not None
+    assert done.data["text"] == "本节正文"
+
+
 def test_final_delta事件被接受() -> None:
     """纯文本终稿增量。未登记的类型会被丢掉。"""
     parsed = parse_line(Event(FINAL_DELTA, {"text": "第一段\n第二段"}).to_line())

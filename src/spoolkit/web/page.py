@@ -1640,6 +1640,25 @@ function ensureLive() {
 }
 
 // assistant delta：第一次把「生成中」清掉，之后追加纯文本（final 再整段覆盖）。
+function replaceSection(index, text) {
+  const stick = atBottom();
+  const card = ensureLive();
+  if (!card.streamed) {
+    card.bubble.className = 'bubble';
+    card.bubble.textContent = '';
+    card.streamed = true;
+  }
+  let node = card.bubble.querySelector('[data-section="' + index + '"]');
+  if (!node) {
+    node = document.createElement('div');
+    node.setAttribute('data-section', String(index));
+    card.bubble.appendChild(node);
+  }
+  node.textContent = text;
+  if (stick) { scrollDown(); }
+  updateToBottom();
+}
+
 function appendDelta(piece) {
   if (!piece) { return; }
   const stick = atBottom();
@@ -2931,6 +2950,17 @@ function onEvent(event) {
   }
   // 步骤 / 工具 / 系统说的一句话 / 等待心跳：全部进这张卡片的「思考过程」
   // （运行中自动展开；成功收尾后再收起）。
+  if (data.type === 'section_start') {
+    addTraceLine({
+      type: 'note',
+      text: '第 ' + (Number(data.index) + 1) + '/' + data.total + ' 节 ' + (data.title || '')
+    });
+    return;
+  }
+  if (data.type === 'section_done') {
+    replaceSection(Number(data.index), String(data.text || ''));
+    return;
+  }
   if (data.type === 'delta' || data.type === 'final_delta') {
     // 正文流式：主气泡增量追加（final 再用完整文本覆盖，防漏片）。
     setThinking(true);

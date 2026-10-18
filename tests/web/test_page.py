@@ -259,6 +259,13 @@ def test_运行中展开思考过程收尾可收起() -> None:
     assert "setTraceOpen(card.trace, true)" in script
 
 
+def test_页面重写一节只换这一节() -> None:
+    script = _script()
+    assert "data.type === 'section_done'" in script
+    assert "data-section" in script
+    assert "node.textContent = text" in script
+
+
 def test_页面处理delta增量() -> None:
     script = _script()
     assert "data.type === 'delta'" in script

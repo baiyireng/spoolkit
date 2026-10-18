@@ -27,6 +27,9 @@ WAIT = "wait"
 DELTA = "delta"
 # 纯文本终稿增量。不经 JSON `final` 抽取；老客户端忽略未知类型，这里登记后网页才收得到。
 FINAL_DELTA = "final_delta"
+# 长文一节的草稿开始 / 正式提交。重写只再发这一节，不重放前面的节。
+SECTION_START = "section_start"
+SECTION_DONE = "section_done"
 
 KNOWN = frozenset(
     {
@@ -43,6 +46,8 @@ KNOWN = frozenset(
         WAIT,
         DELTA,
         FINAL_DELTA,
+        SECTION_START,
+        SECTION_DONE,
     }
 )
 

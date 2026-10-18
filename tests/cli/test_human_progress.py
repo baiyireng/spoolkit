@@ -40,6 +40,27 @@ def test_delta追加正文(capsys) -> None:
     assert "世界" in out
 
 
+def test_章节完成只追加本节(capsys) -> None:
+    progress = HumanProgress()
+    progress.handle(
+        "section_start",
+        {"index": 0, "title": "背景", "total": 2, "state": "draft"},
+    )
+    progress.handle(
+        "section_done",
+        {"index": 0, "title": "背景", "total": 2, "text": "第一节正文", "state": "final"},
+    )
+    progress.handle(
+        "section_done",
+        {"index": 1, "title": "方案", "total": 2, "text": "第二节正文", "state": "final"},
+    )
+    progress.finish()
+    captured = capsys.readouterr()
+    assert "第 1/2 节" in captured.err
+    assert captured.out.count("第一节正文") == 1
+    assert "第二节正文" in captured.out
+
+
 def test_final_delta追加且不重放(capsys) -> None:
     progress = HumanProgress()
     progress.handle(FINAL_DELTA, {"text": "半截"})

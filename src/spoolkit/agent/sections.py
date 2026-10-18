@@ -112,22 +112,59 @@ def write_sections(
     n_ctx: int | None = None,
     n_past: int = 0,
     prompt_tokens: int | None = None,
+    on_event: Any = None,
 ) -> tuple[SectionDraft, ...]:
     """按大纲顺序逐节写。每一节都用同一份事实，不把前文拼回去。"""
+    total = len(state.outline)
     drafts: list[SectionDraft] = []
-    for index in range(len(state.outline)):
+    for index in range(total):
+        section = state.outline[index]
+        _emit_section(
+            on_event,
+            "section_start",
+            index=index,
+            title=section.title,
+            total=total,
+            state="draft",
+        )
         current = replace(state, next_section=index)
-        drafts.append(
-            generate_section(
-                gateway,
-                current,
-                facts=facts,
-                n_ctx=n_ctx,
-                n_past=n_past,
-                prompt_tokens=prompt_tokens,
-            )
+        draft = generate_section(
+            gateway,
+            current,
+            facts=facts,
+            n_ctx=n_ctx,
+            n_past=n_past,
+            prompt_tokens=prompt_tokens,
+        )
+        drafts.append(draft)
+        _emit_section(
+            on_event,
+            "section_done",
+            index=draft.index,
+            title=draft.title,
+            total=total,
+            state="final",
+            text=draft.text,
         )
     return tuple(drafts)
+
+
+def apply_section_event(
+    parts: dict[int, str], kind: str, data: dict
+) -> dict[int, str]:
+    """按节更新。完成事件只替换这一节，前面的节保持原样。"""
+    updated = dict(parts)
+    index = int(data["index"])
+    if kind == "section_start":
+        updated.setdefault(index, "")
+    elif kind == "section_done":
+        updated[index] = str(data.get("text") or "")
+    return updated
+
+
+def _emit_section(on_event: Any, kind: str, **data: object) -> None:
+    if on_event is not None:
+        on_event(kind, data)
 
 
 def assemble(
