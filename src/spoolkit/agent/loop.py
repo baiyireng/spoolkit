@@ -125,8 +125,8 @@ from spoolkit.config import Config
 from spoolkit.context.assembler import Assembler, AssembleResult
 from spoolkit.context.budget import Budget, compact_trigger
 from spoolkit.context.phase_budget import (
-    PROTOCOL_V2,
     output_tokens_for_turn,
+    protocol_v2_enabled,
     resolve_n_past,
 )
 from spoolkit.context.sections import Section
@@ -1832,7 +1832,9 @@ class AgentLoop:
         self._budget = Budget(
             window=config.context_window, overrides=config.overrides
         )
-        self._turn_protocol = TurnProtocol(v2=PROTOCOL_V2)
+        self._turn_protocol = TurnProtocol(
+            v2=protocol_v2_enabled(config.overrides)
+        )
         self._schema = self._turn_protocol.schema(registry)
 
     def _note_landed_write(self, call: ToolCall, book: _WriteBook) -> None:
@@ -2766,7 +2768,7 @@ class AgentLoop:
                             ChatRequest(
                                 messages=assembled.messages,
                                 max_tokens=output_tokens_for_turn(
-                                    protocol_v2=PROTOCOL_V2,
+                                    protocol_v2=self._turn_protocol.v2,
                                     legacy=self._budget.output_reserve(),
                                     n_ctx=self._budget.window,
                                     messages=assembled.messages,

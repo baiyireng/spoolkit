@@ -742,6 +742,12 @@ KNOBS: tuple[Knob, ...] = (
         "默认 200，允许 200–400；超出由 overlap_chars 夹回这个区间。"
         "续写提示只带这段重叠和本节要求，不把整段旧正文送回去",
     ),
+    Knob(
+        "protocol_v2", 0, CAPABILITY,
+        "长文控制协议灰度（方案里的 protocol.v2）。"
+        "0 = 旧统一 JSON，done 时带 final；1 = 控制回合去掉 final。"
+        "在工作区 .agent/limits.json 里写数字 1 或 0。写 true 会被忽略。",
+    ),
 )
 
 _BY_NAME = {knob.name: knob for knob in KNOBS}

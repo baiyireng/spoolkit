@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -16,8 +16,16 @@ logger = logging.getLogger(__name__)
 Phase = Literal["control", "final", "outline", "section", "continuation"]
 BudgetReason = Literal["ok", "context-full", "below-min"]
 
-# 灰度开关。关闭时主循环的 max_tokens 与改动前相同。
+# 代码里的默认。主循环实际读旋钮 protocol_v2，默认 0，与这里一致。
 PROTOCOL_V2 = False
+
+
+def protocol_v2_enabled(overrides: Mapping[str, float] | None = None) -> bool:
+    """工作区把 protocol_v2 设成 1 才走新协议。默认仍是旧 JSON。"""
+    from spoolkit.limits import resolve
+
+    value, _source = resolve("protocol_v2", overrides)
+    return value >= 1
 
 HARD_CAP: dict[Phase, int] = {
     "control": 768,

@@ -46,9 +46,9 @@
 | P1-6 长文回归 | **已完成**：20 条脚本夹具标题齐全。真机比率未采集 → `docs/metrics/2026-10-18-report.md` |
 | P2-1 证据门槛 | **已完成**：`evidence_gate.py`。实时问题必须引用工具结果；普通问题可写「无需外部信息」。只在 v2 的 done 分支退回 |
 | P2-2 指标埋点 | **已完成**：请求记录在 llama.cpp 封装。按任务类型出表，缓存命中率单独一列。没有 `timings.prompt_n` 时命中率为空。主循环尚未在回合结束写 `turn_metric` |
-| P2-3 及以后 | **未开始** |
+| P2-3 灰度与回滚 | **已完成**：旋钮 `protocol_v2` 默认 `0`。回滚步骤见 `docs/protocol-v2-runbook.md`。代码默认未改成打开 |
 
-**下一步：P2-3 灰度、回滚与文档**；每个任务独立提交；不要一次性重写主循环。不要把 `PROTOCOL_V2` 默认改成打开。
+**下一步：** 方案任务表已做到 P2-3。主循环默认仍是旧协议。不要把 `protocol_v2` 默认改成 `1`。变更单 §8 的四条决定尚未落地。
 
 ---
 
@@ -60,7 +60,7 @@
 2. docs/local-agent-long-answer-plan.md
 3. docs/integration-notes.md
 
-然后从 P2-3 开始。主文档 v1.0 已冻结，增量只看 `docs/plan-changes-v1.1.md`。
+方案任务表已做到 P2-3。主文档 v1.0 已冻结，增量只看 `docs/plan-changes-v1.1.md`。不要把 `protocol_v2` 默认改成打开。
 约束：
 - 每个任务独立提交；完成前跑对应测试；没有测试先补测试。
 - 不要一次性重写 AgentLoop；不要删除旧协议，用 protocol.v2（或等价开关）灰度。
