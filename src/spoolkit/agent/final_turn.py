@@ -65,11 +65,13 @@ def _output_limit(
     n_past: int,
     phase: Phase,
     target_tokens: int | None,
+    prompt_tokens: int | None = None,
 ) -> int:
     if n_ctx is not None:
         return compute_budget(
             n_ctx=n_ctx,
-            n_past=n_past,
+            prompt_tokens=prompt_tokens,
+            n_past=None if prompt_tokens is not None else n_past,
             phase=phase,
             target_tokens=target_tokens,
         ).max_tokens
@@ -109,6 +111,7 @@ def request_final(
     max_tokens: int | None = None,
     n_ctx: int | None = None,
     n_past: int = 0,
+    prompt_tokens: int | None = None,
     target_tokens: int | None = None,
     on_delta: Any = None,
 ) -> FinalDraft:
@@ -120,6 +123,7 @@ def request_final(
         max_tokens=max_tokens,
         n_ctx=n_ctx,
         n_past=n_past,
+        prompt_tokens=prompt_tokens,
         phase="final",
         target_tokens=target_tokens,
     )
@@ -127,7 +131,7 @@ def request_final(
         logger.warning("终稿没有输出预算，改为短答并留下继续入口")
         return FinalDraft(
             text=SHORT_CONTINUE.strip(),
-            prompt_tokens=n_past,
+            prompt_tokens=prompt_tokens if prompt_tokens is not None else n_past,
             completion_tokens=0,
             truncated=True,
         )
@@ -137,10 +141,17 @@ def request_final(
         return _draft(response, response.text, False)
 
     logger.warning("终稿被截断，续写一次")
+    if response.prompt_tokens:
+        follow_prompt: int | None = response.prompt_tokens
+    elif prompt_tokens is not None:
+        follow_prompt = prompt_tokens
+    else:
+        follow_prompt = None
     follow_limit = _output_limit(
         max_tokens=limit,
         n_ctx=n_ctx,
-        n_past=response.prompt_tokens or n_past,
+        n_past=n_past,
+        prompt_tokens=follow_prompt,
         phase="continuation",
         target_tokens=None,
     )
@@ -175,7 +186,8 @@ def request_final(
             prefix,
             limit=limit,
             n_ctx=n_ctx,
-            n_past=follow.prompt_tokens or response.prompt_tokens or n_past,
+            n_past=n_past,
+            prompt_tokens=follow.prompt_tokens or response.prompt_tokens or prompt_tokens,
             on_delta=on_delta,
         )
     _emit(on_delta, fresh)
@@ -189,6 +201,7 @@ def _rewrite_final(
     limit: int,
     n_ctx: int | None,
     n_past: int,
+    prompt_tokens: int | None = None,
     on_delta: Any,
 ) -> FinalDraft:
     """整段重写一次。预算是原终稿的 1.5 倍，不是 2 倍。"""
@@ -197,6 +210,7 @@ def _rewrite_final(
         max_tokens=requested,
         n_ctx=n_ctx,
         n_past=n_past,
+        prompt_tokens=prompt_tokens,
         phase="final",
         target_tokens=requested,
     )
@@ -205,7 +219,7 @@ def _rewrite_final(
         _emit(on_delta, SHORT_CONTINUE)
         return FinalDraft(
             text=SHORT_CONTINUE.strip(),
-            prompt_tokens=n_past,
+            prompt_tokens=prompt_tokens if prompt_tokens is not None else n_past,
             completion_tokens=0,
             truncated=True,
         )

@@ -39,10 +39,10 @@
 
 | 方案假设 | 仓库现状 | 建议 |
 |---|---|---|
-| `budget.ts` / TS 模块名 | Python `spoolkit` | 已落在 `spoolkit/context/phase_budget.py` 的 `compute_budget`。`n_past` 用 `usage.prompt_tokens`，缺省按字数估算并打日志 |
+| `budget.ts` / TS 模块名 | Python `spoolkit` | `compute_budget` 的 `prompt_tokens` 是 P_total（含缓存前缀）。`n_past` 保留，只传它时按 P_total 解释并警告。字数估算仍是 `chars/1.6`，未加变更单里的 5%：现有 `resolve_n_past` 测试锁死了这个数 |
 | Control JSON **无 `final`** | 旧 schema 仍含 `final` | 已加 `build_turn_schema_v2` / `TurnProtocol`。v2 去掉 `final`，保留 `state` / `assessment`（主循环还用）。`PROTOCOL_V2=False` 时仍走旧解析。连续两次旧格式降级并打日志 |
 | `answer_plan` / `summary` 字段 | v2 已解析。`should_use_long_answer` 已实现，主循环尚未改道 | 大纲在 `writing_state.py`，逐节在 `sections.py`。主循环未改道。开关关闭时仍是单次终稿 |
-| `n_past = timings.prompt_n` | 仅有 `usage.prompt_tokens`（且流式依赖 `stream_options.include_usage`） | P0-1 先用 `prompt_tokens`；缺省再退化估算；`cache_hit` 需查 llama-server 是否返回 |
+| `n_past = timings.prompt_n` | 预算已改用 P_total。客户端仍只读到 `usage.prompt_tokens`，没有单独的 `prompt_n` 与复用 token 数 | 拿到 `prompt_n` 与缓存复用数之前，把 `usage.prompt_tokens` 当作 P_total。不要用更小的重算量去放大输出预算 |
 | `cache_prompt=true` | `ChatRequest.cache_prompt` 默认关；终稿请求为真时写入 payload | 用两次请求的 `prompt_tokens` 增量验收（阈值 200）。服务端是否回 `cache_hit` 仍未接入 |
 | 终稿纯文本、无 grammar | `PROTOCOL_V2=False` 时主循环仍带 schema，结论取 `final` | v2 打开且 `done` 时，`request_final` 复用控制前缀、不带 schema、不翻倍重试 |
 | 截断后不做 ×2 整段重试 | 控制回合仍走 `chat_with_escalation`（×2） | 终稿与逐节：续写一次并按 200 字重叠拼接。续写再截断则短答，不再请求。续写完整但 12 字片段重合超过一半：逐节重写一次（原预算）；终稿按 1.5 倍预算重写一次。方案里的「再失败则拆分该节」没有拆分规则，未做 |

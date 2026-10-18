@@ -42,14 +42,20 @@ class BudgetResult:
 def compute_budget(
     *,
     n_ctx: int,
-    n_past: int,
+    n_past: int | None = None,
+    prompt_tokens: int | None = None,
     phase: Phase,
     target_tokens: int | None = None,
     margin: int | None = None,
 ) -> BudgetResult:
-    """窗口减去已用提示词和余量，再与阶段硬上限、目标取最小。"""
+    """窗口减去完整提示词 P_total 和余量，再与阶段硬上限、目标取最小。
+
+    `prompt_tokens` 是 P_total（含缓存前缀）。`n_past` 只是旧名字，
+    传入时仍按 P_total 解释，并打一条废弃警告。
+    """
+    total = _prompt_total(prompt_tokens, n_past)
     room = margin if margin is not None else DEFAULT_MARGIN
-    o_max = max(0, n_ctx - n_past - room)
+    o_max = max(0, n_ctx - total - room)
     if o_max < MIN_OUTPUT:
         return BudgetResult(max_tokens=0, capped=True, reason="context-full")
     target = HARD_CAP[phase] if target_tokens is None else target_tokens
@@ -68,6 +74,7 @@ def output_tokens_for_turn(
     legacy: int,
     n_ctx: int = 0,
     n_past: int | None = None,
+    prompt_tokens: int | None = None,
     messages: Sequence[object] = (),
     phase: Phase = "control",
     target_tokens: int | None = None,
@@ -76,14 +83,26 @@ def output_tokens_for_turn(
     """v2 关闭时原样返回旧预留，避免估算或打日志。"""
     if not protocol_v2:
         return legacy
-    past = n_past if n_past is not None else resolve_n_past(None, messages)
+    if prompt_tokens is None and n_past is None:
+        prompt_tokens = resolve_n_past(None, messages)
     return compute_budget(
         n_ctx=n_ctx,
-        n_past=past,
+        n_past=n_past,
+        prompt_tokens=prompt_tokens,
         phase=phase,
         target_tokens=target_tokens,
         margin=margin,
     ).max_tokens
+
+
+def _prompt_total(prompt_tokens: int | None, n_past: int | None) -> int:
+    if prompt_tokens is not None:
+        return prompt_tokens
+    if n_past is not None:
+        logger.warning("n_past 已废弃，按 P_total 解释；请改传 prompt_tokens")
+        return n_past
+    logger.warning("没有 prompt_tokens，按 0 计算输出预算")
+    return 0
 
 
 def resolve_n_past(

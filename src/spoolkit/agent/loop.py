@@ -3419,7 +3419,9 @@ class AgentLoop:
             if turn.done:
                 if self._turn_protocol.v2:
                     # 控制回合的消息原样当前缀，终稿另一次纯文本请求。
-                    n_past = resolve_n_past(response.prompt_tokens, assembled.messages)
+                    prompt_tokens = resolve_n_past(
+                        response.prompt_tokens, assembled.messages
+                    )
                     target = (
                         turn.answer_plan.target_tokens if turn.answer_plan else None
                     )
@@ -3427,7 +3429,7 @@ class AgentLoop:
                         self.gateway,
                         assembled.messages,
                         n_ctx=self._budget.window,
-                        n_past=n_past,
+                        prompt_tokens=prompt_tokens,
                         target_tokens=target,
                         on_delta=self._on_final_delta,
                     ).text

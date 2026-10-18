@@ -45,6 +45,7 @@ def generate_section(
     facts: str,
     n_ctx: int | None = None,
     n_past: int = 0,
+    prompt_tokens: int | None = None,
 ) -> SectionDraft:
     """写当前节。system 是大纲和约束，user 只有事实。"""
     if not 0 <= state.next_section < len(state.outline):
@@ -52,7 +53,12 @@ def generate_section(
     section = state.outline[state.next_section]
     request = ChatRequest(
         messages=_messages(state, facts),
-        max_tokens=_limit(section.target_tokens, n_ctx=n_ctx, n_past=n_past),
+        max_tokens=_limit(
+            section.target_tokens,
+            n_ctx=n_ctx,
+            n_past=n_past,
+            prompt_tokens=prompt_tokens,
+        ),
         response_schema=None,
         cache_prompt=True,
     )
@@ -63,7 +69,8 @@ def generate_section(
     follow_limit = _continuation_limit(
         request.max_tokens,
         n_ctx=n_ctx,
-        n_past=response.prompt_tokens or n_past,
+        n_past=n_past,
+        prompt_tokens=response.prompt_tokens or prompt_tokens,
     )
     if follow_limit <= 0:
         logger.warning("本节续写未完成，改为短答并留下继续入口")
@@ -101,6 +108,7 @@ def write_sections(
     facts: str,
     n_ctx: int | None = None,
     n_past: int = 0,
+    prompt_tokens: int | None = None,
 ) -> tuple[SectionDraft, ...]:
     """按大纲顺序逐节写。每一节都用同一份事实，不把前文拼回去。"""
     drafts: list[SectionDraft] = []
@@ -113,6 +121,7 @@ def write_sections(
                 facts=facts,
                 n_ctx=n_ctx,
                 n_past=n_past,
+                prompt_tokens=prompt_tokens,
             )
         )
     return tuple(drafts)
@@ -180,21 +189,35 @@ def _draft(
     )
 
 
-def _continuation_limit(section_limit: int, *, n_ctx: int | None, n_past: int) -> int:
+def _continuation_limit(
+    section_limit: int,
+    *,
+    n_ctx: int | None,
+    n_past: int,
+    prompt_tokens: int | None,
+) -> int:
     if n_ctx is not None:
         return compute_budget(
             n_ctx=n_ctx,
-            n_past=n_past,
+            prompt_tokens=prompt_tokens,
+            n_past=None if prompt_tokens is not None else n_past,
             phase="continuation",
         ).max_tokens
     return min(HARD_CAP["continuation"], section_limit)
 
 
-def _limit(target_tokens: int, *, n_ctx: int | None, n_past: int) -> int:
+def _limit(
+    target_tokens: int,
+    *,
+    n_ctx: int | None,
+    n_past: int,
+    prompt_tokens: int | None = None,
+) -> int:
     if n_ctx is not None:
         return compute_budget(
             n_ctx=n_ctx,
-            n_past=n_past,
+            prompt_tokens=prompt_tokens,
+            n_past=None if prompt_tokens is not None else n_past,
             phase="section",
             target_tokens=target_tokens,
         ).max_tokens

@@ -83,6 +83,60 @@ def test_有prompt_tokens时直接采用(caplog) -> None:
     assert caplog.records == []
 
 
+def test_重算量小于完整提示词时按完整提示词收紧预算() -> None:
+    n_ctx = 8192
+    margin = 192
+    prompt_n = 1000
+    p_total = 6000
+    assert prompt_n < p_total
+    result = compute_budget(
+        n_ctx=n_ctx,
+        prompt_tokens=p_total,
+        phase="final",
+        target_tokens=8000,
+        margin=margin,
+    )
+    assert result.max_tokens <= n_ctx - p_total - margin
+    by_recompute = compute_budget(
+        n_ctx=n_ctx,
+        prompt_tokens=prompt_n,
+        phase="final",
+        target_tokens=8000,
+        margin=margin,
+    )
+    assert result.max_tokens < by_recompute.max_tokens
+
+
+def test_完整提示词距窗口只剩一百时上下文已满() -> None:
+    n_ctx = 8192
+    result = compute_budget(
+        n_ctx=n_ctx,
+        prompt_tokens=n_ctx - 100,
+        phase="final",
+    )
+    assert result.max_tokens == 0
+    assert result.reason == "context-full"
+
+
+def test_重算量等于完整提示词时与旧口径一致(caplog) -> None:
+    caplog.set_level(logging.WARNING)
+    shared = 1000
+    current = compute_budget(
+        n_ctx=8192,
+        prompt_tokens=shared,
+        phase="final",
+        target_tokens=400,
+    )
+    previous = compute_budget(
+        n_ctx=8192,
+        n_past=shared,
+        phase="final",
+        target_tokens=400,
+    )
+    assert current == previous
+    assert any("n_past" in record.message for record in caplog.records)
+
+
 def test_没有prompt_tokens时按字数估算并打日志(caplog) -> None:
     caplog.set_level(logging.WARNING)
     text = "字" * 16

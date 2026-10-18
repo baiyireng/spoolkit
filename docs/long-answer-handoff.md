@@ -31,6 +31,7 @@
 | 显示层：JSON `\n` 解码、Wait/Live 抢屏、截断重试整段重刷 | **已修**（`FinalFieldTap` 解码、`set_stream_holds_tty`、Live transient、内核跳过重复前缀） |
 | P0-0 代码定位 | **已完成** → `docs/integration-notes.md` |
 | P0-1 预算计算器 | **已完成**：`context/phase_budget.py`；`PROTOCOL_V2=False` 时主循环仍用 `output_reserve()` |
+| P0-1b 预算口径 | **已完成**：`prompt_tokens` 是 P_total；`n_past` 保留为废弃别名。字数估算未加 5% |
 | P0-2 ControlTurn v2 | **已完成**：`TurnProtocol`；开关关闭时仍解析旧 `final` |
 | P0-3 FinalTurn | **已完成**：`request_final`；开关关闭时不发第二次请求 |
 | P0-4 终稿截断 | **已完成**：续写一次或短答；控制回合仍可 ×2 |
@@ -40,9 +41,10 @@
 | P1-2 大纲 | **已完成**：`writing_state.py`。3–7 节；超窗从末尾删，三节仍超则按比例缩小。主循环未接入 |
 | P1-3 逐节 | **已完成**：`sections.py`。每节只带大纲、约束和事实；组装校验标题并去重。主循环未接入 |
 | P1-4 续写去重 | **已完成**：`continuation.py`。重叠拼接；续写重复则重写该节，终稿按 1.5 倍预算重写一次。续写再截断仍是短答。拆分该节未做 |
+| P1-4b overlap 配置 | **未开始**（变更单 v1.1） |
 | P1-5 及以后 | **未开始** |
 
-**下一步：P1-5 章节级流式与 UI**（方案 §11）；每个任务独立提交；不要一次性重写主循环。
+**下一步：P1-4b** 把续写 overlap 改成可配置 200–400，再做 P1-5。每个任务独立提交；不要一次性重写主循环。
 
 ---
 
@@ -54,7 +56,7 @@
 2. docs/local-agent-long-answer-plan.md
 3. docs/integration-notes.md
 
-然后从 P1-5 开始，按方案 §11 的 P1 → P2 顺序执行。
+然后从 P1-4b 开始（`docs/plan-changes-v1.1.md`），再做 P1-5。主文档 v1.0 已冻结，不要改它。
 约束：
 - 每个任务独立提交；完成前跑对应测试；没有测试先补测试。
 - 不要一次性重写 AgentLoop；不要删除旧协议，用 protocol.v2（或等价开关）灰度。
