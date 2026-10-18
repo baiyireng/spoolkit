@@ -32,6 +32,59 @@ def _request(schema=None) -> ChatRequest:
     )
 
 
+def test_一次请求记入指标且不含正文() -> None:
+    from spoolkit.agent.metrics import capture_metrics, dumps_metric, metric_scope
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "答案正文"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 4000, "completion_tokens": 12},
+                "timings": {"prompt_n": 1000},
+            },
+        )
+
+    gateway = _gateway(handler)
+    with capture_metrics() as rows, metric_scope(phase="final", task_type="long", n_ctx=8192):
+        gateway.chat(
+            ChatRequest(
+                messages=(Message(role="user", content="独特口令甲乙丙"),),
+                max_tokens=200,
+            )
+        )
+    gateway.close()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["phase"] == "final"
+    assert row["task_type"] == "long"
+    assert row["prompt_tokens"] == 4000
+    assert row["prompt_n"] == 1000
+    assert row["max_tokens"] == 200
+    assert row["generated_tokens"] == 12
+    assert row["finish_reason"] == "stop"
+    assert row["cache_hit"] is True
+    assert row["cache_reused_tokens"] == 3000
+    assert "独特口令" not in dumps_metric(row)
+
+
+def test_没有重算量时缓存命中留空() -> None:
+    from spoolkit.agent.metrics import capture_metrics, metric_scope
+
+    gateway = _gateway(lambda request: httpx.Response(200, json=_completion()))
+    with capture_metrics() as rows, metric_scope(phase="control", task_type="short"):
+        gateway.chat(_request())
+    gateway.close()
+    assert rows[0]["cache_hit"] is None
+    assert rows[0]["prompt_n"] is None
+    assert rows[0]["prompt_tokens"] == 21
+
+
 def test_解析内容与用量() -> None:
     gateway = _gateway(lambda request: httpx.Response(200, json=_completion()))
     response = gateway.chat(_request())

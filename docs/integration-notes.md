@@ -43,13 +43,14 @@
 | Control JSON **无 `final`** | 旧 schema 仍含 `final` | 已加 `build_turn_schema_v2` / `TurnProtocol`。v2 去掉 `final`，保留 `state` / `assessment`（主循环还用）。`PROTOCOL_V2=False` 时仍走旧解析。连续两次旧格式降级并打日志 |
 | `answer_plan` / `summary` 字段 | v2 已解析。`should_use_long_answer` 已实现，主循环尚未改道 | 大纲在 `writing_state.py`，逐节在 `sections.py`。主循环未改道。开关关闭时仍是单次终稿 |
 | `n_past = timings.prompt_n` | 预算已改用 P_total。客户端仍只读到 `usage.prompt_tokens`，没有单独的 `prompt_n` 与复用 token 数 | 拿到 `prompt_n` 与缓存复用数之前，把 `usage.prompt_tokens` 当作 P_total。不要用更小的重算量去放大输出预算 |
-| `cache_prompt=true` | `ChatRequest.cache_prompt` 默认关；终稿请求为真时写入 payload | 用两次请求的 `prompt_tokens` 增量验收（阈值 200）。服务端是否回 `cache_hit` 仍未接入 |
+| `cache_prompt=true` | `ChatRequest.cache_prompt` 默认关；终稿请求为真时写入 payload | 用两次请求的 `prompt_tokens` 增量验收（阈值 200）。`cache_hit` 只在响应带 `timings.prompt_n` 时推导：小于 `prompt_tokens` 为真，相等为假，缺字段则为空。默认不写记录 |
 | 终稿纯文本、无 grammar | `PROTOCOL_V2=False` 时主循环仍带 schema，结论取 `final` | v2 打开且 `done` 时，`request_final` 复用控制前缀、不带 schema、不翻倍重试 |
 | 截断后不做 ×2 整段重试 | 控制回合仍走 `chat_with_escalation`（×2） | 终稿与逐节：续写一次。重叠字数读 `continuation_overlap_chars`（默认 200，夹在 200–400）。续写再截断或空续写则短答，不再请求。续写完整但 12 字片段重合超过一半：逐节重写一次（原预算）；终稿按 1.5 倍预算重写一次。变更单写「只带重叠区 + 本节要求」：现有续写末条仍是续写指令，旧正文（含重叠区）不进 prompt，否则会改掉已锁定的末条。拆分该节仍未做 |
 | 流式事件 `final_delta` 等 | 已登记 `final_delta`、`section_start`、`section_done`。网页按 `data-section` 只替换这一节 | 主循环尚未发出章节事件。控制回合在 v2 下仍走 `FinalFieldTap` |
 | 配置 `protocol.v2` 等 | `limits.py` 无对应项 | P2-3 / 更早用 settings 或 limits 旋钮灰度 |
 | 长文子流程 WritingState | `writing_state.py` 管大纲；`sections.py` 逐节生成，截断走 `continuation.py`。主循环未调用 | 开关关闭时仍是单次终稿 |
 | 硬 `required_tools` | 仓库里没有这个门禁 | `evidence_gate.py`：标签「最新 / 今天 / 价格 / 版本」必须引用本轮工具结果。其它问题写「无需外部信息」即可。不指定工具名。只在 v2 的 done 分支生效 |
+| 变更单 §9 回合指标 | `request_metric` 在 `llamacpp.py` 的 chat / chat_stream 写出。阶段、任务类型、重试、恢复由调用方 `metric_scope` 标注。`turn_metric` 有 `observe_turn`，逐节提交会更新 `sections_completed` | 主循环在 v2 关闭时不在回合结束调用 `observe_turn`。`first_token_ms` / `prefill_ms` 服务端没单独给出，记录里为空。`recovery=short/split` 不另发请求 |
 
 ---
 
@@ -91,4 +92,4 @@ P0-1 起的落地状态见 `docs/long-answer-handoff.md` 第 3 节。
 | 控制 JSON 合法率 | 旧协议与 v2 单测通过；开关关闭，线上仍是旧协议 |
 | 工具正确性 | 假模型工具轮通过，不是真机实时任务 |
 | 终稿截断 / 重复生成 | 终稿路径：续写一次或短答；事件只追加。控制回合仍可 ×2 |
-| 长文完整率、截断率、首次成功率、时延、缓存命中率 | 未采集。脚本夹具 20/20 标题齐全，见 `docs/metrics/2026-10-18-report.md`。要 8K 真机，且 `cache_hit` 尚未从服务端读出 |
+| 长文完整率、截断率、首次成功率、时延、缓存命中率 | 真机仍未采集。脚本夹具 20/20 标题齐全，见 `docs/metrics/2026-10-18-report.md`。请求记录含命中率列；没有 `prompt_n` 时该格写未采集 |

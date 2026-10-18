@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from spoolkit.agent.continuation import looks_repeated, merge_continuation, overlap_chars
+from spoolkit.agent.metrics import commit_section, metric_scope, note_retry, reset_section_progress
 from spoolkit.agent.final_turn import CONTINUATION_INSTRUCTION, SHORT_CONTINUE
 from spoolkit.agent.writing_state import WritingState
 from spoolkit.context.phase_budget import HARD_CAP, compute_budget
@@ -63,7 +64,8 @@ def generate_section(
         response_schema=None,
         cache_prompt=True,
     )
-    response: ChatResponse = gateway.chat(request)
+    with metric_scope(phase="section", task_type="long", n_ctx=n_ctx or 0):
+        response: ChatResponse = gateway.chat(request)
     if not response.truncated:
         return _draft(state, section.title, response, response.text.strip(), False)
 
@@ -77,16 +79,24 @@ def generate_section(
         logger.warning("本节续写未完成，改为短答并留下继续入口")
         return _draft(state, section.title, response, response.text + SHORT_CONTINUE, True)
 
-    follow: ChatResponse = gateway.chat(
-        ChatRequest(
-            messages=request.messages + (
-                Message(role="user", content=CONTINUATION_INSTRUCTION),
-            ),
-            max_tokens=follow_limit,
-            response_schema=None,
-            cache_prompt=True,
+    note_retry()
+    with metric_scope(
+        phase="continuation",
+        task_type="long",
+        n_ctx=n_ctx or 0,
+        retry_index=1,
+        recovery="continue",
+    ):
+        follow: ChatResponse = gateway.chat(
+            ChatRequest(
+                messages=request.messages + (
+                    Message(role="user", content=CONTINUATION_INSTRUCTION),
+                ),
+                max_tokens=follow_limit,
+                response_schema=None,
+                cache_prompt=True,
+            )
         )
-    )
     merged = merge_continuation(
         response.text, follow.text, overlap=overlap_chars(overlap)
     )
@@ -95,7 +105,14 @@ def generate_section(
         return _draft(state, section.title, follow, merged + SHORT_CONTINUE, True)
     if looks_repeated(response.text, follow.text):
         logger.warning("本节续写与已写内容重复，重写该节")
-        rewrite: ChatResponse = gateway.chat(request)
+        with metric_scope(
+            phase="section",
+            task_type="long",
+            n_ctx=n_ctx or 0,
+            retry_index=2,
+            recovery="rewrite",
+        ):
+            rewrite: ChatResponse = gateway.chat(request)
         if rewrite.truncated or looks_repeated(response.text, rewrite.text):
             logger.warning("本节重写未完成，改为短答并留下继续入口")
             kept = rewrite.text.strip() or response.text
@@ -116,6 +133,7 @@ def write_sections(
 ) -> tuple[SectionDraft, ...]:
     """按大纲顺序逐节写。每一节都用同一份事实，不把前文拼回去。"""
     total = len(state.outline)
+    reset_section_progress()
     drafts: list[SectionDraft] = []
     for index in range(total):
         section = state.outline[index]
@@ -137,6 +155,7 @@ def write_sections(
             prompt_tokens=prompt_tokens,
         )
         drafts.append(draft)
+        commit_section(total=total, completed=len(drafts))
         _emit_section(
             on_event,
             "section_done",

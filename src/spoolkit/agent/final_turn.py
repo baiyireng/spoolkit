@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from spoolkit.agent.metrics import metric_scope
 from spoolkit.agent.continuation import (
     REWRITE_FACTOR,
     looks_repeated,
@@ -142,7 +143,8 @@ def request_final(
             truncated=True,
         )
 
-    response = _complete(gateway, final_request(prefix, max_tokens=limit), on_delta)
+    with metric_scope(phase="final", task_type="long", n_ctx=n_ctx or 0):
+        response = _complete(gateway, final_request(prefix, max_tokens=limit), on_delta)
     if not response.truncated:
         return _draft(response, response.text, False)
 
@@ -166,18 +168,25 @@ def request_final(
         return _draft(response, response.text + SHORT_CONTINUE, True)
 
     held: list[str] = []
-    follow = _complete(
-        gateway,
-        ChatRequest(
-            messages=tuple(prefix) + (
-                Message(role="user", content=CONTINUATION_INSTRUCTION),
+    with metric_scope(
+        phase="continuation",
+        task_type="long",
+        n_ctx=n_ctx or 0,
+        retry_index=1,
+        recovery="continue",
+    ):
+        follow = _complete(
+            gateway,
+            ChatRequest(
+                messages=tuple(prefix) + (
+                    Message(role="user", content=CONTINUATION_INSTRUCTION),
+                ),
+                max_tokens=follow_limit,
+                response_schema=None,
+                cache_prompt=True,
             ),
-            max_tokens=follow_limit,
-            response_schema=None,
-            cache_prompt=True,
-        ),
-        held.append if on_delta is not None else None,
-    )
+            held.append if on_delta is not None else None,
+        )
     merged = merge_continuation(
         response.text, follow.text, overlap=overlap_chars(overlap)
     )
@@ -231,9 +240,16 @@ def _rewrite_final(
             completion_tokens=0,
             truncated=True,
         )
-    rewrite = _complete(
-        gateway, final_request(prefix, max_tokens=rewrite_limit), on_delta
-    )
+    with metric_scope(
+        phase="final",
+        task_type="long",
+        n_ctx=n_ctx or 0,
+        retry_index=2,
+        recovery="rewrite",
+    ):
+        rewrite = _complete(
+            gateway, final_request(prefix, max_tokens=rewrite_limit), on_delta
+        )
     if rewrite.truncated or not rewrite.text.strip():
         logger.warning("终稿重写未完成，改为短答并留下继续入口")
         _emit(on_delta, SHORT_CONTINUE)

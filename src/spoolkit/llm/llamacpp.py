@@ -14,6 +14,7 @@ token 计数走 /tokenize，拿到的是模型真实分词结果，而不是估�
 from collections.abc import Callable
 from typing import Any
 import json
+import time
 
 import httpx
 
@@ -65,6 +66,31 @@ def proxy_for(base_url: str, explicit: str | None = None) -> str | None:
 
 class LlamaCppError(RuntimeError):
     """调用 llama.cpp 服务失败。"""
+
+
+def _note_response(
+    request: ChatRequest,
+    *,
+    text: str,
+    prompt_tokens: int,
+    generated_tokens: int,
+    finish_reason: str,
+    timings: dict | None,
+    started: float,
+) -> None:
+    """只在有人捕获指标时写一条。正文不进记录。"""
+    from spoolkit.agent.metrics import observe_response
+
+    observe_response(
+        max_tokens=request.max_tokens,
+        prompt_tokens=prompt_tokens,
+        generated_tokens=generated_tokens,
+        generated_text=text,
+        finish_reason=finish_reason,
+        timings=timings,
+        total_ms=int((time.perf_counter() - started) * 1000),
+        grammar=request.response_schema is not None,
+    )
 
 
 def _to_payload(
@@ -141,6 +167,7 @@ class LlamaCppGateway:
 
     def chat(self, request: ChatRequest) -> ChatResponse:
         timeout = self._timeout_for(request.max_tokens)
+        started = time.perf_counter()
         try:
             response = self._client.post(
                 "/v1/chat/completions",
@@ -191,11 +218,23 @@ class LlamaCppGateway:
             )
 
         usage = data.get("usage") or {}
+        prompt_tokens = int(usage.get("prompt_tokens", 0))
+        completion_tokens = int(usage.get("completion_tokens", 0))
+        finish = choices[0].get("finish_reason") or "stop"
+        _note_response(
+            request,
+            text=text,
+            prompt_tokens=prompt_tokens,
+            generated_tokens=completion_tokens,
+            finish_reason=finish,
+            timings=data.get("timings") if isinstance(data.get("timings"), dict) else None,
+            started=started,
+        )
         return ChatResponse(
             text=text,
-            prompt_tokens=int(usage.get("prompt_tokens", 0)),
-            completion_tokens=int(usage.get("completion_tokens", 0)),
-            truncated=choices[0].get("finish_reason") in ("length", "max_tokens"),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            truncated=finish in ("length", "max_tokens"),
         )
 
     def chat_stream(
@@ -210,7 +249,9 @@ class LlamaCppGateway:
         )
         # 流式时 usage 常在末帧；要 include_usage 时部分服务支持 stream_options。
         payload["stream_options"] = {"include_usage": True}
+        started = time.perf_counter()
         pieces: list[str] = []
+        timings: dict | None = None
         finish_reason = ""
         prompt_tokens = 0
         completion_tokens = 0
@@ -248,6 +289,8 @@ class LlamaCppGateway:
                     except json.JSONDecodeError:
                         continue
                     usage = data.get("usage") or {}
+                    if isinstance(data.get("timings"), dict):
+                        timings = data["timings"]
                     if usage:
                         prompt_tokens = int(usage.get("prompt_tokens", prompt_tokens) or 0)
                         completion_tokens = int(
@@ -291,6 +334,15 @@ class LlamaCppGateway:
             )
         if completion_tokens <= 0:
             completion_tokens = max(1, len(text) // 2)
+        _note_response(
+            request,
+            text=text,
+            prompt_tokens=prompt_tokens,
+            generated_tokens=completion_tokens,
+            finish_reason=finish_reason or "stop",
+            timings=timings,
+            started=started,
+        )
         return ChatResponse(
             text=text,
             prompt_tokens=prompt_tokens,

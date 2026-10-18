@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from spoolkit.agent.metrics import metric_scope
 from spoolkit.context.phase_budget import HARD_CAP
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
@@ -113,7 +114,8 @@ def request_outline(
         response_schema=None,
         cache_prompt=True,
     )
-    response: ChatResponse = gateway.chat(request)
+    with metric_scope(phase="outline", task_type="long"):
+        response: ChatResponse = gateway.chat(request)
     return parse_outline(response.text, goal=goal, token_budget=token_budget)
 
 
