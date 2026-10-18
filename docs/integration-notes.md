@@ -41,14 +41,14 @@
 |---|---|---|
 | `budget.ts` / TS 模块名 | Python `spoolkit` | 已落在 `spoolkit/context/phase_budget.py` 的 `compute_budget`。`n_past` 用 `usage.prompt_tokens`，缺省按字数估算并打日志 |
 | Control JSON **无 `final`** | 旧 schema 仍含 `final` | 已加 `build_turn_schema_v2` / `TurnProtocol`。v2 去掉 `final`，保留 `state` / `assessment`（主循环还用）。`PROTOCOL_V2=False` 时仍走旧解析。连续两次旧格式降级并打日志 |
-| `answer_plan` / `summary` 字段 | v2 已解析。`should_use_long_answer` 已实现，主循环尚未改道 | 大纲与逐节在 P1-2 / P1-3。开关关闭时仍是单次终稿 |
+| `answer_plan` / `summary` 字段 | v2 已解析。`should_use_long_answer` 已实现，主循环尚未改道 | 大纲在 `writing_state.py`。逐节在 P1-3。开关关闭时仍是单次终稿 |
 | `n_past = timings.prompt_n` | 仅有 `usage.prompt_tokens`（且流式依赖 `stream_options.include_usage`） | P0-1 先用 `prompt_tokens`；缺省再退化估算；`cache_hit` 需查 llama-server 是否返回 |
 | `cache_prompt=true` | `ChatRequest.cache_prompt` 默认关；终稿请求为真时写入 payload | 用两次请求的 `prompt_tokens` 增量验收（阈值 200）。服务端是否回 `cache_hit` 仍未接入 |
 | 终稿纯文本、无 grammar | `PROTOCOL_V2=False` 时主循环仍带 schema，结论取 `final` | v2 打开且 `done` 时，`request_final` 复用控制前缀、不带 schema、不翻倍重试 |
 | 截断后不做 ×2 整段重试 | 控制回合仍走 `chat_with_escalation`（×2） | 终稿 `request_final`：续写一次（预算用 `continuation`，不 ×2）；仍截断则短答 +「继续」入口并打日志。×1.5 整段重写与重叠去重留在 P1-4 |
 | 流式事件 `final_delta` 等 | 已登记 `final_delta`；CLI / 网页与 `delta` 一样追加 | 控制回合在 v2 下仍走 `FinalFieldTap`（没有 `final` 就不上屏）。章节事件留到 P1-5 |
 | 配置 `protocol.v2` 等 | `limits.py` 无对应项 | P2-3 / 更早用 settings 或 limits 旋钮灰度 |
-| 长文子流程 WritingState | 不存在 | P1；P0 只做短答纯文本终稿 |
+| 长文子流程 WritingState | `agent/writing_state.py`：大纲解析、超窗缩节、状态序列化。主循环未调用 | 逐节生成与组装在 P1-3。开关关闭时仍是单次终稿 |
 
 ---
 
