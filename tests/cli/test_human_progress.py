@@ -1,7 +1,7 @@
 """HumanProgress：chat 散文进度行。"""
 
 from spoolkit.cli.events import HumanProgress
-from spoolkit.web.protocol import DELTA, NOTE, STEP, TOOL, WAIT
+from spoolkit.web.protocol import DELTA, FINAL_DELTA, NOTE, STEP, TOOL, WAIT
 
 
 def test_step_tool_note_走stderr(capsys) -> None:
@@ -38,6 +38,16 @@ def test_delta追加正文(capsys) -> None:
     out = capsys.readouterr().out
     assert "你好" in out
     assert "世界" in out
+
+
+def test_final_delta追加且不重放(capsys) -> None:
+    progress = HumanProgress()
+    progress.handle(FINAL_DELTA, {"text": "半截"})
+    progress.handle(FINAL_DELTA, {"text": "续上"})
+    progress.finish()
+    out = capsys.readouterr().out
+    assert out.count("半截") == 1
+    assert "续上" in out
 
 
 def test_截断note保留流式面板只打进度(capsys) -> None:

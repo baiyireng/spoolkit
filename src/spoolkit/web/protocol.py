@@ -25,6 +25,8 @@ NOTE = "note"
 WAIT = "wait"
 # 面向人的正文增量（流式）。channel 先只实现 assistant。
 DELTA = "delta"
+# 纯文本终稿增量。不经 JSON `final` 抽取；老客户端忽略未知类型，这里登记后网页才收得到。
+FINAL_DELTA = "final_delta"
 
 KNOWN = frozenset(
     {
@@ -40,6 +42,7 @@ KNOWN = frozenset(
         NOTE,
         WAIT,
         DELTA,
+        FINAL_DELTA,
     }
 )
 

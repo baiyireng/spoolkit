@@ -2931,7 +2931,7 @@ function onEvent(event) {
   }
   // 步骤 / 工具 / 系统说的一句话 / 等待心跳：全部进这张卡片的「思考过程」
   // （运行中自动展开；成功收尾后再收起）。
-  if (data.type === 'delta') {
+  if (data.type === 'delta' || data.type === 'final_delta') {
     // 正文流式：主气泡增量追加（final 再用完整文本覆盖，防漏片）。
     setThinking(true);
     appendDelta(String(data.text || ''));

@@ -3429,6 +3429,7 @@ class AgentLoop:
                         n_ctx=self._budget.window,
                         n_past=n_past,
                         target_tokens=target,
+                        on_delta=self._on_final_delta,
                     ).text
                 else:
                     conclusion_text = turn.final or ""
@@ -6942,6 +6943,11 @@ class AgentLoop:
                 "kind": "truncation_retry",
             },
         )
+
+    def _on_final_delta(self, chunk: str) -> None:
+        """纯文本终稿：原文上屏，不经过 JSON `final` 抽取。"""
+        if chunk:
+            self._emit("final_delta", {"text": chunk})
 
     def _on_model_delta(self, chunk: str) -> None:
         """流式字节 → 只把 `final` 字段的增长发成 assistant delta。"""

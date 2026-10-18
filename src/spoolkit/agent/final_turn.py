@@ -86,6 +86,21 @@ def _draft(response: ChatResponse, text: str, truncated: bool) -> FinalDraft:
     )
 
 
+def _complete(
+    gateway: Any,
+    request: ChatRequest,
+    on_delta: Any,
+) -> ChatResponse:
+    """有流式入口就按原文回调；否则整段 chat，再一次性交出正文。"""
+    stream = getattr(gateway, "chat_stream", None)
+    if on_delta is not None and callable(stream):
+        return stream(request, on_delta=on_delta)
+    response: ChatResponse = gateway.chat(request)
+    if on_delta is not None and response.text:
+        on_delta(response.text)
+    return response
+
+
 def request_final(
     gateway: Any,
     prefix: Sequence[Message],
@@ -94,6 +109,7 @@ def request_final(
     n_ctx: int | None = None,
     n_past: int = 0,
     target_tokens: int | None = None,
+    on_delta: Any = None,
 ) -> FinalDraft:
     """纯文本终稿。截断后续写一次；仍截断则短答并留下继续入口。不翻倍重试。"""
     limit = _output_limit(
@@ -112,7 +128,7 @@ def request_final(
             truncated=True,
         )
 
-    response: ChatResponse = gateway.chat(final_request(prefix, max_tokens=limit))
+    response = _complete(gateway, final_request(prefix, max_tokens=limit), on_delta)
     if not response.truncated:
         return _draft(response, response.text, False)
 
@@ -128,7 +144,8 @@ def request_final(
         logger.warning("终稿续写未完成，改为短答并留下继续入口")
         return _draft(response, response.text + SHORT_CONTINUE, True)
 
-    follow: ChatResponse = gateway.chat(
+    follow = _complete(
+        gateway,
         ChatRequest(
             messages=tuple(prefix) + (
                 Message(role="user", content=CONTINUATION_INSTRUCTION),
@@ -136,10 +153,13 @@ def request_final(
             max_tokens=follow_limit,
             response_schema=None,
             cache_prompt=True,
-        )
+        ),
+        on_delta,
     )
     merged = response.text + follow.text
     if follow.truncated or not follow.text.strip():
         logger.warning("终稿续写未完成，改为短答并留下继续入口")
+        if on_delta is not None:
+            on_delta(SHORT_CONTINUE)
         return _draft(follow, merged + SHORT_CONTINUE, True)
     return _draft(follow, merged, False)

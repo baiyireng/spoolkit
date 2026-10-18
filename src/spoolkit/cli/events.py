@@ -26,6 +26,7 @@ from spoolkit.web.protocol import (
     CONFIRM,
     DELTA,
     DIFF,
+    FINAL_DELTA,
     Event,
     NOTE,
     STEP,
@@ -188,7 +189,7 @@ class HumanProgress:
         self._stream: _AssistantStream | None = None
 
     def handle(self, kind: str, data: dict) -> None:
-        if kind == DELTA:
+        if kind in (DELTA, FINAL_DELTA):
             text = str(data.get("text") or "")
             if text:
                 self._ensure_stream().feed(text)

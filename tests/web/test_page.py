@@ -262,6 +262,7 @@ def test_运行中展开思考过程收尾可收起() -> None:
 def test_页面处理delta增量() -> None:
     script = _script()
     assert "data.type === 'delta'" in script
+    assert "data.type === 'final_delta'" in script
     assert "appendDelta" in script
 
 
