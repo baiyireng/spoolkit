@@ -61,6 +61,7 @@ from spoolkit.agent.material_compactor import (
     notes_from_material,
 )
 from spoolkit.agent.monitor import ToolSight, inspect
+from spoolkit.agent.evidence_gate import check_evidence
 from spoolkit.agent.final_turn import request_final
 from spoolkit.agent.protocol import ParseFailure, TurnProtocol
 from spoolkit.agent.signals import (
@@ -3419,6 +3420,26 @@ class AgentLoop:
             if turn.done:
                 if self._turn_protocol.v2:
                     # 控制回合的消息原样当前缀，终稿另一次纯文本请求。
+                    # 实时问题必须引用本轮工具结果；普通问题可以声明无需外部信息。
+                    decision = check_evidence(
+                        state.goal or "",
+                        turn.summary,
+                        [item.content for item in history if item.role == "tool"],
+                    )
+                    if not decision.ok:
+                        history.append(Message(role="user", content=decision.reason))
+                        feedback = decision.reason
+                        awaiting_final = False
+                        trace.append(f"step{state.step}: 终稿缺少依据，退回")
+                        self._emit(
+                            "note",
+                            {
+                                "text": decision.reason,
+                                "ok": False,
+                                "kind": "evidence_gate",
+                            },
+                        )
+                        continue
                     prompt_tokens = resolve_n_past(
                         response.prompt_tokens, assembled.messages
                     )

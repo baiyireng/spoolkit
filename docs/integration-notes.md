@@ -48,7 +48,8 @@
 | 截断后不做 ×2 整段重试 | 控制回合仍走 `chat_with_escalation`（×2） | 终稿与逐节：续写一次。重叠字数读 `continuation_overlap_chars`（默认 200，夹在 200–400）。续写再截断或空续写则短答，不再请求。续写完整但 12 字片段重合超过一半：逐节重写一次（原预算）；终稿按 1.5 倍预算重写一次。变更单写「只带重叠区 + 本节要求」：现有续写末条仍是续写指令，旧正文（含重叠区）不进 prompt，否则会改掉已锁定的末条。拆分该节仍未做 |
 | 流式事件 `final_delta` 等 | 已登记 `final_delta`、`section_start`、`section_done`。网页按 `data-section` 只替换这一节 | 主循环尚未发出章节事件。控制回合在 v2 下仍走 `FinalFieldTap` |
 | 配置 `protocol.v2` 等 | `limits.py` 无对应项 | P2-3 / 更早用 settings 或 limits 旋钮灰度 |
-| 长文子流程 WritingState | `writing_state.py` 管大纲；`sections.py` 逐节生成，截断走 `continuation.py`。主循环未调用 | 章节流式在 P1-5。开关关闭时仍是单次终稿 |
+| 长文子流程 WritingState | `writing_state.py` 管大纲；`sections.py` 逐节生成，截断走 `continuation.py`。主循环未调用 | 开关关闭时仍是单次终稿 |
+| 硬 `required_tools` | 仓库里没有这个门禁 | `evidence_gate.py`：标签「最新 / 今天 / 价格 / 版本」必须引用本轮工具结果。其它问题写「无需外部信息」即可。不指定工具名。只在 v2 的 done 分支生效 |
 
 ---
 
