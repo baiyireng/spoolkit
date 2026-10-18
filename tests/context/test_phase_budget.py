@@ -1,0 +1,90 @@
+"""阶段预算：长文各阶段的 max_tokens，与旧的窗口比例预留分开。"""
+
+import logging
+
+from spoolkit.context.phase_budget import (
+    compute_budget,
+    output_tokens_for_turn,
+    resolve_n_past,
+)
+from spoolkit.llm.types import Message
+
+
+def test_n_past为零时控制回合用硬上限() -> None:
+    result = compute_budget(n_ctx=8192, n_past=0, phase="control")
+    assert result.max_tokens == 768
+    assert result.capped is False
+    assert result.reason == "ok"
+
+
+def test_n_past贴近窗口时上下文已满() -> None:
+    result = compute_budget(n_ctx=8192, n_past=8192 - 100, phase="final")
+    assert result.max_tokens == 0
+    assert result.capped is True
+    assert result.reason == "context-full"
+
+
+def test_负数n_past仍被阶段硬上限卡住() -> None:
+    result = compute_budget(n_ctx=8192, n_past=-50, phase="control")
+    assert result.max_tokens == 768
+    assert result.capped is False
+    assert result.reason == "ok"
+
+
+def test_目标低于硬上限时按目标给() -> None:
+    result = compute_budget(
+        n_ctx=8192, n_past=0, phase="final", target_tokens=400
+    )
+    assert result.max_tokens == 400
+    assert result.capped is False
+    assert result.reason == "ok"
+
+
+def test_目标高于硬上限时按上限截断() -> None:
+    # 方案算法：只要没给到 target，reason 就是 context-full，
+    # 即使真正卡住的是阶段硬上限而不是窗口。
+    result = compute_budget(
+        n_ctx=8192, n_past=0, phase="final", target_tokens=9000
+    )
+    assert result.max_tokens == 2500
+    assert result.capped is True
+    assert result.reason == "context-full"
+
+
+def test_旧协议不改输出预留() -> None:
+    assert (
+        output_tokens_for_turn(
+            protocol_v2=False,
+            legacy=1228,
+            n_ctx=8192,
+            n_past=0,
+            phase="control",
+        )
+        == 1228
+    )
+
+
+def test_v2按阶段预算计算() -> None:
+    assert (
+        output_tokens_for_turn(
+            protocol_v2=True,
+            legacy=1228,
+            n_ctx=8192,
+            n_past=0,
+            phase="control",
+        )
+        == 768
+    )
+
+
+def test_有prompt_tokens时直接采用(caplog) -> None:
+    caplog.set_level(logging.WARNING)
+    assert resolve_n_past(400, [Message(role="user", content="hello" * 100)]) == 400
+    assert caplog.records == []
+
+
+def test_没有prompt_tokens时按字数估算并打日志(caplog) -> None:
+    caplog.set_level(logging.WARNING)
+    text = "字" * 16
+    assert resolve_n_past(None, [Message(role="user", content=text)]) == int(16 / 1.6)
+    assert any("prompt_tokens" in record.message for record in caplog.records)

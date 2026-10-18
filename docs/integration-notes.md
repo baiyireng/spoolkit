@@ -39,7 +39,7 @@
 
 | 方案假设 | 仓库现状 | 建议 |
 |---|---|---|
-| `budget.ts` / TS 模块名 | Python `spoolkit` | 新建如 `spoolkit/llm/phase_budget.py`（或 `context/phase_budget.py`）实现 `compute_budget` |
+| `budget.ts` / TS 模块名 | Python `spoolkit` | 已落在 `spoolkit/context/phase_budget.py` 的 `compute_budget`。`n_past` 用 `usage.prompt_tokens`，缺省按字数估算并打日志 |
 | Control JSON **无 `final`** | `TURN_SCHEMA` / `build_turn_schema` / `parse_turn` **强依赖 `final`** | P0-2 需双协议 + `protocol.v2` 开关；旧路径完整保留 |
 | `answer_plan` / `summary` 字段 | 协议中不存在 | P0-2 / P1-1 扩展 schema 与解析校验 |
 | `n_past = timings.prompt_n` | 仅有 `usage.prompt_tokens`（且流式依赖 `stream_options.include_usage`） | P0-1 先用 `prompt_tokens`；缺省再退化估算；`cache_hit` 需查 llama-server 是否返回 |

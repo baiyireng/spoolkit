@@ -122,6 +122,7 @@ from spoolkit.agents.supervisor import (
 from spoolkit.config import Config
 from spoolkit.context.assembler import Assembler, AssembleResult
 from spoolkit.context.budget import Budget, compact_trigger
+from spoolkit.context.phase_budget import PROTOCOL_V2, output_tokens_for_turn
 from spoolkit.context.sections import Section
 from spoolkit.context import templates as T
 from spoolkit.errors import ContextOverflowError, PathOutsideProjectError
@@ -2751,7 +2752,13 @@ class AgentLoop:
                         self.gateway,
                         ChatRequest(
                             messages=assembled.messages,
-                            max_tokens=self._budget.output_reserve(),
+                            max_tokens=output_tokens_for_turn(
+                                protocol_v2=PROTOCOL_V2,
+                                legacy=self._budget.output_reserve(),
+                                n_ctx=self._budget.window,
+                                messages=assembled.messages,
+                                phase="control",
+                            ),
                             response_schema=self._schema,
                         ),
                         on_truncated_retry=self._on_truncated_retry,
