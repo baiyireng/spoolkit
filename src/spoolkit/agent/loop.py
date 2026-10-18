@@ -125,7 +125,6 @@ from spoolkit.context.assembler import Assembler, AssembleResult
 from spoolkit.context.budget import Budget, compact_trigger
 from spoolkit.context.phase_budget import (
     PROTOCOL_V2,
-    compute_budget,
     output_tokens_for_turn,
     resolve_n_past,
 )
@@ -3424,16 +3423,12 @@ class AgentLoop:
                     target = (
                         turn.answer_plan.target_tokens if turn.answer_plan else None
                     )
-                    phase_budget = compute_budget(
-                        n_ctx=self._budget.window,
-                        n_past=n_past,
-                        phase="final",
-                        target_tokens=target,
-                    )
                     conclusion_text = request_final(
                         self.gateway,
                         assembled.messages,
-                        max_tokens=phase_budget.max_tokens,
+                        n_ctx=self._budget.window,
+                        n_past=n_past,
+                        target_tokens=target,
                     ).text
                 else:
                     conclusion_text = turn.final or ""

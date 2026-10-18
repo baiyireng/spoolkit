@@ -45,7 +45,7 @@
 | `n_past = timings.prompt_n` | 仅有 `usage.prompt_tokens`（且流式依赖 `stream_options.include_usage`） | P0-1 先用 `prompt_tokens`；缺省再退化估算；`cache_hit` 需查 llama-server 是否返回 |
 | `cache_prompt=true` | `ChatRequest.cache_prompt` 默认关；终稿请求为真时写入 payload | 用两次请求的 `prompt_tokens` 增量验收（阈值 200）。服务端是否回 `cache_hit` 仍未接入 |
 | 终稿纯文本、无 grammar | `PROTOCOL_V2=False` 时主循环仍带 schema，结论取 `final` | v2 打开且 `done` 时，`request_final` 复用控制前缀、不带 schema、不翻倍重试 |
-| 截断后不做 ×2 整段重试 | `chat_with_escalation` **默认 ×2**，主循环终稿也走这条 | P0-4：终稿通道单独 retries；控制通道可保留短预算重试 |
+| 截断后不做 ×2 整段重试 | 控制回合仍走 `chat_with_escalation`（×2） | 终稿 `request_final`：续写一次（预算用 `continuation`，不 ×2）；仍截断则短答 +「继续」入口并打日志。×1.5 整段重写与重叠去重留在 P1-4 |
 | 流式事件 `final_delta` 等 | 只有通用 `delta` | P0-5 可先复用 `delta` + `note`；或扩展 `KNOWN`（老 Web 忽略未知类型） |
 | 配置 `protocol.v2` 等 | `limits.py` 无对应项 | P2-3 / 更早用 settings 或 limits 旋钮灰度 |
 | 长文子流程 WritingState | 不存在 | P1；P0 只做短答纯文本终稿 |
