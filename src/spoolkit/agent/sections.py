@@ -13,7 +13,7 @@ from typing import Any
 from spoolkit.agent.continuation import looks_repeated, merge_continuation, overlap_chars
 from spoolkit.agent.metrics import commit_section, metric_scope, note_retry, reset_section_progress
 from spoolkit.agent.final_turn import CONTINUATION_INSTRUCTION, SHORT_CONTINUE
-from spoolkit.agent.writing_state import WritingState
+from spoolkit.agent.writing_state import WritingState, merge_decisions, split_section_decisions
 from spoolkit.context.phase_budget import HARD_CAP, compute_budget
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 SECTION_INSTRUCTION = (
     "只写第 {index} 节「{title}」。要点：{points}。目标约 {target_tokens} tokens。\n"
-    "不要写其他节，不要重复已写内容，不要总结全文。"
+    "不要写其他节，不要重复已写内容，不要总结全文。\n"
+    "节末用「决定：」单独成行写出 1–3 条结论，每条不超过 40 字。"
 )
 
 
@@ -32,6 +33,7 @@ class SectionDraft:
     text: str
     prompt_tokens: int
     truncated: bool
+    decisions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -135,6 +137,7 @@ def write_sections(
     total = len(state.outline)
     reset_section_progress()
     drafts: list[SectionDraft] = []
+    carried = state.decisions
     for index in range(total):
         section = state.outline[index]
         _emit_section(
@@ -145,7 +148,7 @@ def write_sections(
             total=total,
             state="draft",
         )
-        current = replace(state, next_section=index)
+        current = replace(state, next_section=index, decisions=carried)
         draft = generate_section(
             gateway,
             current,
@@ -155,6 +158,7 @@ def write_sections(
             prompt_tokens=prompt_tokens,
         )
         drafts.append(draft)
+        carried = draft.decisions
         commit_section(total=total, completed=len(drafts))
         _emit_section(
             on_event,
@@ -239,12 +243,19 @@ def _draft(
     text: str,
     truncated: bool,
 ) -> SectionDraft:
+    raw = text
+    suffix = ""
+    if raw.endswith(SHORT_CONTINUE):
+        raw = raw[: -len(SHORT_CONTINUE)]
+        suffix = SHORT_CONTINUE
+    body, found = split_section_decisions(raw)
     return SectionDraft(
         index=state.next_section,
         title=title,
-        text=text,
+        text=body + suffix,
         prompt_tokens=response.prompt_tokens,
         truncated=truncated,
+        decisions=merge_decisions(state.decisions, found),
     )
 
 

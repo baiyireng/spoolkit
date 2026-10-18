@@ -16,6 +16,10 @@ from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
 MIN_SECTIONS = 3
 MAX_SECTIONS = 7
+DECISION_CHARS = 40
+DECISIONS_PER_SECTION = 3
+DECISION_CAP = 20
+_DECISION_LINE = re.compile(r"^决定：\s*(.*)$")
 
 OUTLINE_INSTRUCTION = (
     "根据对话与工具结果，给出 3–7 节大纲，每行：标题 | 一句话要点 | 目标 tokens。\n"
@@ -78,6 +82,48 @@ class WritingState:
             decisions=tuple(str(item) for item in payload.get("decisions", ())),
             next_section=int(payload.get("next_section", 0)),
         )
+
+
+def split_section_decisions(text: str) -> tuple[str, tuple[str, ...]]:
+    """节末「决定：」行抽出来。正文留在节里，不进约束。"""
+    lines = text.splitlines()
+    taken: list[str] = []
+    while lines:
+        matched = _DECISION_LINE.match(lines[-1].strip())
+        if matched is None:
+            break
+        lines.pop()
+        item = matched.group(1).strip()
+        if item:
+            taken.append(item)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    taken.reverse()
+    return "\n".join(lines).strip(), tuple(taken[:DECISIONS_PER_SECTION])
+
+
+def merge_decisions(existing: Sequence[str], found: Sequence[str]) -> tuple[str, ...]:
+    """去重后追加。单节最多 3 条，每条不超过 40 字，总数不超过 20。"""
+    kept = [item.strip() for item in existing if item and item.strip()]
+    seen = {_decision_key(item) for item in kept}
+    added = 0
+    for raw in found:
+        if added >= DECISIONS_PER_SECTION or len(kept) >= DECISION_CAP:
+            break
+        item = raw.strip()
+        if not item or len(item) > DECISION_CHARS:
+            continue
+        key = _decision_key(item)
+        if key in seen:
+            continue
+        kept.append(item)
+        seen.add(key)
+        added += 1
+    return tuple(kept[:DECISION_CAP])
+
+
+def _decision_key(text: str) -> str:
+    return " ".join(text.split())
 
 
 def parse_outline(text: str, *, goal: str, token_budget: int) -> WritingState | OutlineFailure:
