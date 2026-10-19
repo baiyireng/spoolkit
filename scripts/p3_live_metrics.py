@@ -24,6 +24,7 @@ from spoolkit.agent.metrics import (
     capture_metrics,
     read_metrics,
     render_phase_report,
+    render_retry_share,
     render_section_cache_by_arm,
     write_metrics,
 )
@@ -180,6 +181,8 @@ def write_report(rows: list[dict], env: dict, path: Path) -> None:
         "## 分阶段",
         "",
         render_phase_report(requests),
+        "",
+        render_retry_share(requests),
         "",
     ]
     arm_cache = render_section_cache_by_arm(requests)

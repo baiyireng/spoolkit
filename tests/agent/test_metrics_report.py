@@ -24,6 +24,22 @@ def _row(task_type: str, cache_hit: bool | None) -> dict:
     }
 
 
+def test_分阶段表列出总时延且重试占比单独成行() -> None:
+    from spoolkit.agent.metrics import render_phase_report, render_retry_share
+
+    rows = [
+        {"phase": "section", "outcome": "ok", "total_ms": 100, "retry_index": 0, "first_token_ms": 10},
+        {"phase": "section", "outcome": "ok", "total_ms": 300, "retry_index": 1, "first_token_ms": 20},
+    ]
+    text = render_phase_report(rows)
+    assert "P50 总时延" in text
+    assert "| section | 2 |" in text
+    assert "| 200 |" in text
+    share = render_retry_share(rows)
+    assert "1/2" in share
+    assert "50.0%" in share
+
+
 def test_按任务类型聚合且缓存命中率可见() -> None:
     rows = [
         _row("long", True),

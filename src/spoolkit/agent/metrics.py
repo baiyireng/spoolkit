@@ -350,12 +350,14 @@ def aggregate_by_phase(rows: Sequence[dict[str, Any]]) -> dict[str, dict[str, An
         known = [item.get("cache_hit") for item in items if item.get("cache_hit") is not None]
         rate = None if not known else sum(1 for hit in known if hit) / len(known)
         first = [int(item["first_token_ms"]) for item in items if item.get("first_token_ms") is not None]
+        elapsed = [int(item["total_ms"]) for item in items if item.get("total_ms") is not None]
         truncated = sum(1 for item in items if item.get("outcome") == "truncated")
         table[phase] = {
             "count": len(items),
             "truncation_rate": truncated / len(items),
             "cache_hit_rate": rate,
             "first_token_ms_p50": _median(first) if first else None,
+            "total_ms_p50": _median(elapsed) if elapsed else None,
             "cache_hit_rate_excl_first": None,
             "cold_start_misses": None,
         }
@@ -388,23 +390,40 @@ def _section_cache_excl_first(items: Sequence[dict[str, Any]]) -> tuple[float | 
     return rest_hits / rest, cold
 
 
+def render_retry_share(rows: Sequence[dict[str, Any]]) -> str:
+    """retry_index>0 的请求占比。续写固定记 1，空节换提示也记在这里。"""
+    requests = [row for row in rows if row.get("phase")]
+    if not requests:
+        return "- 重试占比：未采集"
+    retried = [row for row in requests if int(row.get("retry_index") or 0) > 0]
+    total = sum(int(row.get("total_ms") or 0) for row in requests)
+    spent = sum(int(row.get("total_ms") or 0) for row in retried)
+    time_rate = "未采集" if total <= 0 else f"{spent / total:.1%}"
+    return (
+        f"- 重试占比：retry_index>0 为 {len(retried)}/{len(requests)}"
+        f"（{len(retried) / len(requests):.1%}），耗时 {time_rate}。"
+        "continuation 的 retry_index 固定为 1，空节换提示也记在这里。"
+    )
+
+
 def render_phase_report(rows: Sequence[dict[str, Any]]) -> str:
     """按 phase 出表。缓存命中率单独一列；缺样本写未采集。"""
     table = aggregate_by_phase(rows)
     if not table:
         return "按阶段：未采集\n"
     lines = [
-        "| 阶段 | 请求数 | 截断率 | 缓存命中率 | 去掉首节 | 冷启动 miss | P50 首 token |",
-        "|---|---|---|---|---|---|---|",
+        "| 阶段 | 请求数 | 截断率 | 缓存命中率 | 去掉首节 | 冷启动 miss | P50 首 token | P50 总时延 |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for phase in sorted(table):
         item = table[phase]
         rate = item["cache_hit_rate"]
         first = item["first_token_ms_p50"]
+        elapsed = item["total_ms_p50"]
         excl = item["cache_hit_rate_excl_first"]
         cold = item["cold_start_misses"]
         lines.append(
-            "| {phase} | {count} | {cut:.2f} | {hit} | {excl} | {cold} | {token} |".format(
+            "| {phase} | {count} | {cut:.2f} | {hit} | {excl} | {cold} | {token} | {elapsed} |".format(
                 phase=phase,
                 count=item["count"],
                 cut=item["truncation_rate"],
@@ -412,6 +431,7 @@ def render_phase_report(rows: Sequence[dict[str, Any]]) -> str:
                 excl="—" if excl is None else f"{excl:.2f}",
                 cold="—" if cold is None else str(cold),
                 token="未采集" if first is None else str(first),
+                elapsed="未采集" if elapsed is None else str(elapsed),
             )
         )
     section = table.get("section")
