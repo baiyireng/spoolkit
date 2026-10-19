@@ -271,14 +271,19 @@
 
 | 项 | 结果 |
 |---|---|
-| 20 条 | v2 20/20 完成。P50 总时延 35736 ms，截断 5/163。单节 generated/target 中位数 55%，不越界 89/108。`empty_sections` 合计 1，只在题目 4。报告 `docs/metrics/2026-10-19-p35-report.md`，数据 `metrics/2026-10-19-p35.jsonl`。未写入 `metrics/2026-10-19.jsonl`，也未改手改日报 |
+| 20 条 | v2 20/20 完成，全是长文（方案/报告/对比/架构/表格各 4）。回合 P50 总时延 35736 ms，是整篇墙钟，不是单次请求。分阶段 P50：control 2431、outline 4336、section 5031（108 次）、continuation 14010（5 次）。final 为 0 是预期，长文路径不产生 final 请求。截断 5/163。单节 generated/target 中位数 55%，不越界 89/108。`empty_sections` 合计 1（1/20 篇）。报告 `docs/metrics/2026-10-19-p35-report.md`，数据 `metrics/2026-10-19-p35.jsonl`。未写入 `metrics/2026-10-19.jsonl`，也未改手改日报 |
+| 时延口径 | 17112 ms 来自 `docs/metrics/2026-10-19-report-before-cues.md`：同样 20 个题名，但 18 篇是短终稿、只有 2 篇进了长文。不能和这次 20/20 长文比。手改日报 `docs/metrics/2026-10-19-report.md` 的 cache-on 13638 ms 含长文 20 + 短答 20。长文单独看，该日报 cache-on 长文 P50 是 47649 ms。这次 35736 ms 低于那条长文基线。空节与续写（`retry_index>0`）占请求 9/163（5.5%）、耗时 8.9%；其中续写 5 次占掉大部分重试时间，空节换提示 4 次 |
 | 构造 smoke | `.agent/xxx` 写入前后两次 `list_dir(.)`。只执行了第一次。`kind=useless`，`observed=current=da39a3ee5e6b`，提示含「没有执行」。清单行仍有 `.agent/`。原文在 `docs/metrics/2026-10-19-smoke-p35.md` |
 | 空响应重试 | `5c1ac2d`。节请求第一次空内容时追加「必须输出正文，至少 100 字。没有材料时基于目标写，不要留空。」，不原样重发。仍空则该节占位，回合记 `empty_sections`，报告写「内容缺失」。题目 4 有 4 次第一次空；换提示后 `prompt_tokens` 从 259 增到 287，3 节写出正文，1 节仍空 |
 | 第 1 节原文 | 改重试前抓的题目 4 第 1 节有正文。message 只有 `content` / `role`。没有 `reasoning` 字段。`finish_reason=stop`，`prompt_tokens=257`，`completion_tokens=62`。附录在同一份 smoke |
-| 第三次重试 | 不做。20 条合计 `empty_sections` 为 1，不启用。若以后做：只在 `empty_sections` 超阈值时启用，单独提交，默认关闭 |
+| 第三次重试 | 不做。20 条里 1 篇有空节，未到回滚线。若以后做：只在 `empty_sections` 超阈值时启用，单独提交，默认关闭 |
+| 灰度 | 默认仍是 `0`。打开只用 overrides 或 `limits.json` 的数字 `1`。首档：内部 1–2 个会话，观察 1 周。监控：`empty_sections`、回合 P50、截断率、用户「继续/改写」率。回滚线：`empty_sections ≥ 2 篇/20`，或回合 P50 > 47649 ms。47649 ms 的样本、口径和来源见 `docs/metrics/2026-10-19-p35-report.md` |
 
 | 命令 | 收集 | 通过 |
 |---|---|---|
 | `uv run pytest tests/llm/test_llamacpp.py tests/llm/test_llamacpp_stream.py tests/agent/test_sections.py tests/agent/test_metrics_report.py -q --basetemp=/d/tmp/spool-p35/close` | 44 | 44 passed |
+| `uv run pytest tests/agent/test_loop.py tests/agent/test_repeat_guard.py tests/agent/test_probe_regression.py tests/agent/test_sections.py -q --basetemp=/d/tmp/spool-p35/final` | 59 | 59 passed |
 
-此前护栏与任务卡：`c08f59d`、`8e8ba38`、`86590ad`、`b1134fc`、`9607867`、`14cfa71`。本轮只有 `5c1ac2d`。
+此前护栏与任务卡：`c08f59d`、`8e8ba38`、`86590ad`、`b1134fc`、`9607867`、`14cfa71`。
+
+本轮：`5c1ac2d` 空节换提示重试；`7365c63` 收口文档与 20 条结论。
