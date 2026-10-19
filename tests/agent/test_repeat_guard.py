@@ -1284,3 +1284,21 @@ def test_同一组目录条目顺序不同指纹不变(tmp_path: Path) -> None:
     assert ordered is not None
     assert ordered.splitlines() == ["a.txt", "m.txt"]
     assert loop._call_state(ToolCall("list_dir", {"path": "."})) == mixed_fp
+
+
+def test_列agent目录时子项进入指纹且不被排除(tmp_path: Path) -> None:
+    """显式 `list_dir(.agent)` 看的是它的子项。`sessions/` 不是 `.agent`，要参与比较。"""
+    sessions = tmp_path / ".agent" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "task.json").write_text("{}\n", encoding="utf-8")
+    loop = _build(tmp_path, [])
+    raw = loop._listing_of(".agent")
+    assert raw is not None
+    names = raw.splitlines()
+    assert "sessions/" in names
+    assert ".agent" not in {line.rstrip("/") for line in names}
+    call = ToolCall("list_dir", {"path": ".agent"})
+    before = loop._call_state(call)
+    assert before == _content_fingerprint("\n".join(sorted(names)))
+    (tmp_path / ".agent" / "memory.md").write_text("x\n", encoding="utf-8")
+    assert loop._call_state(call) != before
