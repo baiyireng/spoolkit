@@ -14,6 +14,7 @@ from spoolkit.agent.loop import AgentLoop
 from spoolkit.config import Config
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.edit import PendingChanges, write_file_spec
 from spoolkit.tools.fs import read_file_spec
 from spoolkit.tools.registry import ToolRegistry
 
@@ -35,9 +36,11 @@ def _read(path: str) -> dict:
     return {"name": "read_file", "arguments": {"path": path}}
 
 
-def _build(tmp_path: Path, script: list, **kwargs) -> AgentLoop:
+def _build(tmp_path: Path, script: list, *, with_write: bool = False, **kwargs) -> AgentLoop:
     registry = ToolRegistry()
     registry.register(read_file_spec(tmp_path))
+    if with_write:
+        registry.register(write_file_spec(tmp_path, PendingChanges(tmp_path)))
     return AgentLoop(
         gateway=FakeModel(script=script, tokenizer=OfflineTokenCounter()),
         tokenizer=OfflineTokenCounter(),
@@ -167,6 +170,20 @@ def test_confirm_rewrite_接受_write_file_的_acked_disappeared_别名(tmp_path
     assert [one.path for one in pending.items()] == ["snake.html"]
 
 
+def test_只读工具的编码任务不要求落盘(tmp_path: Path) -> None:
+    """没有写工具时，编码目标说「接下来」也不退回，并告诉模型直接给结论。"""
+    script = [
+        _turn("看完了", final="接下来将进行重命名操作。"),
+        _turn("改口", final="根目录没有可改的文件。"),
+    ]
+    loop = _build(tmp_path, script)
+    result = loop.run("把 get_rows 改名成 load_rows")
+    assert not any("结论没有落盘" in line for line in result.trace), result.trace
+    assert result.finished is True
+    prompt = "\n".join(message.content for message in loop.gateway.requests[-1].messages)
+    assert "当前没有写工具，直接给结论" in prompt
+
+
 def test_假完成_接下来将进行_被退回(tmp_path: Path) -> None:
     """rename-cross-file 真机现场：模型第 5 步说「load_rows 不存在，可以安全
     地重命名。接下来将进行重命名操作。」——一个文件没改就 done=true，
@@ -184,7 +201,7 @@ def test_假完成_接下来将进行_被退回(tmp_path: Path) -> None:
         # 被退回后模型改口直接收尾（这里只关心第一步的拦截）
         _turn("收尾", final="已确认 get_rows 无外部引用。"),
     ]
-    loop = _build(tmp_path, script)
+    loop = _build(tmp_path, script, with_write=True)
     result = loop.run("把 get_rows 改名成 load_rows")
     # 第一次 done 必须被退回，trace 里要留下「结论没有落盘」的记录。
     assert any("结论没有落盘" in line for line in result.trace), (
@@ -265,7 +282,7 @@ def test_谎称完成_宣称改了没改的文件_被退回(tmp_path: Path) -> N
         # 被退回后模型改口说实话
         _turn("收尾", final="已把 fetch.py 里的 get_rows 改名为 load_rows。"),
     ]
-    loop = _build(tmp_path, script)
+    loop = _build(tmp_path, script, with_write=True)
     result = loop.run("把 get_rows 改名成 load_rows")
     # 谎称完成必须被退回，trace 里要留下「结论没有落盘」的记录。
     assert any("结论没有落盘" in line for line in result.trace), (

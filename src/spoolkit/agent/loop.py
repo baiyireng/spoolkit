@@ -1219,6 +1219,12 @@ def _render_lessons(pushed: list[tuple[int, str]]) -> str:
     return "\n".join(lines)
 
 
+def _described_has_write(registry: ToolRegistry) -> bool:
+    """工具索引里有没有写工具。索引没列出的，模型也用不了。"""
+    described = registry.describe()
+    return any(name in described for name in WRITE_TOOLS)
+
+
 def build_workflow(
     registry: ToolRegistry, read_roots: tuple[Path, ...] = (), *, from_channel: bool = False
 ) -> str:
@@ -1702,6 +1708,7 @@ class AgentLoop:
             self._compactor = _tagged_compactor
         self.tokenizer = tokenizer
         self.registry = registry
+        self._has_write = _described_has_write(registry)
         self.config = config
         self.prefetch = prefetch
         self.memory = memory
@@ -2001,6 +2008,8 @@ class AgentLoop:
         )
         if self.persona:
             system_text = f"{self.persona}\n\n{system_text}"
+        if not self._has_write:
+            system_text += "\n当前没有写工具，直接给结论。"
         if self._turn_protocol.v2:
             system_text += (
                 "\n这是 v2 控制回合：不要写 final。"
@@ -3706,7 +3715,11 @@ class AgentLoop:
                 bounced = self._bounce_unwritten(
                     conclusion_text,
                     changed_paths,
-                    require_landing=_is_coding_goal(state.goal or "") and not long_mode,
+                    require_landing=(
+                        _is_coding_goal(state.goal or "")
+                        and self._has_write
+                        and not long_mode
+                    ),
                 )
                 if bounced:
                     trace.append(
