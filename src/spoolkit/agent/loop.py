@@ -562,6 +562,10 @@ REPEAT_REFRESH = "refresh"
 REPEAT_UNDECIDED = "undecided"
 
 
+# 目录指纹里排除的运行时目录。只放已经证实会污染清单的名字。
+_RUNTIME_ENTRIES = {".agent"}
+
+
 def _content_fingerprint(text: str) -> str:
     """一段内容的指纹：sha1 前 12 位 + 行数。
 
@@ -6656,7 +6660,13 @@ class AgentLoop:
                 return _content_fingerprint(text)
             listing = self._listing_of(path)
             if listing is not None:
-                return _content_fingerprint(listing)
+                # 只改指纹。`_listing_of` 和 `list_dir` 的原文仍包含这些目录。
+                entries = [
+                    line
+                    for line in listing.splitlines()
+                    if line.rstrip("/") not in _RUNTIME_ENTRIES
+                ]
+                return _content_fingerprint("\n".join(sorted(entries)))
             return ""
         if call.name == CONFIRM_TOOL and self.pending is not None:
             token = call.arguments.get(TOKEN_PARAM)

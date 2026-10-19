@@ -24,3 +24,16 @@ observed=da39a3ee5e6b current=d2c277b75e9f
 | current | `d2c277b75e9f` |
 
 清单从空变成只有 `.agent/`。指纹变化来自运行时目录 `.agent`。
+
+## 指纹排除 `.agent` 之后
+
+同一题再重放一次。第 4 次 `list_dir(.)` 仍在 step3，清单原文仍是 `.agent/`，指纹不再把它算进去。
+
+| 项 | 值 |
+|---|---|
+| kind | `useless` |
+| cause | `-` |
+| observed | `da39a3ee5e6b` |
+| current | `da39a3ee5e6b` |
+| 处置 | 执行前拦截，工具结果「没有执行」 |
+| finished / steps | True / 4 |

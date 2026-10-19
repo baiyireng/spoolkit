@@ -9,7 +9,12 @@ import json
 import sys
 from pathlib import Path
 
-from spoolkit.agent.loop import REPEAT_BLOCK_AT, AgentLoop, call_signature
+from spoolkit.agent.loop import (
+    REPEAT_BLOCK_AT,
+    AgentLoop,
+    _content_fingerprint,
+    call_signature,
+)
 from spoolkit.config import Config
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
@@ -1145,3 +1150,137 @@ def test_回归靶_同一个confirm_rewrite连发只执行一次(tmp_path: Path)
     assert landed[0].new_text == new
     assert pending.staged_items() == []
     assert result.finished is True
+
+
+def _list_call(path: str) -> dict:
+    return {"name": "list_dir", "arguments": {"path": path}}
+
+
+def test_两次列根目录之间只新增agent则执行前拦截(tmp_path: Path) -> None:
+    """根目录多出来的 `.agent/` 是运行时状态，不是业务清单变了。
+
+    第一次 `list_dir(.)` 看到空目录；中间写入 `.agent/xxx`；第二次同参调用
+    必须在执行前判成无用。显式 `list_dir(.agent)` 看的是这个目录自己的子项，
+    仍然执行。
+    """
+    loop = _build(
+        tmp_path,
+        [
+            _turn("先看根", [_list_call(".")]),
+            _turn("再看根", [_list_call(".")]),
+            _turn("看运行时目录", [_list_call(".agent")]),
+            _turn("好了", final="看完了"),
+        ],
+    )
+    ran: list[str] = []
+    shown: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        result = real(call)
+        ran.append(str(call.arguments.get("path")))
+        shown.append(result.content)
+        return result
+
+    def plant_agent(kind, data):
+        # 指纹在工具返回后才记下。写在事件里，才会落在「已记录」和「下一次判据」之间。
+        if kind == "tool" and data.get("name") == "list_dir" and not (tmp_path / ".agent").exists():
+            agent = tmp_path / ".agent"
+            agent.mkdir()
+            (agent / "xxx").write_text("1\n", encoding="utf-8")
+
+    loop.registry.invoke = counting
+    loop.on_event = plant_agent
+    result = loop.run("看看目录里有什么")
+
+    assert ran == [".", ".agent"], ran
+    assert "xxx" in shown[-1]
+    prompt = _last_prompt(loop)
+    assert "没有执行" in prompt
+    guard = [line for line in result.trace if "guard list_dir" in line]
+    assert len(guard) == 1, result.trace
+    assert "kind=useless" in guard[0], guard[0]
+    observed = guard[0].split("observed=", 1)[1].split(" ", 1)[0]
+    current = guard[0].split("current=", 1)[1].split(" ", 1)[0]
+    assert observed == current
+    listing = [line for line in result.trace if "listing list_dir(.)" in line]
+    assert listing and ".agent/" in listing[0]
+
+
+def test_新增业务文件后列目录放行(tmp_path: Path) -> None:
+    """业务文件进了清单，指纹必须变，第二次 `list_dir(.)` 要执行。"""
+    loop = _build(
+        tmp_path,
+        [
+            _turn("先看根", [_list_call(".")]),
+            _turn("再看根", [_list_call(".")]),
+            _turn("好了", final="看完了"),
+        ],
+    )
+    ran: list[str] = []
+    real = loop.registry.invoke
+
+    def counting(call):
+        result = real(call)
+        ran.append(str(call.arguments.get("path")))
+        return result
+
+    def plant_readme(kind, data):
+        if (
+            kind == "tool"
+            and data.get("name") == "list_dir"
+            and not (tmp_path / "readme.txt").exists()
+        ):
+            (tmp_path / "readme.txt").write_text("hi\n", encoding="utf-8")
+
+    loop.registry.invoke = counting
+    loop.on_event = plant_readme
+    result = loop.run("看看目录里有什么")
+
+    assert ran == [".", "."], ran
+    assert any("重复调用放行" in line for line in result.trace), result.trace
+    guard = [line for line in result.trace if "guard list_dir" in line]
+    assert guard and "kind=refresh" in guard[0] and "cause=changed" in guard[0]
+
+
+def test_指纹排除agent但列目录结果仍包含它(tmp_path: Path) -> None:
+    """过滤只进指纹。`list_dir` 和 `_listing_of` 仍把 `.agent/` 交出去。"""
+    agent = tmp_path / ".agent"
+    agent.mkdir()
+    (agent / "xxx").write_text("1\n", encoding="utf-8")
+    (tmp_path / "readme.txt").write_text("hi\n", encoding="utf-8")
+    shown = list_dir_spec(tmp_path).handler({"path": "."})
+    assert shown.ok
+    assert ".agent/" in shown.content.splitlines()
+    assert "readme.txt" in shown.content.splitlines()
+
+    loop = _build(tmp_path, [])
+    raw = loop._listing_of(".")
+    assert raw is not None
+    assert ".agent/" in raw.splitlines()
+    kept = [
+        line for line in raw.splitlines() if line.rstrip("/") != ".agent"
+    ]
+    assert loop._call_state(ToolCall("list_dir", {"path": "."})) == (
+        _content_fingerprint("\n".join(sorted(kept)))
+    )
+
+
+def test_同一组目录条目顺序不同指纹不变(tmp_path: Path) -> None:
+    """磁盘顺序和待确认叠加顺序不同，同一组名字的指纹相同。"""
+    (tmp_path / "m.txt").write_text("m\n", encoding="utf-8")
+    pending = PendingChanges(tmp_path)
+    pending.propose("a.txt", "a\n")
+    loop = _build(tmp_path, [])
+    loop.pending = pending
+    mixed = loop._listing_of(".")
+    assert mixed is not None
+    assert mixed.splitlines() == ["m.txt", "a.txt"]
+    mixed_fp = loop._call_state(ToolCall("list_dir", {"path": "."}))
+
+    (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
+    loop.pending = PendingChanges(tmp_path)
+    ordered = loop._listing_of(".")
+    assert ordered is not None
+    assert ordered.splitlines() == ["a.txt", "m.txt"]
+    assert loop._call_state(ToolCall("list_dir", {"path": "."})) == mixed_fp
