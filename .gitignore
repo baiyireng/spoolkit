@@ -46,6 +46,15 @@ benchmarks/probes/orchestration/real-sandbox-whole.txt
 
 # 本地交接备忘（开发机用，不进仓库）
 docs/roadmap.md
+docs/long-answer-handoff.md
+docs/long-answer-next.md
+docs/integration-notes.md
+docs/local-agent-long-answer-plan.md
+docs/plan-changes-v1.1.md
+docs/memory-audit.md
+docs/p3-1-review.md
+docs/p3.5-guard-diagnosis.md
+docs/metrics/
 
 # 设计讨论时的可视化伴侣产物
 .superpowers/

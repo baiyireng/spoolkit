@@ -6,6 +6,7 @@
 | [cli.md](cli.md) | 命令/参数速查（与 `--help` 对齐） |
 | [manual.md](manual.md) | 运行机制契约（工作区、策略、记忆、循环） |
 | [agent-loop-flow.md](agent-loop-flow.md) | 主循环控制流（mermaid；改 loop 必同步） |
+| [protocol-v2-runbook.md](protocol-v2-runbook.md) | `protocol_v2` 的打开与回滚 |
 | [bridge.md](bridge.md) | 聊天通道桥 |
 | [mcp.md](mcp.md) | MCP 被调用 / 调用外挂 |
 | [rationale.md](rationale.md) | 设计取舍（结论 + 指针，细节在 dogfooding/specs） |
