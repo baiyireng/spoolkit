@@ -149,7 +149,7 @@ def test_不是模型层的异常照旧往上抛(tmp_path: Path) -> None:
 def test_上下文超长仍然走原来的重发路径(tmp_path: Path) -> None:
     """`ContextOverflowError` 是**可恢复**的一条路，不许被算成失败。
 
-    它原先就在 `LlamaCppError` 之前单独接住（丢掉历史重发一次）。这条用例
+    它原先就在 `LlamaCppError` 之前单独接住（原样重发一次）。这条用例
     把它钉住：超长报错一次之后，第二轮正常收尾。
     """
     tokenizer = OfflineTokenCounter()

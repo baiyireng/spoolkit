@@ -2,6 +2,7 @@
 
 import json
 import logging
+from pathlib import Path
 
 from spoolkit.agent.protocol import (
     AgentTurn,
@@ -10,6 +11,8 @@ from spoolkit.agent.protocol import (
     build_turn_schema,
     build_turn_schema_v2,
     parse_turn,
+    summary_clip,
+    summary_fallback,
 )
 
 
@@ -55,7 +58,8 @@ def test_v2_schema没有final且有summary() -> None:
     ]
     assert "state" in schema["properties"]
     assert "assessment" in schema["properties"]
-    assert schema["required"] == ["thought", "tool_calls", "done"]
+    assert schema["required"] == ["thought", "tool_calls", "done", "summary"]
+    assert "200" in schema["properties"]["summary"]["description"]
 
 
 def test_旧schema仍包含final() -> None:
@@ -95,7 +99,30 @@ def test_v2未完成时允许工具且summary为空() -> None:
 def test_v2完成时summary为空失败() -> None:
     failure = TurnProtocol(v2=True).parse(_v2(tool_calls=[], done=True, summary=""))
     assert isinstance(failure, ParseFailure)
-    assert "summary" in failure.reason
+    assert failure.kind == "summary_empty"
+    assert "为空" in failure.reason
+
+
+def test_v2完成时缺少summary键也记为空() -> None:
+    raw = json.dumps(
+        {"thought": "结论已经齐了", "tool_calls": [], "done": True},
+        ensure_ascii=False,
+    )
+    failure = TurnProtocol(v2=True).parse(raw)
+    assert isinstance(failure, ParseFailure)
+    assert failure.kind == "summary_empty"
+    assert "缺少 summary" in failure.reason
+    recovered = summary_fallback(raw)
+    assert isinstance(recovered, AgentTurn)
+    assert recovered.summary == "结论已经齐了"
+
+
+def test_thought超过200字时不兜底() -> None:
+    raw = json.dumps(
+        {"thought": "结" * 201, "tool_calls": [], "done": True},
+        ensure_ascii=False,
+    )
+    assert summary_fallback(raw) is None
 
 
 def test_v2完成时summary超过200字失败() -> None:
@@ -103,7 +130,11 @@ def test_v2完成时summary超过200字失败() -> None:
         _v2(tool_calls=[], done=True, summary="结" * 201)
     )
     assert isinstance(failure, ParseFailure)
+    assert failure.kind == "summary_long"
     assert "200" in failure.reason
+    recovered = summary_clip(_v2(tool_calls=[], done=True, summary="结" * 201))
+    assert isinstance(recovered, AgentTurn)
+    assert len(recovered.summary) == 200
 
 
 def test_v2完成时不能再带工具() -> None:
@@ -166,3 +197,43 @@ def test_关闭v2时解析与旧函数一致() -> None:
     assert isinstance(direct, AgentTurn)
     assert turn == direct
     assert protocol.schema(_EmptyRegistry()) == build_turn_schema(_EmptyRegistry())
+
+
+def test_summary连续为空时用thought兜底再走终稿(tmp_path: Path) -> None:
+    from spoolkit.agent.loop import AgentLoop
+    from spoolkit.config import Config
+    from spoolkit.llm.fake import FakeModel
+    from spoolkit.llm.tokenizer import OfflineTokenCounter
+    from spoolkit.tools.registry import ToolRegistry
+
+    empty = json.dumps(
+        {
+            "thought": "无需外部信息。结论已经齐了。",
+            "tool_calls": [],
+            "done": True,
+        },
+        ensure_ascii=False,
+    )
+    gateway = FakeModel(
+        script=[empty, empty, "# 答\n\n二"],
+        tokenizer=OfflineTokenCounter(),
+    )
+    loop = AgentLoop(
+        gateway,
+        OfflineTokenCounter(),
+        ToolRegistry(),
+        Config(
+            project_root=tmp_path,
+            context_window=8192,
+            max_steps=8,
+            supervise=False,
+            overrides={"protocol_v2": 1},
+        ),
+        compaction=False,
+    )
+    result = loop.run("1+1 等于几")
+    assert result.finished is True
+    assert any("degraded" in line for line in result.trace)
+    assert "不要写 final" in gateway.requests[0].messages[0].content
+    assert gateway.requests[2].response_schema is None
+    assert "二" in result.final

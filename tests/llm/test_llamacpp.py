@@ -124,7 +124,7 @@ def test_有schema时通过response_format下发() -> None:
     gateway.close()
 
 
-def test_cache_prompt只在打开时下发() -> None:
+def test_cache_prompt总是显式下发() -> None:
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -133,7 +133,7 @@ def test_cache_prompt只在打开时下发() -> None:
 
     gateway = _gateway(handler)
     gateway.chat(_request())
-    assert "cache_prompt" not in seen["payload"]
+    assert seen["payload"]["cache_prompt"] is False
     gateway.chat(
         ChatRequest(
             messages=(Message(role="user", content="终稿"),),
@@ -203,6 +203,65 @@ def test_内容为空时报错() -> None:
     gateway = _gateway(lambda request: httpx.Response(200, json=payload))
     with pytest.raises(LlamaCppError):
         gateway.chat(_request())
+    gateway.close()
+
+
+def test_空内容先重试一次成功并记下空响应() -> None:
+    from spoolkit.agent.metrics import capture_metrics, metric_scope
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+                    "usage": {"prompt_tokens": 8000, "completion_tokens": 0},
+                },
+            )
+        return httpx.Response(200, json=_completion("补上了"))
+
+    gateway = _gateway(handler, temperature=0.0)
+    with capture_metrics() as rows, metric_scope(phase="section", task_type="long", n_ctx=8192):
+        response = gateway.chat(_request())
+    assert response.text == "补上了"
+    assert calls["n"] == 2
+    empty = [row for row in rows if row.get("event") == "empty_response"]
+    assert empty[0]["finish_reason"] == "length"
+    assert empty[0]["prompt_tokens"] == 8000
+    assert empty[0]["max_tokens"] == 256
+    assert empty[0]["n_ctx"] == 8192
+    assert empty[0]["temperature"] == 0.0
+    assert empty[0]["streaming"] is False
+    assert empty[0]["retry_index"] == 0
+    assert empty[0]["context_tight"] is True
+    ok = [row for row in rows if row.get("phase") == "section"]
+    assert ok[0]["retry_index"] == 1
+    gateway.close()
+
+
+def test_空内容重试仍空才报错() -> None:
+    from spoolkit.llm.llamacpp import EmptyContentError
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+            },
+        )
+
+    gateway = _gateway(handler)
+    with pytest.raises(EmptyContentError) as caught:
+        gateway.chat(_request())
+    assert calls["n"] == 2
+    assert caught.value.context_tight is False
     gateway.close()
 
 

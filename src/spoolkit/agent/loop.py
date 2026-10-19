@@ -13,7 +13,10 @@
 import hashlib
 import json
 import re
+import signal
+import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence, cast
@@ -61,9 +64,16 @@ from spoolkit.agent.material_compactor import (
     notes_from_material,
 )
 from spoolkit.agent.monitor import ToolSight, inspect
+from spoolkit.agent.answer_plan import SHORT_CUES, should_use_long_answer
 from spoolkit.agent.evidence_gate import check_evidence
-from spoolkit.agent.final_turn import request_final
-from spoolkit.agent.protocol import ParseFailure, TurnProtocol
+from spoolkit.agent.final_turn import SHORT_CONTINUE, request_final
+from spoolkit.agent.sections import STOP_MARK, compose_long_answer
+from spoolkit.agent.protocol import (
+    ParseFailure,
+    TurnProtocol,
+    summary_clip,
+    summary_fallback,
+)
 from spoolkit.agent.signals import (
     BEHAVIOR_KINDS,
     FindingKind,
@@ -132,9 +142,17 @@ from spoolkit.context.phase_budget import (
 from spoolkit.context.sections import Section
 from spoolkit.context import templates as T
 from spoolkit.errors import ContextOverflowError, PathOutsideProjectError
-from spoolkit.agent.metrics import metric_scope
+from spoolkit.agent.metrics import (
+    bind_turn_id,
+    current_turn_id,
+    metric_scope,
+    note_parse_failure,
+    observe_turn,
+    reset_turn_id,
+)
+from spoolkit.llm.cancel import CancelToken, GenerationCancelled
 from spoolkit.llm.gateway import ModelGateway, wait_phase
-from spoolkit.llm.retry import chat_with_escalation
+from spoolkit.llm.retry import DEFAULT_ATTEMPTS, chat_with_escalation
 from spoolkit.llm.tokenizer import TokenCounter
 from spoolkit.llm.types import ChatRequest, Message
 from spoolkit.memory.transcript import set_run_origin
@@ -577,6 +595,45 @@ def _final_holds_source(text: str) -> bool:
         if "<html" in chunk.lower() and len(lines) >= 8:
             return True
     return False
+
+
+_DOC_CUES = ("方案", "报告", "分析", "设计", "对比", "说明", "总结", "文档")
+_CODE_CUES = ("文件", "代码", "修改", "实现", "改名", "重构", "修复")
+
+
+def _is_coding_goal(goal: str) -> bool:
+    """要改文件或写代码。方案、报告一类文档题优先，不算编码任务。"""
+    text = goal or ""
+    if any(cue in text for cue in _DOC_CUES):
+        return False
+    return any(cue in text for cue in _CODE_CUES)
+
+
+def _repeat_read_hint(seen: dict[str, int], call: ToolCall) -> str:
+    """同一路径第二次再读时，提示不要继续翻目录。"""
+    if call.name not in ("list_dir", "read_file"):
+        return ""
+    raw = call.arguments.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    key = f"{call.name}:{raw.replace(chr(92), '/').strip()}"
+    seen[key] = seen.get(key, 0) + 1
+    if seen[key] != 2:
+        return ""
+    return "这个路径已经读过。不要再读同一路径；如果这是写作任务，直接给结论。"
+
+
+def _long_skip_reason(goal: str, plan: Any, *, long_mode: bool, room: int) -> str:
+    """没进长文时记下原因。进了就留空。"""
+    if long_mode and room >= 3:
+        return ""
+    if long_mode:
+        return "room_insufficient"
+    if any(cue in (goal or "") for cue in SHORT_CUES):
+        return "cue_miss"
+    if plan is not None and getattr(plan, "mode", "") == "short":
+        return "plan_short"
+    return "cue_miss"
 
 
 def _final_is_promising(text: str) -> bool:
@@ -1822,6 +1879,7 @@ class AgentLoop:
         # 本次运行里「没有证据的完成声明」条数（探针的 `evidence_gaps` 字段）。
         # **它只进报告与事件流，不改 `finished`**（P0 的纪律）。
         self._evidence_gaps: int = 0
+        self._evidence_hard_returns: int = 0
         # 本次运行里每个改动文件**磁盘上的原始行数**。判「迎合测试」要用它：
         # 行数是可证伪的证据，比措辞可靠（测试失败的同一步，业务代码变短了）。
         self._base_lines: dict[str, int] = {}
@@ -1836,6 +1894,8 @@ class AgentLoop:
             v2=protocol_v2_enabled(config.overrides)
         )
         self._schema = self._turn_protocol.schema(registry)
+        # 上一轮服务端报回的 P_total。重置或整理之后清空，下一轮先按字数估算。
+        self._last_prompt_tokens: int | None = None
 
     def _note_landed_write(self, call: ToolCall, book: _WriteBook) -> None:
         """一次**真的落成**的写调用要记的全部账。
@@ -1930,6 +1990,14 @@ class AgentLoop:
         )
         if self.persona:
             system_text = f"{self.persona}\n\n{system_text}"
+        if self._turn_protocol.v2:
+            system_text += (
+                "\n这是 v2 控制回合：不要写 final。"
+                "done=true 时 summary 必填，不超过 200 字，写结论与依据；"
+                "done=false 时 summary 留空串。"
+                "若问题不需要实时信息，summary 写「无需外部信息」；"
+                "若引用了本轮工具结果，写关键句。"
+            )
         sections = [
             Section(name="system", text=system_text, priority=10, mandatory=True),
         ]
@@ -1991,6 +2059,66 @@ class AgentLoop:
         return assembler.assemble(sections, recent_turns=history[-MAX_RECENT_TURNS:])
 
     def run(
+        self,
+        goal: str,
+        task_id: str = "task",
+        resume: bool = False,
+        prompt: str | None = None,
+    ) -> LoopResult:
+        """运行任务直到给出最终答复或达到步数上限。
+
+        采集打开时，结束处写一条 turn_metric。没打开则 observe_turn 直接返回。
+        """
+        token = bind_turn_id(uuid.uuid4().hex[:12])
+        self._metric_task = "short"
+        self._metric_fallback = False
+        self._user_stopped = False
+        self._summary_empty_streak = 0
+        self._summary_long_streak = 0
+        self._long_skip_reason = ""
+        self._read_paths = {}
+        self._evidence_hard_returns = 0
+        self._cancel = CancelToken()
+        self._cancel.reset()
+        bind = getattr(self.gateway, "bind_cancel", None)
+        if callable(bind):
+            bind(self._cancel)
+        started = time.perf_counter()
+        result: LoopResult | None = None
+        previous_sigint = self._install_stop_signal()
+        try:
+            result = self._run(goal, task_id=task_id, resume=resume, prompt=prompt)
+            return result
+        finally:
+            if previous_sigint is not None:
+                signal.signal(signal.SIGINT, previous_sigint)
+            observe_turn(
+                turn_id=current_turn_id(),
+                task_type=self._metric_task,
+                total_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                completed=bool(result and result.finished),
+                fallback_short=self._metric_fallback,
+                long_skipped_reason=self._long_skip_reason,
+            )
+            reset_turn_id(token)
+
+    def _install_stop_signal(self):
+        """Ctrl+C 关掉正在读的模型连接。没在读时仍是键盘中断。"""
+        if threading.current_thread() is not threading.main_thread():
+            return None
+        try:
+            previous = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, self._on_stop_signal)
+        except ValueError:
+            return None
+        return previous
+
+    def _on_stop_signal(self, _signum: int, _frame: object) -> None:
+        self._cancel.cancel()
+        if not self._cancel.armed:
+            raise KeyboardInterrupt
+
+    def _run(
         self,
         goal: str,
         task_id: str = "task",
@@ -2686,7 +2814,9 @@ class AgentLoop:
                         # 工具结果的**逐字原文**不在上下文里了（换成了压缩稿）：
                         # 版本号 +1，重复调用护栏据此放行刷新读取。收束指令
                         # 不在这里重装——这一级不动 feedback（它不是重置）。
+                        # history 已换成压缩稿，上一轮 P_total 作废。
                         self._context_revision += 1
+                        self._last_prompt_tokens = None
                         _assemble_started = time.time()
                         assembled = self._assemble(
                             state, history, feedback, prefetched, hot, lesson_text
@@ -2726,6 +2856,7 @@ class AgentLoop:
                 # 版本号 +1，重复调用护栏据此放行刷新读取（见
                 # `_guard_repeat_decision` 的第一条判据）。
                 self._context_revision += 1
+                self._last_prompt_tokens = None
                 trace.append(
                     f"step{state.step}: 上下文重置（第 {resets} 次）"
                     + (
@@ -2748,6 +2879,7 @@ class AgentLoop:
             elif assembled.demand_tokens >= self._budget.soft_limit():
                 history = history[-(MAX_RECENT_TURNS // 2):]
                 self._context_revision += 1
+                self._last_prompt_tokens = None
                 trace.append(f"step{state.step}: 上下文整理")
 
             try:
@@ -2771,31 +2903,41 @@ class AgentLoop:
                                     protocol_v2=self._turn_protocol.v2,
                                     legacy=self._budget.output_reserve(),
                                     n_ctx=self._budget.window,
+                                    prompt_tokens=self._last_prompt_tokens,
                                     messages=assembled.messages,
                                     phase="control",
+                                    safety_ratio=1.05,
                                 ),
                                 response_schema=self._schema,
                             ),
                             on_truncated_retry=self._on_truncated_retry,
                             on_delta=self._on_model_delta,
+                            attempts=1 if self._turn_protocol.v2 else DEFAULT_ATTEMPTS,
                         )
                 model_seconds += time.time() - _call_started
             except ContextOverflowError:
                 model_seconds += time.time() - _call_started
                 # 预算用的是**估算**分词器，服务端用的是真实分词；两者偏差大时
                 # （中文/代码混排尤其明显）本地判定会放行、服务端拒绝。
-                # 这不能让它把整个运行打断——丢掉历史重发一次，只重试一次。
+                # 这不能让它把整个运行打断——这里不直接改 history：置 resets+1
+                # 后原样重发一次；下一轮若仍超硬线，会走硬线重置分支
+                # （重建 history 并清空 P_total）。只重试一次。
                 if overflow_retried:
                     raise
                 overflow_retried = True
                 feedback = None
                 resets += 1
-                # 同上：历史被丢掉，工具结果的内容都不在上下文里了。
+                # history 未变，P_total 仍有效；若下一轮触发硬线重置，那里会清空。
                 self._context_revision += 1
                 trace.append(
-                    f"step{state.step}: 服务端说提示词超长，丢掉历史重发（第 {resets} 次）"
+                    f"step{state.step}: 服务端说提示词超长，原样重发（第 {resets} 次；下一轮若仍超硬线才重置历史）"
                 )
                 continue
+            except GenerationCancelled:
+                model_seconds += time.time() - _call_started
+                stopped_by = "用户停止"
+                trace.append(f"step{state.step}: 用户停止，当前请求已取消")
+                break
             except Exception as exc:  # noqa: BLE001 - 见下面那段：**不许静默**
                 # ---- P0 修②：LLM/分词相关失败必须响亮 ------------------------
                 #
@@ -2830,9 +2972,37 @@ class AgentLoop:
             model_calls += 1
             prompt_tokens += response.prompt_tokens
             completion_tokens += response.completion_tokens
+            if response.prompt_tokens > 0:
+                self._last_prompt_tokens = response.prompt_tokens
             turn = self._turn_protocol.parse(response.text)
             if self._turn_protocol.take_downgrade():
                 self._schema = self._turn_protocol.schema(self.registry)
+
+            if isinstance(turn, ParseFailure) and turn.kind == "summary_empty":
+                self._summary_empty_streak += 1
+                if self._summary_empty_streak >= 2:
+                    recovered = summary_fallback(response.text)
+                    if recovered is not None:
+                        trace.append(
+                            f"step{state.step}: summary 仍空，用 thought 兜底（degraded）"
+                        )
+                        note_parse_failure(reason=turn.reason, kind="summary_degraded")
+                        turn = recovered
+                        self._summary_empty_streak = 0
+            elif isinstance(turn, ParseFailure) and turn.kind == "summary_long":
+                self._summary_long_streak += 1
+                if self._summary_long_streak >= 2:
+                    recovered = summary_clip(response.text)
+                    if recovered is not None:
+                        trace.append(
+                            f"step{state.step}: summary 仍超长，截到 200 字（degraded）"
+                        )
+                        note_parse_failure(reason=turn.reason, kind="summary_degraded")
+                        turn = recovered
+                        self._summary_long_streak = 0
+            elif not isinstance(turn, ParseFailure):
+                self._summary_empty_streak = 0
+                self._summary_long_streak = 0
 
             if isinstance(turn, ParseFailure):
                 # ---- 收束出口：收束态里没调工具的那段正文**就是结论** -------
@@ -2966,6 +3136,7 @@ class AgentLoop:
                 state_seconds += time.time() - _state_started
                 snippet = response.text.strip().replace("\n", " ")[:160]
                 trace.append(f"step{state.step}: 解析失败 - {turn.reason} | 原始: {snippet}")
+                note_parse_failure(reason=turn.reason, kind=turn.kind)
                 continue
 
             if turn.state_delta is not None:
@@ -3223,6 +3394,10 @@ class AgentLoop:
                         outputs.append(
                             f"[{call.name}] {status}: {for_prompt(shown)}"
                         )
+                    hint = _repeat_read_hint(self._read_paths, call)
+                    if hint:
+                        outputs.append(hint)
+                        trace.append(f"step{state.step}: {hint}")
                     if extra:
                         outputs.append(for_prompt(extra))
                         trace.append(
@@ -3426,6 +3601,10 @@ class AgentLoop:
             # 那一步有没有产出」（同一步里既改东西又宣告完成的不给自动修：
             # 那一轮它已经动过了，判词进的是运行报告）。
             if turn.done:
+                long_mode = should_use_long_answer(
+                    state.goal or "",
+                    getattr(turn, "answer_plan", None),
+                )
                 if self._turn_protocol.v2:
                     # 控制回合的消息原样当前缀，终稿另一次纯文本请求。
                     # 实时问题必须引用本轮工具结果；普通问题可以声明无需外部信息。
@@ -3433,38 +3612,90 @@ class AgentLoop:
                         state.goal or "",
                         turn.summary,
                         [item.content for item in history if item.role == "tool"],
+                        long_answer=(
+                            turn.answer_plan is not None
+                            and turn.answer_plan.mode == "long"
+                        ),
                     )
                     if not decision.ok:
-                        history.append(Message(role="user", content=decision.reason))
-                        feedback = decision.reason
-                        awaiting_final = False
-                        trace.append(f"step{state.step}: 终稿缺少依据，退回")
-                        self._emit(
-                            "note",
-                            {
-                                "text": decision.reason,
-                                "ok": False,
-                                "kind": "evidence_gate",
-                            },
-                        )
-                        continue
+                        self._evidence_hard_returns += 1
+                        if not (decision.hard and self._evidence_hard_returns >= 2):
+                            history.append(Message(role="user", content=decision.reason))
+                            feedback = decision.reason
+                            awaiting_final = False
+                            trace.append(f"step{state.step}: 终稿缺少依据，退回")
+                            self._emit(
+                                "note",
+                                {
+                                    "text": decision.reason,
+                                    "ok": False,
+                                    "kind": "evidence_gate",
+                                },
+                            )
+                            continue
+                        self._note_evidence_gap(decision.reason)
+                    elif decision.reason:
+                        self._note_evidence_gap(decision.reason)
                     prompt_tokens = resolve_n_past(
                         response.prompt_tokens, assembled.messages
                     )
                     target = (
                         turn.answer_plan.target_tokens if turn.answer_plan else None
                     )
-                    conclusion_text = request_final(
-                        self.gateway,
-                        assembled.messages,
-                        n_ctx=self._budget.window,
-                        prompt_tokens=prompt_tokens,
-                        target_tokens=target,
-                        on_delta=self._on_final_delta,
-                    ).text
+                    room = self._budget.window - prompt_tokens - 192
+                    self._long_skip_reason = _long_skip_reason(
+                        state.goal or "",
+                        getattr(turn, "answer_plan", None),
+                        long_mode=long_mode,
+                        room=room,
+                    )
+                    long_text = None
+                    if long_mode and room >= 3:
+                        facts = "\n\n".join(
+                            item.content.strip()
+                            for item in history
+                            if item.role == "tool" and item.content.strip()
+                        ) or "工具结果：无额外材料。"
+                        long_text = compose_long_answer(
+                            self.gateway,
+                            assembled.messages,
+                            goal=state.goal or "",
+                            facts=facts,
+                            token_budget=room,
+                            n_ctx=self._budget.window,
+                            on_event=self._emit,
+                        )
+                        if long_text:
+                            self._metric_task = "long"
+                            if STOP_MARK in long_text:
+                                self._user_stopped = True
+                                trace.append(f"step{state.step}: 用户停止，已提交的节保留")
+                            else:
+                                trace.append(f"step{state.step}: 长文分节完成")
+                        else:
+                            self._metric_task = "long"
+                            self._metric_fallback = True
+                            trace.append(f"step{state.step}: 长文没写成，改走短终稿")
+                    if long_text:
+                        conclusion_text = long_text
+                    else:
+                        conclusion_text = request_final(
+                            self.gateway,
+                            assembled.messages,
+                            n_ctx=self._budget.window,
+                            prompt_tokens=prompt_tokens,
+                            target_tokens=target,
+                            on_delta=self._on_final_delta,
+                        ).text
+                    if SHORT_CONTINUE.strip() in conclusion_text:
+                        self._metric_fallback = True
                 else:
                     conclusion_text = turn.final or ""
-                bounced = self._bounce_unwritten(conclusion_text, changed_paths)
+                bounced = self._bounce_unwritten(
+                    conclusion_text,
+                    changed_paths,
+                    require_landing=_is_coding_goal(state.goal or "") and not long_mode,
+                )
                 if bounced:
                     trace.append(
                         f"step{state.step}: 结论没有落盘，退回让它写入文件"
@@ -3543,7 +3774,11 @@ class AgentLoop:
                     history.append(Message(role="user", content=ask))
                     continue
                 settled_clean = not self.escalation_gate.pending_actions
-                episode_finished = not self._review_blocked and settled_clean
+                episode_finished = (
+                    not self._review_blocked
+                    and settled_clean
+                    and not self._user_stopped
+                )
                 episode_outcome = self._episode_outcome(episode_finished)
                 self._archive(state, episode_outcome, trace, conclusion_text)
                 clear_state(checkpoint)
@@ -5631,6 +5866,20 @@ class AgentLoop:
             )
         return len(ledger.gaps())
 
+    def _note_evidence_gap(self, reason: str) -> None:
+        """缺引用但仍然放行。只记进报告，不改 finished。"""
+        self._evidence_gaps += 1
+        self._emit(
+            "note",
+            {
+                "text": reason,
+                "ok": False,
+                "kind": EVIDENCE_GAPS_KIND,
+                "count": self._evidence_gaps,
+            },
+        )
+        self._log(f"证据放行：{reason}")
+
     def _evidence_ledger(
         self, changed: Sequence[str], passed: bool | None
     ) -> ReviewLedger:
@@ -5726,13 +5975,33 @@ class AgentLoop:
             return False
         return key in item.span_keys or item.withheld
 
-    def _bounce_unwritten(self, final: str, changed_paths: Sequence[str] = ()) -> str:
+    def _requires_file_landing(self) -> bool:
+        """编码任务才要求终稿对应一次落盘。长文和纯问答不要求。"""
+        goal = self._goal_text or ""
+        if should_use_long_answer(goal):
+            return False
+        if getattr(self, "_metric_task", "short") == "long":
+            return False
+        return _is_coding_goal(goal)
+
+    def _bounce_unwritten(
+        self,
+        final: str,
+        changed_paths: Sequence[str] = (),
+        *,
+        require_landing: bool = True,
+    ) -> str:
         """宣告完成但文件还不会落盘时，返回要退回的那句话。空串表示可以收。
 
         changed_paths：本次运行到这一步为止真正落过盘的路径清单（run 的累积
         账本）。只有它为空时，「接下来将进行…」才算假完成——改过东西的模型
         说「接下来」多半只是说明下一步，不该拦。
+
+        require_landing 为假时整段跳过。长文和纯问答的正文里出现路径或代码
+        示例，不应当成谎称改了文件。
         """
+        if not require_landing:
+            return ""
         pending = self.pending
         if pending is not None and pending.staged_count():
             hold = self._staged_hold_text()
@@ -5745,11 +6014,12 @@ class AgentLoop:
         # 必须放在「有 pending 就放行」之后——真有改动时模型说「接下来」
         # 可能只是说明还要做下一步，不算假完成。
         if not changed_paths and _final_is_promising(final):
-            return (
-                "你说了「接下来/将/准备」要做，但一个文件都还没改。"
-                "宣告完成之前必须真的调 write_file 把改动落盘；"
-                "如果还没开始改，就把 done 设为 false 继续动手。"
-            )
+            if self._requires_file_landing():
+                return (
+                    "你说了「接下来/将/准备」要做，但一个文件都还没改。"
+                    "宣告完成之前必须真的调 write_file 把改动落盘；"
+                    "如果还没开始改，就把 done 设为 false 继续动手。"
+                )
         # 谎称完成：final 宣称改了某文件，但那个文件根本不在落盘账本里。
         # 比「接下来将进行」更狠——这次它用的是过去式，听上去像已经做完了。
         lied_path = _final_lies_about_changes(final, changed_paths)
@@ -6446,6 +6716,7 @@ class AgentLoop:
             and mark < self._context_revision
             and not self._withheld_observation(call)
         )
+
         if signature not in self._observed_state:
             failure = self._failed_output.get(signature, "")
             if failure:
@@ -7103,4 +7374,3 @@ def outcome_for(
     if verified is False or review_blocked or not finished:
         return "fail"
     return "success"
-

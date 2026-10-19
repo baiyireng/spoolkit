@@ -24,7 +24,9 @@ INTERRUPT_FINAL = False
 _DECISION_LINE = re.compile(r"^决定：\s*(.*)$")
 
 OUTLINE_INSTRUCTION = (
-    "根据对话与工具结果，给出 3–7 节大纲，每行：标题 | 一句话要点 | 目标 tokens。\n"
+    "你现在是写作层，不是控制层：不要输出 thought/tool_calls/done/final，"
+    "不要包 JSON 外壳。\n"
+    "直接输出 3–7 行，每行：标题 | 一句话要点 | 目标 tokens。\n"
     "总 tokens 不超过 {remaining}。"
 )
 
@@ -176,6 +178,19 @@ def parse_outline(text: str, *, goal: str, token_budget: int) -> WritingState | 
     return WritingState(goal=goal, outline=tuple(fitted))
 
 
+def fallback_outline(goal: str, budget: int) -> WritingState:
+    """大纲没收下时用固定三节，保证还能分节写。"""
+    share = max(1, budget // 4)
+    return WritingState(
+        goal=goal,
+        outline=(
+            OutlineSection("背景与目标", "问题、约束、成功标准", share),
+            OutlineSection("方案与结构", "核心设计、关键取舍", max(1, budget // 2)),
+            OutlineSection("风险与下一步", "边界、成本、行动项", share),
+        ),
+    )
+
+
 def request_outline(
     gateway: Any,
     prefix: Sequence[Message],
@@ -200,12 +215,20 @@ def request_outline(
     return parse_outline(response.text, goal=goal, token_budget=token_budget)
 
 
-def _read_sections(text: str) -> list[OutlineSection] | OutlineFailure:
-    stripped = text.strip()
+def _read_sections(text: str, _depth: int = 0) -> list[OutlineSection] | OutlineFailure:
+    stripped = _strip_fence(text.strip())
     if stripped.startswith("{") or stripped.startswith("["):
-        return _read_json(stripped)
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            return OutlineFailure(reason="大纲 JSON 无法解析")
+        if isinstance(payload, dict) and isinstance(payload.get("final"), str):
+            if _depth >= 2:
+                return OutlineFailure(reason="大纲 JSON 嵌套过深")
+            return _read_sections(payload["final"], _depth + 1)
+        return _rows_from_payload(payload)
     found: list[OutlineSection] = []
-    for raw in text.splitlines():
+    for raw in stripped.splitlines():
         line = raw.strip()
         if not line:
             continue
@@ -221,11 +244,19 @@ def _read_sections(text: str) -> list[OutlineSection] | OutlineFailure:
     return found
 
 
-def _read_json(text: str) -> list[OutlineSection] | OutlineFailure:
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return OutlineFailure(reason="大纲 JSON 无法解析")
+def _strip_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _rows_from_payload(payload: Any) -> list[OutlineSection] | OutlineFailure:
     rows = payload.get("outline") if isinstance(payload, dict) else payload
     if not isinstance(rows, list):
         return OutlineFailure(reason="大纲 JSON 需要节数组")

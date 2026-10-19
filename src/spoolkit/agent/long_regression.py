@@ -127,7 +127,7 @@ class _Scripted:
 
     def chat(self, request: ChatRequest) -> ChatResponse:
         blob = "\n".join(item.content for item in request.messages)
-        if "给出 3–7 节大纲" in blob:
+        if "不是控制层" in blob:
             text = "\n".join(f"{title} | {points} | 400" for title, points in _OUTLINE)
             return ChatResponse(text=text, prompt_tokens=30, completion_tokens=40)
         self.calls += 1

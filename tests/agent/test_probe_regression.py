@@ -195,6 +195,47 @@ def test_假完成_接下来将进行_被退回(tmp_path: Path) -> None:
     assert "已确认" in result.final
 
 
+def test_长文终稿里的接下来不要求落盘(tmp_path: Path) -> None:
+    loop = _build(tmp_path, [])
+    loop._goal_text = "写一份完整方案。"
+    assert loop._bounce_unwritten("接下来我们看架构。下一步是部署。", ()) == ""
+
+
+def test_编码任务说接下来仍要求落盘(tmp_path: Path) -> None:
+    loop = _build(tmp_path, [])
+    loop._goal_text = "把 get_rows 改名成 load_rows"
+    bounced = loop._bounce_unwritten("接下来将进行重命名操作。", ())
+    assert "一个文件都还没改" in bounced
+
+
+def test_文档线索优先于实现() -> None:
+    from spoolkit.agent.loop import _is_coding_goal
+
+    assert _is_coding_goal("AI 社区平台实现方案") is False
+    assert _is_coding_goal("修复 loop.py 的预算") is True
+
+
+def test_长文终稿宣称改了文件不退回(tmp_path: Path) -> None:
+    loop = _build(tmp_path, [])
+    text = "已完成 docs/design.md 的结构说明。"
+    assert loop._bounce_unwritten(text, (), require_landing=False) == ""
+
+
+def test_长文终稿里的长代码块不退回(tmp_path: Path) -> None:
+    loop = _build(tmp_path, [])
+    body = "```python\n" + "\n".join(f"x{i} = {i}" for i in range(25)) + "\n```"
+    assert loop._bounce_unwritten(body, (), require_landing=False) == ""
+
+
+def test_编码任务同文本仍要求落盘(tmp_path: Path) -> None:
+    loop = _build(tmp_path, [])
+    text = "已完成 docs/design.md 的结构说明。"
+    bounced = loop._bounce_unwritten(text, (), require_landing=True)
+    assert "design.md" in bounced
+    code = "```python\n" + "\n".join(f"x{i} = {i}" for i in range(25)) + "\n```"
+    assert "不会落盘" in loop._bounce_unwritten(code, (), require_landing=True)
+
+
 def test_谎称完成_宣称改了没改的文件_被退回(tmp_path: Path) -> None:
     """rename-cross-file 第二轮真机现场：模型只改了 fetch.py，final 却说
     「pipeline/report.py 文件中的 render 函数已更新为 load_rows。请检查并

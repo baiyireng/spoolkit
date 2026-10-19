@@ -121,7 +121,15 @@ def build_turn_schema(
     }
     if v2:
         # 主循环还要 state / assessment。v2 只拿掉 final，避免长文再进 JSON。
-        properties["summary"] = {"type": "string"}
+        # summary 必须出现：允许空串，done=true 时非空由解析器检查。
+        # 不用 minLength / oneOf，避免语法把 done=false 的空串也锁死。
+        properties["summary"] = {
+            "type": "string",
+            "description": (
+                "done=true 时必填，不超过 200 字，写结论与依据；"
+                "done=false 时必须是空串"
+            ),
+        }
         properties["answer_plan"] = {
             "type": "object",
             "properties": {
@@ -137,7 +145,7 @@ def build_turn_schema(
     return {
         "type": "object",
         "properties": properties,
-        "required": ["thought", "tool_calls", "done"],
+        "required": ["thought", "tool_calls", "done", "summary"],
     }
 
 
@@ -378,9 +386,20 @@ def parse_turn_v2(text: str) -> AgentTurn | ParseFailure:
         if calls:
             return ParseFailure(reason="done 与 tool_calls 互斥：标记完成时不要调用工具")
         if not summary:
-            return ParseFailure(reason="已标记 done，但 summary 为空")
+            missing = "summary" not in payload
+            return ParseFailure(
+                reason=(
+                    "已标记 done，但缺少 summary；请用 ≤200 字写结论与依据"
+                    if missing
+                    else "已标记 done，但 summary 为空；请用 ≤200 字写结论与依据"
+                ),
+                kind="summary_empty",
+            )
         if len(summary) > SUMMARY_LIMIT:
-            return ParseFailure(reason=f"summary 超过 {SUMMARY_LIMIT} 字")
+            return ParseFailure(
+                reason=f"summary 超过 {SUMMARY_LIMIT} 字",
+                kind="summary_long",
+            )
     else:
         if summary:
             return ParseFailure(reason="未完成时 summary 必须为空")
@@ -399,6 +418,51 @@ def parse_turn_v2(text: str) -> AgentTurn | ParseFailure:
         summary=summary,
         answer_plan=plan,
     )
+
+
+def summary_fallback(text: str) -> AgentTurn | None:
+    """重试后 summary 仍空时，用不超过 200 字的 thought 兜底。"""
+    payload = _load_object(text)
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("done") is not True:
+        return None
+    calls = payload.get("tool_calls") or []
+    if calls:
+        return None
+    thought = payload.get("thought")
+    if not isinstance(thought, str):
+        return None
+    thought = thought.strip()
+    if not thought or len(thought) > SUMMARY_LIMIT:
+        return None
+    patched = dict(payload)
+    patched["summary"] = thought
+    result = parse_turn_v2(json.dumps(patched, ensure_ascii=False))
+    if isinstance(result, AgentTurn):
+        return result
+    return None
+
+
+def summary_clip(text: str) -> AgentTurn | None:
+    """重试后 summary 仍超长时，截到 200 字再解析。"""
+    payload = _load_object(text)
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("done") is not True or payload.get("tool_calls"):
+        return None
+    summary = payload.get("summary")
+    if not isinstance(summary, str):
+        return None
+    summary = summary.strip()
+    if len(summary) <= SUMMARY_LIMIT:
+        return None
+    patched = dict(payload)
+    patched["summary"] = summary[:SUMMARY_LIMIT]
+    result = parse_turn_v2(json.dumps(patched, ensure_ascii=False))
+    if isinstance(result, AgentTurn):
+        return result
+    return None
 
 
 class TurnProtocol:

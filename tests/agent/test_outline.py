@@ -1,5 +1,7 @@
 """大纲：3–7 节，超窗缩节，写作状态能存能读。"""
 
+import json
+
 from spoolkit.agent.writing_state import (
     OUTLINE_INSTRUCTION,
     OutlineFailure,
@@ -132,4 +134,65 @@ def test_大纲请求沿用前缀且不带schema() -> None:
     assert request.response_schema is None
     assert request.cache_prompt is True
     assert "2400" in request.messages[-1].content
-    assert OUTLINE_INSTRUCTION.split("{remaining}")[0].strip() in request.messages[-1].content
+    assert "不是控制层" in request.messages[-1].content
+
+
+def _three() -> str:
+    return _lines(
+        ("背景", "说明现状", 400),
+        ("问题", "指出缺口", 500),
+        ("方案", "给出做法", 600),
+    )
+
+
+def test_控制JSON包着行格式也能解析() -> None:
+    wrapped = json.dumps(
+        {"thought": "给大纲", "tool_calls": [], "done": True, "final": _three()},
+        ensure_ascii=False,
+    )
+    state = parse_outline(wrapped, goal="包一层", token_budget=8000)
+    assert isinstance(state, WritingState)
+    assert [item.title for item in state.outline] == ["背景", "问题", "方案"]
+
+
+def test_控制JSON包着JSON数组也能解析() -> None:
+    rows = json.dumps(
+        [
+            {"title": "背景", "points": "说明现状", "target_tokens": 400},
+            {"title": "问题", "points": "指出缺口", "target_tokens": 500},
+            {"title": "方案", "points": "给出做法", "target_tokens": 600},
+        ],
+        ensure_ascii=False,
+    )
+    wrapped = json.dumps({"final": rows}, ensure_ascii=False)
+    state = parse_outline(wrapped, goal="数组", token_budget=8000)
+    assert isinstance(state, WritingState)
+    assert len(state.outline) == 3
+
+
+def test_围栏里的JSON数组能解析() -> None:
+    body = """```json
+[{"title": "背景", "points": "说明现状", "target_tokens": 400},
+ {"title": "问题", "points": "指出缺口", "target_tokens": 500},
+ {"title": "方案", "points": "给出做法", "target_tokens": 600}]
+```"""
+    state = parse_outline(body, goal="围栏", token_budget=8000)
+    assert isinstance(state, WritingState)
+    assert state.outline[0].title == "背景"
+
+
+def test_嵌套超过两层就失败() -> None:
+    core = json.dumps({"final": _three()}, ensure_ascii=False)
+    mid = json.dumps({"final": core}, ensure_ascii=False)
+    outer = json.dumps({"final": mid}, ensure_ascii=False)
+    failed = parse_outline(outer, goal="太深", token_budget=8000)
+    assert isinstance(failed, OutlineFailure)
+    assert "嵌套" in failed.reason
+
+
+def test_大纲失败时固定三节() -> None:
+    from spoolkit.agent.writing_state import fallback_outline
+
+    state = fallback_outline("写方案", 4000)
+    assert [item.title for item in state.outline] == ["背景与目标", "方案与结构", "风险与下一步"]
+    assert sum(item.target_tokens for item in state.outline) == 4000

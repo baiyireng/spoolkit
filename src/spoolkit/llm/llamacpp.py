@@ -21,6 +21,7 @@ import httpx
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 from spoolkit.net import system_proxy
 from spoolkit.errors import ContextOverflowError
+from spoolkit.llm.cancel import CancelToken, GenerationCancelled
 
 # 生成时间的超时**不能是常数**：它是「让它生成多少 token」的函数。
 #
@@ -68,6 +69,73 @@ class LlamaCppError(RuntimeError):
     """调用 llama.cpp 服务失败。"""
 
 
+class EmptyContentError(LlamaCppError):
+    """重试一次后内容仍为空。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        prompt_tokens: int,
+        max_tokens: int,
+        n_ctx: int,
+        context_tight: bool,
+        finish_reason: str,
+        streaming: bool,
+    ) -> None:
+        super().__init__(message)
+        self.prompt_tokens = prompt_tokens
+        self.max_tokens = max_tokens
+        self.n_ctx = n_ctx
+        self.context_tight = context_tight
+        self.finish_reason = finish_reason
+        self.streaming = streaming
+
+
+_EMPTY_CONTENT = (
+    "模型返回了空内容。如果这是带思考的模型（推理内容走单独的字段），"
+    "很可能是推理 token 把输出预算吃光了——用 --reasoning off "
+    "重启 llama-server，或者调大 max_tokens 再试"
+)
+
+
+def _handle_empty(
+    gateway: "LlamaCppGateway",
+    request: ChatRequest,
+    *,
+    prompt_tokens: int,
+    finish_reason: str,
+    streaming: bool,
+    attempt: int,
+) -> None:
+    """记下空内容。第一次返回，由调用方重发；第二次抛出。"""
+    from spoolkit.agent.metrics import mark_request_retry, note_empty_response
+
+    tight, n_ctx = note_empty_response(
+        finish_reason=finish_reason,
+        prompt_tokens=prompt_tokens,
+        max_tokens=request.max_tokens,
+        temperature=gateway.temperature,
+        streaming=streaming,
+        retry_index=attempt,
+    )
+    if attempt == 0:
+        mark_request_retry()
+        return
+    message = _EMPTY_CONTENT
+    if tight:
+        message += "。这次 prompt_tokens 接近上下文余量，根因是上下文余量"
+    raise EmptyContentError(
+        message,
+        prompt_tokens=prompt_tokens,
+        max_tokens=request.max_tokens,
+        n_ctx=n_ctx,
+        context_tight=tight,
+        finish_reason=finish_reason or "",
+        streaming=streaming,
+    )
+
+
 def _note_response(
     request: ChatRequest,
     *,
@@ -77,6 +145,7 @@ def _note_response(
     finish_reason: str,
     timings: dict | None,
     started: float,
+    first_token_ms: int | None = None,
 ) -> None:
     """只在有人捕获指标时写一条。正文不进记录。"""
     from spoolkit.agent.metrics import observe_response
@@ -90,6 +159,7 @@ def _note_response(
         timings=timings,
         total_ms=int((time.perf_counter() - started) * 1000),
         grammar=request.response_schema is not None,
+        first_token_ms=first_token_ms,
     )
 
 
@@ -116,8 +186,8 @@ def _to_payload(
         # 就没法跟「上一次绿」比较了。所以种子只在显式给出时才下发，
         # 默认保持「服务端说了算」（llama.cpp 自己会随机取）。
         payload["seed"] = int(seed)
-    if request.cache_prompt:
-        payload["cache_prompt"] = True
+    # false 也要发。不发时 llama-server 会按 slot 里已有的 KV 复用，对照组关不掉。
+    payload["cache_prompt"] = bool(request.cache_prompt)
     if request.response_schema:
         # llama.cpp 会把这里转成 GBNF 语法做约束采样。
         payload["response_format"] = {
@@ -164,18 +234,45 @@ class LlamaCppGateway:
             # 本机 8080 还没碰就死了。status.py / health.py 早就是这么写的。
             trust_env=False,
         )
+        self._cancel = CancelToken()
 
-    def chat(self, request: ChatRequest) -> ChatResponse:
+    def bind_cancel(self, token: CancelToken) -> None:
+        """和主循环共用一个开关，这样 Ctrl+C 能关掉正在读的连接。"""
+        self._cancel = token
+
+    def request_stop(self) -> None:
+        self._cancel.cancel()
+
+    @property
+    def cancel_token(self) -> CancelToken:
+        return self._cancel
+
+    def chat(self, request: ChatRequest, *, _attempt: int = 0) -> ChatResponse:
         timeout = self._timeout_for(request.max_tokens)
         started = time.perf_counter()
+        if self._cancel.cancelled:
+            raise GenerationCancelled()
         try:
-            response = self._client.post(
+            with self._client.stream(
+                "POST",
                 "/v1/chat/completions",
                 json=_to_payload(
                     request, self.model, self.temperature, self.seed
                 ),
                 timeout=timeout,
-            )
+            ) as response:
+                self._cancel.arm(response.close)
+                try:
+                    if self._cancel.cancelled:
+                        response.close()
+                        raise GenerationCancelled()
+                    response.read()
+                    status = response.status_code
+                    body_text = response.text
+                finally:
+                    self._cancel.disarm()
+        except GenerationCancelled:
+            raise
         except httpx.ReadTimeout as exc:
             # 分开报：超时和「连不上」是两件事，混在一起会把排查方向指错。
             # 实测那条长任务崩在这里，而报错说的是「请确认服务已启动」——
@@ -187,40 +284,47 @@ class LlamaCppGateway:
                 "调小这次的输出量（把活拆开做）比调大超时更管用。"
             ) from exc
         except httpx.HTTPError as exc:
+            if self._cancel.cancelled:
+                raise GenerationCancelled() from exc
             raise LlamaCppError(
                 f"无法连接 llama-server（{type(exc).__name__}），"
                 "请确认服务已启动并监听正确端口"
             ) from exc
 
-        if response.status_code != 200:
+        if status != 200:
             # 必须把服务端说的话带上。只报一句「服务返回 400」，等于把唯一的
             # 线索扔掉——是超长、是语法不支持、还是参数写错，全在 body 里。
-            body = " ".join((response.text or "").split())[:300]
+            body = " ".join((body_text or "").split())[:300]
             if "exceed_context_size" in body or "exceeds the available context" in body:
                 raise ContextOverflowError(
                     f"提示词超过服务端上下文上限：{body}"
                 )
             raise LlamaCppError(
-                f"服务返回 {response.status_code}：{body or '（没有说明）'}"
+                f"服务返回 {status}：{body or '（没有说明）'}"
             )
 
-        data = response.json()
+        data = json.loads(body_text)
         choices = data.get("choices") or []
         if not choices:
             raise LlamaCppError("响应中没有 choices")
 
+        usage = data.get("usage") or {}
+        prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+        finish = choices[0].get("finish_reason") or ""
         text = (choices[0].get("message") or {}).get("content") or ""
         if not text:
-            raise LlamaCppError(
-                "模型返回了空内容。如果这是带思考的模型（推理内容走单独的字段），"
-                "很可能是推理 token 把输出预算吃光了——用 --reasoning off "
-                "重启 llama-server，或者调大 max_tokens 再试"
+            _handle_empty(
+                self,
+                request,
+                prompt_tokens=prompt_tokens,
+                finish_reason=finish,
+                streaming=False,
+                attempt=_attempt,
             )
-
-        usage = data.get("usage") or {}
-        prompt_tokens = int(usage.get("prompt_tokens", 0))
-        completion_tokens = int(usage.get("completion_tokens", 0))
-        finish = choices[0].get("finish_reason") or "stop"
+            return self.chat(request, _attempt=1)
+        if not finish:
+            finish = "stop"
         _note_response(
             request,
             text=text,
@@ -241,6 +345,8 @@ class LlamaCppGateway:
         self,
         request: ChatRequest,
         on_delta: Callable[[str], None] | None = None,
+        *,
+        _attempt: int = 0,
     ) -> ChatResponse:
         """流式生成：每段 content 调一次 on_delta，返回与 chat() 同形的完整响应。"""
         timeout = self._timeout_for(request.max_tokens)
@@ -251,6 +357,7 @@ class LlamaCppGateway:
         payload["stream_options"] = {"include_usage": True}
         started = time.perf_counter()
         pieces: list[str] = []
+        first_at: float | None = None
         timings: dict | None = None
         finish_reason = ""
         prompt_tokens = 0
@@ -273,45 +380,59 @@ class LlamaCppGateway:
                     raise LlamaCppError(
                         f"服务返回 {response.status_code}：{body or '（没有说明）'}"
                     )
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    if line.startswith("data:"):
-                        data_str = line[5:].strip()
-                    elif line.startswith("data: "):
-                        data_str = line[6:].strip()
-                    else:
-                        continue
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-                    usage = data.get("usage") or {}
-                    if isinstance(data.get("timings"), dict):
-                        timings = data["timings"]
-                    if usage:
-                        prompt_tokens = int(usage.get("prompt_tokens", prompt_tokens) or 0)
-                        completion_tokens = int(
-                            usage.get("completion_tokens", completion_tokens) or 0
-                        )
-                    for choice in data.get("choices") or []:
-                        reason = choice.get("finish_reason") or ""
-                        if reason:
-                            finish_reason = reason
-                        delta = choice.get("delta") or {}
-                        piece = delta.get("content") or ""
-                        if not piece:
-                            # 非流式兼容：偶发整段 message
-                            piece = (choice.get("message") or {}).get("content") or ""
-                        if piece:
-                            pieces.append(piece)
-                            if on_delta is not None:
-                                try:
-                                    on_delta(piece)
-                                except Exception:
-                                    pass
+                self._cancel.arm(response.close)
+                try:
+                    if self._cancel.cancelled:
+                        response.close()
+                        raise GenerationCancelled()
+                    for line in response.iter_lines():
+                        if self._cancel.cancelled:
+                            response.close()
+                            raise GenerationCancelled("".join(pieces))
+                        if not line:
+                            continue
+                        if line.startswith("data:"):
+                            data_str = line[5:].strip()
+                        elif line.startswith("data: "):
+                            data_str = line[6:].strip()
+                        else:
+                            continue
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        usage = data.get("usage") or {}
+                        if isinstance(data.get("timings"), dict):
+                            timings = data["timings"]
+                        if usage:
+                            prompt_tokens = int(usage.get("prompt_tokens", prompt_tokens) or 0)
+                            completion_tokens = int(
+                                usage.get("completion_tokens", completion_tokens) or 0
+                            )
+                        for choice in data.get("choices") or []:
+                            reason = choice.get("finish_reason") or ""
+                            if reason:
+                                finish_reason = reason
+                            delta = choice.get("delta") or {}
+                            piece = delta.get("content") or ""
+                            if not piece:
+                                # 非流式兼容：偶发整段 message
+                                piece = (choice.get("message") or {}).get("content") or ""
+                            if piece:
+                                if first_at is None:
+                                    first_at = time.perf_counter()
+                                pieces.append(piece)
+                                if on_delta is not None:
+                                    try:
+                                        on_delta(piece)
+                                    except Exception:
+                                        pass
+                finally:
+                    self._cancel.disarm()
+        except GenerationCancelled:
+            raise
         except httpx.ReadTimeout as exc:
             raise LlamaCppError(
                 f"服务端 {timeout:.0f} 秒内没返回（max_tokens={request.max_tokens}，"
@@ -320,6 +441,8 @@ class LlamaCppGateway:
                 "调小这次的输出量（把活拆开做）比调大超时更管用。"
             ) from exc
         except httpx.HTTPError as exc:
+            if self._cancel.cancelled:
+                raise GenerationCancelled("".join(pieces)) from exc
             raise LlamaCppError(
                 f"无法连接 llama-server（{type(exc).__name__}），"
                 "请确认服务已启动并监听正确端口"
@@ -327,11 +450,15 @@ class LlamaCppGateway:
 
         text = "".join(pieces)
         if not text:
-            raise LlamaCppError(
-                "模型返回了空内容。如果这是带思考的模型（推理内容走单独的字段），"
-                "很可能是推理 token 把输出预算吃光了——用 --reasoning off "
-                "重启 llama-server，或者调大 max_tokens 再试"
+            _handle_empty(
+                self,
+                request,
+                prompt_tokens=prompt_tokens,
+                finish_reason=finish_reason,
+                streaming=True,
+                attempt=_attempt,
             )
+            return self.chat_stream(request, on_delta, _attempt=1)
         if completion_tokens <= 0:
             completion_tokens = max(1, len(text) // 2)
         _note_response(
@@ -342,6 +469,9 @@ class LlamaCppGateway:
             finish_reason=finish_reason or "stop",
             timings=timings,
             started=started,
+            first_token_ms=(
+                None if first_at is None else int((first_at - started) * 1000)
+            ),
         )
         return ChatResponse(
             text=text,

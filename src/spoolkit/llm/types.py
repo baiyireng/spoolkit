@@ -19,7 +19,7 @@ class ChatRequest:
     messages: tuple[Message, ...]
     max_tokens: int
     response_schema: dict | None = None
-    # 为真时要求服务端复用相同 token 前缀的 KV。默认关闭，旧请求体不变。
+    # 为真时要求服务端复用相同 token 前缀的 KV。默认关闭，但请求体里总会带上这个字段。
     cache_prompt: bool = False
 
 

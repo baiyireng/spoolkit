@@ -113,11 +113,12 @@ def test_达到步数上限会停止(tmp_path: Path) -> None:
     assert result.final == "已达步数上限，任务未完成"
 
 
-def test_服务端说提示词超长时丢掉历史重发(tmp_path: Path) -> None:
+def test_服务端说提示词超长时原样重发(tmp_path: Path) -> None:
     """本地用估算分词判定放行、服务端用真实分词拒绝，这会发生。
 
     实测那条拒绝曾经变成未捕获异常，直接把整个运行打断——一次上下文
-    估算偏差不该让任务崩掉。
+    估算偏差不该让任务崩掉。历史在下一轮硬线重置时才丢；本用例只验证
+    原样重发一次。
     """
     from spoolkit.errors import ContextOverflowError
     from spoolkit.llm.gateway import ModelGateway

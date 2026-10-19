@@ -39,6 +39,44 @@ class _Script:
         return ChatResponse(text=text, prompt_tokens=used, completion_tokens=20)
 
 
+def test_空响应重试仍失败时本节占位且后文继续() -> None:
+    from spoolkit.llm.llamacpp import EmptyContentError
+
+    class _OneEmpty:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat_stream(self, request: ChatRequest, on_delta=None) -> ChatResponse:
+            self.calls += 1
+            if self.calls == 1:
+                raise EmptyContentError(
+                    "空",
+                    prompt_tokens=8000,
+                    max_tokens=600,
+                    n_ctx=8192,
+                    context_tight=True,
+                    finish_reason="length",
+                    streaming=True,
+                )
+            return ChatResponse(text="后一节正文", prompt_tokens=12, completion_tokens=4)
+
+    state = WritingState(
+        goal="把方案写清楚",
+        outline=(
+            OutlineSection("背景", "说明现状", 200),
+            OutlineSection("方案", "给出做法", 200),
+        ),
+        next_section=0,
+    )
+    gateway = _OneEmpty()
+    drafts = write_sections(gateway, state, facts=_FACTS)
+    assert gateway.calls == 2
+    assert len(drafts) == 2
+    assert "没有生成" in drafts[0].text
+    assert drafts[0].truncated is True
+    assert drafts[1].text == "后一节正文"
+
+
 def test_本节请求只带大纲约束和事实() -> None:
     state = _state()
     state = WritingState(
@@ -56,11 +94,12 @@ def test_本节请求只带大纲约束和事实() -> None:
     request = gateway.requests[0]
     assert request.response_schema is None
     assert request.cache_prompt is True
-    assert request.max_tokens == 800
+    assert request.max_tokens == 1000
     assert [item.role for item in request.messages] == ["system", "user"]
-    assert request.messages[1].content == _FACTS
+    assert request.messages[1].content.startswith(_FACTS)
     system = request.messages[0].content
-    assert "只写第 3 节「方案」" in system
+    assert "只写第 3 节「方案」" in request.messages[1].content
+    assert "只写第" not in system
     assert "给出做法" in system
     assert "术语用「窗口」" in system
     for title in _TITLES:
@@ -82,10 +121,44 @@ def test_五节提示词不随已写正文变长() -> None:
     assert max(lengths) - min(lengths) < 200
     for index, request in enumerate(gateway.requests):
         blob = "\n".join(message.content for message in request.messages)
-        assert request.messages[-1].content == _FACTS
+        assert request.messages[-1].content.startswith(_FACTS)
+        assert f"只写第 {index + 1} 节" in request.messages[-1].content
+        assert "只写第" not in request.messages[0].content
         for earlier in bodies[:index]:
             assert earlier not in blob
         assert "甲" * 40 not in blob
+
+
+def test_连续三节system相同变化只在user末尾() -> None:
+    state = WritingState(
+        goal="把方案写清楚",
+        outline=tuple(
+            OutlineSection(title, points, 400)
+            for title, points in zip(_TITLES[:3], _POINTS[:3], strict=True)
+        ),
+    )
+    bodies = ["第一节正文。", "第二节正文。" * 30, "第三节正文。"]
+    gateway = _Script(bodies)
+    drafts = write_sections(gateway, state, facts=_FACTS)
+    systems = [request.messages[0].content for request in gateway.requests]
+    assert systems[0] == systems[1] == systems[2]
+    users = [request.messages[1].content for request in gateway.requests]
+    assert all(item.startswith(_FACTS + "\n\n") for item in users)
+    assert "只写第 2 节「问题」" in users[1]
+    assert "只写第" not in systems[1]
+    delta = abs(drafts[1].prompt_tokens - drafts[0].prompt_tokens)
+    assert delta < drafts[0].prompt_tokens / 2
+    assert bodies[0] not in users[1]
+
+
+def test_目标400时单节上限是600() -> None:
+    state = WritingState(
+        goal="把方案写清楚",
+        outline=(OutlineSection("背景", "说明现状", 400),),
+    )
+    gateway = _Script(["正文"])
+    generate_section(gateway, state, facts=_FACTS, n_ctx=8192, prompt_tokens=500)
+    assert gateway.requests[0].max_tokens == 600
 
 
 def test_组装按顺序带上标题并去掉重复段() -> None:

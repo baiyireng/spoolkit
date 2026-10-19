@@ -87,12 +87,13 @@ def output_tokens_for_turn(
     phase: Phase = "control",
     target_tokens: int | None = None,
     margin: int | None = None,
+    safety_ratio: float = 1.0,
 ) -> int:
     """v2 关闭时原样返回旧预留，避免估算或打日志。"""
     if not protocol_v2:
         return legacy
     if prompt_tokens is None and n_past is None:
-        prompt_tokens = resolve_n_past(None, messages)
+        prompt_tokens = resolve_n_past(None, messages, safety_ratio=safety_ratio)
     return compute_budget(
         n_ctx=n_ctx,
         n_past=n_past,
@@ -118,15 +119,19 @@ def resolve_n_past(
     messages: Sequence[object],
     *,
     chars_per_token: float = CHARS_PER_TOKEN,
+    safety_ratio: float = 1.0,
 ) -> int:
-    """优先用服务端 `usage.prompt_tokens`。拿不到时按字数估算并打日志。"""
+    """优先用服务端 `usage.prompt_tokens`。拿不到时按字数估算并打日志。
+
+    `safety_ratio` 默认 1.0。只有主循环在估算时传 1.05，其它调用方保持原口径。
+    """
     if prompt_tokens is not None and prompt_tokens >= 0:
         return prompt_tokens
     chars = 0
     for message in messages:
         content = message if isinstance(message, str) else getattr(message, "content", "")
         chars += len(content or "")
-    estimate = int(chars / chars_per_token) if chars_per_token > 0 else 0
+    estimate = int(chars / chars_per_token * safety_ratio) if chars_per_token > 0 else 0
     logger.warning(
         "拿不到 prompt_tokens，按消息长度估算 n_past=%s",
         estimate,

@@ -5,6 +5,7 @@ from spoolkit.agent.metrics import (
     capture_metrics,
     commit_section,
     metric_scope,
+    note_parse_failure,
     note_retry,
     observe_response,
     observe_turn,
@@ -86,3 +87,53 @@ def test_回合结束汇总已提交的节和终稿命中率() -> None:
     assert rows[-1]["turn_id"] == "t1"
     table = aggregate_by_task(rows)
     assert table["long"]["count"] == 2
+
+
+def test_prompt_ms写入prefill缺字段则留空() -> None:
+    with capture_metrics() as rows:
+        with metric_scope(phase="final", task_type="short", turn_id="t2"):
+            observe_response(
+                max_tokens=32,
+                prompt_tokens=18,
+                generated_tokens=2,
+                generated_text="OK",
+                finish_reason="stop",
+                timings={"prompt_n": 4, "prompt_ms": 358.2},
+                total_ms=400,
+                grammar=False,
+                first_token_ms=360,
+            )
+            observe_response(
+                max_tokens=32,
+                prompt_tokens=18,
+                generated_tokens=2,
+                generated_text="OK",
+                finish_reason="stop",
+                timings={"prompt_n": 18},
+                total_ms=400,
+                grammar=False,
+            )
+    assert rows[0]["prefill_ms"] == 358
+    assert rows[0]["first_token_ms"] == 360
+    assert rows[1]["prefill_ms"] is None
+    assert rows[1]["first_token_ms"] is None
+    assert rows[0]["generated_chars"] == 2
+    assert "generated_text" not in rows[0]
+
+
+def test_解析失败原因写到最近一条请求() -> None:
+    with capture_metrics() as rows:
+        with metric_scope(phase="control", task_type="short", turn_id="t3"):
+            observe_response(
+                max_tokens=32,
+                prompt_tokens=10,
+                generated_tokens=4,
+                generated_text="{}",
+                finish_reason="stop",
+                timings=None,
+                total_ms=1,
+                grammar=True,
+            )
+        note_parse_failure(reason="已标记 done，但 summary 为空", kind="")
+    assert rows[0]["parse_reason"] == "已标记 done，但 summary 为空"
+    assert rows[0]["parse_kind"] == ""

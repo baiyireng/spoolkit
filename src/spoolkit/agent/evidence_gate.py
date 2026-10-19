@@ -23,8 +23,14 @@ def check_evidence(
     user_text: str,
     summary: str,
     tool_texts: Sequence[str],
+    *,
+    long_answer: bool = False,
 ) -> EvidenceDecision:
-    """done 之前看 summary。硬门禁只对实时信息。"""
+    """done 之前看 summary。硬门禁只对实时信息。
+
+    普通问题缺引用时放行，理由留在 reason 里，由调用方记入报告。
+    长文模式直接放行。实时问题无引用时 ok 为假，由调用方最多退回一次。
+    """
     hard = any(tag in user_text for tag in FRESH_TAGS)
     cited = _cites(summary, tool_texts)
     if hard:
@@ -35,12 +41,12 @@ def check_evidence(
             hard=True,
             reason="这是实时信息，summary 必须引用本轮工具结果。",
         )
-    if cited or NO_EXTERNAL in summary:
+    if long_answer or cited or NO_EXTERNAL in summary:
         return EvidenceDecision(ok=True, hard=False, reason="")
     return EvidenceDecision(
-        ok=False,
+        ok=True,
         hard=False,
-        reason="summary 需要写上本轮工具结果，或写明「无需外部信息」。",
+        reason="summary 未引用工具结果，也未写「无需外部信息」；已放行，记入报告。",
     )
 
 

@@ -48,12 +48,13 @@
 | 截断后不做 ×2 整段重试 | 控制回合仍走 `chat_with_escalation`（×2） | 终稿与逐节：续写一次。重叠字数读 `continuation_overlap_chars`（默认 200，夹在 200–400）。续写再截断或空续写则短答，不再请求。续写完整但 12 字片段重合超过一半：逐节重写一次（原预算）；终稿按 1.5 倍预算重写一次。变更单写「只带重叠区 + 本节要求」：现有续写末条仍是续写指令，旧正文（含重叠区）不进 prompt，否则会改掉已锁定的末条。拆分该节仍未做 |
 | 流式事件 `final_delta` 等 | 已登记 `final_delta`、`section_start`、`section_done`。网页按 `data-section` 只替换这一节 | 主循环尚未发出章节事件。控制回合在 v2 下仍走 `FinalFieldTap` |
 | 配置 `protocol.v2` 等 | 旋钮名 `protocol_v2`，默认 `0`。主循环按本轮 `config.overrides` 读取 | 回滚：`.agent/limits.json` 写 `0` 或删键，新开一轮。步骤在 `docs/protocol-v2-runbook.md`。json 里的 `true` 会被忽略 |
-| 长文子流程 WritingState | `writing_state.py` 管大纲；`sections.py` 逐节生成，截断走 `continuation.py`。主循环未调用 | 开关关闭时仍是单次终稿 |
-| 硬 `required_tools` | 仓库里没有这个门禁 | `evidence_gate.py`：标签「最新 / 今天 / 价格 / 版本」必须引用本轮工具结果。其它问题写「无需外部信息」即可。不指定工具名。只在 v2 的 done 分支生效 |
-| 变更单 §9 回合指标 | `request_metric` 在 `llamacpp.py` 的 chat / chat_stream 写出。阶段、任务类型、重试、恢复由调用方 `metric_scope` 标注。`turn_metric` 有 `observe_turn`，逐节提交会更新 `sections_completed` | 主循环在 v2 关闭时不在回合结束调用 `observe_turn`。`first_token_ms` / `prefill_ms` 服务端没单独给出，记录里为空。`recovery=short/split` 不另发请求 |
+| v2 语法与解析 | `summary` 在 v2 语法的 `required` 里，类型是字符串，允许空串。`done=true` 且为空时 `kind=summary_empty`，主循环回灌一次；再空则用不超过 200 字的 `thought` 兜底并标 degraded | 缺键和空串都能过语法之后才出现。默认 `protocol_v2` 仍是 0 |
+| 长文子流程 WritingState | `writing_state.py` 管大纲；`sections.py` 逐节生成。v2 且判定为长文时，主循环在证据门之后调用 `compose_long_answer` | 开关关闭时仍是单次终稿。章节生成不另计控制步数 |
+| 硬 `required_tools` | 仓库里没有这个门禁 | 实时标签「最新 / 今天 / 价格 / 版本」无引用时退回一次，第二次放行并记 `evidence_gaps`。普通问题和 `answer_plan.mode=long` 不退回；普通问题缺引用只记一笔。不改 `finished` |
+| 变更单 §9 回合指标 | `request_metric` 在 `llamacpp.py` 的 chat / chat_stream 写出。`run` 结束调用 `observe_turn` 写 `turn_metric`。没打开 `capture_metrics` 时不写。缓存命中率只算终稿请求；缺样本为未采集。`prefill_ms` 取服务端 `timings.prompt_ms`。流式请求的 `first_token_ms` 是客户端从发出到第一段正文的毫秒 | `非流式 chat 没有首 token 时刻。recovery=short/split 不另发请求。主循环不自动把 JSONL 写进 docs/metrics/` |
 | 变更单 §8.1 结构不完整再续写 | 停笔但 ``` 未成对：续写一次，这次不重写。续写再截断或为空仍短答。截断后的重复续写仍重写。节正文在 `\n## ` 处截断 | 没有 `#` 标题的普通停笔仍算写完。若把「必须有标题」也当成未完成，现有「写完了」会多一次请求 |
 | 变更单 §8.2 decisions | 节末 `决定：` 行抽进 `WritingState.decisions`。每节最多 3 条、每条 ≤ 40 字、总数 ≤ 20，按空白归一去重 | 正文留在该节，不进约束。下一节的 system 能看见这些结论 |
-| 变更单 §8.3 用户停止 | `apply_user_stop`：已提交节保留；当前节标未完成；`interrupt_final` 为假时终稿插话只排队 | 主循环还没走长文，进行中的 HTTP 请求没有接这条取消。策略先落在写作状态上 |
+| 变更单 §8.3 用户停止 | `apply_user_stop`：已提交节保留；当前节标未完成。`run` 把 Ctrl+C 接到 `CancelToken`，关掉正在读的 llama.cpp 连接。长文停在当前节，不再发下一次请求 | 终稿阶段插话仍只排队（`interrupt_final` 为假）。网页壳 `Runner.stop` 在 Windows 上仍是结束子进程，不走这条进程内取消 |
 | 变更单 §8.4 跨进程恢复 | `WritingState` 只在当次进程里用 `to_dict` / `from_dict` | 重开会话不读回这份状态，长文从头开始 |
 
 ---
@@ -89,7 +90,7 @@ P0-1 起的落地状态见 `docs/long-answer-handoff.md` 第 3 节。
 
 ## 6. P0-6 回归（无新功能）
 
-`PROTOCOL_V2=False`。133 项通过：短答（`test_loop`、`test_chat_command`、`test_loop_prefetch`）、工具轮（`test_loop` 的工具后终稿、`test_loop_events`）、截断（`test_output_truncated`、`test_retry`、`test_final_truncation`、`test_delta_truncation_replay`），加上协议 / 预算 / 终稿流式单测。
+`PROTOCOL_V2=False`。回归套件全绿（命令、收集数与通过数见 `docs/p3-1-review.md` §6）：短答（`test_loop`、`test_chat_command`、`test_loop_prefetch`）、工具轮（`test_loop` 的工具后终稿、`test_loop_events`）、截断（`test_output_truncated`、`test_retry`、`test_final_truncation`、`test_delta_truncation_replay`），加上协议 / 预算 / 终稿流式单测。
 
 | 方案 §13 指标 | 这次能说的 |
 |---|---|
