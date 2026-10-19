@@ -56,9 +56,10 @@
 | P3-3 长文改道 | **已接**：`answer_plan.mode=long` 时走 `compose_long_answer`。大纲失败改短终稿。`v2=0` 不发章节事件。见第 11 节 |
 | P3-4 回合指标 | **已接**：`run` 结束调用 `observe_turn`。未打开采集时不写。命中率只算终稿请求；没有样本写未采集。见第 12 节 |
 | P3-5 停止 | **已接**：停止关掉当前 HTTP 读。已提交节保留，当前节未完成，不再发下一次请求。见第 13 节 |
-| P3-6 真机 | **强线索会进长文，纯问答不再因「接下来」要求落盘**。smoke 发出了大纲请求，但模型把大纲包进控制 JSON 的 `final`，解析要节数组，没收下，改走短终稿。没有分节。20 条还没跑。见第 14 节 |
+| P3-6 真机 | **收口**。见第 14 节。`protocol_v2` 默认仍是 `0` |
+| P3.5 护栏与空节 | **收口**。见第 15 节。护栏和长文主路径不再改。第三次空响应重试不做 |
 
-**下一步：** 大纲请求仍带着「只输出 JSON」的系统提示，模型把「标题 | 要点 | tokens」写进 `final`。先决定要不要从这层 JSON 里抽出大纲行。不要把 `protocol_v2` 默认改成 `1`。20 条先不要跑。
+**下一步：** P3.5 已收口。不要改护栏判据，也不要改长文主路径。`protocol_v2` 默认保持 `0`。第三次空响应重试不做；若以后做，只在 `empty_sections` 超阈值时启用，单独提交，默认关闭。
 
 ---
 
@@ -261,3 +262,23 @@
 | `uv run pytest tests/agent/test_plan_trigger.py tests/agent/test_sections.py tests/agent/test_p3_long_answer.py tests/agent/test_probe_regression.py -q --basetemp=/d/tmp/spool-p36h/cue` | 53 | 53 passed |
 
 `protocol_v2` 默认仍是 `0`。没有用 `minLength` 或 `oneOf`。
+
+---
+
+## 15. P3.5 结论
+
+护栏和长文主路径到此为止。旋钮 `protocol_v2` 在 `limits.py` 的默认值是 `0`，`PROTOCOL_V2 = False`。没有推送。
+
+| 项 | 结果 |
+|---|---|
+| 20 条 | v2 20/20 完成。P50 总时延 35736 ms，截断 5/163。单节 generated/target 中位数 55%，不越界 89/108。`empty_sections` 合计 1，只在题目 4。报告 `docs/metrics/2026-10-19-p35-report.md`，数据 `metrics/2026-10-19-p35.jsonl`。未写入 `metrics/2026-10-19.jsonl`，也未改手改日报 |
+| 构造 smoke | `.agent/xxx` 写入前后两次 `list_dir(.)`。只执行了第一次。`kind=useless`，`observed=current=da39a3ee5e6b`，提示含「没有执行」。清单行仍有 `.agent/`。原文在 `docs/metrics/2026-10-19-smoke-p35.md` |
+| 空响应重试 | `5c1ac2d`。节请求第一次空内容时追加「必须输出正文，至少 100 字。没有材料时基于目标写，不要留空。」，不原样重发。仍空则该节占位，回合记 `empty_sections`，报告写「内容缺失」。题目 4 有 4 次第一次空；换提示后 `prompt_tokens` 从 259 增到 287，3 节写出正文，1 节仍空 |
+| 第 1 节原文 | 改重试前抓的题目 4 第 1 节有正文。message 只有 `content` / `role`。没有 `reasoning` 字段。`finish_reason=stop`，`prompt_tokens=257`，`completion_tokens=62`。附录在同一份 smoke |
+| 第三次重试 | 不做。20 条合计 `empty_sections` 为 1，不启用。若以后做：只在 `empty_sections` 超阈值时启用，单独提交，默认关闭 |
+
+| 命令 | 收集 | 通过 |
+|---|---|---|
+| `uv run pytest tests/llm/test_llamacpp.py tests/llm/test_llamacpp_stream.py tests/agent/test_sections.py tests/agent/test_metrics_report.py -q --basetemp=/d/tmp/spool-p35/close` | 44 | 44 passed |
+
+此前护栏与任务卡：`c08f59d`、`8e8ba38`、`86590ad`、`b1134fc`、`9607867`、`14cfa71`。本轮只有 `5c1ac2d`。
