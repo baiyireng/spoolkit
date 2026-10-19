@@ -1886,6 +1886,13 @@ class AgentLoop:
         # 本轮的 trace 引用。辅助方法（护栏的放行理由）要往它上面写一行，
         # 又不能把 trace 当参数一路传下去。
         self._trace: list[str] | None = None
+        self._guard_trace_step = 0
+        self._last_guard_probe: dict[str, object] = {
+            "lost": False,
+            "pending_changed": False,
+            "observed": "",
+            "current": "",
+        }
         # 预算里的每个比例都是能力标定值：走本次运行的覆盖，而不是各写一份常量。
         self._budget = Budget(
             window=config.context_window, overrides=config.overrides
@@ -2356,6 +2363,7 @@ class AgentLoop:
             ))
 
         while True:
+            self._guard_trace_step = state.step
             if state.step >= limit and not self.config.supervise:
                 # 关掉督导就退回老行为：撞上上限即停。这条路仍然要留着——
                 # 它是一个可用的对照，也是督导自己出问题时的最终退路。
@@ -4598,6 +4606,34 @@ class AgentLoop:
             # 判据不许无脑拦：刚写完再读一遍、文件真的变了之后再查一遍，
             # 都是合法的重取（判据二成立 → 有理由的重取）。
             repeat_kind, reason, cause = self._guard_repeat_decision(signature, call)
+            probe = self._last_guard_probe
+            if self._trace is not None:
+                observed = probe.get("observed") or ""
+                current_state = probe.get("current") or ""
+                self._trace.append(
+                    f"step{self._guard_trace_step}: guard {call.name} "
+                    f"level={level} gate={gate} "
+                    f"kind={repeat_kind} cause={cause or '-'} lost={probe.get('lost')} "
+                    f"pending_changed={probe.get('pending_changed')} "
+                    f"observed={observed[:12] if observed else '-'} "
+                    f"current={current_state[:12] if current_state else '-'}"
+                )
+                if call.name == "list_dir":
+                    raw_path = call.arguments.get("path")
+                    listing = (
+                        self._listing_of(raw_path)
+                        if isinstance(raw_path, str) and raw_path
+                        else None
+                    )
+                    if listing is None:
+                        shown = "-"
+                    else:
+                        head = [line for line in listing.splitlines() if line][:5]
+                        shown = ", ".join(head) if head else "(空)"
+                    self._trace.append(
+                        f"step{self._guard_trace_step}: listing {call.name}"
+                        f"({raw_path}) {shown}"
+                    )
             if repeat_kind == REPEAT_USELESS:
                 return self._refuse(
                     call,
@@ -6717,6 +6753,23 @@ class AgentLoop:
             and not self._withheld_observation(call)
         )
 
+        def _finish(
+            kind: str,
+            reason: str,
+            cause: str,
+            *,
+            pending_changed: bool = False,
+            observed: str = "",
+            current: str = "",
+        ) -> tuple[str, str, str]:
+            self._last_guard_probe = {
+                "lost": lost,
+                "pending_changed": pending_changed,
+                "observed": observed or "",
+                "current": current or "",
+            }
+            return kind, reason, cause
+
         if signature not in self._observed_state:
             failure = self._failed_output.get(signature, "")
             if failure:
@@ -6726,7 +6779,7 @@ class AgentLoop:
                 # 「上一次它被别的闸拦下了」这句读错的理由写进提示。理论上限由
                 # `_REFRESH_LIMIT` 兜着，重试次数不会无限。
                 head = _flat_line(failure)[:60]
-                return (
+                return _finish(
                     REPEAT_REFRESH,
                     f"上一次执行失败了（{head}…），这一次是重试，不是无事重复",
                     REFRESH_CAUSE_RETRY,
@@ -6734,7 +6787,7 @@ class AgentLoop:
             if lost:
                 # 没记下「当时看到的是什么」（上一次执行失败或被别的闸拦下），
                 # 但结果确实被压掉了：仍然是"不让它饿死"的那一笔。
-                return (
+                return _finish(
                     REPEAT_REFRESH,
                     "上一次的结果已经被上下文压缩丢弃（它不在你手上了）",
                     REFRESH_CAUSE_COMPACTED,
@@ -6742,53 +6795,65 @@ class AgentLoop:
             # 它从没真的执行过（上一次这一条被别的闸拦下了）：没有「上一次的结果」
             # 可以复用，也没有对象可以比较。旧口径在这里放行（理由写作「谈不上
             # 重复」），于是任何「被拦 → 再原样发一遍」都白跑一次。
-            return (
+            return _finish(
                 REPEAT_UNDECIDED,
                 "这个签名没有真的执行过的记录（上一次它被别的闸拦下了），"
                 "既没有可复用的结果，也没有可比较的对象",
                 "",
             )
         observed_state, observed_pending = self._observed_state[signature]
-        if self._pending_state_key() != observed_pending:
+        pending_changed = self._pending_state_key() != observed_pending
+        if pending_changed:
             # 改动真的落成了：重跑会看到不同的结果 → 这是"能拿到新内容"那一本。
             # 结果同时被压掉时把这件事也说上（两件事实都成立，账按**更强的那条**
             # 记：新内容才是这次重取的价值所在）。
-            return (
+            return _finish(
                 REPEAT_REFRESH,
                 "这中间有改动真的落成了（待确认清单与上次不同），"
                 "重发一次可能拿到不同的结果"
                 + ("；上一次的结果也已经不在上下文里了" if lost else ""),
                 REFRESH_CAUSE_PENDING,
+                pending_changed=True,
+                observed=observed_state,
             )
         current = self._call_state(call)
         if not current or not observed_state:
             if lost:
                 # 拿不到可比对象、但结果确实不在手上了：这一条仍然是"不让它饿死"
                 # 的那笔账（旧口径在这里也是放行，行为不变；变的只是账记在哪本上）。
-                return (
+                return _finish(
                     REPEAT_REFRESH,
                     "上一次的结果已经被上下文压缩丢弃（它不在你手上了）",
                     REFRESH_CAUSE_COMPACTED,
+                    pending_changed=pending_changed,
+                    observed=observed_state,
+                    current=current,
                 )
             # 拿不到可比的对象（既没有正文、也没有可读路径、也不是一条命令）：
             # **如实记成判不出**，不假装判过。注意「当时拿不到」也算——两个空
             # 指纹互相「相等」，那种相等什么也证明不了。处置与无用重复相同。
-            return (
+            return _finish(
                 REPEAT_UNDECIDED,
                 f"这个调用（{call.name}）没有可比较的内容对象"
                 "（既不带正文、也不带可读路径、也不是一条命令），"
                 "护栏判不出这次重复有没有意义",
                 "",
+                pending_changed=pending_changed,
+                observed=observed_state,
+                current=current,
             )
         if current == observed_state and lost:
             # 对象一字未变、只是结果被压掉了：重取拿回的**是同一份内容**，
             # 这笔账记在「结果被压掉」那一本上（份额比全局小，见上面的注释）。
             # 这一条必须排在"一字未变 → 无用重复"之前：结果不在手上时，
             # 硬拦的后果是模型什么都读不到。
-            return (
+            return _finish(
                 REPEAT_REFRESH,
                 "上一次的结果已经被上下文压缩丢弃（它不在你手上了）",
                 REFRESH_CAUSE_COMPACTED,
+                pending_changed=pending_changed,
+                observed=observed_state,
+                current=current,
             )
         if current == observed_state:
             path = call.arguments.get("path")
@@ -6842,20 +6907,26 @@ class AgentLoop:
                 note = self._staged_note(path)
                 if note:
                     where = f"{where}。{note}"
-            return (
+            return _finish(
                 REPEAT_USELESS,
                 f"{what}自上次调用以来一字未变（指纹 {current}），"
                 f"{where}"
                 f"{extra}",
                 "",
+                pending_changed=pending_changed,
+                observed=observed_state,
+                current=current,
             )
         # 对象真的变了：重取能拿到新内容 → 记在"新内容"那一本账上。
         # 结果同时被压掉时把两件事实都说上（账按更强的那条记）。
-        return (
+        return _finish(
             REPEAT_REFRESH,
             "这次要看的对象与上次执行时不一样了，旧结果描述的是旧内容"
             + ("；而且上一次的结果已经被上下文压缩丢弃" if lost else ""),
             REFRESH_CAUSE_CHANGED,
+            pending_changed=pending_changed,
+            observed=observed_state,
+            current=current,
         )
 
     def _episode_outcome(self, finished: bool) -> str:
