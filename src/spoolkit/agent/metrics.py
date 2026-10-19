@@ -244,9 +244,19 @@ def observe_response(
     )
 
 
+def _progress_state() -> dict[str, int]:
+    current = _progress.get() or {}
+    return {
+        "total": int(current.get("total") or 0),
+        "completed": int(current.get("completed") or 0),
+        "retried": int(current.get("retried") or 0),
+        "empty": int(current.get("empty") or 0),
+    }
+
+
 def commit_section(*, total: int, completed: int) -> None:
     """一节提交后更新完成数。不在这里拼 JSON。"""
-    state = dict(_progress.get() or {"total": 0, "completed": 0, "retried": 0})
+    state = _progress_state()
     state["total"] = total
     state["completed"] = completed
     _progress.set(state)
@@ -254,13 +264,20 @@ def commit_section(*, total: int, completed: int) -> None:
 
 def note_retry() -> None:
     """本节发出了续写或重写。"""
-    state = dict(_progress.get() or {"total": 0, "completed": 0, "retried": 0})
+    state = _progress_state()
     state["retried"] = int(state["retried"]) + 1
     _progress.set(state)
 
 
+def note_empty_section() -> None:
+    """这一节重试后仍空，正文用占位交出去。"""
+    state = _progress_state()
+    state["empty"] = int(state["empty"]) + 1
+    _progress.set(state)
+
+
 def reset_section_progress() -> None:
-    _progress.set({"total": 0, "completed": 0, "retried": 0})
+    _progress.set({"total": 0, "completed": 0, "retried": 0, "empty": 0})
 
 
 def note_parse_failure(*, reason: str, kind: str = "") -> None:
@@ -291,7 +308,7 @@ def observe_turn(
     requests = [
         row for row in sink if row.get("phase") and row.get("turn_id") == turn_id
     ]
-    progress = _progress.get() or {"total": 0, "completed": 0, "retried": 0}
+    progress = _progress_state()
     finals = [row for row in requests if row.get("phase") == "final"]
     known = [row.get("cache_hit") for row in finals if row.get("cache_hit") is not None]
     rate = None if not known else sum(1 for hit in known if hit) / len(known)
@@ -302,6 +319,7 @@ def observe_turn(
         "sections_total": int(progress["total"]),
         "sections_completed": int(progress["completed"]),
         "sections_retried": int(progress["retried"]),
+        "empty_sections": int(progress["empty"]),
         "total_generated_tokens": sum(int(row.get("generated_tokens") or 0) for row in requests),
         "recovery_tokens": sum(
             int(row.get("generated_tokens") or 0)

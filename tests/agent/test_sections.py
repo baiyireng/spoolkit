@@ -77,6 +77,51 @@ def test_空响应重试仍失败时本节占位且后文继续() -> None:
     assert drafts[1].text == "后一节正文"
 
 
+def test_本节请求带上空响应时要换的提示() -> None:
+    """空了不能原样重发。重试说明要求正文、至少 100 字，没材料就按目标写。"""
+    gateway = _Script(["背景正文。\n决定：窗口按 8192。"])
+    generate_section(gateway, _state(), facts=_FACTS, n_ctx=8192)
+    note = gateway.requests[0].empty_retry
+    assert "必须输出正文" in note
+    assert "至少 100 字" in note
+    assert "基于目标写" in note
+
+
+def test_空节计入empty_sections() -> None:
+    from spoolkit.agent.metrics import capture_metrics, observe_turn
+    from spoolkit.llm.llamacpp import EmptyContentError
+
+    class _Empty:
+        def chat_stream(self, request: ChatRequest, on_delta=None) -> ChatResponse:
+            raise EmptyContentError(
+                "空",
+                prompt_tokens=30,
+                max_tokens=200,
+                n_ctx=8192,
+                context_tight=False,
+                finish_reason="stop",
+                streaming=True,
+            )
+
+    state = WritingState(
+        goal="写一份本周故障复盘报告。",
+        outline=(OutlineSection("经过", "按时间写", 200),),
+        next_section=0,
+    )
+    with capture_metrics():
+        drafts = write_sections(_Empty(), state, facts="工具结果：无额外材料。")
+        record = observe_turn(
+            turn_id="t-empty",
+            task_type="long",
+            total_ms=1,
+            completed=True,
+            fallback_short=False,
+        )
+    assert "没有生成" in drafts[0].text
+    assert record is not None
+    assert record["empty_sections"] == 1
+
+
 def test_本节请求只带大纲约束和事实() -> None:
     state = _state()
     state = WritingState(

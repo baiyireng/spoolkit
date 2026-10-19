@@ -226,6 +226,11 @@ def write_report(rows: list[dict], env: dict, path: Path) -> None:
         lines.append("- long_skipped_reason：" + "，".join(f"{key} {value}" for key, value in sorted(counts.items())))
     else:
         lines.append("- long_skipped_reason：无")
+    missing = sum(int(row.get("empty_sections") or 0) for row in turns)
+    if missing:
+        lines.append(f"- 内容缺失：empty_sections {missing}")
+    else:
+        lines.append("- 内容缺失：无")
     lines.append("")
     lines.append("变更单 §9.3：prefill 降幅 ≥70% 才保留双请求；<50% 回退单请求轻协议。单节 target 是上限：看不越界和中位数。不低于目标一半只做观察。")
     lines.append("样本未到 20 条时，上表的比率只是已跑样本，不能当成达标。")
@@ -301,21 +306,29 @@ def main() -> None:
     parser.add_argument("--profile", default="long", choices=("long", "short"))
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--indexes", default="", help="逗号分隔的题号。给出后忽略 limit/offset")
+    parser.add_argument("--jsonl", type=Path, default=None)
+    parser.add_argument("--report", type=Path, default=None)
     args = parser.parse_args()
     env = _env()
     day = date.today().isoformat()
-    jsonl = ROOT / "metrics" / f"{day}.jsonl"
-    report = ROOT / "docs" / "metrics" / f"{day}-report.md"
+    jsonl = args.jsonl or (ROOT / "metrics" / f"{day}.jsonl")
+    report = args.report or (ROOT / "docs" / "metrics" / f"{day}-report.md")
     gateway = LlamaCppGateway(base_url=BASE_URL, temperature=0.0, seed=1, timeout=180.0)
     wrapped = _arm_gateway(gateway, args.arm)
     source = LONG_PROMPTS if args.profile == "long" else SHORT_PROMPTS
-    prompts = source[: max(0, args.limit)]
     index_base = 0 if args.profile == "long" else 100
-    start = max(0, args.offset)
+    if args.indexes.strip():
+        selected = [(int(item), source[int(item)]) for item in args.indexes.split(",") if item.strip()]
+    else:
+        start = max(0, args.offset)
+        selected = [
+            (index, prompt)
+            for index, prompt in enumerate(source[: max(0, args.limit)])
+            if index >= start
+        ]
     try:
-        for index, prompt in enumerate(prompts):
-            if index < start:
-                continue
+        for index, prompt in selected:
             rows, finished = _run_one(prompt.text, wrapped, v2=_v2_for(args.arm))
             for row in rows:
                 row["arm"] = args.arm

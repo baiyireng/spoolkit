@@ -1,3 +1,5 @@
+import json
+
 import httpx
 
 from spoolkit.agent.metrics import capture_metrics, metric_scope
@@ -39,6 +41,45 @@ def test_chat_stream拼出完整响应并回调增量() -> None:
     assert rows[0]["prefill_ms"] == 12
     assert rows[0]["first_token_ms"] is not None
     assert rows[0]["first_token_ms"] >= 0
+    gateway.close()
+
+
+def test_流式空内容重试换成另一段提示() -> None:
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            body = (
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":30,"completion_tokens":0}}\n\n'
+                "data: [DONE]\n\n"
+            )
+        else:
+            body = (
+                'data: {"choices":[{"delta":{"content":"正文"}}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":40,"completion_tokens":1}}\n\n'
+                "data: [DONE]\n\n"
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=body.encode("utf-8"),
+        )
+
+    note = "必须输出正文，至少 100 字。没有材料时基于目标写，不要留空。"
+    gateway = LlamaCppGateway(transport=httpx.MockTransport(handler))
+    response = gateway.chat_stream(
+        ChatRequest(
+            messages=(Message(role="user", content="只写第 1 节"),),
+            max_tokens=256,
+            empty_retry=note,
+        )
+    )
+    assert response.text == "正文"
+    assert bodies[1]["messages"][-1]["content"] == note
+    assert bodies[1]["messages"][:-1] == bodies[0]["messages"]
     gateway.close()
 
 

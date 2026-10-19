@@ -11,7 +11,13 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from spoolkit.agent.continuation import looks_repeated, merge_continuation, overlap_chars
-from spoolkit.agent.metrics import commit_section, metric_scope, note_retry, reset_section_progress
+from spoolkit.agent.metrics import (
+    commit_section,
+    metric_scope,
+    note_empty_section,
+    note_retry,
+    reset_section_progress,
+)
 from spoolkit.agent.final_turn import CONTINUATION_INSTRUCTION, SHORT_CONTINUE
 from spoolkit.agent.structure import cut_before_next_heading, fences_closed
 from spoolkit.agent.writing_state import (
@@ -38,6 +44,9 @@ SECTION_INSTRUCTION = (
 )
 SECTION_SLACK = 200
 EMPTY_SECTION = "（本节没有生成。）"
+EMPTY_RETRY_INSTRUCTION = (
+    "必须输出正文，至少 100 字。没有材料时基于目标写，不要留空。"
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +132,7 @@ def _empty_draft(state: WritingState, title: str, exc: EmptyContentError) -> Sec
         )
     else:
         logger.warning("本节空内容，重试后仍空")
+    note_empty_section()
     response = ChatResponse(
         text="",
         prompt_tokens=exc.prompt_tokens,
@@ -155,16 +165,14 @@ def generate_section(
     if not 0 <= state.next_section < len(state.outline):
         raise ValueError("没有这一节")
     section = state.outline[state.next_section]
-    request = ChatRequest(
-        messages=_messages(state, facts),
-        max_tokens=_limit(
+    request = _section_request(
+        _messages(state, facts),
+        _limit(
             section.target_tokens,
             n_ctx=n_ctx,
             n_past=n_past,
             prompt_tokens=prompt_tokens,
         ),
-        response_schema=None,
-        cache_prompt=True,
     )
     with metric_scope(
         phase="section",
@@ -202,13 +210,11 @@ def generate_section(
         try:
             follow: ChatResponse = _ask(
                 gateway,
-                ChatRequest(
-                    messages=request.messages + (
+                _section_request(
+                    request.messages + (
                         Message(role="user", content=CONTINUATION_INSTRUCTION),
                     ),
-                    max_tokens=follow_limit,
-                    response_schema=None,
-                    cache_prompt=True,
+                    follow_limit,
                 ),
             )
         except EmptyContentError as exc:
@@ -230,7 +236,10 @@ def generate_section(
             target_tokens=section.target_tokens,
         ):
             try:
-                rewrite: ChatResponse = _ask(gateway, request)
+                rewrite: ChatResponse = _ask(
+                    gateway,
+                    _section_request(request.messages, request.max_tokens),
+                )
             except EmptyContentError as exc:
                 return _empty_draft(state, section.title, exc)
         if rewrite.truncated or looks_repeated(response.text, rewrite.text):
@@ -343,6 +352,17 @@ def assemble(
             )
         parts.append(_with_heading(section.title, draft.text))
     return _dedupe(parts)
+
+
+def _section_request(messages: tuple[Message, ...], max_tokens: int) -> ChatRequest:
+    """节请求带上换提示重试。空了不能把同一段再发一遍。"""
+    return ChatRequest(
+        messages=messages,
+        max_tokens=max_tokens,
+        response_schema=None,
+        cache_prompt=True,
+        empty_retry=EMPTY_RETRY_INSTRUCTION,
+    )
 
 
 def _messages(state: WritingState, facts: str) -> tuple[Message, ...]:

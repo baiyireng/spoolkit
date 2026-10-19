@@ -43,6 +43,41 @@ def test_按任务类型聚合且缓存命中率可见() -> None:
     assert "未采集" in text
 
 
+def test_报告在有空节时标注内容缺失(tmp_path) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "p3_live_metrics", "scripts/p3_live_metrics.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    path = tmp_path / "report.md"
+    mod.write_report(
+        [
+            {
+                "turn_id": "t",
+                "arm": "v2",
+                "completed": True,
+                "empty_sections": 3,
+                "total_ms": 1,
+            }
+        ],
+        {
+            "model": "m",
+            "quant": "q",
+            "n_ctx": 8192,
+            "slots": 1,
+            "temperature": 0.0,
+            "seed": 1,
+        },
+        path,
+    )
+    text = path.read_text(encoding="utf-8")
+    assert "内容缺失" in text
+    assert "empty_sections 3" in text
+
+
 def test_回合结束汇总已提交的节和终稿命中率() -> None:
     reset_section_progress()
     with capture_metrics() as rows:

@@ -12,6 +12,7 @@ token 计数走 /tokenize，拿到的是模型真实分词结果，而不是估�
 """
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 import json
 import time
@@ -97,6 +98,18 @@ _EMPTY_CONTENT = (
     "很可能是推理 token 把输出预算吃光了——用 --reasoning off "
     "重启 llama-server，或者调大 max_tokens 再试"
 )
+
+
+def _retry_request(request: ChatRequest) -> ChatRequest:
+    """空了就换一段提示再问。没有重试说明时保持原请求。"""
+    note = request.empty_retry.strip()
+    if not note:
+        return request
+    return replace(
+        request,
+        messages=request.messages + (Message(role="user", content=note),),
+        empty_retry="",
+    )
 
 
 def _handle_empty(
@@ -322,7 +335,7 @@ class LlamaCppGateway:
                 streaming=False,
                 attempt=_attempt,
             )
-            return self.chat(request, _attempt=1)
+            return self.chat(_retry_request(request), _attempt=1)
         if not finish:
             finish = "stop"
         _note_response(
@@ -458,7 +471,7 @@ class LlamaCppGateway:
                 streaming=True,
                 attempt=_attempt,
             )
-            return self.chat_stream(request, on_delta, _attempt=1)
+            return self.chat_stream(_retry_request(request), on_delta, _attempt=1)
         if completion_tokens <= 0:
             completion_tokens = max(1, len(text) // 2)
         _note_response(

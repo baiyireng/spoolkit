@@ -242,6 +242,41 @@ def test_空内容先重试一次成功并记下空响应() -> None:
     gateway.close()
 
 
+def test_带重试说明时空内容换提示而不是原样重发() -> None:
+    """第二节请求必须多一段「必须输出正文」，不能把第一次的消息原样再发一遍。"""
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 30, "completion_tokens": 0},
+                },
+            )
+        return httpx.Response(200, json=_completion("正文写出来了"))
+
+    note = "必须输出正文，至少 100 字。没有材料时基于目标写，不要留空。"
+    gateway = _gateway(handler)
+    response = gateway.chat(
+        ChatRequest(
+            messages=(
+                Message(role="system", content="目标：写复盘"),
+                Message(role="user", content="只写第 1 节"),
+            ),
+            max_tokens=256,
+            empty_retry=note,
+        )
+    )
+    assert response.text == "正文写出来了"
+    assert len(bodies) == 2
+    assert bodies[1]["messages"][:-1] == bodies[0]["messages"]
+    assert bodies[1]["messages"][-1] == {"role": "user", "content": note}
+    gateway.close()
+
+
 def test_空内容重试仍空才报错() -> None:
     from spoolkit.llm.llamacpp import EmptyContentError
 
