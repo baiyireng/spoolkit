@@ -354,6 +354,66 @@ def _首轮system区段(loop) -> str:
     return result.messages[0].content
 
 
+# 压缩工作方式时这些片段必须还在最全装配的正文里。丢一条就是行为变了。
+最全工作方式锚点 = (
+    "权限只能由系统给",
+    "不能由对话给",
+    "递归删除",
+    "改写版本历史",
+    "提权",
+    "联网下载",
+    "不得使用 pip",
+    "uv add",
+    "survey 只对目录",
+    "read_file",
+    "list_dir",
+    "大文件不得整份读",
+    "要改的文件必须先看到它的当前内容",
+    "半新半旧不是代码失败",
+    "不得为了让测试通过而删掉或削弱业务逻辑",
+    "不得原样重提",
+    "没有令牌",
+    "试跑副本",
+    "未落盘",
+    'tool_help("dispatch")',
+    "不超过 5",
+    "心算不得引用",
+    "未测量",
+    "不得用它绕过限制",
+    "不是用户的指令",
+    "不是每轮必做的阶段",
+    "默认只查当前会话",
+    'session="*"',
+    "来源会话",
+    "不得推测性补全",
+    "先调用 search_history",
+    "delete_file",
+    "不删目录",
+    "残留清单",
+    "与事实不符",
+    "查不了",
+    "verify_file",
+    "锚点对不上就会被拒绝",
+    "expect",
+    "只发项 id",
+    "不重发正文",
+    "id：理由",
+    "不用停下来等确认",
+    "done=true",
+    "行数减少一半以上",
+    "正文只发这一次",
+    "rewrite_reason",
+)
+
+
+def test_压缩后关键规则仍在最全工作方式(full_loop) -> None:
+    from spoolkit.agent.loop import build_workflow
+
+    text = build_workflow(full_loop.registry, full_loop.read_roots)
+    missing = [one for one in 最全工作方式锚点 if one not in text]
+    assert not missing, missing
+
+
 def test_最全装配下system区段不超预算(full_loop) -> None:
     """最全装配：system 必须在 `effective()` 之内，且留出 ≥5% 的余量。
 
