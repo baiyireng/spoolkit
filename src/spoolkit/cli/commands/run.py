@@ -49,6 +49,7 @@ from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.transcript import ASSISTANT, USER, record_message
 from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.grant import Grants
+from spoolkit.tools.call_context import current_tool_call_id
 from spoolkit.web.protocol import AWAIT, CONFIRM, FINAL, NOTE, START, TOOL, USAGE
 
 
@@ -166,6 +167,7 @@ def _events_approver(writer: EventWriter, reader=None):
                 f"这条命令需要你批准才执行（默认策略不允许它：{reason}）。"
                 "y=只允许这一次，a=始终允许，b=本轮全拒，其它=拒绝。"
             ),
+            tool_call_id=current_tool_call_id(),
         )
         answer = ""
         try:

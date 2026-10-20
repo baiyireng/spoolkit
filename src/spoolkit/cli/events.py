@@ -139,10 +139,16 @@ def settle_with_events(
             writer.emit(NOTE, text=refused, ok=False)
         return "none"
 
+    tool_call_ids = [change.call_id or "" for change in changes]
     for change in changes:
         if change.declared:
             writer.emit(NOTE, text=f"{change.path}：{change.declared}", ok=True)
-        writer.emit(DIFF, path=change.path, text=change.diff)
+        writer.emit(
+            DIFF,
+            path=change.path,
+            text=change.diff,
+            tool_call_id=change.call_id or "",
+        )
 
     if policy == AUTO and not out_of_scope([c.path for c in changes], scope):
         if not any(pending.is_linked(c.path) for c in changes):
@@ -151,14 +157,22 @@ def settle_with_events(
             # `--events` 的解析器要么崩、要么被迫打补丁，录下来的文件也读不了。
             written = apply_with_audit(pending, baseline_path, out=_to_stderr)
             _emit_refused(writer, pending)
-            writer.emit(CONFIRM, applied=True, auto=True, count=len(written))
+            writer.emit(
+                CONFIRM,
+                applied=True,
+                auto=True,
+                count=len(written),
+                tool_call_ids=tool_call_ids,
+            )
             return "auto"
 
-    writer.emit(AWAIT, count=len(changes))
+    writer.emit(AWAIT, count=len(changes), tool_call_ids=tool_call_ids)
     source = reader if reader is not None else sys.stdin
     answer = (source.readline() or "").strip().lower()
     apply = answer in ("y", "yes")
-    writer.emit(CONFIRM, applied=apply, count=len(changes))
+    writer.emit(
+        CONFIRM, applied=apply, count=len(changes), tool_call_ids=tool_call_ids
+    )
     if apply:
         if baseline_path is not None:
             save_baseline(baseline_path, pending.baseline())

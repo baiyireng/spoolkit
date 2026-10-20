@@ -23,6 +23,7 @@ from spoolkit import limits
 from spoolkit import runlog
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable, resolve_within
+from spoolkit.tools.call_context import current_tool_call_id
 from spoolkit.tools.types import NEXT_STEP_MARKER, Artifact, ToolResult, ToolSpec
 from spoolkit.check.constraints import check_source, format_violations
 from spoolkit.tools.view import WorkspaceView
@@ -1626,6 +1627,8 @@ class PendingChange:
     # 而「把文件写成空」回滚之后剩下的也是一个空文件。
     # 靠 `old_text` 反推不出来，所以显式记一位。
     deleted: bool = False
+    # 提出这处改动的那次工具调用。空串表示当时没有调用上下文，不回填最近一次。
+    call_id: str = ""
 
     @property
     def is_new_file(self) -> bool:
@@ -1842,7 +1845,11 @@ class PendingChanges:
         target = self.disk_path(path)
         old_text = self._pre_image(target)
         change = PendingChange(
-            path=path, old_text=old_text, new_text=new_text, declared=declared
+            path=path,
+            old_text=old_text,
+            new_text=new_text,
+            declared=declared,
+            call_id=current_tool_call_id(),
         )
         self._changes[path] = change
         # 同一路径上有更早的暂存时，这一份更晚的直接提交取代它：`_changes` 的
@@ -1869,6 +1876,7 @@ class PendingChanges:
             new_text="",
             declared=declared,
             deleted=True,
+            call_id=current_tool_call_id(),
         )
         self._changes[path] = change
         for token, record in list(self._staged.items()):

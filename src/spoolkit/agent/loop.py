@@ -195,6 +195,7 @@ from spoolkit.agent.contract import (
     retrieval_event,
     tool_event,
 )
+from spoolkit.tools.call_context import tool_call_context
 from spoolkit.tools.types import REVERSE_CLAUSE, ToolCall, ToolResult
 from spoolkit.tools.verify import (
     CANNOT_CHECK,
@@ -3407,7 +3408,8 @@ class AgentLoop:
                                 f"step{state.step}: 目标产出规模要 {target_lines} 行，"
                                 f"步数预算按规模放大到 {limit}（硬上限 {hard} 步）"
                             )
-                    result = self._invoke_guarded(call, repeats, seen)
+                    with tool_call_context(f"tc-{state.step}-{index}"):
+                        result = self._invoke_guarded(call, repeats, seen)
                     shown = self._present_read(call, result)
                     # 按工具投影。read_file 即使带了 summary，仍走上面的卡/片段。
                     # 没填 summary 的失败、暂存重写、没改动仍走原文。
