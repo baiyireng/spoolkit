@@ -34,6 +34,7 @@ from spoolkit.interpreter import (
 )
 from spoolkit.paths import resolve_within
 from spoolkit.tools.trial import trial_workspace
+from spoolkit.agent.contract import SUMMARY_MAX_CHARS
 from spoolkit.tools.types import Artifact, ToolResult, ToolSpec
 from spoolkit import limits as _limits
 from spoolkit.tools.grant import ALLOWED, ASK, DENIED, Grants, classify
@@ -347,23 +348,79 @@ def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     )
 
 
+_CLIP_MARK = "仅保留关键片段"
+
+
+def _output_lines(stdout: str, stderr: str) -> list[str]:
+    lines: list[str] = []
+    for source in (stdout, stderr):
+        lines.extend(line.rstrip() for line in (source or "").splitlines())
+    return [line for line in lines if line.strip()]
+
+
+def _first_error_line(stdout: str, stderr: str) -> str:
+    for line in (stderr or "").splitlines():
+        if line.strip():
+            return line.strip()
+    for line in (stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("FAILED ", "ERROR ", "Traceback", "Error")) or "Error" in stripped:
+            return stripped
+    for line in (stdout or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
 def _key_output(stdout: str, stderr: str, code: int) -> str:
-    """summary 里的那一行：失败优先拿第一处错误，否则拿第一行输出。"""
-    if code != 0:
-        for line in (stderr or "").splitlines():
-            stripped = line.strip()
-            if stripped:
-                return stripped[:160]
-        for line in (stdout or "").splitlines():
-            stripped = line.strip()
-            if stripped.startswith(("FAILED ", "ERROR ", "Traceback", "Error")) or "Error" in stripped:
-                return stripped[:160]
+    """成功时只留第一行输出。失败另走 _failure_summary，不在这里截成一行。"""
+    del code
     for source in (stdout, stderr):
         for line in (source or "").splitlines():
             stripped = line.strip()
             if stripped:
                 return stripped[:160]
     return ""
+
+
+def _failure_summary(code: int, stdout: str, stderr: str) -> str:
+    """退出码、第一处错误、末尾几行。装不下就写明只留了关键片段。"""
+    limit = SUMMARY_MAX_CHARS
+    prefix = f"退出码 {code}。"
+    lines = _output_lines(stdout, stderr)
+    if not lines:
+        return prefix
+    full = prefix + "\n".join(line.strip() for line in lines)
+    if len(full) <= limit:
+        return full
+    head = _first_error_line(stdout, stderr) or lines[0].strip()
+    if len(head) > 80:
+        head = head[:79] + "…"
+    marker = _CLIP_MARK
+    fixed = len(prefix) + len(head) + len(marker) + 2
+    if fixed >= limit:
+        room = limit - len(prefix) - len(marker) - 2
+        head = (head[: room - 1] + "…") if room > 1 else ""
+        fixed = len(prefix) + len(head) + len(marker) + 2
+    budget = limit - fixed
+    tail: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        piece = line.strip()
+        extra = len(piece) + (1 if tail else 0)
+        if used + extra <= budget:
+            tail.append(piece)
+            used += extra
+            continue
+        if not tail and budget > 1:
+            tail.append(piece[: budget - 1] + "…")
+        break
+    tail.reverse()
+    body = "\n".join(tail)
+    summary = prefix + head + ("\n" + body if body else "") + "\n" + marker
+    if len(summary) > limit:
+        summary = summary[: limit - len(marker) - 1].rstrip() + "\n" + marker
+    return summary[:limit]
 
 
 def _execute(
@@ -435,10 +492,14 @@ def _execute(
     # 输出放在前面：模型和人都先要知道「错在哪」，
     # 而不是先看到自己刚才发了什么命令。
     content = f"退出码 {proc.returncode}（{status}）\n$ {requested}\n{body}"
-    key = _key_output(stdout, stderr, proc.returncode)
-    summary = f"退出码 {proc.returncode}。"
-    if key:
-        summary += key
+    if proc.returncode == 0:
+        # 成功不放大：退出码，必要时带第一行输出。
+        summary = f"退出码 {proc.returncode}。"
+        key = _key_output(stdout, stderr, proc.returncode)
+        if key:
+            summary += key
+    else:
+        summary = _failure_summary(proc.returncode, stdout, stderr)
     command = list(requested_argv) if requested_argv is not None else list(argv)
     return ToolResult(
         ok=proc.returncode == 0,

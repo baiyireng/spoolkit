@@ -186,7 +186,7 @@ from spoolkit.tools.capabilities import (
 from spoolkit.tools.capabilities import of_spec as capability_of_spec
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools import types as _types
-from spoolkit.agent.contract import clip_summary, project_for_model
+from spoolkit.agent.contract import SUMMARY_MAX_CHARS, project_for_model
 from spoolkit.tools.types import REVERSE_CLAUSE, ToolCall, ToolResult
 from spoolkit.tools.verify import (
     CANNOT_CHECK,
@@ -1658,25 +1658,40 @@ def _requested_span(call: ToolCall, total: int) -> tuple[bool, str, int]:
 
 
 def project_search_result(result: ToolResult) -> str:
-    """模型看带前几条命中的 summary。raw 里的完整结果不进提示。"""
+    """模型看带前几条命中的 summary。raw 里的完整结果不进提示。
+
+    信封自己把 summary 压进字数上限，并写明截断。这里不再用省略号把命中悄悄切掉。
+    """
     if not result.summary:
         return result.content
-    return clip_summary(result.summary)
+    if len(result.summary) <= SUMMARY_MAX_CHARS:
+        return result.summary
+    note = "摘要已截断。"
+    room = SUMMARY_MAX_CHARS - len(note)
+    if room <= 1:
+        return note
+    return result.summary[: room - 1].rstrip() + "\n" + note
 
 
 def project_run_result(result: ToolResult) -> str:
-    """模型看退出码和第一处关键输出。stdout/stderr 留在 raw。
+    """模型看退出码、第一处错误和末尾几行。stdout/stderr 留在 raw。
 
     试跑副本的提醒不在 summary 里，但模型仍要看见，否则会把副本缺依赖当成没装。
+    这段提醒加在摘要后面，不再被 240 字上限切掉。
     """
     if not result.summary:
         return result.content
     text = result.summary
+    if len(text) > SUMMARY_MAX_CHARS and "仅保留关键片段" not in text:
+        text = text[: SUMMARY_MAX_CHARS - 1] + "…"
+    notes: list[str] = []
     if "试跑副本" in result.content and "试跑副本" not in text:
-        text += " 本次在试跑副本执行，真实工作区未改动。"
+        notes.append("本次在试跑副本执行，真实工作区未改动。")
     if "没能接进副本" in result.content and "没接进副本" not in text:
-        text += " 有依赖目录没接进副本，不要当成没装依赖。"
-    return clip_summary(text)
+        notes.append("有依赖目录没接进副本，不要当成没装依赖。")
+    if not notes:
+        return text
+    return text + " " + " ".join(notes)
 
 
 class AgentLoop:

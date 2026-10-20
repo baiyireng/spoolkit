@@ -19,6 +19,7 @@ from pathlib import Path
 
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable
+from spoolkit.agent.contract import SUMMARY_MAX_CHARS
 from spoolkit.tools.types import Artifact, ToolResult, ToolSpec
 from spoolkit.tools.view import WorkspaceView
 
@@ -45,7 +46,8 @@ _ERROR_LINE = re.compile(r"^rg:\s*(?P<path>.+?):\s+(?P<why>\S.*)$")
 #: 结果里最多点名几个被跳过的路径（点太多会把结果本身挤没）；剩下的只报个数。
 _SKIP_SHOWN = 5
 #: summary 里带上的命中条数。完整列表在 data / raw，不进模型。
-_SUMMARY_HITS = 3
+_SUMMARY_HITS = 5
+_SUMMARY_CLIP = "摘要已截断。"
 _HIT_TEXT_CHARS = 80
 _HIT_LINE = re.compile(r"^(?P<path>.*?):(?P<line>\d+):(?P<text>.*)$")
 
@@ -203,11 +205,76 @@ def _parse_hit(line: str) -> dict | None:
     }
 
 
-def _short_hit(hit: dict) -> str:
+def _short_hit(hit: dict, text_limit: int = _HIT_TEXT_CHARS) -> str:
     text = hit["text"]
-    if len(text) > _HIT_TEXT_CHARS:
-        text = text[: _HIT_TEXT_CHARS - 1] + "…"
+    if len(text) > text_limit:
+        text = text[: text_limit - 1] + "…"
     return f"{hit['path']}:{hit['line']}:{text}"
+
+
+def _pick_summary_hits(hits: list[dict], limit: int) -> list[dict]:
+    """先每个文件取第一条，再按原顺序补满。"""
+    chosen: list[dict] = []
+    used: set[int] = set()
+    seen_files: set[str] = set()
+    for index, hit in enumerate(hits):
+        if hit["path"] in seen_files:
+            continue
+        seen_files.add(hit["path"])
+        used.add(index)
+        chosen.append(hit)
+        if len(chosen) >= limit:
+            return chosen
+    for index, hit in enumerate(hits):
+        if index in used:
+            continue
+        chosen.append(hit)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def _search_footer(count: int, truncated: bool) -> str:
+    if truncated:
+        return f"命中 {count} 条 / 已按 max_results 截断。"
+    return f"命中 {count} 条。"
+
+
+def _fit_search_summary(hits: list[dict], truncated: bool) -> str:
+    """前几条命中加上计数。超过字数上限时写明截断，不悄悄丢掉。"""
+    footer = _search_footer(len(hits), truncated)
+    chosen = _pick_summary_hits(hits, _SUMMARY_HITS)
+    limit = SUMMARY_MAX_CHARS
+
+    def render(items: list[dict], text_limit: int, note: str = "") -> str:
+        body = "\n".join(_short_hit(hit, text_limit) for hit in items)
+        return f"{body}\n{footer}{note}" if body else f"{footer}{note}"
+
+    text = render(chosen, _HIT_TEXT_CHARS)
+    if len(text) <= limit:
+        return text
+    for width in (40, 24, 12):
+        text = render(chosen, width)
+        if len(text) <= limit:
+            return text
+    items = list(chosen)
+    while len(items) > 1:
+        items = items[:-1]
+        text = render(items, 24, _SUMMARY_CLIP)
+        if len(text) <= limit:
+            return text
+    text = render(items, 24, _SUMMARY_CLIP)
+    if len(text) <= limit:
+        return text
+    tail = "\n" + footer + _SUMMARY_CLIP
+    room = limit - len(tail)
+    if room <= 1:
+        clipped = (footer + _SUMMARY_CLIP)[: limit - 1] + "…"
+        return clipped
+    head = _short_hit(items[0], 24) if items else ""
+    if len(head) > room:
+        head = head[: room - 1] + "…"
+    return head + tail
 
 
 def _envelope_search(content: str, lines: list[str], *, truncated: bool) -> ToolResult:
@@ -218,15 +285,15 @@ def _envelope_search(content: str, lines: list[str], *, truncated: bool) -> Tool
         if hit is not None:
             hits.append(hit)
     if hits:
-        top = "\n".join(_short_hit(hit) for hit in hits[:_SUMMARY_HITS])
-        tail = f"命中 {len(hits)} 条"
-        if truncated:
-            tail += "，已按 max_results 截断"
-        summary = f"{top}\n{tail}。"
+        summary = _fit_search_summary(hits, truncated)
     else:
         summary = "没有命中。"
         if content.strip():
             summary = f"没有命中。{content.strip()}"
+        if len(summary) > SUMMARY_MAX_CHARS:
+            note = _SUMMARY_CLIP
+            room = SUMMARY_MAX_CHARS - len(note)
+            summary = summary[: room - 1].rstrip() + note
     paths: list[str] = []
     for hit in hits:
         if hit["path"] not in paths:
