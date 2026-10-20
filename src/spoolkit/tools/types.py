@@ -67,6 +67,15 @@ class Usage:
 
 
 @dataclass(frozen=True)
+class Artifact:
+    """一份留给界面或后续编排的产出引用。不进模型提示。"""
+
+    type: str
+    path: str = ""
+    ref: str = ""
+
+
+@dataclass(frozen=True)
 class ToolResult:
     """工具执行结果。失败也是正常返回值，不通过异常表达。"""
 
@@ -85,6 +94,15 @@ class ToolResult:
     # 拿短摘要去判会漏，改成把整个原始输出灌给模型又太贵。所以两份分开：
     # 模型看 content，审查层看 raw。
     raw: str = ""
+    # 给模型看的短摘要。旧工具不填，适配器再从 content 截出来。
+    # content 仍是兼容别名：这一轮主循环还读它，投影才改看 summary。
+    summary: str = ""
+    # 给界面和后续编排的结构化结果，不进提示。
+    # dict 不能进哈希；排除后信封仍可哈希，相等仍看 data 的内容。
+    data: dict[str, Any] = field(default_factory=dict, hash=False)
+    artifacts: tuple[Artifact, ...] = ()
+    # 下一步建议，给编排看，不进提示。
+    next: str = ""
 
 
 @dataclass(frozen=True)
