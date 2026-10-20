@@ -110,6 +110,18 @@ def _exempt_for(test_id: str, active: list[dict]) -> dict | None:
     return None
 
 
+def run_web_assets() -> int:
+    """网页壳的结构检查。全套 pytest 之前先挡住跨 feature 调用和 dist 漂移。"""
+    print("── 网页壳资源 ──")
+    script = REPO / "scripts" / "check_web_assets.py"
+    done = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=str(REPO),
+        env=dev_env.test_env(),
+    )
+    return done.returncode
+
+
 def run_tests(extra: list[str], capabilities: dict) -> int:
     command = [
         sys.executable, "-m", "pytest", "-q",
@@ -273,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         print(dev_env.render(capabilities))
         print()
     if args.only in ("", "tests"):
+        codes.append(run_web_assets())
         codes.append(run_tests(args.pytest_args, capabilities))
     if args.only in ("", "types"):
         codes.append(run_types(args.update_baseline))

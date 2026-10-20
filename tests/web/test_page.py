@@ -150,7 +150,8 @@ def test_页面也报外接配方断开() -> None:
     body = _body("showHealth")
     assert "item.ok === false" in body
     assert "外接服务未连接" in body
-    assert "healthView.lines" in body
+    assert "ctx.store.update('healthView'" in body
+    assert "next.lines = next.lines.concat(extra)" in body
 
 
 def test_探活详情说得出什么时候探的与未探测() -> None:
@@ -209,7 +210,7 @@ def test_页面按快照显示待批准的配对码() -> None:
     # 钉要点：那两个按钮**不批配对**这件事必须说得出（口径可以换词，这条事实不行）。
     assert "不批准配对" in section, "没说清那两个按钮不批配对"
     assert "批准在终端" in section, "没说清批配对到底在哪做"
-    assert "'配对码 ' + pairingRows[0].code" in _body("drawStatus"), (
+    assert "'配对码 ' + ctx.store.get('pairingRows')[0].code" in _body("drawStatus"), (
         "只有一条配对时码没有直接写在徽标上"
     )
 
@@ -329,11 +330,16 @@ def test_左栏是两段式的会话列表() -> None:
     assert 'id="sidebar"' in HTML
     assert 'id="workspaces"' in HTML
     assert 'id="sessions"' in HTML
+    assert 'id="side-search"' in HTML
+    assert 'aria-label="搜索工作区或会话"' in HTML
+    assert "function renderSidebar(wrows, srows, sremoved, key, locked, query)" in _script()
 
     body = _body("renderSidebar")
-    # 两段各自的名字，以及"每一段都要有列表"这件事
-    assert "工作区" in body
-    assert "会话" in body
+    # 「工作区」的标题在 `.side-head` 里，列表段内不再重复第二遍；
+    # 会话段自己的标题仍然在 `renderSidebar` 里。
+    assert "工作区" in HTML
+    assert "headSpec('工作区')" not in body, "工作区标题重复画了两遍"
+    assert "headSpec('会话')" in body
     assert "syncGroup(workspaceList" in body
     assert "syncGroup(sessionList" in body
     assert "sidebarSig" in body, "没有「同键跳过」：同一帧重复到达会整段重画"
@@ -360,31 +366,26 @@ def test_列表按行复用而不是整段重画() -> None:
 
 
 def test_左栏的行点下去就是切目标() -> None:
-    """行是 div，键盘与读屏够不着：真正的控件是两条原生 select，行负责点它们。
+    """可见行就是按钮。点它、按 Enter、按空格都进同一条 `switchTarget`。
 
-    所以切换**只有一条代码路径**（原生 change → switchTarget），
-    而且"点一行"必须真的落到那个控件上，不能自己另发一次请求。
+    隐藏 select 不再当第二套控件。行自己不另写一条请求，只调用 `target()`。
     """
     sidebar = _body("renderSidebar")
-    assert "target(" in sidebar, "行没有落到原生控件上"
+    assert "target(" in sidebar, "行没有走到切换函数上"
     assert "switchTarget" not in sidebar, "行自己发了一次请求：切换就有了第二条路径"
 
     dispatch = _body("target")
-    assert "wsBox" in dispatch
-    assert "sessBox" in dispatch
-    assert "dispatchEvent" in dispatch
-    # 两条都要派发：原先只派发会话那条，于是**点工作区那一列什么都没发生**
-    # （ws 那条 change 监听永远收不到事件，"点了没反应"就是这么来的）。
-    assert "wsBox.dispatchEvent" in dispatch
-    assert "sessBox.dispatchEvent" in dispatch
-    # 目标名不一定已经是控件里的一项（当前会话没跑过就不在会话表里）：
-    # 不先把那项补出来，赋 value 会被浏览器丢掉，点一行就变成"不改会话"。
-    assert "pick(" in dispatch
-    assert "box.value = value" in _body("pick")
+    assert "ctx.switchTarget({workspace: workspace})" in dispatch
+    assert "ctx.switchTarget({session: name})" in dispatch
+    row = _body("row")
+    assert "setAttribute('role', 'button')" in row
+    assert "line.tabIndex = 0" in row
+    assert "event.key !== 'Enter'" in row
+    assert "event.key !== ' '" in row
 
     script = _script()
-    assert "wsBox.addEventListener('change'" in script
-    assert "sessBox.addEventListener('change'" in script
+    assert "wsBox" not in script and "sessBox" not in script
+    assert 'id="ws"' not in HTML and 'id="sess"' not in HTML
 
 
 def test_点一行立刻亮起来不等回帧() -> None:
@@ -394,13 +395,14 @@ def test_点一行立刻亮起来不等回帧() -> None:
     服务端确认的目标；切换被拒时拨回去。
     """
     body = _body("switchTarget")
-    assert "chosen = wantedKey(payload)" in body
+    assert "store.set('chosen', wantedKey(payload))" in body
     assert "markChosen()" in body
     # 失败要拨回当前目标（与"选择栏拨回去"同一件事，只是这次是行的高亮）。
-    assert "drawTarget(lastState)" in body
+    assert "drawTarget(store.get('lastState'))" in body
 
     apply_body = _body("applyState")
-    assert "chosen = {root: '', session: ''}" in apply_body, "回帧之后要交棒"
+    assert "fields.chosen = {root: '', session: ''}" in apply_body, "回帧之后要交棒"
+    assert "store.patch(fields)" in apply_body, "回帧要一次写入 store"
     assert "markChosen()" in apply_body
 
     want = _body("wantedKey")
@@ -410,8 +412,8 @@ def test_点一行立刻亮起来不等回帧() -> None:
 
 def test_切换完成后服务端补的那一帧不再重建侧栏() -> None:
     """同一帧重复到达要**一个节点都不重建**（行为数字在 `test_page_dom.py`）。"""
-    assert "if (sig === sidebarSig) { return; }" in _body("renderSidebar")
-    assert "if (box.dataset.fill === sign)" in _body("fillSelect")
+    assert "if (sig === ctx.store.get('sidebarSig')) { return; }" in _body("renderSidebar")
+    assert "have._sig === spec.sig" in _body("syncGroup")
 
 
 def test_左栏标出哪个目标在跑() -> None:
@@ -446,13 +448,15 @@ def test_新建会话的入口在顶部() -> None:
 
     body = _body("newSession")
     assert "post('/session/new'" in body, "没有真的建会话：又回到「只换个名字」"
+    assert "post('/session/new', {})" in body, "还在让人先起名：id 与标题应该交给系统/Agent"
+    assert "window.prompt" not in body, "又回到浏览器原生 prompt 了"
     assert "switchTarget({session: made.session})" in body, "建完没有切过去"
     assert body.find("post('/session/new'") < body.find("switchTarget("), (
         "顺序反了：切目标时那条会话还没建出来（服务端会 400）"
     )
     assert "readonly" in body, "只读壳里不许摆能点的入口"
     assert "pinned" in body, "--root 钉住时只有一个目标，建不了新的"
-    assert "newBtn.onclick = newSession" in _script()
+    assert "newBtn.onclick = app.sessions.newSession" in _script()
 
 
 def test_窄屏时左栏是可收起的抽屉() -> None:
@@ -464,7 +468,7 @@ def test_窄屏时左栏是可收起的抽屉() -> None:
     close = _body("closeDrawer")
     assert "classList.remove('drawer')" in close
     assert "closeDrawer()" in _body("switchTarget"), "切完目标要顺手把抽屉收掉"
-    assert "scrim.onclick = closeDrawer" in _script()
+    assert "scrim.onclick = app.sidebar.closeDrawer" in _script()
 
 
 def test_只读时左栏的行与新建入口都点不动() -> None:
@@ -515,11 +519,11 @@ def test_历史也只追加不重画() -> None:
     """
     body = _body("drawHistory")
     assert "historyCard(" in body
-    assert "for (let index = drawn; index < items.length; index += 1)" in body, (
+    assert "for (let index = ctx.store.get('drawn'); index < items.length; index += 1)" in body, (
         "不是从「已经画到哪儿」接着画：那是全量重画"
     )
-    assert "drawn = items.length" in body
-    assert "drawn > items.length" in body, "列表变短时要能重来一遍"
+    assert "ctx.store.set('drawn', items.length)" in body
+    assert "ctx.store.get('drawn') > items.length" in body, "列表变短时要能重来一遍"
     # 这一批多了一道**认领**：这一轮已经实时画过的那些不新建节点（否则同一句话
     # 会出现两遍）。行为数字在 `test_page_dom.py` 的 `reply_card` 那一组。
     assert "adoptMessage(" in body, "快照里那条已经画过的消息没有认领回来"
@@ -531,7 +535,7 @@ def test_历史也只追加不重画() -> None:
     assert "fillReport(" in card and "item.content" in card, "历史正文没画出来"
 
     reset = _body("resetView")
-    assert "drawn = 0" in reset, "换了目标要重新开始画"
+    assert "ctx.store.set('drawn', 0)" in reset, "换了目标要重新开始画"
 
 
 def test_代码块等宽且能一键复制() -> None:
@@ -567,9 +571,15 @@ def test_围栏是代码而其余是正文() -> None:
     assert "appendProse(bubble, parts[index])" in body
 
     prose = _body("appendProse")
-    assert "index % 2 === 1" in prose, "行内代码没有按 ` 切出来"
-    assert "inline.className = 'inline-code'" in prose
-    assert "document.createTextNode(piece)" in prose, "正文要按文本节点写进去"
+    assert "hasBlockMarkdown(text)" in prose, "有反引号时不再走块级"
+    assert "renderMarkdownBlocks(" in prose
+    assert "parseInlines(text)" in prose
+    assert "innerHTML" not in prose
+    inline = _body("appendInline")
+    assert "inline-code" in inline, "行内代码没有单独的节点"
+    assert "textContent" in inline
+    assert "innerHTML" not in inline
+    assert "safeHref(" in inline
 
 
 def test_代码块有明显的块样式且不撑破气泡() -> None:
@@ -856,7 +866,8 @@ def test_常驻提示在右上角浮层里而不是占着输入条那一行() ->
     for badge in ("st-health", "st-mode", "st-target", "st-pair", "st-elsewhere",
                   "st-panel"):
         assert f'id="{badge}"' in hints, f"{badge} 不在右上角那一列里"
-    strip = HTML[HTML.find('<div class="st">') :][:400]
+    start = HTML.find('<div class="st">')
+    strip = HTML[start : HTML.find("</div>", start) + len("</div>")]
     assert "Enter 发送" in strip, "输入条那一行连原来那句提示都没了"
     assert 'id="st-' not in strip, "输入条那一行里还留着会随状态长出来的徽标"
     assert strip.count("<button") == 0, "输入条那一行里还有按钮"
@@ -871,7 +882,8 @@ def test_常驻提示在右上角浮层里而不是占着输入条那一行() ->
     # 详情面板以 `#hints` 为锚（它得是定位祖先），高度自适应、超长才自己滚。
     assert "position:relative" in hints_rule, "详情面板没有可锚定的祖先"
     panel = _rule(".st-panel")
-    assert "position:absolute" in panel, "详情面板长在文档流里"
+    assert "position:static" in panel, "详情面板还在绝对定位，会盖住通知"
+    assert "position:absolute" not in panel
     assert "max-height:56vh" in panel and "overflow-y:auto" in panel
 
 
@@ -890,7 +902,7 @@ def test_状态区常态只剩一枚圆点() -> None:
     )
     assert "'模型未连接'" in body, "连接不通那一档没有短标签"
     status = _body("drawStatus")
-    assert "healthLabel.classList.toggle('hidden', healthView.label === '')" in status, (
+    assert "healthLabel.classList.toggle('hidden', ctx.store.get('healthView').label === '')" in status, (
         "常态那枚圆点旁边还挂着空标签"
     )
     # 那一行与"Enter 发送"仍是同一个 flex 行（`.st-hint` 靠 margin-left:auto 靠右）。
@@ -909,14 +921,14 @@ def test_状态详情保留四项而且异常仍然看得见() -> None:
     assert "'模型服务地址：'" in lines, "详情里没有地址那一行"
     assert "'最近一次探测：'" in lines, "详情里没有探活时刻那一行"
     assert "probedStamp(info)" in lines
-    assert "healthView.lines" in lines, "可能原因 / 下一步那几行没有接进详情"
+    assert "ctx.store.get('healthView').lines" in lines, "可能原因 / 下一步那几行没有接进详情"
 
     # 异常那一档带着原始信息（先遮蔽密钥），而它是"bad"（红的）。
     body = _body("showHealth")
     assert "cls: 'bad'" in body
     assert "redact(" in body
-    # 详情面板是浮层：绝对定位（锚在右上角那一列里），展开/收起都不占文档流。
-    assert "position:absolute" in _rule(".st-panel"), "详情面板长在文档流里"
+    # 详情在右上角那一列里往下排，不盖住通知，也不占对话流（列本身仍是 fixed）。
+    assert "position:static" in _rule(".st-panel"), "详情面板还在绝对定位"
 
 
 def test_状态详情能收起而且点外面也行() -> None:
@@ -927,7 +939,7 @@ def test_状态详情能收起而且点外面也行() -> None:
     输入条那一行里），现在是 `#corner`——不然点一下对话流就会被当成"点在外面"。
     """
     script = _script()
-    assert "if (event.key === 'Escape') { setStatusOpen(false); return; }" in _body("onKeydown")
+    assert "if (event.key === 'Escape') { ctx.status.setStatusOpen(false); return; }" in _body("onKeydown")
     assert "document.onkeydown" in script and "Escape" in script
     outside = script[script.find("document.onclick = function") :][:400]
     assert "closest('#corner')" in outside, "点外面收不掉"
@@ -942,8 +954,8 @@ def test_只读与钉住的模式信息仍然可发现() -> None:
     assert 'id="st-mode"' in HTML
     view = _body("showReadonly")
     assert "state.readonly" in view
-    assert "readonly = Boolean(state.readonly)" in view
-    assert "readOnlyNote = readonly" in view, "只读那句解释没有落到状态区"
+    assert "ctx.store.set('readonly', Boolean(state.readonly))" in view
+    assert "ctx.store.set('readOnlyNote', ctx.store.get('readonly')" in view, "只读那句解释没有落到状态区"
     assert "非回环地址上" in view and "只能看，不能驱动" in view, (
         "只读那句解释被删短了：为什么、能看什么、想驱动怎么办三件事都得在"
     )
@@ -951,7 +963,7 @@ def test_只读与钉住的模式信息仍然可发现() -> None:
     assert "drawStatus()" in view
 
     target = _body("drawTarget")
-    assert "pinnedNote = locked" in target, "--root 钉住的解释没有落到状态区"
+    assert "ctx.store.set('pinnedNote', locked" in target, "--root 钉住的解释没有落到状态区"
     assert "--root" in target
     assert "drawStatus()" in target
 
@@ -1004,7 +1016,7 @@ def test_每条通知都能关掉两条以上给全部关闭() -> None:
     """人得能自己把一条通知赶走，不然"能自动消失的那一档"就变成唯一出路。"""
     assert 'id="toast-all"' in HTML
     assert "全部关闭" in HTML
-    assert "toastAllBtn.onclick = closeAllToasts" in _script()
+    assert "toastAllBtn.onclick = app.toasts.closeAllToasts" in _script()
 
     close = _body("closeToast")
     assert "removeChild(" in close, "关掉只是藏起来，节点还留着"
@@ -1086,7 +1098,7 @@ def test_会话行上有移除入口而且要两次点击() -> None:
     assert "requestRemove" in actions and "requestRestore" in actions
 
     remove = _body("requestRemove")
-    assert "if (armed !== value)" in remove, "没有二次确认：点一下就删了"
+    assert "if (ctx.store.get('armed') !== value)" in remove, "没有二次确认：点一下就删了"
     assert "markArmed()" in remove
     assert "act('/session/delete'" in remove
 
@@ -1101,25 +1113,65 @@ def test_会话行上有移除入口而且要两次点击() -> None:
     assert "button.dataset.value = value" in button
 
 
-def test_已移除的会话在页面上能放回来() -> None:
-    """"可恢复"在界面上必须够得着，否则不叫可恢复。"""
+def test_已移除的会话收进设置而不是摊在左栏() -> None:
+    """"可恢复"必须够得着，但默认不该占左栏：只在设置里主动找。"""
     body = _body("renderSidebar")
     assert "sremoved" in body
-    assert "已移除（" in body
-    assert "'恢复'" in body
+    assert "updateArchiveBadge(sremoved)" in body
+    assert "已移除（" not in body, "归档行又摊回左栏了"
+    assert "requestRestore" not in body, "左栏里不该再有恢复入口"
 
     target = _body("drawTarget")
     assert "state.sessions_removed" in target
+    # 归档入口在页脚「设置」，列表节点只在弹层打开时建。
+    assert 'id="settings-btn"' in HTML
+    assert 'id="settings"' in HTML
+    assert 'id="archived-list"' in HTML
+    archived = _body("renderArchived")
+    assert "ctx.store.get('lastState').sessions_removed" in archived
+    assert "requestRestore" in archived
+    assert "'恢复'" in archived
+    assert "setSettingsOpen" in _script()
+    assert "settingsBox.classList.toggle(\"hidden\"" in _script()
+
+
+def test_当前会话即使不在会话表里也补进左栏() -> None:
+    """`cli` 这种还没跑过的名字不在 `state.sessions` 里，但它是当前目标——
+    左栏必须看得见、点得着，否则"我在哪"只能靠顶栏猜。"""
+    body = _body("drawTarget")
+    assert "sessions.unshift" in body
+    assert "t.session_title" in body
+
+
+def test_跑完请Agent给会话起标题() -> None:
+    """标题展示优化之外，命名本身要交给 Agent：final 后请服务端起名。"""
+    script = _script()
+    assert "/session/title" in script
+    assert "maybeAgentTitle" in script
+    assert "maybeAgentTitle(true)" in _body("onEvent"), "final 之后没有请 Agent 起名"
+    assert "applySessionTitle" in _body("say"), "/run 的种子标题没有落到左栏"
+    assert "title_source" in script, "没有区分种子/Agent/手工标题"
+
+
+def test_会话行标题优先id次之() -> None:
+    body = _body("renderSidebar")
+    assert "sessionRowTitle" in body
+    assert "one.title" in body, "行没有读标题字段"
+    assert "String(one.value || '')" in body, "id 没有作为次级信息传下去"
+    row = _body("row")
+    assert "line.title = label" in row
+    assert "src.title = title" in row
 
 
 def test_只读时移除入口不摆出来() -> None:
     body = _body("renderSidebar")
-    assert "const removable = !locked && !readonly;" in body
-    assert "readonly ? null : actSpec('恢复'" in body
+    assert "const removable = !locked && !ctx.store.get('readonly');" in body
+    # 归档恢复入口在设置弹层里：只读时按钮仍然可见，但必须禁用。
+    assert "restore.disabled = ctx.store.get('readonly');" in _body("renderArchived")
     remove = _body("requestRemove")
-    assert "if (readonly) { return; }" in remove
+    assert "if (ctx.store.get('readonly')) { return; }" in remove
     restore = _body("requestRestore")
-    assert "if (readonly) { return; }" in restore
+    assert "if (ctx.store.get('readonly')) { return; }" in restore
 
 
 # --- 滚动：跟到底，但不抢 ---
@@ -1137,7 +1189,22 @@ def test_默认滚到底但人不被抢滚动() -> None:
 
     flip = _body("updateToBottom")
     assert "classList.toggle('show'" in flip
-    assert "stream.onscroll = updateToBottom" in _script()
+    assert "stream.onscroll = app.thread.updateToBottom" in _script()
+    assert _ancestors("thinking")[-2:] == ["div#composer", "div#composer-tools"]
+    assert _ancestors("toBottom")[-2:] == ["div#composer", "div#composer-tools"]
+    assert _ancestors("conn")[-1] == "div#composer"
+    assert "bottom:" not in _rule("#thinking")
+    assert "bottom:" not in _rule("#toBottom")
+    assert "position:static" in _rule("#conn")
+    assert 'role="alert"' in HTML and 'aria-live="assertive"' in HTML
+    assert 'id="st-close"' in HTML
+    assert "stPanel.replaceChildren(close, ...nodes)" in _body("renderStatusPanel")
+    assert "order:-1" not in _rule(".st-close")
+    narrow = HTML[HTML.find("@media (max-width:860px)") : HTML.find("@media (prefers-reduced-motion")]
+    assert "pointer-events:none;" in narrow
+    assert "body.drawer #sidebar { transform:none; pointer-events:auto; }" in narrow
+    assert "pointer-events" not in _rule("#sidebar")
+    assert "drawerQuery.addEventListener('change', syncDrawer)" in _body("createSidebar")
 
     assert 'id="toBottom"' in HTML
     assert "#toBottom" in HTML and ".show" in HTML
@@ -1186,7 +1253,7 @@ def test_Enter发送与ShiftEnter换行() -> None:
     assert "event.shiftKey" in body, "没挡住 Shift+Enter，换行会变成发送"
     assert "preventDefault()" in body
     assert "say()" in body
-    assert "goalBox.onkeydown = onKeydown" in _script(), "处理函数写了却没绑上"
+    assert "goalBox.onkeydown = app.composer.onKeydown" in _script(), "处理函数写了却没绑上"
 
 
 def test_发送键走同一个run() -> None:
@@ -1194,9 +1261,9 @@ def test_发送键走同一个run() -> None:
     assert "post('/run', {goal})" in say
     click = _body("onSendClick")
     assert "say()" in click, "空闲时那一枚键不是发送"
-    assert "sendBtn.onclick = onSendClick" in _script(), "发送按钮没绑上"
+    assert "sendBtn.onclick = app.composer.onSendClick" in _script(), "发送按钮没绑上"
     # 只读壳里不许发：非回环按钮点了只会 403
-    assert "if (readonly) { return; }" in say
+    assert "if (ctx.store.get('readonly')) { return; }" in say
 
 
 def test_运行中发送键变成停止而不是禁用() -> None:
@@ -1208,8 +1275,8 @@ def test_运行中发送键变成停止而不是禁用() -> None:
     这条立刻红。
     """
     send = _body("syncSend")
-    assert "const mode = busy ? (stopping ? 'stopping' : 'stop') : 'send';" in send
-    assert "sendBtn.disabled = stopping || readonly;" in send, (
+    assert "const mode = ctx.store.get('busy') ? (ctx.store.get('stopping') ? 'stopping' : 'stop') : 'send';" in send
+    assert "sendBtn.disabled = ctx.store.get('stopping') || ctx.store.get('readonly');" in send, (
         "运行中那一枚键又被禁用了：点不动就等于没有停止入口"
     )
     assert "sendBtn.dataset.mode = mode" in send, "没有任何地方说得出它现在是哪一档"
@@ -1220,27 +1287,28 @@ def test_运行中发送键变成停止而不是禁用() -> None:
     # 点它：运行中走停止，空闲才走发送；返回值是那一条 POST 的 promise
     # （要能 `await` 到"请求真的发出去了"，而不是只看按钮那一瞬间）。
     click = _body("onSendClick")
-    assert "if (busy) { return requestStop(); }" in click
+    assert "if (ctx.store.get('busy')) { return requestStop(); }" in click
     assert "return say();" in click
-    assert "sendBtn.onclick = onSendClick" in _script()
+    assert "sendBtn.onclick = app.composer.onSendClick" in _script()
 
     # 停止走的是新端点，而且**立刻有反馈**（按钮进"正在停止…"）、失败要拨回去。
     stop = _body("requestStop")
     assert "post('/run/stop', {})" in stop
-    assert "stopping = true;" in stop and "syncSend()" in stop, "点了没有立刻反馈"
-    assert "stopping = false;" in stop, "被拒（409/403）之后那一枚键卡在停止态"
-    assert "if (readonly || stopping) { return; }" in stop, "没有防连点"
+    assert "ctx.store.set('stopping', true);" in stop and "syncSend()" in stop, "点了没有立刻反馈"
+    assert "ctx.store.set('stopping', false);" in stop, "被拒（409/403）之后那一枚键卡在停止态"
+    assert "if (ctx.store.get('readonly') || ctx.store.get('stopping')) { return; }" in stop, "没有防连点"
 
     # 跑完（或 `/state` 说不在跑）要把那一档落回去，否则会永远写着"正在停止…"。
     run = _body("setRunning")
-    assert "if (!busy) { stopping = false; }" in run
+    assert "if (!value) { fields.stopping = false; }" in run
+    assert "ctx.store.patch(fields)" in run, "停下来要一次写回 running / busy / stopping"
     poll = _body("refreshStatus")
-    assert "if (!state.running) {" in poll and "if (busy) { setRunning(false); }" in poll, (
+    assert "if (!state.running) {" in poll and "if (ctx.store.get('busy')) { ctx.composer.setRunning(false); }" in poll, (
         "`final` 事件漏掉时那一枚键会卡在「正在停止…」"
     )
     # 服务端说这一轮**不是**被停掉的（`stopped` 假）= 正常收场：那个标记也得清，
     # 否则下一轮的一次普通失败会被画成"已停止"。
-    assert "if (!state.stopped) { stoppedRun = false; }" in _body("applyState")
+    assert "if (!state.stopped) { fields.stoppedRun = false; }" in _body("applyState")
     final_at = _script().find("data.type === 'final'")
     assert "setRunning(false)" in _script()[final_at : final_at + 200], "跑完没有把那一档放回去"
 
@@ -1285,26 +1353,26 @@ def test_只读时发送键不出现也不可点() -> None:
     `/run/stop` 与 `/run` 走同一张 `WRITE_PATHS` 表，远程一律 403）。
     """
     say = _body("say")
-    assert "if (readonly) { return; }" in say
+    assert "if (ctx.store.get('readonly')) { return; }" in say
 
     view = _body("showReadonly")
     assert "state.readonly" in view
-    assert "readonly = Boolean(state.readonly)" in view
+    assert "ctx.store.set('readonly', Boolean(state.readonly))" in view
 
     send = _body("syncSend")
     assert "readonly" in send
     # 只读与"正在停止"落在同一个禁用条件上（运行中那一档是**可点**的停止键）。
-    assert "sendBtn.disabled = stopping || readonly" in send
+    assert "sendBtn.disabled = ctx.store.get('stopping') || ctx.store.get('readonly')" in send
 
     stop = _body("requestStop")
-    assert "if (readonly || stopping) { return; }" in stop, "只读壳里还发得出停止请求"
+    assert "if (ctx.store.get('readonly') || ctx.store.get('stopping')) { return; }" in stop, "只读壳里还发得出停止请求"
 
 
 def test_只读时审批按钮也不摆出来() -> None:
     body = _body("showActions")
-    assert "if (readonly) { return; }" in body
+    assert "if (ctx.store.get('readonly')) { return; }" in body
     # 更狠一层：只读壳里连那两个按钮节点都不建（藏起来的空按钮还能被 Tab 到）。
-    assert "if (!readonly)" in _body("ensureCard")
+    assert "if (!ctx.store.get('readonly'))" in _body("ensureCard")
 
 
 # --- ② 待确认：对话流里的卡片 ---
@@ -1320,7 +1388,7 @@ def test_待确认卡片与ChatGPT的调用卡片同形() -> None:
         assert cls in HTML, f"卡片少了 {cls} 这一块"
     card = _body("ensureCard")
     assert "appendNode(node)" in card, "卡片没有挂进对话流"
-    assert "'应用'" in card and "'拒绝'" in card
+    assert "'应用全部改动'" in card and "'拒绝全部'" in card
     assert "apply.onclick" in card and "reject.onclick" in card, "按钮写了却没绑上"
 
     pending = _body("showPending")
@@ -1328,7 +1396,17 @@ def test_待确认卡片与ChatGPT的调用卡片同形() -> None:
     assert "处改动待确认" in pending
     assert "diffBox(" in pending
     # 同一份待确认内容（补帧 / 重连）只更新不重建：diff 可能有几百行。
-    assert "cardSig === sig" in pending
+    assert "ctx.store.get('cardSig') === sig" in pending
+
+    labels = _body("setAskLabels")
+    assert "'允许执行'" in labels and "'拒绝'" in labels
+    assert "'应用全部改动'" in labels and "'拒绝全部'" in labels
+
+    box = _body("diffBox")
+    assert "aria-expanded" in box and "diff-file-head" in box
+    assert "lines.length <= DIFF_FOLD_AT" in box
+    assert "max-height:45vh" in HTML
+    assert "max-height:32vh" in HTML and "diff-file-body" in HTML
 
     summary = _body("diffSummary")
     assert "startsWith('+')" in summary and "startsWith('-')" in summary
@@ -1338,35 +1416,56 @@ def test_确认之后卡片变成状态行() -> None:
     """点完不再是横幅、也不再是问句：就地变成"已应用 / 已拒绝"的一行记录。"""
     settle = _body("settleCard")
     assert "'已应用：'" in settle and "'已拒绝：'" in settle
+    assert "'已允许执行：'" in settle
     assert "ask-row" in settle
-    assert "card = null;" in settle, "状态行没让出「当前那张卡片」的位置"
+    assert "ctx.store.set('card', null)" in settle, "状态行没让出「当前那张卡片」的位置"
     # 下一份待确认另起一张卡片，不是把状态行改回问句。
-    assert "if (card) { return card; }" in _body("ensureCard")
+    assert "if (ctx.store.get('card')) { return ctx.store.get('card'); }" in _body("ensureCard")
 
     decide = _body("decide")
     assert "post('/confirm', {apply})" in decide
+    command = _body("showCommandAsk")
+    assert "ask-card command" in command
+    assert "要执行一条命令" in command
+    assert "仅允许这一次" in command
+    assert "grants.json" in command
+    assert "应用" not in command
     assert "settleCard(apply ? 'applied' : 'rejected')" in decide
-    assert "if (cardApply) { cardApply.disabled = true; }" in decide, "点一次没有禁用"
+    assert "if (ctx.store.get('cardApply')) { ctx.store.get('cardApply').disabled = true; }" in decide, "点一次没有禁用"
     # 被拒（409 没有待确认 / 403 只读）：退回"等你点"，别停在已应用上骗人。
-    assert "decided = false;" in decide
+    assert "ctx.store.set('decided', false)" in decide
 
 
 def test_没有待确认内容时整块UI从页面上拿掉() -> None:
     """`awaiting` 缺了 / 是 0 都按"没有待确认内容"办：**节点也拿掉**。"""
     clear = _body("clearPending")
     assert "removeCard();" in clear, "只是藏起来，DOM 里还占着地方"
-    assert "if (!card) { decided = false; return; }" in clear, "缺字段时要能安全早退"
+    assert "if (!ctx.store.get('card')) { ctx.store.set('decided', false); return; }" in clear, "缺字段时要能安全早退"
     drop = _body("removeCard")
-    assert "removeChild(card)" in drop
-    assert "card = null;" in drop
+    assert "removeChild(ctx.store.get('card'))" in drop
+    assert "ctx.store.set('card', null)" in drop
     # 换目标整屏重绑：卡片没了，引用与状态要一起清。
     reset = _body("resetView")
-    assert "card = null;" in reset and "cardAsking = false;" in reset
+    assert "ctx.store.set('card', null)" in reset and "ctx.store.set('cardAsking', false)" in reset
 
     state = _body("applyState")
-    assert "if (state.awaiting) { showActions(); } else { clearPending(); }" in state, (
+    assert "if (state.awaiting) { app.status.showActions(); } else { app.confirm.clearPending(); }" in state, (
         "服务端说没有待确认时卡片不消失"
     )
+    assert "showApproval(" in state
+    assert "showPending(" not in state and "showCommandAsk" not in state
+    approval = _body("showApproval")
+    assert "showCombined(" in approval and "showCommandAsk(" in approval and "showPending(" in approval
+    combined = _body("showCombined")
+    assert "ask-card combined" in combined and "diffBox(" in combined and "ask-cmd" in combined
+    assert "处改动 + 1 条命令待确认" in combined
+    assert "detail.command" in combined and "detail.reason" in combined
+    assert "ctx.store.get('cardSig') === sig" in combined
+    assert "'应用改动并允许执行'" in _body("setAskLabels")
+    assert "'全部拒绝'" in _body("setAskLabels")
+    settle = _body("settleCard")
+    assert "处改动并允许执行：命令 " in settle
+    assert "处改动 + 命令 " in settle
 
 
 def test_pinned时选择也点不动() -> None:
@@ -1378,5 +1477,5 @@ def test_pinned时选择也点不动() -> None:
     """
     body = _body("drawTarget")
     assert "t.pinned" in body
-    assert "wsBox.disabled = locked" in body
     assert "newBtn.disabled = dead" in body
+    assert "line.tabIndex = locked ? -1 : 0" in _body("lockRows")

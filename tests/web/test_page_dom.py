@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from spoolkit.web.page import HTML
+from spoolkit.web.static import bundle_js
 
 HARNESS = Path(__file__).with_name("page_dom.js")
 
@@ -34,8 +35,10 @@ def dom(tmp_path_factory) -> dict:
     where = tmp_path_factory.mktemp("page-dom")
     page = where / "page.html"
     page.write_text(HTML, encoding="utf-8")
+    bundle = where / "test-bundle.js"
+    bundle.write_text(bundle_js(include_test=True), encoding="utf-8")
     done = subprocess.run(
-        [node, str(HARNESS), str(page)],
+        [node, str(HARNESS), str(page), str(bundle)],
         capture_output=True,
         # 必须显式给 utf-8：这台机器的 locale 是 gbk，而脚本吐的是中文 JSON。
         encoding="utf-8",
@@ -63,6 +66,47 @@ def test_同一帧重复到达时一个节点都不重建(dom: dict) -> None:
     assert cost["select"] == 0, "两条下拉的备选项被重画了"
 
 
+def test_归档默认不在左栏只在设置入口露数量(dom: dict) -> None:
+    """归档会话不该摊在左栏：默认只露页脚「设置」上的数量，列表要主动打开。"""
+    state = dom["archive_default"]
+    assert "归档的登录页修复" not in state["sidebar_text"], "归档行又摊回左栏了"
+    assert "old-1" not in state["sidebar_text"]
+    assert state["count"] == "2"
+    assert state["hidden"] is False
+    assert state["settings_hidden"] is True, "设置弹层默认就该是关的"
+
+
+def test_设置里能看到归档会话并恢复(dom: dict) -> None:
+    opened = dom["archive_open"]
+    assert opened["open"] is True
+    assert opened["aria"] == "false"
+    assert "归档的登录页修复" in opened["list"]
+    assert "old-2" in opened["list"], "没有标题的归档也要能靠 id 找到"
+    assert opened["rows"] == 2
+    assert opened["restore"] == 2
+    assert opened["restore_disabled"] == [False, False]
+    assert dom["archive_esc"]["closed"] is True, "Esc 没关掉设置"
+
+
+def test_当前会话不在会话表里也会补进左栏(dom: dict) -> None:
+    """`cli` 这种还没跑过的名字不在 `state.sessions` 里，但它是当前目标。"""
+    row = dom["current_session_row"]
+    assert row["found"] is True, "当前会话没有补进左栏"
+    assert row["highlighted"] is True, "补进来的当前会话没有高亮"
+    assert row["subtitle"] == "cli", "次级信息应该是会话 id"
+
+
+def test_会话行标题优先id次之(dom: dict) -> None:
+    assert dom["session_title_sub"] == "a1", "id 没有作为次级信息显示"
+
+
+def test_种子标题在Agent起名后被替换(dom: dict) -> None:
+    title = dom["agent_title"]
+    assert title["title"] == "模型起的标题"
+    assert title["sub"] == "a1"
+    assert title["fetched"] == ["/session/title"]
+
+
 def test_点击一行立刻亮起来而不是等回帧(dom: dict) -> None:
     """回帧那一趟里服务端会顺带探活模型，模型不通时要好几秒。
 
@@ -71,6 +115,21 @@ def test_点击一行立刻亮起来而不是等回帧(dom: dict) -> None:
     """
     assert "ws-b" in dom["optimistic_selected"], "点下去之后选中态没有立刻跟过去"
     assert dom["optimistic_cost"]["created"] == 0, "为了亮一行把节点重建了一遍"
+    chosen = dom["optimistic_chosen"]
+    assert chosen["root"] == "D:/ws-b", "乐观选中没有写进 store"
+    assert chosen["session"] == "a1"
+
+
+def test_首帧写进store且多个字段同一次通知(dom: dict) -> None:
+    assert dom["apply_running"] is False
+    assert dom["apply_session"] == "a1"
+    assert dom["apply_last_session"] == "a1"
+    assert dom["apply_first_keys"] == ["lastState", "session", "chosen"]
+
+
+def test_输入只通过ctx且Esc收起状态(dom: dict) -> None:
+    assert dom["composer_uses_ctx"] is True
+    assert dom["escape_closes_status"] is True
 
 
 def test_切换完成后服务端补的那一帧不再重画侧栏(dom: dict) -> None:
@@ -397,6 +456,11 @@ def test_多条通知堆在一起每条都能关(dom: dict) -> None:
     # 「全部关闭」：一条不剩，整块也跟着收起来。
     assert stack["after_all"]["keys"] == []
     assert stack["after_all"]["shown"] is False
+    cap = dom["toast_cap"]
+    assert cap["count"] == 3, f"通知超过 3 条：{cap}"
+    assert cap["newest"] == "failure|cap|四", f"最新一条不在栈顶：{cap}"
+    assert "failure|cap|一" not in cap["keys"]
+    assert cap["alert"] == "alert"
 
 
 def test_人关掉的那一份不再自己弹回来(dom: dict) -> None:
@@ -472,6 +536,7 @@ def test_探活详情保留状态地址探活时间与下一步(dom: dict) -> No
     # 展开详情**不动对话流**：那些新节点全在面板下（面板是绝对定位的浮层）。
     assert panel["panel_nodes"] > 0, "详情面板是空的"
     assert panel["panel_root"] == "st-panel", "详情节点挂到别人家去了"
+    assert panel["panel_first"] == "st-close", "关闭键不在详情的 DOM 首位"
     assert panel["stream_nodes"] == panel["stream_nodes_before"], "展开详情把对话流重画了"
     assert panel["stream_children"] == panel["stream_children_before"]
 
@@ -621,7 +686,12 @@ def test_有待确认时对话流里出现一张卡片(dom: dict) -> None:
         f"没有文件与增删行数：{card['summaries']}"
     )
     assert any("src/b.py" in one and "+1 -0" in one for one in card["summaries"])
+    assert card["cls"] == "ask-card"
+    assert card["apply_label"] == "应用全部改动"
+    assert card["reject_label"] == "拒绝全部"
     assert card["apply_buttons"] == 1 and card["reject_buttons"] == 1
+    assert len(card["folds"]) == 2
+    assert all(one["expanded"] == "true" and one["open"] is True for one in card["folds"])
     # 同一份待确认内容再来一帧（补帧 / 重连）不重建卡片。
     assert dom["card_repeat"]["created"] == 0, f"卡片被重建了：{dom['card_repeat']}"
 
@@ -630,6 +700,7 @@ def test_应用之后卡片变成一行状态(dom: dict) -> None:
     """确认完不在那里当横幅：卡片变成"已应用"的状态行，按钮随之消失。"""
     applied = dom["card_applied"]
     assert applied["calls"] == ["/confirm"], f"没有走 /confirm：{applied['calls']}"
+    assert applied["body"] == '{"apply":true}'
     assert applied["cards"] == 0, "点完之后卡片还留着"
     assert applied["rows"] == 1
     assert applied["text"].startswith("已应用：2 处改动")
@@ -643,6 +714,7 @@ def test_拒绝是另起一张卡片再变成已拒绝(dom: dict) -> None:
     rejected = dom["card_rejected"]
     assert rejected["new_card"] == 1, "新的一份待确认没有另起卡片"
     assert rejected["calls"] == ["/confirm"]
+    assert rejected["body"] == '{"apply":false}'
     assert rejected["cards"] == 0
     assert rejected["rows"] == 2, "上一行状态被覆盖掉了"
     assert rejected["last"].startswith("已拒绝：1 处改动")
@@ -668,16 +740,66 @@ def test_只读壳里那两个按钮根本不建(dom: dict) -> None:
     assert ro["actions"] == 0, "只读壳里连按钮条都建了出来"
 
 
-def test_命令授权用同一张卡片(dom: dict) -> None:
-    """授权和落盘是两件事：一个是问"能不能跑"，一个是问"要不要写入"。
-    同一张卡片，写的字不一样（要执行什么 / 为什么）。
+def test_命令授权卡与文件改动卡分开(dom: dict) -> None:
+    """授权和落盘是两件事：命令卡用警告样式和「允许执行 / 拒绝」，
+    文件卡用「应用全部改动 / 拒绝全部」。点完的状态行也按这件事分开写。
     """
     cmd = dom["card_command"]
+    assert cmd["cls"] == "ask-card command"
     assert cmd["kind"] == "命令授权待确认"
-    assert "要执行：whoami" in cmd["body"], f"没摆出被问的那条命令：{cmd['body']}"
-    assert "原因：白名单外" in cmd["body"]
-    assert "grants.json" in cmd["body"], "没给出「要长期允许」的路"
-    assert cmd["apply_buttons"] == 1
+    assert "要执行一条命令" in cmd["title"]
+    assert cmd["pre"] == "PRE" and cmd["code"] == "whoami"
+    assert cmd["reason"] == "原因：白名单外"
+    assert "仅允许这一次" in cmd["warn"] and "grants.json" in cmd["warn"]
+    assert "应用" not in cmd["card_text"], f"命令卡上还写着应用：{cmd['card_text']}"
+    assert cmd["allow"] == 1 and cmd["deny"] == 1
+    assert cmd["file_apply"] == 0 and cmd["file_reject"] == 0
+    allowed = dom["card_command_allowed"]
+    assert allowed["body"] == '{"apply":true}'
+    assert allowed["text"].startswith("已允许执行：命令 whoami")
+    denied = dom["card_command_denied"]
+    assert denied["body"] == '{"apply":false}'
+    assert denied["text"].startswith("已拒绝：命令 echo denied")
+
+
+def test_大diff默认收起并且文件头能折叠(dom: dict) -> None:
+    """超过 40 行的 diff 先收起，小的先展开。点文件头切换 aria-expanded；
+    同一份内容再来一帧不重建，所以刚展开的状态还在。
+    """
+    fold = dom["diff_fold"]
+    assert fold["files"] == 2
+    assert fold["big_lines"] == 200
+    assert fold["big_before"] == "false" and fold["big_after"] == "true"
+    assert fold["big_open_after"] is True
+    assert fold["big_body"] == "diff-file-body"
+    assert fold["small_before"] == "true" and fold["small_after"] == "false"
+    assert fold["small_open_after"] is False
+    assert fold["repeat"]["created"] == 0, f"折叠状态被重建冲掉了：{fold['repeat']}"
+    assert fold["still"] == "true"
+
+
+def test_同一帧的改动和命令一起确认(dom: dict) -> None:
+    """同一帧里 diff 和命令都在时，不能先画文件再被命令盖掉。
+    一张组合卡同时摆出两边，点一次只发一次 /confirm。
+    """
+    both = dom["card_both"]
+    assert both["cls"] == "ask-card combined"
+    assert both["kind"] == "2 处改动 + 1 条命令待确认"
+    assert both["files"] == 2 and both["cmds"] == 1
+    assert both["code"] == "git status"
+    assert both["reason"] == "原因：要看工作区"
+    assert "仅允许这一次" in both["warn"] and "grants.json" in both["warn"]
+    assert both["apply_label"] == "应用改动并允许执行"
+    assert both["reject_label"] == "全部拒绝"
+    assert both["file_apply"] == 0 and both["allow"] == 0
+    assert both["expanded_before"] == "true" and both["expanded_flipped"] == "false"
+    assert both["repeat"]["created"] == 0, f"组合卡被重建了：{both['repeat']}"
+    assert both["still"] == "false"
+    assert both["posts"] == [{"url": "/confirm", "body": '{"apply":true}'}]
+    assert both["text"].startswith("已应用 2 处改动并允许执行：命令 git status")
+    denied = dom["card_both_denied"]
+    assert denied["posts"] == [{"url": "/confirm", "body": '{"apply":false}'}]
+    assert denied["text"].startswith("已拒绝：2 处改动 + 命令 git status")
 
 
 def test_服务端说没有待确认时卡片从页面上消失(dom: dict) -> None:
@@ -720,7 +842,8 @@ def test_点新建会话先建出来再切过去(dom: dict) -> None:
     assert made["calls"] == ["/session/new", "/target"], (
         f"请求两连发不对：{made['calls']}"
     )
-    assert "web-new" in made["selected"], "建完没有切过去（或没点亮那一行）"
+    assert made["selected_sub"] == "web-new", "建完没有切过去（或没点亮那一行）"
+    assert "未命名会话" in made["selected"], "新会话没标题时应显示可读占位名"
 
 
 # --- ⑥ 收尾报告的**分档**：结论段干净、详情与用量进「思考过程」 ---
@@ -784,4 +907,164 @@ def test_刷新之后报告的分档一样(dom: dict) -> None:
     assert "已创建文件 hello.txt" in card["bubble_text"]
     assert "详情：" not in card["bubble_text"], card["bubble_text"]
     assert "详情：本次运行共落成 1 处改动" in card["trace_text"], card["trace_text"]
+
+
+def test_键盘能切目标并且抽屉Esc回到菜单(dom: dict) -> None:
+    """可见行是按钮：空格走同一条 /target；抽屉打开后焦点进去，Esc 回到菜单。"""
+    row = dom["row_key"]
+    assert row["role"] == "button"
+    assert row["tab"] == 0
+    entered = dom["row_enter"]
+    assert entered["posts"] == ["/target"], entered
+    assert entered["chosen"]["root"], entered
+    opened = dom["drawer_open"]
+    assert opened["drawer"] is True
+    assert opened["expanded"] == "true"
+    assert opened["focus"] == "new-session", opened
+    closed = dom["drawer_esc"]
+    assert closed["drawer"] is False
+    assert closed["expanded"] == "false"
+    assert closed["focus"] == "menu", closed
+    assert dom["no_hidden_select"] is True
+    assert dom["panel_close"]["label"] == "关闭状态详情"
+    assert dom["panel_close"]["click"] is True
+    live = dom["live"]
+    assert live["conn_role"] == "alert" and live["conn"] == "assertive"
+    assert live["thinking"] == "status"
+    assert live["toasts"] == "polite"
+    assert live["goal"] == "goal-label"
+    assert live["stream"] == "log"
+
+
+def test_草稿按会话隔离并且新建不继承(dom: dict) -> None:
+    """A 的半句不能出现在 B；同一目标的空帧也不能把正在打的字盖掉。"""
+    drafts = dom["drafts"]
+    assert drafts["blank_b"] == "", drafts
+    assert drafts["back_a"] == "A 的一半", drafts
+    assert drafts["back_b"] == "B 的另一半", drafts
+    assert drafts["kept_typing"] == "还在打", drafts
+    assert drafts["map_a"] == "A 的一半", drafts
+    assert drafts["map_b"] == "B 的另一半", drafts
+    assert drafts["fresh_value"] == "", drafts
+    assert drafts["fresh_draft"] is False, drafts
+    assert drafts["restored_a"] == "A 的一半", drafts
+    assert "/session/new" in drafts["new_posts"], drafts
+    assert "/target" in drafts["new_posts"], drafts
+
+
+def test_发送失败恢复草稿并且重试不重复气泡(dom: dict) -> None:
+    """500 和网络异常都把原文放回输入框；重试成功只发一次，也不再画第二条。"""
+    failed = dom["send_500"]
+    assert failed["value"] == "五百的原文", failed
+    assert failed["focus"] == "goal", failed
+    assert failed["draft"] == "五百的原文", failed
+    assert failed["bubbles"] == 1, failed
+    assert failed["users"] == 1, failed
+    assert "未发送" in failed["unsent"], failed
+    assert failed["retry"] == "重试", failed
+    assert failed["pending"] == "", failed
+    trip = dom["send_500_roundtrip"]
+    assert trip["away"] == "", trip
+    assert trip["back"] == "五百的原文", trip
+
+    net = dom["send_net"]
+    assert net["rejected"] is False, net
+    assert net["value"] == "断网的原文", net
+    assert net["focus"] == "goal", net
+    assert net["draft"] == "断网的原文", net
+    assert net["bubbles"] == 1 and net["retry"] == "重试", net
+    assert net["pending"] == "", net
+    assert net["users_before"] == 1 and net["users_after"] == 1, net
+    assert net["still_failed"] == 1, net
+    assert net["posts"] == ["/run"], net
+    assert net["notes"] == net["notes_before"], net
+
+    retry = dom["send_retry"]
+    assert retry["before"]["posts"] == ["/run"], retry
+    assert retry["before"]["users"] == 1, retry
+    assert retry["before"]["failed"] == 0, retry
+    assert retry["before"]["pending"] == "重试成功的原文", retry
+    assert retry["before"]["value"] == "", retry
+    assert retry["users"] == 1, retry
+    assert retry["pending"] == "", retry
+
+
+def test_标题列表表格和行内代码一起画出来(dom: dict) -> None:
+    """块级标记和行内代码在同一段里：标题、列表、表格、粗体、链接都要成节点。"""
+    md = dom["markdown"]
+    assert md["heading"] == "结论", md
+    assert md["items"] == ["先跑 spool status", "注意 看 文档"], md
+    assert md["codes"] == ["spool status", "a"], md
+    assert md["strong"] == "注意", md
+    assert md["link"] == "https://example.test/docs", md
+    assert md["cells"] == ["a", "b"], md
+    assert "##" not in md["raw"] and "**" not in md["raw"] and "`" not in md["raw"], md
+
+
+def test_空态按目标和历史重算(dom: dict) -> None:
+    """没选目标、选了但还没说话，是两种空态。示例只填输入框。"""
+    pick = dom["empty_pick"]
+    assert pick["mode"] == "pick", pick
+    assert "先选一个工作区和会话" in pick["text"], pick
+    assert pick["go"] == "去选择工作区", pick
+    assert pick["drawer"] is True, pick
+    ready = dom["empty_ready"]
+    assert ready["mode"] == "ready", ready
+    assert "ws-a" in ready["text"] and "A 的第 1 条" in ready["text"], ready
+    assert "让 Agent 做点什么" in ready["text"], ready
+    assert ready["samples"] == ["解释这个项目结构", "跑测试并修失败", "找我最近改过的文件"], ready
+    assert ready["goal"] == "解释这个项目结构", ready
+    assert ready["focus"] == "goal", ready
+    assert ready["posts"] == 0, ready
+    assert ready["draft"] == "解释这个项目结构", ready
+    assert dom["empty_after_send"]["shown"] == 0, dom["empty_after_send"]
+    switched = dom["empty_switched"]
+    assert switched["shown"] == 1, switched
+    assert switched["mode"] == "ready", switched
+    assert "A 的第 2 条" in switched["text"], switched
+    assert "A 的第 1 条" not in switched["text"], switched
+
+
+def test_顶栏是工作区名和会话标题(dom: dict) -> None:
+    """长路径不进顶栏正文。完整根在 title 和状态详情里。没目标仍是原来那句。"""
+    bar = dom["where_bar"]
+    assert bar["text"] == "beta · 当前会话", bar
+    assert "D:/" not in bar["text"], bar
+    assert bar["title"] == "D:/very/long/path/that/should/not/wrap/beta-workspace", bar
+    assert bar["title"] in bar["status"], bar
+    assert dom["where_empty"] == "还没有目标", dom["where_empty"]
+
+
+def test_侧栏搜索只过滤不发请求(dom: dict) -> None:
+    """当前目标留在列表里。没有匹配时有一行提示。Escape 只清搜索。"""
+    default = dom["search_default"]
+    assert default["ws"] == ["beta", "alpha", "my-tmp-files"], default
+    assert "spool-chat-9" not in default["ws"], default
+    assert "tmp-notes" not in default["ws"] and "temp-scratch" not in default["ws"], default
+    alpha = dom["search_alpha"]
+    assert alpha["ws"] == ["beta", "alpha"], alpha
+    assert "当前会话" in alpha["sess"] and "Alpha 笔记" in alpha["sess"], alpha
+    none = dom["search_none"]
+    assert none["ws"] == ["beta"], none
+    assert none["sess"] == ["当前会话"], none
+    assert "没有匹配的工作区/会话" in none["text"], none
+    assert dom["search_cleared"]["ws"] == default["ws"], dom["search_cleared"]
+    assert dom["search_alias"]["ws"] == ["beta", "alpha"], dom["search_alias"]
+    esc = dom["search_escape"]
+    assert esc["value"] == "", esc
+    assert esc["ws"] == default["ws"], esc
+    assert esc["focus"] == "goal", esc
+    assert esc["stopped"] is True, esc
+    assert esc["statusOpen"] is True, esc
+    assert esc["posts"] == 0, esc
+    assert dom["search_escape_global"]["statusOpen"] is False, dom["search_escape_global"]
+
+
+def test_临时工作区默认隐藏可被搜索找回(dom: dict) -> None:
+    """前缀才算临时目录。当前目标即使是临时目录也留在列表里。"""
+    assert dom["search_temp"]["ws"] == ["beta", "spool-chat-9"], dom["search_temp"]
+    current = dom["search_current_temp"]["ws"]
+    assert "spool-chat-9" in current, current
+    assert "tmp-notes" not in current and "temp-scratch" not in current, current
+    assert "my-tmp-files" in current and "alpha" in current and "beta" in current, current
 

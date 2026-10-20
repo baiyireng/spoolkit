@@ -1,0 +1,140 @@
+
+  /* ── 通知：右上角的浮动气泡。**脱离文档流**（`position:fixed`，`z-index` 高于内容）：
+        出现与消失都不改页面高度、不挪滚动位置——"弹一条通知把对话流推下去"就是这么坏的。
+        容器**不吃点击**（`pointer-events:none`），只有气泡与「全部关闭」自己吃（`auto`）：
+        它跟对话流叠在一起时（宽屏上右侧那一列会压到居中的卡片），底下的按钮照样点得动。
+        可堆叠（竖着排，不叠在一起）、每条一个关闭键；`info` 自己会走，
+        **`error` / `warn` 不会**——错误在用户看到之前消失，比不提示更糟。 */
+  .toast-all { display:none; align-self:flex-end; padding:4px 12px;
+               border-radius:999px; border:1px solid var(--line);
+               background:var(--panel-2); color:var(--text-dim);
+               cursor:pointer; font-size:12px; pointer-events:auto; }
+  .toast-all.show { display:inline-flex; }
+  .toast-all:hover { color:var(--text); border-color:var(--text-dim); }
+  .toast { display:flex; align-items:flex-start; gap:8px;
+           border:1px solid var(--line); border-radius:12px;
+           padding:9px 10px 9px 12px; background:var(--panel-2);
+           color:var(--text); font-size:13px; overflow-wrap:anywhere;
+           box-shadow:0 8px 26px rgba(0,0,0,.34); pointer-events:auto;
+           animation:toast-in .14s ease-out; }
+  .toast-body { flex:1 1 auto; min-width:0; }
+  .toast-title { font-weight:600; }
+  .toast-line { margin-top:3px; color:var(--text-dim); }
+  .toast-raw { margin-top:6px; color:var(--text-faint);
+               font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
+  .toast-close { flex:0 0 auto; width:24px; height:24px; padding:0; border:0;
+                 border-radius:6px; background:transparent; color:var(--text-dim);
+                 cursor:pointer; display:flex; align-items:center;
+                 justify-content:center; }
+  .toast-close:hover { background:var(--bubble-user); color:var(--text); }
+  .toast-close svg { width:14px; height:14px; }
+  .pair-code { font:12.5px/1.55 var(--mono); font-weight:700;
+               letter-spacing:.06em; }
+  .toast.info { border-color:var(--info-line); background:var(--info-bg);
+                color:var(--info-text); }
+  .toast.warn { border-color:var(--warn-line); background:var(--warn-bg);
+                color:var(--warn-text); }
+  .toast.error { border-color:var(--danger-line); background:var(--danger-bg);
+                 color:var(--danger-text); }
+  /* `ask` 那一档（待批准）现在**没有调用方**：配对码收进了右上角状态区
+     （那里必须看得见码，气泡会被划走）。配色留着，因为气泡这个组件仍是四档的。 */
+  .toast.ask { border-color:var(--pair-line); background:var(--pair-bg);
+               color:var(--pair-text); }
+  .toast.info .toast-line, .toast.info .toast-close,
+  .toast.warn .toast-line, .toast.warn .toast-close,
+  .toast.error .toast-line, .toast.error .toast-close,
+  .toast.ask .toast-line, .toast.ask .toast-close { color:inherit; opacity:.82; }
+
+  /* 入场只动 `opacity` 与一点位移：`position:fixed` 的元素上做 transform 不会建
+     包含块问题，而 `prefers-reduced-motion` 那一档把它整个关掉（见文件末尾）。 */
+  @keyframes toast-in { from { opacity:0; transform:translateY(-4px); }
+                        to { opacity:1; transform:none; } }
+  /* ══ 右上角那一列：**常驻提示**与**通知**，两样都脱离文档流 ══
+     它们曾经各自占着地方：常驻状态（探活 / 只读 / 钉住 / 待配对 / 别处在跑）先是顶部
+     一条横幅带，上一轮搬进了输入条下面那一行（`.st`）——可那一行**在文档流里**：
+     徽标一多就换行，`#composer` 跟着变高，`#stream`（`flex:1`）就被压矮，
+     而"提示一出现就把对话区挤下去"正是用户这次报的第一条。
+
+     所以这一轮把常驻提示也**收到右上角**，与通知共用一条 `position:fixed` 的列：
+     出现 / 展开 / 收起都**不改对话区的高度、不挪滚动位置**（证据在
+     `tests/web/page_dom.js` 的 `no_squeeze`：对话区可用高度前后一样，而且那个
+     模型先被反证过它量得出"挤"）。两样都在同一列里靠右堆叠，也就不存在"通知盖住
+     徽标"这种事（徽标是不该被划走的状态，通知是不该被盖住的提醒）。
+
+     尺寸的依据（不是随手写的数）：
+     - `width:min(420px, 92vw)`：420px 是"一条状态说明 + 一条 `spool service list`
+       这类命令"在 12.5px 等宽下不折行的量级；92vw 是窄屏那一档的护栏——留 8vw
+       给边距，右锚 14px，视口窄到 175px 才开始贴边，**不越界**（同一件事在
+       860px 以下那条媒体查询里再收一次）。
+     - `height:auto`（一个字都不写死）：内容多少就多高，徽标换行也不会溢出——
+       整列的宽度是定值，高度随内容走。
+     - 容器 `pointer-events:none`，只有徽标、详情面板、气泡自己吃点击：它压在
+       对话流上时，底下的卡片与按钮照样点得动。 */
+  #corner { position:fixed; z-index:30; top:52px; right:14px;
+            width:min(420px, 92vw); height:auto;
+            max-height:calc(100vh - 120px); overflow:auto;
+            display:flex; flex-direction:column; align-items:stretch;
+            gap:8px; pointer-events:none; }
+  #hints { position:relative; width:100%; height:auto; display:flex;
+           flex-wrap:wrap; justify-content:flex-end; align-items:flex-start; gap:6px; }
+  #toasts { display:none; width:100%; max-height:60vh; overflow-y:auto;
+            flex-direction:column; gap:8px; }
+  #toasts.show { display:flex; }
+
+  /* ══ 状态区：右上角那一列里的常驻提示（`.st-item` 徽标 + `#st-panel` 详情） ══
+     "这一页现在是什么模式 / 探活通不通 / 有没有人在等批准"全在这里，而它**不在文档流里**
+     （挂在 `#corner` 那个 `position:fixed` 的列下）：对话区的高度与滚动位置都不受它影响。
+     三种信息各就各位：① 探活常态只剩一枚小圆点（**不是**"显示一句一切正常"）；
+     ② 只读（非回环）与 `--root` 钉住才摆出一枚锁徽标——它回答"为什么点不动"；
+     ③ 待配对 / 别处还有一条在跑收进同一行，详情里仍然是完整的码与命令。
+     点徽标（或那枚圆点）展开详情；再点、点别处、按 Esc 收起。 */
+  .st { display:flex; align-items:center; gap:6px; max-width:800px;
+        margin:8px auto 0; font-size:11.5px; color:var(--text-faint); }
+  .st-hint { margin-left:auto; padding-left:10px; color:var(--text-dim);
+             white-space:nowrap; }
+  .st-item { display:inline-flex; align-items:center; gap:6px; max-width:44vw;
+             min-width:0; flex:0 1 auto; padding:2px 9px; border-radius:999px;
+             border:1px solid var(--line-soft); background:var(--panel-2);
+             color:var(--text-faint); cursor:pointer; font-size:11.5px;
+             line-height:1.7; pointer-events:auto; }
+  .st-item > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .st-item:hover, .st-item[aria-expanded="true"] { color:var(--text);
+             border-color:var(--line); }
+  /* 常态那枚圆点：绿色、低调，但不沉默——鼠标停上去（`title`）与读屏（`aria-label`）
+     都念得出"模型探活：正常"。 */
+  .st-dot { width:8px; height:8px; flex:0 0 8px; border-radius:50%;
+            background:var(--ok); }
+  .st-item.warn { color:var(--warn-text); border-color:var(--warn-line); }
+  .st-item.warn .st-dot { background:var(--warn-text); }
+  .st-item.bad { color:var(--danger-text); border-color:var(--danger-line); }
+  .st-item.bad .st-dot { background:var(--bad); }
+  .st-item.ro { color:var(--ro-text); border-color:var(--ro-line); }
+  .st-item.ask { color:var(--pair-text); border-color:var(--pair-line); }
+  .st-item svg { width:12px; height:12px; flex:0 0 12px; }
+  /* 详情面板：以 `#hints` 为锚**绝对定位**，从徽标下面朝下展开（**不占文档流**）。
+     高度自适应内容、超过 56vh 才自己滚：面板再长也不会把右上角那一列撑出屏。 */
+  /* 详情在徽标下面、通知上面，三者同一列往下排，展开时把通知往下推。 */
+  .st-panel { position:static; width:100%; max-height:56vh; overflow-y:auto;
+              display:flex; flex-direction:column; gap:8px;
+              padding:12px 14px; border-radius:14px; border:1px solid var(--line);
+              background:var(--panel); color:var(--text); font-size:12.5px;
+              box-shadow:0 10px 30px rgba(0,0,0,.4); pointer-events:auto;
+              animation:toast-in .14s ease-out; }
+  .st-close { align-self:flex-end; width:28px; height:28px; padding:0;
+              border:0; border-radius:8px; background:transparent;
+              color:var(--text-dim); cursor:pointer; pointer-events:auto;
+              display:flex; align-items:center; justify-content:center; }
+  .st-close:hover { background:var(--bubble-user); color:var(--text); }
+  .st-close svg { width:14px; height:14px; }
+  .st-sec + .st-sec { margin-top:10px; padding-top:10px;
+                      border-top:1px solid var(--line-soft); }
+  .st-sec-head { font-weight:600; }
+  .st-line { margin-top:3px; color:var(--text-dim); overflow-wrap:anywhere; }
+  .st-line.bad { color:var(--danger-text); }
+  .st-raw { margin-top:6px; color:var(--text-faint);
+            font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
+  #conn { position:static; align-self:center; max-width:100%;
+          color:var(--danger-text); background:var(--danger-bg);
+          border:1px solid var(--danger-line); border-radius:999px;
+          padding:4px 14px; font-size:12px; display:none;
+          pointer-events:none; }

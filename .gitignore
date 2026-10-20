@@ -24,6 +24,9 @@ scratch_lab/
 # 误放在仓库根的包缓存。不忽略时 git status 会扫上万个文件。
 .pnpm-store/
 
+# 网页壳的开发期检查器用。运行时读 assets/dist，不需要 Node。
+web/node_modules/
+
 # pytest / 探针跑出来的临时目录与调试输出
 .pytest_tmp/
 .pytest-*/

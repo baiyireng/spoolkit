@@ -44,9 +44,10 @@ def _body(name: str) -> str:
 
 
 def test_顶部有工作区与会话两条选择栏() -> None:
-    assert HTML.count("<select") == 2
-    assert 'id="ws"' in HTML
-    assert 'id="sess"' in HTML
+    assert "<select" not in HTML
+    assert 'id="ws"' not in HTML
+    assert 'id="sess"' not in HTML
+    assert "setAttribute('role', 'button')" in _body("row")
     body = _body("drawTarget")
     # 两条下拉的备选就是 /state 里给它们准备的那两个字段
     assert "state.workspaces" in body
@@ -56,13 +57,15 @@ def test_顶部有工作区与会话两条选择栏() -> None:
 
 
 def test_当前目标的全路径摆在页面上() -> None:
-    """批次一踩过"绑错工作区、把 __init__.py 写空"的坑：我在哪儿必须一眼看得出。"""
+    """顶栏只显示工作区名和会话标题。完整根路径在 title 上，悬停能看到。"""
     assert 'id="where"' in HTML
 
     body = _body("drawTarget")
 
-    assert "whereBox.textContent = t.root" in body
-    assert "会话" in body
+    assert "whereBox.textContent = wsName + ' · ' + sessName" in body
+    assert "whereBox.title = t.root" in body
+    assert "还没有目标" in body
+    assert "whereBox.textContent = t.root" not in body
 
 
 # --- 切换：POST /target，且不重连事件流 ---
@@ -76,10 +79,10 @@ def test_切换走的是POST_target() -> None:
 
 
 def test_两条下拉各自发起切换() -> None:
-    script = _script()
+    body = _body("target")
 
-    assert "switchTarget({workspace: wsBox.value})" in script
-    assert "switchTarget({session: sessBox.value})" in script
+    assert "ctx.switchTarget({workspace: workspace})" in body
+    assert "ctx.switchTarget({session: name})" in body
 
 
 def test_切换不重连事件流() -> None:
@@ -106,7 +109,7 @@ def test_state帧会重画目标与历史() -> None:
 
     reset = _body("resetView")
     assert "stream.replaceChildren()" in reset, "换了目标还留着上一个目标的输出"
-    assert "drawn = 0" in reset, "不给新目标重画历史的门"
+    assert "ctx.store.set('drawn', 0)" in reset, "不给新目标重画历史的门"
 
 
 # --- 三种状态各有分支 ---
@@ -128,7 +131,7 @@ def test_空态引导人选工作区() -> None:
     assert "未选择工作区" in body
     assert "登记表为空" in body, "登记表为空时没给出路（只让人对着空列表选）"
     assert "t.note" in body, "空态那句话以服务端为准，页面只兜底"
-    assert "targetMissing = !t.root" in body, "空态那枚徽标没有画出来"
+    assert "ctx.store.set('targetMissing', !t.root)" in body, "空态那枚徽标没有画出来"
     assert "drawStatus()" in body, "空态那句话没有落到状态区"
 
 
@@ -137,8 +140,8 @@ def test_pinned时选择栏禁用并说明原因() -> None:
     body = _body("drawTarget")
 
     assert "t.pinned" in body
-    assert "wsBox.disabled = locked" in body
-    assert "sessBox.disabled = locked" in body
+    assert "lockRows(workspaceList, locked)" in _body("renderSidebar")
+    assert "line.tabIndex = locked ? -1 : 0" in _body("lockRows")
     assert "--root" in body
 
 
@@ -173,4 +176,4 @@ def test_请求被拒时把error说给人看() -> None:
     # 切换被拒（409/400）同样要落在页面上，而且选择栏要拨回当前目标
     switch = _body("switchTarget")
     assert "next === null" in switch
-    assert "drawTarget(lastState)" in switch
+    assert "drawTarget(store.get('lastState'))" in switch

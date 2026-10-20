@@ -9,16 +9,20 @@
    圆角、滚动条外观）——那些只能在真浏览器里看。它能量的是"脚本对 DOM 做了什么"：
    建了几个节点、换了哪几个、谁被点亮了、认不认得出"连不上模型"。
 
-   用法：node page_dom.js <page.html>，往 stdout 打一段 JSON（断言在
-   `test_page_dom.py` 里）。node 不在 PATH 时那条用例跳过（与 `node --check` 同一个态度）。
+   用法：node page_dom.js <page.html> <test-bundle.js>，往 stdout 打一段 JSON
+   （断言在 `test_page_dom.py` 里）。HTML 只提供元素 id；脚本跑 test-bundle，
+   测试面在 `ctx.__spoolTest`。node 不在 PATH 时那条用例跳过。
 */
 
 const fs = require('fs');
 const vm = require('vm');
 
 const html = fs.readFileSync(process.argv[2], 'utf8');
-const script = html.slice(html.indexOf('<script>') + '<script>'.length,
-  html.lastIndexOf('</script>'));
+if (!process.argv[3]) {
+  console.error('用法：node page_dom.js <page.html> <test-bundle.js>');
+  process.exit(2);
+}
+const script = fs.readFileSync(process.argv[3], 'utf8');
 
 const stats = { created: 0, rows: 0, sidebar: 0, stream: 0, select: 0, replaced: 0, attached: 0 };
 function snap() { return JSON.parse(JSON.stringify(stats)); }
@@ -66,6 +70,8 @@ class El {
     this.attrs[String(name)] = String(value);
     if (String(name) === 'class') { this.className = value; }
   }
+  removeAttribute(name) { delete this.attrs[String(name)]; }
+  focus() { document.activeElement = this; }
   getAttribute(name) {
     return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null;
   }
@@ -172,6 +178,13 @@ const ids = new Map();
 for (const match of html.matchAll(/id="([^"]+)"/g)) {
   const el = new El(match[1].startsWith('ws') || match[1] === 'sess' ? 'select' : 'div');
   el._id = match[1];
+  const start = html.lastIndexOf('<', match.index);
+  const end = html.indexOf('>', match.index);
+  const tag = html.slice(start, end);
+  for (const attr of tag.matchAll(/\s([a-zA-Z:-]+)="([^"]*)"/g)) {
+    if (attr[1] === 'id' || attr[1] === 'class') { continue; }
+    el.setAttribute(attr[1], attr[2]);
+  }
   ids.set(match[1], el);
 }
 const body = new El('body');
@@ -199,6 +212,7 @@ function fireTimers() {
 
 const document = {
   body,
+  activeElement: null,
   getElementById: (id) => ids.get(id) || null,
   createElement: (tag) => new El(tag),
   createTextNode: (text) => { const node = new El('text'); node.textContent = text; return node; },
@@ -228,9 +242,9 @@ const ctx = {
   __fetchImpl: null,
 };
 ctx.window = ctx;
-ctx.fetch = async (url) => {
+ctx.fetch = async (url, opts) => {
   ctx.fetchCalls.push(url);
-  if (ctx.__fetchImpl) { return ctx.__fetchImpl(url); }
+  if (ctx.__fetchImpl) { return ctx.__fetchImpl(url, opts); }
   return { ok: true, status: 200, json: async () => ctx.__nextBody };
 };
 vm.createContext(ctx);
@@ -297,6 +311,25 @@ function highlighted() {
   return found;
 }
 
+function highlightedSub() {
+  for (const boxId of ['workspaces', 'sessions']) {
+    const walk = (node) => {
+      for (const kid of node.children) {
+        if (String(kid._cls || '').split(/\s+/).indexOf('on') >= 0) {
+          const sub = kid.querySelector('.src');
+          if (sub) { return sub.textContent; }
+        }
+        const deeper = walk(kid);
+        if (deeper) { return deeper; }
+      }
+      return '';
+    };
+    const found = walk(ids.get(boxId));
+    if (found) { return found; }
+  }
+  return '';
+}
+
 function rowByName(boxId, label) {
   for (const node of ids.get(boxId).querySelectorAll('.li')) {
     const name = node.querySelector('.nm');
@@ -357,10 +390,26 @@ function visibleBadges() {
 }
 function panelOpen() { return !ids.get('st-panel').classList.contains('hidden'); }
 function panelText() { return ids.get('st-panel').textContent; }
-// 每个 diff 的头一行（"哪个文件 + 加了几行减了几行"）。
+// 每个文件头（路径 + 加了几行减了几行）。正文在可折叠块里，头是按钮。
 function diffHeads() {
-  return ids.get('stream').querySelectorAll('.diff').map(
-    (node) => (node.firstChild ? node.firstChild.textContent : ''));
+  return ids.get('stream').querySelectorAll('.diff-file-head').map(
+    (node) => node.textContent);
+}
+function diffFolds() {
+  return ids.get('stream').querySelectorAll('.diff-file').map((node) => {
+    const head = node.querySelector('.diff-file-head');
+    return {
+      open: node.classList.contains('open'),
+      expanded: head ? head.getAttribute('aria-expanded') : '',
+      head: head ? head.textContent : '',
+    };
+  });
+}
+function confirmButtonCounts() {
+  return {
+    apply_buttons: buttonsWith('应用全部改动').length + buttonsWith('允许执行').length,
+    reject_buttons: buttonsWith('拒绝全部').length + buttonsWith('拒绝').length,
+  };
 }
 
 // 按**文字**数按钮：卡片的「应用 / 拒绝」没有静态 id（没有待确认内容时连节点都不建），
@@ -380,9 +429,15 @@ function inStream(node) { return node ? node._rootId() : ''; }
 const out = {};
 
 // ①-1 首帧之后，**同一帧再来 5 次**：一个节点都不该新建（同键跳过）。
-ctx.applyState(FRAME_A);
+const applyNotices = [];
+ctx.__spoolTest.store.subscribe(function (keys) { applyNotices.push(keys.slice()); });
+ctx.__spoolTest.applyState(FRAME_A);
+out.apply_running = ctx.__spoolTest.store.get('running');
+out.apply_session = ctx.__spoolTest.store.get('session');
+out.apply_last_session = ctx.__spoolTest.store.get('lastState').target.session;
+out.apply_first_keys = applyNotices[0] || [];
 const beforeRepeat = snap();
-for (let index = 0; index < 5; index += 1) { ctx.applyState(FRAME_A); }
+for (let index = 0; index < 5; index += 1) { ctx.__spoolTest.applyState(FRAME_A); }
 out.repeat_frame = since(beforeRepeat);
 
 // ①-2 点一行工作区：**同步**就该亮起来（回帧还没到），而且不重建节点。
@@ -390,35 +445,36 @@ const beforeClick = snap();
 ctx.__fetchImpl = () => new Promise(() => {});   // 回帧永远不到（模拟服务端在探活）
 rowByName('workspaces', 'ws-b').onclick();
 out.optimistic_selected = highlighted();
+out.optimistic_chosen = ctx.__spoolTest.store.get('chosen');
 out.optimistic_cost = since(beforeClick);
 ctx.__fetchImpl = null;
 
 // ①-3 切换：回帧 + 服务端补的那一帧，各重建了多少。
 ctx.__nextBody = FRAME_B;
 const beforeSwitch = snap();
-ctx.switchTarget({ workspace: ROOT_B }).then(() => {
+ctx.__spoolTest.switchTarget({ workspace: ROOT_B }).then(() => {
   out.switch_reply = since(beforeSwitch);
   out.switch_selected = highlighted();
   const beforeDup = snap();
-  ctx.applyState(FRAME_B);
+  ctx.__spoolTest.applyState(FRAME_B);
   out.switch_duplicate = since(beforeDup);
 
   // ①-4 同一目标、消息变长了两条：只补那两条，侧栏不动。
   const bubbles = streamBubbles();
   const beforeGrow = snap();
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(8, 'b')));
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(8, 'b')));
   out.history_grew = since(beforeGrow);
   out.history_added = streamBubbles() - bubbles;
 
   // ①-5 3 秒轮询（refreshStatus）：状态区之外不该有重建。
   ctx.__nextBody = FRAME_B;
   const beforePoll = snap();
-  ctx.refreshStatus().then(() => {
+  ctx.__spoolTest.refreshStatus().then(() => {
     out.poll = since(beforePoll);
 
     // ③ 代码块与正文分开：一段"正文 + 围栏代码 + 正文 + 行内代码"
     const bubble = document.createElement('div');
-    ctx.fillRich(bubble, [
+    ctx.__spoolTest.fillRich(bubble, [
       '先说一句 `spool status` 之类的行内代码。',
       '```powershell',
       'spool web',
@@ -436,25 +492,25 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
     };
 
     // ② 连不上模型：结构化线索 → 人话
-    const parts = ctx.explainFailure(
+    const parts = ctx.__spoolTest.explainFailure(
       'spoolkit.llm.llamacpp.LlamaCppError: 无法连接 llama-server（ConnectTimeout），'
       + '请确认服务已启动并监听正确端口',
       { stage: 'model', kind: 'connect', url: 'http://127.0.0.1:8080' }
     );
     out.failure = parts;
-    out.failure_by_text = ctx.explainFailure('httpx.ConnectError: Connection refused', null) !== null;
-    out.failure_unknown = ctx.explainFailure('工具 read_file 失败：文件不存在', null);
-    out.redact = ctx.redact('api_key=sk-abcdef123456 Bearer abcdefghijklmn token=zzz9');
-    out.address_fallback = ctx.explainFailure('Connection refused', null).lines[0];
+    out.failure_by_text = ctx.__spoolTest.explainFailure('httpx.ConnectError: Connection refused', null) !== null;
+    out.failure_unknown = ctx.__spoolTest.explainFailure('工具 read_file 失败：文件不存在', null);
+    out.redact = ctx.__spoolTest.redact('api_key=sk-abcdef123456 Bearer abcdefghijklmn token=zzz9');
+    out.address_fallback = ctx.__spoolTest.explainFailure('Connection refused', null).lines[0];
 
     // 画出来之后长什么样：认不出来的是"原来的词 + 原文"，认出来的是块。
     const beforePlain = ids.get('stream').querySelectorAll('.failure').length;
-    ctx.showFailure('失败：', '工具 read_file 失败：文件不存在', null);
+    ctx.__spoolTest.showFailure('失败：', '工具 read_file 失败：文件不存在', null);
     out.failure_plain_blocks = ids.get('stream').querySelectorAll('.failure').length - beforePlain;
     const plain = ids.get('stream').querySelectorAll('.sys-line');
     out.failure_plain = plain[plain.length - 1].textContent;
     const before = ids.get('stream').querySelectorAll('.failure').length;
-    ctx.showFailure('失败：', 'LlamaCppError: 无法连接 llama-server', {
+    ctx.__spoolTest.showFailure('失败：', 'LlamaCppError: 无法连接 llama-server', {
       kind: 'connect', url: 'http://127.0.0.1:9',
     });
     out.failure_blocks = ids.get('stream').querySelectorAll('.failure').length - before;
@@ -470,8 +526,8 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
       model: { ok: false, target: 'http://127.0.0.1:8080', detail: '拒绝连接', kind: 'connect' },
       services: [], state: 'down', probed_at: 1700000000, age_s: 3,
     };
-    ctx.closeAllToasts();   // 先清干净：要能说"探活**一条气泡都不产生**"
-    ctx.showHealth(HEALTH_UP);
+    ctx.__spoolTest.closeAllToasts();   // 先清干净：要能说"探活**一条气泡都不产生**"
+    ctx.__spoolTest.showHealth(HEALTH_UP);
     out.health_ok = {
       label: stLabel('st-health'),
       cls: stNode('st-health')._cls,
@@ -481,7 +537,7 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
       keys: toastKeys(),
     };
     const beforeDown = snap();
-    ctx.showHealth(DOWN);
+    ctx.__spoolTest.showHealth(DOWN);
     out.health_down = {
       label: stLabel('st-health'),
       cls: stNode('st-health')._cls,
@@ -491,13 +547,13 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
     };
     // 同一份内容再来一拍（3 秒轮询就是这么送的）：一个节点都不该新建。
     const beforeHealthRepeat = snap();
-    ctx.showHealth(DOWN);
+    ctx.__spoolTest.showHealth(DOWN);
     out.health_repeat = since(beforeHealthRepeat);
     // 点开那枚徽标：四件事都要在（地址 / 探活时间 / 可能原因 / 下一步敲什么）。
     const beforePanel = snap();
     const streamKidsBefore = ids.get('stream').children.length;
     const streamNodesBefore = allNodes(ids.get('stream')).length;
-    ctx.setStatusOpen(true);
+    ctx.__spoolTest.setStatusOpen(true);
     out.health_panel = {
       open: panelOpen(),
       text: panelText(),
@@ -508,33 +564,39 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
       stream_nodes_before: streamNodesBefore,
       panel_nodes: allNodes(ids.get('st-panel')).length,
       panel_root: (function () {
-        const kid = ids.get('st-panel').firstChild;
+        const kids = ids.get('st-panel').children.filter(function (node) {
+          return node._id !== 'st-close';
+        });
+        const kid = kids.length ? kids[0] : null;
         return kid ? kid._rootId() : '';
+      })(),
+      panel_first: (function () {
+        const kid = ids.get('st-panel').firstChild;
+        return kid ? (kid._id || '') : '';
       })(),
       cost: since(beforePanel),
     };
-    ctx.setStatusOpen(false);
+    ctx.__spoolTest.setStatusOpen(false);
     out.health_panel_closed = {open: panelOpen(), aria: stNode('st-health').getAttribute('aria-expanded')};
     // 模型又通了：圆点回到常态——一条通知都不该留（探活不再是气泡）。
-    ctx.showHealth(HEALTH_UP);
+    ctx.__spoolTest.showHealth(HEALTH_UP);
     out.health_back = {
       label: stLabel('st-health'), cls: stNode('st-health')._cls,
       keys: toastKeys(), visible: visibleBadges(),
     };
     // 还没探过：既不许画成"通了"，也不许画成"连不上"。
-    ctx.showHealth({
+    ctx.__spoolTest.showHealth({
       model: { ok: null, target: '', detail: '还没探过（后台探活刚起来）', kind: '' },
       services: [], state: 'unknown', probed_at: null, age_s: null,
     });
     out.health_unknown = {label: stLabel('st-health'), cls: stNode('st-health')._cls};
     out.health_line_unknown = stLabel('st-health');
-    ctx.showHealth(HEALTH_UP);
+    ctx.__spoolTest.showHealth(HEALTH_UP);
 
     // ①-6 点「＋ 新建会话」：**先让服务端建出来、再切过去**，两个请求都要发对
     // （以前这里只发一次 /target，而服务端不新建会话——那个按钮点下去只有 400）。
     const posts = [];
     const SROWS_NEW = [{ id: 'web-new', title: '', archived: false, last_active: 1, current: true }];
-    ctx.prompt = () => 'web-new';
     ctx.__fetchImpl = (url) => {
       posts.push(url);
       if (url === '/session/new') {
@@ -545,7 +607,11 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
         json: async () => frame(ROOT_B, 'web-new', WROWS, SROWS_NEW, history(0, '')) });
     };
     ids.get('new-session').onclick().then(() => {
-      out.new_session = { calls: posts, selected: highlighted() };
+      out.new_session = {
+        calls: posts,
+        selected: highlighted(),
+        selected_sub: highlightedSub(),
+      };
       ctx.__fetchImpl = null;
       return extras();
     }).then(() => {
@@ -559,11 +625,11 @@ ctx.switchTarget({ workspace: ROOT_B }).then(() => {
 /* ── ① 通知 / ② 待确认卡片 / ③ 历史分隔：都放在最后，别打乱上面那几组计数 ── */
 
 async function extras() {
-  ctx.closeAllToasts();
+  ctx.__spoolTest.closeAllToasts();
 
   // ①-7 一次性提示（`info`）**自己走**：页面排了一个定时器，到点那条就没了。
   const beforeInfo = snap();
-  ctx.notifyInfo('已恢复会话 a2', []);
+  ctx.__spoolTest.notifyInfo('已恢复会话 a2', []);
   const infoScheduled = timers.length;
   out.info_toast = {
     keys: toastKeys(),
@@ -581,7 +647,7 @@ async function extras() {
 
   // ①-8 错误：**不许自己消失**（一个定时器都不排），四件事都要在气泡里。
   const timersBeforeError = timers.length;
-  ctx.showFailure('失败：', 'LlamaCppError: 无法连接 llama-server（ConnectTimeout）', {
+  ctx.__spoolTest.showFailure('失败：', 'LlamaCppError: 无法连接 llama-server（ConnectTimeout）', {
     kind: 'connect', url: 'http://127.0.0.1:9',
   });
   const errorToast = toastWith('failure|');
@@ -604,8 +670,8 @@ async function extras() {
   // 气泡现在只管"刚刚发生了什么"（失败 / 做成了的回执）；"这一页什么状态"走状态区，
   // 所以这里直接摆两条失败通知。
   const failSpec = (key, title) => ({key: key, kind: 'error', title: title, lines: ['一行']});
-  ctx.showToast(failSpec('failure|甲', '失败甲'));
-  ctx.showToast(failSpec('failure|乙', '失败乙'));
+  ctx.__spoolTest.showToast(failSpec('failure|甲', '失败甲'));
+  ctx.__spoolTest.showToast(failSpec('failure|乙', '失败乙'));
   const stackNodes = toastNodes();
   out.stack = {
     keys: toastKeys(),
@@ -621,28 +687,36 @@ async function extras() {
   if (first) { first.onclick(); }
   out.stack.after_one = { keys: toastKeys(), all_shown: allButtonShown(), shown: toastsShown() };
   // 「全部关闭」：一条不剩，整块也收起来。
-  ctx.closeAllToasts();
+  ctx.__spoolTest.closeAllToasts();
   out.stack.after_all = { keys: toastKeys(), shown: toastsShown() };
 
   // ①-10 人关掉的那一份内容不再自己弹回来；内容真变了才回。
-  ctx.showToast(failSpec('failure|丙', '失败丙'));
+  ctx.__spoolTest.showToast(failSpec('failure|丙', '失败丙'));
   const dismissedKey = toastKeys()[0];
-  ctx.dismissToast(dismissedKey);
+  ctx.__spoolTest.dismissToast(dismissedKey);
   out.dismiss = { after_close: toastKeys().length };
-  ctx.showToast(failSpec('failure|丙', '失败丙'));
+  ctx.__spoolTest.showToast(failSpec('failure|丙', '失败丙'));
   out.dismiss.same_again = toastKeys().length;
-  ctx.showToast(failSpec('failure|丙', '失败丙（换了内容）'));
+  ctx.__spoolTest.showToast(failSpec('failure|丙', '失败丙（换了内容）'));
   out.dismiss.changed = toastKeys().length;
-  ctx.closeAllToasts();
+  ctx.__spoolTest.closeAllToasts();
+  for (const name of ['一', '二', '三', '四']) {
+    ctx.__spoolTest.showToast(failSpec('failure|cap|' + name, name));
+  }
+  out.toast_cap = {
+    count: toastNodes().length,
+    keys: toastKeys(),
+    newest: toastNodes().length ? toastNodes()[0].dataset.key : '',
+    alert: toastNodes().length ? toastNodes()[0].getAttribute('role') : '',
+  };
+  ctx.__spoolTest.closeAllToasts();
 
   // ②-3 没有待确认内容：这块 UI **在页面上不存在**（没有卡片、没有那两个按钮）。
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), { diffs: [], awaiting: 0 }));
-  out.card_absent = {
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), { diffs: [], awaiting: 0 }));
+  out.card_absent = Object.assign({
     cards: ids.get('stream').querySelectorAll('.ask-card').length,
     rows: ids.get('stream').querySelectorAll('.ask-row').length,
-    apply_buttons: buttonsWith('应用').length,
-    reject_buttons: buttonsWith('拒绝').length,
-  };
+  }, confirmButtonCounts());
 
   // ②-4 有待确认内容：卡片出现在**对话流里**，写着谁的、哪个文件、改了多少。
   const CARD_FRAME = frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
@@ -653,58 +727,64 @@ async function extras() {
     awaiting: 2,
   });
   const beforeCard = snap();
-  ctx.applyState(CARD_FRAME);
+  ctx.__spoolTest.applyState(CARD_FRAME);
   const card = ids.get('stream').querySelector('.ask-card');
-  out.card_asking = {
+  out.card_asking = Object.assign({
     cards: ids.get('stream').querySelectorAll('.ask-card').length,
     in_stream: inStream(card),
     state: card ? card.dataset.state : '',
+    cls: card ? card._cls : '',
     who: card ? card.querySelector('.ask-who').textContent : '',
     kind: card ? card.querySelector('.ask-kind').textContent : '',
     summaries: diffHeads(),
-    apply_buttons: buttonsWith('应用').length,
-    reject_buttons: buttonsWith('拒绝').length,
+    folds: diffFolds(),
+    apply_label: card && card.querySelector('.ask-apply') ? card.querySelector('.ask-apply').textContent : '',
+    reject_label: card && card.querySelector('.ask-reject') ? card.querySelector('.ask-reject').textContent : '',
     cost: since(beforeCard),
-  };
+  }, confirmButtonCounts());
   // 同一帧再来一次：卡片不重建（轮询/补帧会一遍遍送同一份状态）。
   const beforeCardRepeat = snap();
-  ctx.applyState(CARD_FRAME);
+  ctx.__spoolTest.applyState(CARD_FRAME);
   out.card_repeat = since(beforeCardRepeat);
 
   // ②-5 点「应用」：卡片变成一行状态，不再是等你点的卡片；按钮没了。
   const decidePosts = [];
-  ctx.__fetchImpl = (url) => {
+  const decideBodies = [];
+  ctx.__fetchImpl = (url, opts) => {
     decidePosts.push(url);
+    decideBodies.push(opts && opts.body ? String(opts.body) : '');
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
   };
-  await ctx.decide(true);
+  await ctx.__spoolTest.decide(true);
   ctx.__fetchImpl = null;
   const appliedRow = ids.get('stream').querySelector('.ask-row');
-  out.card_applied = {
+  out.card_applied = Object.assign({
     calls: decidePosts,
+    body: decideBodies[0] || '',
     cards: ids.get('stream').querySelectorAll('.ask-card').length,
     rows: ids.get('stream').querySelectorAll('.ask-row').length,
     text: appliedRow ? appliedRow.textContent : '',
     kind: appliedRow ? appliedRow._cls : '',
-    apply_buttons: buttonsWith('应用').length,
-    reject_buttons: buttonsWith('拒绝').length,
-  };
+  }, confirmButtonCounts());
 
   // ②-6 再来一份待确认、点「拒绝」：另起一张新卡片，不是把上面那行改回问句。
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
     diffs: [{ path: 'src/c.py', text: '+one' }], awaiting: 1,
   }));
   const askingAgain = ids.get('stream').querySelectorAll('.ask-card').length;
   const denyPosts = [];
-  ctx.__fetchImpl = (url) => {
+  const denyBodies = [];
+  ctx.__fetchImpl = (url, opts) => {
     denyPosts.push(url);
+    denyBodies.push(opts && opts.body ? String(opts.body) : '');
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
   };
-  await ctx.decide(false);
+  await ctx.__spoolTest.decide(false);
   ctx.__fetchImpl = null;
   const rows = ids.get('stream').querySelectorAll('.ask-row');
   out.card_rejected = {
     calls: denyPosts,
+    body: denyBodies[0] || '',
     new_card: askingAgain,
     cards: ids.get('stream').querySelectorAll('.ask-card').length,
     rows: rows.length,
@@ -712,13 +792,13 @@ async function extras() {
   };
 
   // ②-7 被拒（服务端 409「当前没有待确认的改动」）：卡片退回"等你点"，别停在已应用上骗人。
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
     diffs: [{ path: 'src/d.py', text: '+x' }], awaiting: 1,
   }));
   ctx.__fetchImpl = () => Promise.resolve({
     ok: false, status: 409, json: async () => ({ error: '当前没有待确认的改动' }),
   });
-  await ctx.decide(true);
+  await ctx.__spoolTest.decide(true);
   ctx.__fetchImpl = null;
   const backCard = ids.get('stream').querySelector('.ask-card');
   out.card_reverted = {
@@ -731,58 +811,181 @@ async function extras() {
   // ②-8 只读壳（非回环）：那两条按钮**根本不出现**（既有契约）。
   // 先把上一张卡片收掉（只读是绑定地址决定的，真实使用里不会中途翻转），
   // 再看"只读时新起一张卡片"长什么样。
-  ctx.showReadonly({ readonly: true, host: '0.0.0.0' });
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
+  ctx.__spoolTest.showReadonly({ readonly: true, host: '0.0.0.0' });
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
     diffs: [], awaiting: 0, readonly: true, host: '0.0.0.0',
   }));
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
     diffs: [{ path: 'src/e.py', text: '+y' }], awaiting: 1, readonly: true, host: '0.0.0.0',
   }));
-  out.card_readonly = {
+  out.card_readonly = Object.assign({
     cards: ids.get('stream').querySelectorAll('.ask-card').length,
     state: (ids.get('stream').querySelector('.ask-card') || { dataset: {} }).dataset.state,
-    apply_buttons: buttonsWith('应用').length,
-    reject_buttons: buttonsWith('拒绝').length,
     actions: ids.get('stream').querySelectorAll('.ask-actions').length,
-  };
+  }, confirmButtonCounts());
   // 只读是**绑定地址**决定的，一次会话里不会来回变；这里把状态收回去，
   // 免得后面那几条把"只读时建的那张卡片"当成正常情况。
-  ctx.showReadonly({ readonly: false, host: '127.0.0.1' });
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), { diffs: [], awaiting: 0 }));
+  ctx.__spoolTest.showReadonly({ readonly: false, host: '127.0.0.1' });
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), { diffs: [], awaiting: 0 }));
 
   // ②-9 命令授权也是同一张卡片（它没有 diff，但有"要执行什么"）。
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
     diffs: [], awaiting: 1,
     awaiting_detail: { count: 1, command: 'whoami', reason: '白名单外' },
   }));
   const askCard = ids.get('stream').querySelector('.ask-card');
-  out.card_command = {
+  const askCode = askCard ? askCard.querySelector('code') : null;
+  out.card_command = Object.assign({
+    cls: askCard ? askCard._cls : '',
     kind: askCard ? askCard.querySelector('.ask-kind').textContent : '',
+    title: askCard && askCard.querySelector('.ask-title') ? askCard.querySelector('.ask-title').textContent : '',
+    pre: askCard && askCard.querySelector('pre') ? askCard.querySelector('pre').tagName : '',
+    code: askCode ? askCode.textContent : '',
+    reason: askCard && askCard.querySelector('.ask-reason') ? askCard.querySelector('.ask-reason').textContent : '',
+    warn: askCard && askCard.querySelector('.ask-warn') ? askCard.querySelector('.ask-warn').textContent : '',
     body: askCard ? askCard.querySelector('.ask-body').textContent : '',
-    apply_buttons: buttonsWith('应用').length,
+    card_text: askCard ? askCard.textContent : '',
+    allow: buttonsWith('允许执行').length,
+    deny: buttonsWith('拒绝').length,
+    file_apply: buttonsWith('应用全部改动').length,
+    file_reject: buttonsWith('拒绝全部').length,
+  }, confirmButtonCounts());
+
+  const cmdBodies = [];
+  ctx.__fetchImpl = (url, opts) => {
+    cmdBodies.push(opts && opts.body ? String(opts.body) : '');
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  };
+  await ctx.__spoolTest.decide(true);
+  const allowedRows = ids.get('stream').querySelectorAll('.ask-row');
+  out.card_command_allowed = {
+    body: cmdBodies[0] || '',
+    text: allowedRows.length ? allowedRows[allowedRows.length - 1].textContent : '',
+  };
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
+    diffs: [], awaiting: 1,
+    awaiting_detail: { count: 1, command: 'echo denied', reason: '再问一次' },
+  }));
+  cmdBodies.length = 0;
+  await ctx.__spoolTest.decide(false);
+  ctx.__fetchImpl = null;
+  const deniedRows = ids.get('stream').querySelectorAll('.ask-row');
+  out.card_command_denied = {
+    body: cmdBodies[0] || '',
+    text: deniedRows.length ? deniedRows[deniedRows.length - 1].textContent : '',
   };
 
   // ②-10 服务端说没有待确认了（`awaiting` 没了 / 是 0）：卡片**从页面上消失**。
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), { diffs: [], awaiting: 0 }));
-  out.card_gone = {
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), { diffs: [], awaiting: 0 }));
+  out.card_gone = Object.assign({
     cards: ids.get('stream').querySelectorAll('.ask-card').length,
     rows: ids.get('stream').querySelectorAll('.ask-row').length,
-    apply_buttons: buttonsWith('应用').length,
-    reject_buttons: buttonsWith('拒绝').length,
-  };
+  }, confirmButtonCounts());
   // 缺字段（老服务端 / 空快照）也按"没有待确认内容"办。
   const bare = frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''));
   delete bare.awaiting;
   delete bare.diffs;
-  ctx.applyState(bare);
-  out.card_missing_field = {
+  ctx.__spoolTest.applyState(bare);
+  out.card_missing_field = Object.assign({
     cards: ids.get('stream').querySelectorAll('.ask-card').length,
-    apply_buttons: buttonsWith('应用').length,
+  }, confirmButtonCounts());
+
+  // ②-11 大 diff 默认收起、小 diff 默认展开；点文件头切换，同一帧再来不把折叠状态冲掉。
+  const bigLines = [];
+  for (let lineNo = 0; lineNo < 200; lineNo += 1) { bigLines.push('+' + lineNo); }
+  const FOLD_FRAME = frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
+    diffs: [
+      { path: 'big.py', text: bigLines.join('\n') },
+      { path: 'small.py', text: '+one\n-two' },
+    ],
+    awaiting: 2,
+  });
+  ctx.__spoolTest.applyState(FOLD_FRAME);
+  const foldFiles = ids.get('stream').querySelectorAll('.diff-file');
+  const bigHead = foldFiles[0] ? foldFiles[0].querySelector('.diff-file-head') : null;
+  const smallHead = foldFiles[1] ? foldFiles[1].querySelector('.diff-file-head') : null;
+  const bigSheet = foldFiles[0] ? foldFiles[0].querySelector('.diff') : null;
+  const bigBefore = bigHead ? bigHead.getAttribute('aria-expanded') : '';
+  if (bigHead && bigHead.onclick) { bigHead.onclick(); }
+  const bigAfter = bigHead ? bigHead.getAttribute('aria-expanded') : '';
+  const smallBefore = smallHead ? smallHead.getAttribute('aria-expanded') : '';
+  if (smallHead && smallHead.onclick) { smallHead.onclick(); }
+  const smallAfter = smallHead ? smallHead.getAttribute('aria-expanded') : '';
+  const beforeFoldRepeat = snap();
+  ctx.__spoolTest.applyState(FOLD_FRAME);
+  out.diff_fold = {
+    files: foldFiles.length,
+    big_lines: bigSheet ? bigSheet.children.length : 0,
+    big_before: bigBefore,
+    big_after: bigAfter,
+    big_open_after: foldFiles[0] ? foldFiles[0].classList.contains('open') : false,
+    big_body: foldFiles[0] && foldFiles[0].querySelector('.diff-file-body')
+      ? foldFiles[0].querySelector('.diff-file-body').className : '',
+    small_before: smallBefore,
+    small_after: smallAfter,
+    small_open_after: foldFiles[1] ? foldFiles[1].classList.contains('open') : true,
+    repeat: since(beforeFoldRepeat),
+    still: bigHead ? bigHead.getAttribute('aria-expanded') : '',
+  };
+
+  // ②-12 同一帧里既有 diff 又有命令：一张组合卡，两边都在，点一次只发一次 /confirm。
+  const BOTH_FRAME = frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, ''), {
+    diffs: [
+      { path: 'src/a.py', text: '@@ -1,2 +1,3 @@\n-old\n+new\n+more' },
+      { path: 'src/b.py', text: '+only' },
+    ],
+    awaiting: 1,
+    awaiting_detail: { count: 1, command: 'git status', reason: '要看工作区' },
+  });
+  ctx.__spoolTest.applyState(BOTH_FRAME);
+  const bothCard = ids.get('stream').querySelector('.ask-card');
+  const bothHead = bothCard ? bothCard.querySelector('.diff-file-head') : null;
+  const bothBefore = bothHead ? bothHead.getAttribute('aria-expanded') : '';
+  if (bothHead && bothHead.onclick) { bothHead.onclick(); }
+  const bothFlipped = bothHead ? bothHead.getAttribute('aria-expanded') : '';
+  const beforeBothRepeat = snap();
+  ctx.__spoolTest.applyState(BOTH_FRAME);
+  const bothAsking = {
+    cls: bothCard ? bothCard._cls : '',
+    kind: bothCard && bothCard.querySelector('.ask-kind') ? bothCard.querySelector('.ask-kind').textContent : '',
+    files: bothCard ? bothCard.querySelectorAll('.diff-file').length : 0,
+    cmds: bothCard ? bothCard.querySelectorAll('.ask-cmd').length : 0,
+    code: bothCard && bothCard.querySelector('code') ? bothCard.querySelector('code').textContent : '',
+    reason: bothCard && bothCard.querySelector('.ask-reason') ? bothCard.querySelector('.ask-reason').textContent : '',
+    warn: bothCard && bothCard.querySelector('.ask-warn') ? bothCard.querySelector('.ask-warn').textContent : '',
+    apply_label: bothCard && bothCard.querySelector('.ask-apply') ? bothCard.querySelector('.ask-apply').textContent : '',
+    reject_label: bothCard && bothCard.querySelector('.ask-reject') ? bothCard.querySelector('.ask-reject').textContent : '',
+    file_apply: buttonsWith('应用全部改动').length,
+    allow: buttonsWith('允许执行').length,
+    expanded_before: bothBefore,
+    expanded_flipped: bothFlipped,
+    repeat: since(beforeBothRepeat),
+    still: bothHead ? bothHead.getAttribute('aria-expanded') : '',
+  };
+  const bothPosts = [];
+  ctx.__fetchImpl = (url, opts) => {
+    bothPosts.push({url: url, body: opts && opts.body ? String(opts.body) : ''});
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  };
+  await ctx.__spoolTest.decide(true);
+  const bothRows = ids.get('stream').querySelectorAll('.ask-row');
+  out.card_both = Object.assign(bothAsking, {
+    posts: bothPosts.slice(),
+    text: bothRows.length ? bothRows[bothRows.length - 1].textContent : '',
+  });
+  ctx.__spoolTest.applyState(BOTH_FRAME);
+  bothPosts.length = 0;
+  await ctx.__spoolTest.decide(false);
+  ctx.__fetchImpl = null;
+  const bothDenied = ids.get('stream').querySelectorAll('.ask-row');
+  out.card_both_denied = {
+    posts: bothPosts.slice(),
+    text: bothDenied.length ? bothDenied[bothDenied.length - 1].textContent : '',
   };
 
   // ③-1 历史：分隔线还在（一条线），但那句"给人看的、不进模型上下文"没了，
   // 历史消息本身照旧画在对话流里（略淡那一档）。
-  ctx.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(4, 'h')));
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(4, 'h')));
   out.history = {
     seps: ids.get('stream').querySelectorAll('.history-sep').length,
     sep_text: (ids.get('stream').querySelector('.history-sep') || { textContent: '' }).textContent,
@@ -807,7 +1010,7 @@ async function extras() {
     scrollHeight: streamBox.scrollHeight,
   });
   const beforePush = readStream();
-  const pushed = ctx.showToast({key: 'failure|挤', kind: 'error', title: '失败：挤一下', lines: ['一行']});
+  const pushed = ctx.__spoolTest.showToast({key: 'failure|挤', kind: 'error', title: '失败：挤一下', lines: ['一行']});
   out.toast_no_push = {
     before: beforePush,
     after: readStream(),
@@ -816,56 +1019,56 @@ async function extras() {
     in_stream: pushed ? inStream(pushed) : 'missing',
     parent_id: pushed && pushed.parentNode ? pushed.parentNode._id : '',
   };
-  ctx.closeAllToasts();
+  ctx.__spoolTest.closeAllToasts();
   out.toast_no_push.after_close = readStream();
 
   // ②-11 状态区：常态下**只看得见一枚圆点**；只读 / 钉住 / 待配对 / 别处在跑
   // 才各多出一枚徽标。徽标只是同一行里的东西，所以展开详情也不动对话流与输入条结构。
-  ctx.showReadonly({ readonly: true, host: '0.0.0.0' });
+  ctx.__spoolTest.showReadonly({ readonly: true, host: '0.0.0.0' });
   out.status_readonly = {
     visible: visibleBadges(), mode: stLabel('st-mode'),
     title: stNode('st-mode').title,
   };
   const beforeStatusPanel = snap();
-  ctx.setStatusOpen(true);
+  ctx.__spoolTest.setStatusOpen(true);
   out.status_readonly_panel = { open: panelOpen(), text: panelText(), cost: since(beforeStatusPanel) };
-  ctx.setStatusOpen(false);
-  ctx.showReadonly({ readonly: false, host: '127.0.0.1' });
-  ctx.showPairings([{ code: '482913', user: 'u-1' }]);
+  ctx.__spoolTest.setStatusOpen(false);
+  ctx.__spoolTest.showReadonly({ readonly: false, host: '127.0.0.1' });
+  ctx.__spoolTest.showPairings([{ code: '482913', user: 'u-1' }]);
   out.status_pair = { visible: visibleBadges(), pair: stLabel('st-pair') };
-  ctx.setStatusOpen(true);
+  ctx.__spoolTest.setStatusOpen(true);
   out.status_pair_panel = { text: panelText() };
-  ctx.setStatusOpen(false);
-  ctx.showPairings([]);
-  ctx.showElsewhere({ running_targets: [
+  ctx.__spoolTest.setStatusOpen(false);
+  ctx.__spoolTest.showPairings([]);
+  ctx.__spoolTest.showElsewhere({ running_targets: [
     { root: 'D:/ws-c', session: 'c1', name: 'ws-c', goal: '另一条在跑', current: false, awaiting: true },
   ] });
   out.status_elsewhere = { visible: visibleBadges(), label: stLabel('st-elsewhere') };
-  ctx.setStatusOpen(true);
+  ctx.__spoolTest.setStatusOpen(true);
   out.status_elsewhere_panel = { text: panelText() };
-  ctx.setStatusOpen(false);
-  ctx.showElsewhere({ running_targets: [] });
+  ctx.__spoolTest.setStatusOpen(false);
+  ctx.__spoolTest.showElsewhere({ running_targets: [] });
   out.status_clean = { visible: visibleBadges(), label: stLabel('st-health'), panel: panelOpen() };
 
   // `--root` 钉住：模式徽标说"已钉住"，详情里那段解释还在（回答"为什么点不动"）。
-  ctx.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(4, 'h'), {
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(4, 'h'), {
     target: { root: ROOT_A, session: 'a1', pinned: true, workspace_source: 'explicit',
       session_source: 'explicit', note: '' },
   }));
   out.status_pinned = { visible: visibleBadges(), mode: stLabel('st-mode') };
-  ctx.setStatusOpen(true);
+  ctx.__spoolTest.setStatusOpen(true);
   out.status_pinned_panel = { text: panelText() };
-  ctx.setStatusOpen(false);
+  ctx.__spoolTest.setStatusOpen(false);
   // 空态（还没有目标）：那一枚"未选工作区"徽标 + 怎么选的说明。
-  ctx.applyState(frame('', 'a1', WROWS, SROWS_A, history(0, ''), {
+  ctx.__spoolTest.applyState(frame('', 'a1', WROWS, SROWS_A, history(0, ''), {
     target: { root: '', session: 'a1', pinned: false, workspace_source: 'none',
       session_source: 'default', note: '未选择工作区：在左侧「工作区」段选一项。' },
   }));
   out.status_no_target = { visible: visibleBadges(), label: stLabel('st-target') };
-  ctx.setStatusOpen(true);
+  ctx.__spoolTest.setStatusOpen(true);
   out.status_no_target_panel = { text: panelText() };
-  ctx.setStatusOpen(false);
-  ctx.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(4, 'h')));
+  ctx.__spoolTest.setStatusOpen(false);
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(4, 'h')));
 
   // ②-12 收起详情有三条路：Esc（焦点不在输入框里也算）、点 `#composer` 之外、
   // 再点一次徽标。前两条挂在 `document` 上——假 DOM 里 `document` 是普通对象，
@@ -882,22 +1085,22 @@ async function extras() {
       ctx.document.onclick({ target: { closest: () => (inside ? {} : null) } });
     }
   };
-  ctx.setStatusOpen(true);
+  ctx.__spoolTest.setStatusOpen(true);
   pressEsc();
   out.status_esc = { open: panelOpen(), bound: typeof ctx.document.onkeydown === 'function' };
-  ctx.setStatusOpen(true);
+  ctx.__spoolTest.setStatusOpen(true);
   clickAt(false);
   out.status_outside = { open: panelOpen(), bound: typeof ctx.document.onclick === 'function' };
-  ctx.setStatusOpen(true);
+  ctx.__spoolTest.setStatusOpen(true);
   clickAt(true);
   out.status_inside = { open: panelOpen() };
-  ctx.setStatusOpen(false);
+  ctx.__spoolTest.setStatusOpen(false);
 
   // ③-2 自己说的话不加符号前缀：发一条之后，气泡里就是原话（一个字符都不多）。
   const goalInput = ids.get('goal');
   goalInput.value = '改一下登录页';
   ctx.__fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
-  await ctx.say();
+  await ctx.__spoolTest.say();
   ctx.__fetchImpl = null;
   const bubbles = ids.get('stream').querySelectorAll('.bubble');
   const mine = bubbles.filter((node) => String(node.parentNode && node.parentNode._cls || '')
@@ -905,6 +1108,72 @@ async function extras() {
   out.say_text = {
     calls: ctx.fetchCalls.slice(-1),
     last_user: mine.length ? mine[mine.length - 1].textContent : 'missing',
+  };
+
+  // ④-1 已归档会话默认不在左栏；只在页脚「设置」里主动找。
+  const REMOVED = [
+    { id: 'old-1', title: '归档的登录页修复' },
+    { id: 'old-2', title: '' },
+  ];
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(0, ''), {
+    sessions_removed: REMOVED,
+  }));
+  out.archive_default = {
+    sidebar_text: ids.get('sessions').textContent,
+    count: ids.get('archived-count').textContent,
+    hidden: ids.get('archived-count').classList.contains('hidden'),
+    settings_hidden: ids.get('settings').classList.contains('hidden'),
+  };
+  ids.get('settings-btn').onclick();
+  out.archive_open = {
+    open: !ids.get('settings').classList.contains('hidden'),
+    aria: ids.get('settings').getAttribute('aria-hidden'),
+    list: ids.get('archived-list').textContent,
+    rows: ids.get('archived-list').querySelectorAll('.archive-row').length,
+    restore: ids.get('archived-list').querySelectorAll('.arc-restore').length,
+    restore_disabled: ids.get('archived-list').querySelectorAll('.arc-restore')
+      .map((node) => node.disabled),
+  };
+  if (typeof ctx.document.onkeydown === 'function') {
+    ctx.document.onkeydown({ key: 'Escape' });
+  }
+  out.archive_esc = { closed: ids.get('settings').classList.contains('hidden') };
+
+  // ④-2 当前会话不在会话表里也要补进左栏，标题优先、id 作为次级信息。
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'cli', WROWS, SROWS_A, history(0, ''), {
+    target: { root: ROOT_A, session: 'cli', session_title: '修复缓存穿透',
+      session_title_source: 'agent', pinned: false,
+      workspace_source: 'explicit', session_source: 'explicit', note: '' },
+  }));
+  const currentRow = rowByName('sessions', '修复缓存穿透');
+  out.current_session_row = {
+    found: Boolean(currentRow),
+    highlighted: currentRow ? currentRow.classList.contains('on') : false,
+    subtitle: currentRow ? currentRow.querySelector('.src').textContent : '',
+  };
+  const titled = rowByName('sessions', 'A 的第 1 条');
+  out.session_title_sub = titled ? titled.querySelector('.src').textContent : '';
+
+  // ④-3 种子标题：final 之后请 Agent 起名，返回后左栏立刻换成真标题。
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, [
+    { id: 'a1', title: '种子标题', title_source: 'seed', archived: false,
+      last_active: 1, current: true },
+  ], history(0, ''), {
+    target: { root: ROOT_A, session: 'a1', session_title: '种子标题',
+      session_title_source: 'seed', pinned: false,
+      workspace_source: 'explicit', session_source: 'explicit', note: '' },
+  }));
+  ctx.__fetchImpl = (url) => {
+    return Promise.resolve({ ok: true, status: 200, json: async () =>
+      ({ ok: true, title: '模型起的标题', generated: true, source: 'agent' }) });
+  };
+  await ctx.__spoolTest.maybeAgentTitle(true);
+  ctx.__fetchImpl = null;
+  const namedRow = rowByName('sessions', '模型起的标题');
+  out.agent_title = {
+    title: namedRow ? namedRow.querySelector('.nm').textContent : '',
+    sub: namedRow ? namedRow.querySelector('.src').textContent : '',
+    fetched: ctx.fetchCalls.slice(-1),
   };
 
   await extras2();
@@ -988,10 +1257,10 @@ async function extras2() {
   const hintFrame = (extra) => frame(ROOT_A, 'a1', WROWS, SROWS_A, [],
     Object.assign({ readonly: false, host: '127.0.0.1', pairings: [],
       running_targets: [], health: UP }, extra));
-  ctx.setStatusOpen(false);
-  ctx.applyState(hintFrame({}));
+  ctx.__spoolTest.setStatusOpen(false);
+  ctx.__spoolTest.applyState(hintFrame({}));
   const quiet = room();
-  ctx.applyState(hintFrame({
+  ctx.__spoolTest.applyState(hintFrame({
     readonly: true,
     host: '0.0.0.0',
     pairings: [{ code: '482913', user: 'u-1' }],
@@ -1003,11 +1272,11 @@ async function extras2() {
   }));
   const busy = room();
   const busyBadges = visibleBadges();
-  ctx.setStatusOpen(true);
+  ctx.__spoolTest.setStatusOpen(true);
   const opened = room();
   const panelNodes = allNodes(ids.get('st-panel')).length;
-  ctx.setStatusOpen(false);
-  ctx.applyState(hintFrame({}));
+  ctx.__spoolTest.setStatusOpen(false);
+  ctx.__spoolTest.applyState(hintFrame({}));
   const clean = room();
   const cleanBadges = visibleBadges();
   out.no_squeeze = {
@@ -1036,33 +1305,33 @@ async function extras2() {
 
   // ══ ② 回复卡片：占位 → 真正的回复；思考过程收起可展开、库里那条不重复画 ══
   // `resetView` 就是"刷新了一次"在假 DOM 里的样子：对话流清空、这一轮的实时状态作废。
-  ctx.resetView();
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, '')));
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, '')));
   const goalInput2 = ids.get('goal');
   goalInput2.value = '改一下登录页';
   ctx.__fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
-  await ctx.say();
+  await ctx.__spoolTest.say();
   ctx.__fetchImpl = null;
   out.reply_user_bubbles = streamBubbles();
-  ctx.onEvent(event('start', { goal: '改一下登录页' }));
+  ctx.__spoolTest.onEvent(event('start', { goal: '改一下登录页' }));
   out.reply_placeholder = cardInfo(lastCard());
   // 边跑边攒：步骤 / 失败工具 / 等待心跳进「思考过程」——运行中自动展开。
-  ctx.onEvent(event('step', { n: 1 }));
-  ctx.onEvent(event('tool', { name: 'read_file', ok: false, detail: '文件不存在：src/a.py' }));
-  ctx.onEvent(event('wait', { elapsed: 12, limit: 491 }));
+  ctx.__spoolTest.onEvent(event('step', { n: 1 }));
+  ctx.__spoolTest.onEvent(event('tool', { name: 'read_file', ok: false, detail: '文件不存在：src/a.py' }));
+  ctx.__spoolTest.onEvent(event('wait', { elapsed: 12, limit: 491 }));
   // 同 phase 再一条 wait：应替换末行，不堆第二行心跳。
-  ctx.onEvent(event('wait', { elapsed: 27, limit: 491 }));
+  ctx.__spoolTest.onEvent(event('wait', { elapsed: 27, limit: 491 }));
   out.reply_live = cardInfo(lastCard());
   out.reply_live_bubbles = streamBubbles();
   out.reply_open = cardInfo(lastCard());
   // phase 变了（输出加长）：追加新 wait，保留上一阶段末行。
-  ctx.onEvent(event('wait', { elapsed: 15, limit: 491, phase: '主循环·输出加长' }));
+  ctx.__spoolTest.onEvent(event('wait', { elapsed: 15, limit: 491, phase: '主循环·输出加长' }));
   out.reply_wait_phases = cardInfo(lastCard());
-  ctx.onEvent(event('final', { ok: true, text: '改好了：加了校验' }));
+  ctx.__spoolTest.onEvent(event('final', { ok: true, text: '改好了：加了校验' }));
   out.reply_done = cardInfo(lastCard());
   out.reply_done_bubbles = streamBubbles();
   // 库里那条回复到了（快照）：**认领**同一张卡片——不新建节点、也不重复一遍。
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, [
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, [
     { role: 'user', content: '改一下登录页', meta: '', created_at: 10 },
     { role: 'assistant', content: '改好了：加了校验', meta: '1 步，完成', created_at: 11,
       trace: [
@@ -1081,8 +1350,8 @@ async function extras2() {
 
   // 刷新页面 / 切走再切回之后：只喂一帧 `/state`（历史里那条消息带着 trace），
   // **思考过程必须重新画得出来**——这是"排错"那条硬要求。
-  ctx.resetView();
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, [
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, [
     { role: 'user', content: '看一下 src/a.py', meta: '', created_at: 20 },
     { role: 'assistant', content: '没做成：文件不存在', meta: '1 步，未完成', created_at: 21,
       trace: [
@@ -1104,8 +1373,8 @@ async function extras2() {
   out.refresh_trace_open = cardInfo(lastCard());
 
   // ══ ⑤ 运行中那一枚键是「停止」：点了立刻有反馈，`/state` 说停下来了就回到发送 ══
-  ctx.resetView();
-  ctx.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(0, ''), { running: true }));
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, history(0, ''), { running: true }));
   const sendNode = ids.get('send');
   out.stop_button = {
     mode: sendNode.dataset.mode, disabled: sendNode.disabled, title: sendNode.title,
@@ -1125,7 +1394,7 @@ async function extras2() {
   };
   ctx.__nextBody = frame(ROOT_A, 'a1', WROWS, SROWS_A, history(0, ''),
     { running: false, stopped: true });
-  await ctx.refreshStatus();
+  await ctx.__spoolTest.refreshStatus();
   out.stop_settled = {
     mode: sendNode.dataset.mode, disabled: sendNode.disabled, title: sendNode.title,
   };
@@ -1141,20 +1410,20 @@ async function extras2() {
     '详情：本次运行共落成 1 处改动。最终文件状态：hello.txt：1 行，指纹 44d3a83db52a/1行。',
     '撤销这一轮：spool revert --run 20261006-022747-299732 （网页里可直接点，桥里回 y）',
   ].join('\n');
-  ctx.resetView();
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, '')));
-  ctx.onEvent(event('start', { goal: '创建一个文本文件' }));
-  ctx.onEvent(event('step', { n: 1 }));
-  ctx.onEvent(event('tool', { name: 'write_file', ok: true }));
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, history(0, '')));
+  ctx.__spoolTest.onEvent(event('start', { goal: '创建一个文本文件' }));
+  ctx.__spoolTest.onEvent(event('step', { n: 1 }));
+  ctx.__spoolTest.onEvent(event('tool', { name: 'write_file', ok: true }));
   // 第三档（没有校验器）：`ok=true` 只说「没有发现问题」。渲染成「成功」就是
   // 一个不成立的通过（问题⑤），而状态字与结论段那句一样则是"同一句说两遍"。
-  ctx.onEvent(event('tool', { name: '最终验证', ok: true, no_checker: true,
+  ctx.__spoolTest.onEvent(event('tool', { name: '最终验证', ok: true, no_checker: true,
     detail: '这次改的是 .txt。' }));
-  ctx.onEvent(event('final', { ok: true, text: REPORT }));
+  ctx.__spoolTest.onEvent(event('final', { ok: true, text: REPORT }));
   // 用量**在结局之后**到（真实那次就是这个次序）：它必须挂回刚画好的那张卡片，
   // 不许另起一张只有一行用量的"幽灵卡片"。
   const cardsBeforeUsage = ids.get('stream').querySelectorAll('.msg').length;
-  ctx.onEvent(event('usage', { steps: 3, calls: 3, prompt_tokens: 13025,
+  ctx.__spoolTest.onEvent(event('usage', { steps: 3, calls: 3, prompt_tokens: 13025,
     completion_tokens: 207 }));
   out.report_tiers = {
     ...cardInfo(lastCard()),
@@ -1169,8 +1438,8 @@ async function extras2() {
   out.report_tiers_open = cardInfo(lastCard());
 
   // 刷新 / 切走再切回：库里存的仍是**完整那份报告**，分档必须一样。
-  ctx.resetView();
-  ctx.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, [
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, [
     { role: 'user', content: '创建一个文本文件', meta: '', created_at: 40 },
     { role: 'assistant', content: REPORT, meta: '3 步，完成', created_at: 41,
       trace: [{ type: 'step', text: '第 1 步' }] },
@@ -1178,5 +1447,387 @@ async function extras2() {
   const historyHead = lastCard() ? lastCard().querySelector('.trace-head') : null;
   if (historyHead) { historyHead.onclick(); }
   out.report_tiers_history = cardInfo(lastCard());
+
+  const goal = ids.get('goal');
+  goal.value = '只走ctx';
+  ctx.__spoolTest.store.set('readonly', false);
+  ctx.__spoolTest.store.set('busy', false);
+  let viaCtx = 0;
+  let viaGlobal = 0;
+  const realAdd = ctx.__spoolTest.app.thread.add;
+  ctx.__spoolTest.app.thread.add = function () { viaCtx += 1; };
+  ctx.add = function () { viaGlobal += 1; };
+  const prevFetch = ctx.__fetchImpl;
+  ctx.__fetchImpl = function () {
+    return Promise.resolve({ ok: true, status: 200, json: async function () { return {}; } });
+  };
+  await ctx.__spoolTest.app.composer.say();
+  ctx.__fetchImpl = prevFetch;
+  ctx.__spoolTest.app.thread.add = realAdd;
+  goal.value = '';
+  out.composer_uses_ctx = viaCtx === 1 && viaGlobal === 0;
+  ctx.__spoolTest.app.status.setStatusOpen(true);
+  goal.onkeydown({
+    key: 'Escape', preventDefault: function () {},
+    shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
+  });
+  out.escape_closes_status = ctx.__spoolTest.store.get('statusOpen') === false;
+
+  const keyRow = rowByName('workspaces', 'ws-b') || rowByName('workspaces', 'ws-a');
+  const keyPosts = [];
+  ctx.__fetchImpl = (url) => {
+    keyPosts.push(url);
+    return new Promise(() => {});
+  };
+  out.row_key = keyRow ? {
+    role: keyRow.getAttribute('role'),
+    tab: keyRow.tabIndex,
+    current: keyRow.getAttribute('aria-current'),
+  } : null;
+  if (keyRow && keyRow.onkeydown) {
+    keyRow.onkeydown({ key: ' ', preventDefault() {} });
+  }
+  out.row_enter = {
+    posts: keyPosts.slice(),
+    chosen: ctx.__spoolTest.store.get('chosen'),
+  };
+  ctx.__fetchImpl = null;
+  ctx.__spoolTest.app.settings.setSettingsOpen(false);
+  ctx.__spoolTest.app.sidebar.openDrawer();
+  out.drawer_open = {
+    drawer: document.body.classList.contains('drawer'),
+    expanded: ids.get('menu').getAttribute('aria-expanded'),
+    focus: document.activeElement ? document.activeElement._id : '',
+  };
+  document.onkeydown({ key: 'Escape' });
+  out.drawer_esc = {
+    drawer: document.body.classList.contains('drawer'),
+    expanded: ids.get('menu').getAttribute('aria-expanded'),
+    focus: document.activeElement ? document.activeElement._id : '',
+  };
+  out.no_hidden_select = !ids.get('ws') && !ids.get('sess');
+  out.panel_close = ids.get('st-close') ? {
+    label: ids.get('st-close').getAttribute('aria-label'),
+    click: typeof ids.get('st-close').onclick === 'function',
+  } : null;
+  out.live = {
+    conn: ids.get('conn') ? ids.get('conn').getAttribute('aria-live') : '',
+    conn_role: ids.get('conn') ? ids.get('conn').getAttribute('role') : '',
+    thinking: ids.get('thinking') ? ids.get('thinking').getAttribute('role') : '',
+    toasts: ids.get('toasts') ? ids.get('toasts').getAttribute('aria-live') : '',
+    goal: ids.get('goal') ? ids.get('goal').getAttribute('aria-labelledby') : '',
+    stream: ids.get('stream') ? ids.get('stream').getAttribute('role') : '',
+  };
+
+  // 草稿按「工作区|会话」分开。输入事件才落盘；同一目标的后续帧不许用空串盖住正在打的字。
+  const goalBox = ids.get('goal');
+  const draftOf = () => ctx.__spoolTest.store.get('drafts') || {};
+  const keyOf = (root, name) => root + '|' + name;
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, []));
+  goalBox.value = 'A 的一半';
+  goalBox.oninput();
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, []));
+  const blankB = goalBox.value;
+  goalBox.value = 'B 的另一半';
+  goalBox.oninput();
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, []));
+  const backA = goalBox.value;
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, []));
+  const backB = goalBox.value;
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, []));
+  goalBox.value = '还在打';
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, []));
+  const keptTyping = goalBox.value;
+  goalBox.value = 'A 的一半';
+  goalBox.oninput();
+  const beforeNew = ctx.fetchCalls.length;
+  ctx.__fetchImpl = (url) => {
+    const path = String(url);
+    if (path.indexOf('/session/new') >= 0) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ session: 'fresh-1' }) });
+    }
+    return Promise.resolve({
+      ok: true, status: 200,
+      json: async () => frame(ROOT_A, 'fresh-1', WROWS, SROWS_A, []),
+    });
+  };
+  await ctx.__spoolTest.newSession();
+  ctx.__fetchImpl = null;
+  const freshValue = goalBox.value;
+  const freshDraft = Object.prototype.hasOwnProperty.call(draftOf(), keyOf(ROOT_A, 'fresh-1'));
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, []));
+  out.drafts = {
+    blank_b: blankB,
+    back_a: backA,
+    back_b: backB,
+    kept_typing: keptTyping,
+    fresh_value: freshValue,
+    fresh_draft: freshDraft,
+    restored_a: goalBox.value,
+    map_a: draftOf()[keyOf(ROOT_A, 'a1')] || '',
+    map_b: draftOf()[keyOf(ROOT_B, 'a1')] || '',
+    new_posts: ctx.fetchCalls.slice(beforeNew),
+  };
+
+  function userBubbles() {
+    return ids.get('stream').querySelectorAll('.bubble').filter((node) => {
+      return String(node.parentNode && node.parentNode._cls || '').indexOf('user') >= 0;
+    });
+  }
+  function failedOf(text) {
+    return userBubbles().filter((node) => {
+      const wrap = node.parentNode;
+      return node.textContent === text && wrap && wrap.classList.contains('failed');
+    });
+  }
+
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, []));
+  goalBox.value = '五百的原文';
+  goalBox.oninput();
+  ctx.__fetchImpl = () => Promise.resolve({
+    ok: false, status: 500, json: async () => ({ error: '服务器坏了' }),
+  });
+  await ctx.__spoolTest.say();
+  ctx.__fetchImpl = null;
+  const failed500 = failedOf('五百的原文');
+  const retry500 = failed500.length && failed500[0].parentNode.querySelector('.msg-retry');
+  out.send_500 = {
+    value: goalBox.value,
+    focus: document.activeElement ? document.activeElement._id : '',
+    draft: draftOf()[keyOf(ROOT_A, 'a1')] || '',
+    bubbles: failed500.length,
+    unsent: failed500.length ? failed500[0].parentNode.textContent : '',
+    retry: retry500 ? retry500.textContent : '',
+    pending: ctx.__spoolTest.app.thread.getPendingUser(),
+    users: userBubbles().length,
+  };
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'empty-b', WROWS, SROWS_B, []));
+  const away = goalBox.value;
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, []));
+  out.send_500_roundtrip = { away: away, back: goalBox.value };
+
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, []));
+  goalBox.value = '断网的原文';
+  goalBox.oninput();
+  ctx.__fetchImpl = () => Promise.reject(new Error('offline'));
+  let rejected = false;
+  try {
+    await ctx.__spoolTest.say();
+  } catch (err) {
+    rejected = true;
+  }
+  ctx.__fetchImpl = null;
+  const failedNet = failedOf('断网的原文');
+  const retryNet = failedNet.length ? failedNet[0].parentNode.querySelector('.msg-retry') : null;
+  const usersBeforeRetry = userBubbles().filter((node) => node.textContent === '断网的原文').length;
+  const noteBefore = (ids.get('stream').textContent.match(/草稿还在输入框里，可以重试/g) || []).length;
+  ctx.__fetchImpl = () => Promise.resolve({
+    ok: false, status: 500, json: async () => ({ error: '仍失败' }),
+  });
+  const postsBefore = ctx.fetchCalls.length;
+  if (retryNet) { await retryNet.onclick(); }
+  ctx.__fetchImpl = null;
+  out.send_net = {
+    rejected: rejected,
+    value: goalBox.value,
+    focus: document.activeElement ? document.activeElement._id : '',
+    draft: draftOf()[keyOf(ROOT_A, 'a1')] || '',
+    bubbles: failedNet.length,
+    retry: retryNet ? retryNet.textContent : '',
+    pending: ctx.__spoolTest.app.thread.getPendingUser(),
+    users_before: usersBeforeRetry,
+    users_after: userBubbles().filter((node) => node.textContent === '断网的原文').length,
+    still_failed: failedOf('断网的原文').length,
+    posts: ctx.fetchCalls.slice(postsBefore),
+    notes: (ids.get('stream').textContent.match(/草稿还在输入框里，可以重试/g) || []).length,
+    notes_before: noteBefore,
+  };
+
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a2', WROWS, SROWS_A, []));
+  goalBox.value = '重试成功的原文';
+  goalBox.oninput();
+  ctx.__fetchImpl = () => Promise.reject(new Error('offline'));
+  await ctx.__spoolTest.say();
+  ctx.__fetchImpl = null;
+  const failedOk = failedOf('重试成功的原文');
+  const retryOk = failedOk.length ? failedOk[0].parentNode.querySelector('.msg-retry') : null;
+  ctx.__fetchImpl = () => Promise.resolve({
+    ok: true, status: 200, json: async () => ({ ok: true }),
+  });
+  const okBefore = ctx.fetchCalls.length;
+  if (retryOk) { await retryOk.onclick(); }
+  const afterRetry = {
+    posts: ctx.fetchCalls.slice(okBefore),
+    users: userBubbles().filter((node) => node.textContent === '重试成功的原文').length,
+    failed: failedOf('重试成功的原文').length,
+    pending: ctx.__spoolTest.app.thread.getPendingUser(),
+    value: goalBox.value,
+  };
+  ctx.__fetchImpl = null;
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a2', WROWS, SROWS_A, [
+    { role: 'user', content: '重试成功的原文', meta: '' },
+  ]));
+  out.send_retry = {
+    before: afterRetry,
+    users: userBubbles().filter((node) => node.textContent === '重试成功的原文').length,
+    pending: ctx.__spoolTest.app.thread.getPendingUser(),
+  };
+
+  const mdBubble = document.createElement('div');
+  ctx.__spoolTest.fillRich(mdBubble, [
+    '## 结论',
+    '',
+    '- 先跑 `spool status`',
+    '- **注意** 看 [文档](https://example.test/docs)',
+    '',
+    '| 项 | 值 |',
+    '| --- | --- |',
+    '| `a` | **b** |',
+  ].join('\n'));
+  const tagged = (tag) => allNodes(mdBubble).filter((node) => node.tagName === tag);
+  out.markdown = {
+    heading: mdBubble.querySelector('.md-h') ? mdBubble.querySelector('.md-h').textContent : '',
+    items: tagged('LI').map((node) => node.textContent),
+    codes: mdBubble.querySelectorAll('.inline-code').map((node) => node.textContent),
+    strong: mdBubble.querySelector('strong') ? mdBubble.querySelector('strong').textContent : '',
+    link: mdBubble.querySelector('a') ? mdBubble.querySelector('a').getAttribute('href') : '',
+    cells: tagged('TD').map((node) => node.textContent),
+    raw: mdBubble.textContent,
+  };
+
+  const postsBeforeEmpty = ctx.fetchCalls.length;
+  ctx.__spoolTest.applyState(frame('', '', WROWS, SROWS_A, [], {
+    target: { root: '', session: '', pinned: false, workspace_source: 'none',
+      session_source: 'none', note: '未选择工作区' },
+  }));
+  const pick = ids.get('stream').querySelector('.empty-state');
+  const pickGo = pick ? pick.querySelector('.empty-go') : null;
+  if (pickGo && pickGo.onclick) { pickGo.onclick(); }
+  out.empty_pick = {
+    mode: pick ? pick.dataset.mode : '',
+    text: pick ? pick.textContent : '',
+    go: pickGo ? pickGo.textContent : '',
+    drawer: document.body.classList.contains('drawer'),
+  };
+  if (document.body.classList.contains('drawer')) { document.body.classList.remove('drawer'); }
+
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, []));
+  const ready = ids.get('stream').querySelector('.empty-state');
+  const sample = ready ? ready.querySelector('.empty-sample') : null;
+  const beforeSample = ctx.fetchCalls.length;
+  if (sample && sample.onclick) { sample.onclick(); }
+  out.empty_ready = {
+    mode: ready ? ready.dataset.mode : '',
+    text: ready ? ready.textContent : '',
+    samples: ready ? ready.querySelectorAll('.empty-sample').map((node) => node.textContent) : [],
+    goal: ids.get('goal').value,
+    focus: document.activeElement ? document.activeElement._id : '',
+    posts: ctx.fetchCalls.length - beforeSample,
+    draft: (ctx.__spoolTest.store.get('drafts') || {})[keyOf(ROOT_A, 'a1')] || '',
+  };
+  ids.get('goal').value = '派一个任务';
+  ctx.__fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  await ctx.__spoolTest.say();
+  ctx.__fetchImpl = null;
+  out.empty_after_send = {
+    shown: ids.get('stream').querySelectorAll('.empty-state').length,
+    posts: ctx.fetchCalls.length - postsBeforeEmpty,
+  };
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a2', WROWS, SROWS_A, []));
+  const nextEmpty = ids.get('stream').querySelector('.empty-state');
+  out.empty_switched = {
+    mode: nextEmpty ? nextEmpty.dataset.mode : '',
+    text: nextEmpty ? nextEmpty.textContent : '',
+    shown: ids.get('stream').querySelectorAll('.empty-state').length,
+  };
+
+  const LONG = 'D:/very/long/path/that/should/not/wrap/beta-workspace';
+  const SEARCH_WS = [
+    { name: 'beta', alias: '', root: LONG, ready: true },
+    { name: 'alpha', alias: '阿尔法', root: 'D:/alpha', ready: true },
+    { name: 'spool-chat-9', alias: '', root: 'D:/scratch/spool-chat-9', ready: true },
+    { name: 'tmp-notes', alias: '', root: 'D:/tmp-notes', ready: true },
+    { name: 'temp-scratch', alias: '', root: 'D:/temp-scratch', ready: true },
+    { name: 'my-tmp-files', alias: '', root: 'D:/my-tmp-files', ready: true },
+  ];
+  const SEARCH_SESS = [
+    { id: 'a1', title: '当前会话', archived: false, last_active: 1, current: true },
+    { id: 'alpha-2', title: 'Alpha 笔记', archived: false, last_active: 2, current: false },
+  ];
+  function sideNames(boxId) {
+    const found = [];
+    for (const node of ids.get(boxId).querySelectorAll('.li')) {
+      const name = node.querySelector('.nm');
+      if (name) { found.push(name.textContent); }
+    }
+    return found;
+  }
+  function typeSearch(value) {
+    const box = ids.get('side-search');
+    box.value = value;
+    if (box.oninput) { box.oninput(); }
+  }
+  ctx.__spoolTest.applyState(frame(LONG, 'a1', SEARCH_WS, SEARCH_SESS, history(1, 's'), {
+    target: {
+      root: LONG, session: 'a1', session_title: '当前会话', pinned: false,
+      workspace_source: 'explicit', session_source: 'explicit', note: '',
+    },
+  }));
+  const where = ids.get('where');
+  ctx.__spoolTest.setStatusOpen(true);
+  const panel = ids.get('st-panel');
+  out.where_bar = {
+    text: where.textContent,
+    title: where.title || '',
+    status: panel ? panel.textContent : '',
+  };
+  out.search_default = { ws: sideNames('workspaces'), sess: sideNames('sessions') };
+  const postsAtSearch = ctx.fetchCalls.length;
+  typeSearch('alpha');
+  out.search_alpha = { ws: sideNames('workspaces'), sess: sideNames('sessions') };
+  typeSearch('zzzz-nope');
+  let stopped = false;
+  out.search_none = {
+    ws: sideNames('workspaces'),
+    sess: sideNames('sessions'),
+    text: ids.get('workspaces').textContent,
+  };
+  typeSearch('');
+  out.search_cleared = { ws: sideNames('workspaces'), sess: sideNames('sessions') };
+  typeSearch('阿尔法');
+  out.search_alias = { ws: sideNames('workspaces') };
+  typeSearch('spool-chat');
+  out.search_temp = { ws: sideNames('workspaces') };
+  const box = ids.get('side-search');
+  box.onkeydown({
+    key: 'Escape',
+    preventDefault() {},
+    stopPropagation() { stopped = true; },
+  });
+  out.search_escape = {
+    value: box.value,
+    ws: sideNames('workspaces'),
+    focus: document.activeElement ? document.activeElement._id : '',
+    stopped: stopped,
+    statusOpen: ctx.__spoolTest.store.get('statusOpen'),
+    posts: ctx.fetchCalls.length - postsAtSearch,
+  };
+  ctx.__spoolTest.store.set('statusOpen', true);
+  document.onkeydown({ key: 'Escape' });
+  out.search_escape_global = { statusOpen: ctx.__spoolTest.store.get('statusOpen') };
+  ctx.__spoolTest.applyState(frame('D:/scratch/spool-chat-9', 'a1', SEARCH_WS, SEARCH_SESS, history(1, 's'), {
+    target: {
+      root: 'D:/scratch/spool-chat-9', session: 'a1', session_title: '当前会话',
+      pinned: false, workspace_source: 'explicit', session_source: 'explicit', note: '',
+    },
+  }));
+  out.search_current_temp = { ws: sideNames('workspaces') };
+  ctx.__spoolTest.applyState(frame('', '', SEARCH_WS, SEARCH_SESS, [], {
+    target: {
+      root: '', session: '', pinned: false,
+      workspace_source: 'none', session_source: 'none', note: '',
+    },
+  }));
+  out.where_empty = ids.get('where').textContent;
 }
 

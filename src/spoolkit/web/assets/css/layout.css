@@ -1,0 +1,21 @@
+
+  /* ── 顶条：抽屉开关 + 当前目标（"我在哪儿"必须直接可读） ── */
+  #top {
+    display:flex; align-items:center; gap:10px; padding:8px 12px;
+    border-bottom:1px solid var(--line-soft); background:var(--panel);
+    min-width:0;
+  }
+  #menu { display:none; width:34px; height:34px; border-radius:8px; border:0;
+          background:transparent; color:var(--text); cursor:pointer;
+          align-items:center; justify-content:center; }
+  #menu:hover { background:var(--bubble-user); }
+  #menu svg { width:18px; height:18px; }
+  #where { color:var(--text); font-weight:600; font-size:13.5px;
+           flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+           white-space:nowrap; }
+  #where.empty { color:var(--text-dim); font-weight:400; }
+
+  /* ── 主体：左栏 + 对话面 ── */
+  #body { flex:1; display:flex; min-height:0; overflow:hidden; }
+  #scrim { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:11; }
+  #scrim.show { display:block; }

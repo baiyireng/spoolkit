@@ -1,0 +1,82 @@
+  /* ══ 主题变量表：一处定义、整体可换 ══
+     默认深色（ChatGPT 观感），跟随系统；浅色只覆盖这份表，选择器与结构都不动。 */
+  :root {
+    --bg:#212121;
+    --panel:#171717;
+    --panel-2:#0d0d0d;
+    --line:#2f2f2f;
+    --line-soft:#242424;
+    --text:#ececec;
+    --text-dim:#9b9b9b;
+    --text-faint:#6f6f6f;
+    --accent:#3b82f6;
+    --accent-soft:#1e3a5f;
+    --bubble-user:#2f2f2f;
+    --bubble-assistant:#0d0d0d;
+    --code-bg:#0b0b0b;
+    --code-line:#3a3a3a;
+    --code-bar:#1c1c1c;
+    --inline-bg:#2b2b2b;
+    --inline-line:#3d3d3d;
+    --scroll-thumb:#4a4a4a;
+    --scroll-thumb-hover:#6a6a6a;
+    --ok:#6fb36f;
+    --bad:#e07777;
+    --warn-bg:#2a2410;
+    --warn-line:#4a4020;
+    --warn-text:#e8d38a;
+    --info-bg:#10202f;
+    --info-line:#1d3a54;
+    --info-text:#9fd0ff;
+    --ro-bg:#2a1f3d;
+    --ro-line:#443066;
+    --ro-text:#d0bfff;
+    --danger-bg:#3d1515;
+    --danger-line:#5c2020;
+    --danger-text:#f0a0a0;
+    --pair-bg:#3d2a00;
+    --pair-line:#5c4300;
+    --pair-text:#f0c674;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono","Liberation Mono",monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#fff;
+      --panel:#f9f9f9;
+      --panel-2:#f4f4f4;
+      --line:#e3e3e3;
+      --line-soft:#ececec;
+      --text:#0d0d0d;
+      --text-dim:#5d5d5d;
+      --text-faint:#8f8f8f;
+      --accent:#2563eb;
+      --accent-soft:#dbeafe;
+      --bubble-user:#f0f0f0;
+      --bubble-assistant:#f7f7f8;
+      --code-bg:#f6f8fa;
+      --code-line:#d8dee4;
+      --code-bar:#eef1f4;
+      --inline-bg:#eef1f4;
+      --inline-line:#d8dee4;
+      --scroll-thumb:#c9cdd3;
+      --scroll-thumb-hover:#a8aeb6;
+      --ok:#2f7a3f;
+      --bad:#b42318;
+      --warn-bg:#fff6d6;
+      --warn-line:#e6d491;
+      --warn-text:#6b4e00;
+      --info-bg:#e8f1fb;
+      --info-line:#b9d3ec;
+      --info-text:#1b4a75;
+      --ro-bg:#f0eaff;
+      --ro-line:#d6c8f5;
+      --ro-text:#4b2f8a;
+      --danger-bg:#fdecec;
+      --danger-line:#f3c2c2;
+      --danger-text:#8f1d1d;
+      --pair-bg:#fff3d6;
+      --pair-line:#e6cf94;
+      --pair-text:#6b4e00;
+    }
+  }

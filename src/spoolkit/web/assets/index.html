@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark light">
+<title>spool</title>
+
+<link rel="stylesheet" href="/assets/dist/app.43f644337c42.css">
+</head>
+<body>
+<!-- 右上角那一列：常驻提示（徽标 + 详情浮层）与通知。两者都在**文档流之外**
+     （`#corner` 是 `position:fixed`），所以它们的出现 / 展开 / 收起都不会改对话区的
+     高度、也不挪滚动位置。常驻提示在最上面（它是不该被划走的状态），通知在它下面
+     （通知是不该被盖住的提醒）。 -->
+<div id="corner">
+  <div id="hints">
+    <button id="st-health" type="button" class="st-item ok" aria-expanded="false"></button>
+    <button id="st-mode" type="button" class="st-item ro hidden" aria-expanded="false"></button>
+    <button id="st-target" type="button" class="st-item warn hidden" aria-expanded="false"></button>
+    <button id="st-pair" type="button" class="st-item ask hidden" aria-expanded="false"></button>
+    <button id="st-elsewhere" type="button" class="st-item warn hidden" aria-expanded="false"></button>
+  </div>
+  <div id="st-panel" class="st-panel hidden" role="region" aria-label="状态详情">
+    <button id="st-close" type="button" class="st-close" aria-label="关闭状态详情" title="关闭状态详情"></button>
+  </div>
+  <div id="toasts" role="status" aria-live="polite" aria-relevant="additions"><button id="toast-all" type="button" class="toast-all">全部关闭</button></div>
+</div>
+<div id="top">
+  <button id="menu" title="会话列表" aria-label="会话列表" aria-expanded="false" aria-controls="sidebar"></button>
+  <span id="where" class="empty">连接中</span>
+</div>
+<div id="scrim"></div>
+<div id="body">
+  <aside id="sidebar">
+    <div class="side-head">
+      <button class="new" id="new-session"><span>＋ 新建会话</span></button>
+      <input id="side-search" type="search" aria-label="搜索工作区或会话" placeholder="搜索工作区 / 会话">
+      <div class="meta dim">工作区</div>
+    </div>
+    <div id="panel">
+      <div id="workspaces"></div>
+      <div id="sessions"></div>
+    </div>
+    <div id="side-foot">
+      <span id="meta" class="dim">连接中</span>
+      <button id="settings-btn" type="button" title="设置" aria-label="设置">
+        <span id="settings-icon"></span><span>设置</span>
+        <span id="archived-count" class="count hidden"></span>
+      </button>
+    </div>
+  </aside>
+  <div id="thread">
+    <div id="stream" role="log" aria-live="off"></div>
+    <div id="composer">
+      <div id="conn" role="alert" aria-live="assertive">与服务连接已断开，正在重连</div>
+      <div id="composer-tools">
+        <div id="thinking" role="status"><span class="thinking-dots"><i></i><i></i><i></i></span>生成中</div>
+        <button id="toBottom" type="button" title="回到最新" aria-label="回到最新"></button>
+      </div>
+      <div class="box">
+        <label id="goal-label" class="sr-only" for="goal">发送给 agent 的任务</label>
+        <textarea id="goal" rows="1" placeholder="发送给 agent 的任务" aria-labelledby="goal-label"></textarea>
+        <button id="send" title="发送"></button>
+      </div>
+      <!-- 输入条下面那一行：**只剩"Enter 发送"这句静态提示**。
+           常驻状态（探活 / 只读 / 钉住 / 待配对 / 别处在跑）已经搬到右上角那一列
+           （`#hints`）：那一行在文档流里，徽标一多就换行、把对话区压矮，而"提示一出现
+           就挤对话区"正是用户这次报的第一条。 -->
+      <div class="st">
+        <span class="st-hint">Enter 发送 · Shift+Enter 换行</span>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="settings" class="hidden" role="dialog" aria-modal="true"
+     aria-labelledby="settings-title" aria-hidden="true">
+  <div class="settings-card">
+    <div class="settings-head">
+      <h2 id="settings-title">设置</h2>
+      <button id="settings-close" type="button" class="icon-btn"
+              aria-label="关闭设置" title="关闭设置"></button>
+    </div>
+    <div class="settings-body">
+      <div class="set-sec">
+        <div class="set-head">已归档会话
+          <span id="archived-count-inline" class="count">0</span>
+        </div>
+        <div id="archived-list" class="archive-list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/assets/dist/app.c849d505c7a0.js" defer></script>
+</body>
+</html>

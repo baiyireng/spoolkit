@@ -32,6 +32,13 @@ from spoolkit.store.db import open_db
 META_NAME = "meta.json"
 TITLE_LIMIT = 40
 
+#: 标题是谁起的。`seed` 是"先拿第一句目标顶上"，`agent` 是模型起的名，
+#: `manual` 是人点名的（`spool session new/rename`）。只有 seed 与 agent 可以被
+#: 更新；没有来源的老标题按 manual 处理——不许为了一个新功能把人的命名盖掉。
+TITLE_SEED = "seed"
+TITLE_AGENT = "agent"
+TITLE_MANUAL = "manual"
+
 #: 会话名（人点名的那个）的长度上限。
 #:
 #: 自动 id 是 `250101-120000-abcd` 这种 20 个字符，48 是它的两倍多：长到人还认得出、
@@ -68,6 +75,7 @@ class Session:
     created_at: float
     last_active: float
     archived: bool = False
+    title_source: str = ""
 
 
 def meta_path(root: Path | str, session_id: str) -> Path:
@@ -134,6 +142,7 @@ def list_sessions(root: Path | str, include_archived: bool = False) -> list[Sess
                 created_at=float(row["created_at"] or 0),
                 last_active=float(row["last_active"] or 0),
                 archived=archived,
+                title_source=str(meta.get("title_source") or ""),
             )
         )
 
@@ -158,6 +167,7 @@ def list_sessions(root: Path | str, include_archived: bool = False) -> list[Sess
                     created_at=float(meta.get("created_at") or 0),
                     last_active=float(meta.get("last_active") or 0),
                     archived=archived,
+                    title_source=str(meta.get("title_source") or ""),
                 )
             )
     found.sort(key=lambda item: item.last_active, reverse=True)
@@ -235,26 +245,31 @@ def create_session(root: Path | str, title: str = "", session_id: str = "") -> s
         if has_session(root, wanted):
             raise SessionExists(_exists_message(wanted))
         session_id = wanted
+        initial = {
+            "id": wanted,
+            "created_at": now,
+            "last_active": now,
+            "title": str(title or ""),
+        }
+        if str(title or "").strip():
+            initial["title_source"] = TITLE_MANUAL
         try:
             # 先建目录由 create_json 负责；这里只声明"这条会话的初始内容"。
-            jsonstore.create_json(
-                meta_path(root, wanted),
-                {
-                    "id": wanted,
-                    "created_at": now,
-                    "last_active": now,
-                    "title": str(title or ""),
-                },
-            )
+            jsonstore.create_json(meta_path(root, wanted), initial)
         except FileExistsError:
             # 并发：另一个请求在"查过之后、写之前"把它建好了。明确失败，
             # 不覆盖——这正是这个函数存在的理由。
             raise SessionExists(_exists_message(wanted)) from None
     else:
         session_id = time.strftime("%y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
-        write_meta(
-            root, session_id, created_at=now, last_active=now, title=str(title or "")
-        )
+        initial: dict[str, Any] = {
+            "created_at": now,
+            "last_active": now,
+            "title": str(title or ""),
+        }
+        if str(title or "").strip():
+            initial["title_source"] = TITLE_MANUAL
+        write_meta(root, session_id, **initial)
     conn = _db(root)
     if conn is not None:
         try:
@@ -292,7 +307,12 @@ def resolve_session(root: Path | str, name: str) -> str:
 
 def rename_session(root: Path | str, session_id: str, title: str) -> None:
     resolve_session(root, session_id)  # 先在，才给改
-    write_meta(root, session_id, title=str(title).strip())
+    write_meta(
+        root,
+        session_id,
+        title=str(title).strip(),
+        title_source=TITLE_MANUAL,
+    )
 
 
 def archive_session(root: Path | str, session_id: str, archived: bool = True) -> None:
@@ -300,18 +320,82 @@ def archive_session(root: Path | str, session_id: str, archived: bool = True) ->
     write_meta(root, session_id, archived=bool(archived))
 
 
+def clean_title(raw: str) -> str:
+    """把模型/目标里的一句话收成一行标题。
+
+    模型不总是照格式回：可能带引号、`标题：`、换行、结尾句号，或者干脆回一整段。
+    这里只做展示前的清洗，不判断语义；空串表示"这不能当标题"。
+    """
+    raw_text = str(raw or "").strip()
+    if not raw_text:
+        return ""
+    # 标题只取第一行：模型有时会在标题后面另起一行解释。
+    text = " ".join(raw_text.splitlines()[0].split())
+    if not text:
+        return ""
+    # 模型经常把标题包在引号里；引号不是标题的一部分。
+    for mark in ('"', "'", "“", "”", "‘", "’"):
+        text = text.replace(mark, "")
+    text = re.sub(r"^(?:标题|会话标题|name|title)\s*[:：]\s*", "", text, flags=re.IGNORECASE)
+    text = text.strip(" \t`#*-：:，,。.!！？?…")
+    if not text:
+        return ""
+    # 第一句就够当标题了；后面的"另外/同时"属于正文。
+    for sep in ("。", "！", "？", "\n", "；", ";"):
+        at = text.find(sep)
+        if at > 0:
+            text = text[:at]
+            break
+    text = text.strip(" \t\"'“”‘’`#*-：:，,。.!！？?…")
+    return text[:TITLE_LIMIT].strip()
+
+
 def title_from_goal(goal: str) -> str:
-    """标题取第一句目标，截断到 TITLE_LIMIT。空白目标给空串。"""
-    text = " ".join(str(goal).split())
-    return text[:TITLE_LIMIT]
+    """标题取第一句目标，去掉"请/帮我"这类口令和 Markdown 前缀。
+
+    这是**种子标题**：模型还没起名、或模型不可用时，左栏至少有一个可读的名字。
+    真正的 Agent 标题走 `set_agent_title`，会覆盖 seed。
+    """
+    text = clean_title(goal)
+    if not text:
+        return ""
+    # 只削掉一次开头口令；不递归，免得把"我想修"这种正常主语也吃掉。
+    text = re.sub(
+        r"^(?:(?:请你?|帮我|麻烦你?|我需要|我想|能不能|可以(?:帮我)?)"
+        r"\s*[:：,，]?\s*)+",
+        "",
+        text,
+    )
+    text = text.strip(" \t\"'“”‘’`#*-：:，,。.!！？?…")
+    return text[:TITLE_LIMIT].strip()
 
 
-def ensure_title(root: Path | str, session_id: str, first_goal: str) -> None:
-    """没标题才填。已有标题不动——人是按标题认这条会话的。"""
+def ensure_title(root: Path | str, session_id: str, first_goal: str) -> str:
+    """没标题才填，返回最终标题。已有标题不动——人是按标题认这条会话的。"""
     meta = read_meta(root, session_id)
-    if str(meta.get("title") or "").strip():
-        return
+    existing = str(meta.get("title") or "").strip()
+    if existing:
+        return existing
     title = title_from_goal(first_goal)
     if not title:
-        return
-    write_meta(root, session_id, title=title)
+        return ""
+    write_meta(root, session_id, title=title, title_source=TITLE_SEED)
+    return title
+
+
+def set_agent_title(root: Path | str, session_id: str, title: str) -> str:
+    """写入 Agent 起的标题；手工标题与来源不明的老标题一律不动。
+
+    返回最终标题。生成失败时返回当前标题（可能是空串），调用方不需要区分
+    "没生成"与"已有标题"——两者都不该弹错误。
+    """
+    meta = read_meta(root, session_id)
+    current = str(meta.get("title") or "").strip()
+    source = str(meta.get("title_source") or "").strip()
+    if current and source not in (TITLE_SEED, TITLE_AGENT):
+        return current
+    cleaned = clean_title(title)
+    if not cleaned:
+        return current
+    write_meta(root, session_id, title=cleaned, title_source=TITLE_AGENT)
+    return cleaned

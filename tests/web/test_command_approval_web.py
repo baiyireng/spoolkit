@@ -111,5 +111,5 @@ def test_页面要显示被问的那条命令() -> None:
     from spoolkit.web.page import HTML
 
     assert "showCommandAsk" in HTML
-    assert "要执行：" in HTML
+    assert "要执行一条命令" in HTML
     assert "awaiting_detail" in HTML

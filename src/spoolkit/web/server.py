@@ -61,10 +61,11 @@ from spoolkit.health import (
 from spoolkit.kernel import pointers as kernel_pointers
 from spoolkit.kernel import sessions as kernel_sessions
 from spoolkit.kernel import workspaces as kernel_workspaces
-from spoolkit.kernel.sessions import SessionError
+from spoolkit.kernel.sessions import TITLE_AGENT, TITLE_SEED, SessionError
 from spoolkit.kernel.target import Target, resolve_target
 from spoolkit.kernel.workspaces import WorkspaceError
-from spoolkit.web.page import HTML
+from spoolkit.web.page import INDEX
+from spoolkit.web.static import AssetError, load_asset
 from spoolkit.web.probe import (
     HEALTH_INTERVAL_SECONDS,
     STATE_UNKNOWN,
@@ -72,6 +73,7 @@ from spoolkit.web.probe import (
 )
 from spoolkit.web.registry import RunnerRegistry
 from spoolkit.web.runner import Runner, health_snapshot
+from spoolkit.web.titles import TitleNamer
 
 KEEPALIVE_SECONDS = 15
 MAX_BODY = 64 * 1024
@@ -118,6 +120,9 @@ WRITE_PATHS = (
     "/session/delete",
     "/session/restore",
     "/session/new",
+    # 让 Agent 给当前会话起一个可读标题：会写 meta（标题）并推一帧 state，
+    # 与新建会话一样属于"驱动这台机器"，远程只读必须拒绝。
+    "/session/title",
 )
 
 #: 网页壳在 `clients.json` 里的键。与 `resolve_target(client=…)` 用的是同一套键，
@@ -220,6 +225,7 @@ class WebState:
         fixed_runner: Runner | None = None,
         extra_args: Sequence[str] = (),
         extra_health: Callable[[], dict] | None = None,
+        title_namer: Callable[[str, str], str] | None = None,
     ) -> None:
         self._registry = registry
         self._target = target
@@ -233,6 +239,10 @@ class WebState:
         self._extra_health = extra_health
         self._lock = threading.Lock()
         self._version = 0
+        # 标题生成器：默认按当前目标的模型配置现装（懒加载）；测试可注入一个纯函数。
+        self._title_namer = title_namer
+        self._title_namers: dict[str, TitleNamer] = {}
+        self._title_lock = threading.Lock()
         # 后台探针（`build_server` 起，`WebServer.server_close` 收）。
         # 没有它时（`build_state(...).snapshot()` 这种直接调用）退回**同步**探一次：
         # 那种壳没有 HTTP 请求路径，也就没有"一次请求卡三秒"这回事，而
@@ -362,14 +372,21 @@ class WebState:
             return {
                 "root": "",
                 "session": "",
+                "session_title": "",
+                "session_title_source": "",
                 "pinned": self._pinned,
                 "workspace_source": "none",
                 "session_source": "none",
                 "note": self._note or f"还没有当前目标：{NO_TARGET_HINT}",
             }
+        meta = kernel_sessions.read_meta(target.root, target.session)
         return {
             "root": str(target.root),
             "session": target.session,
+            # 当前会话不一定在 `state.sessions` 里（`cli` 这种没跑过的名字不会出现），
+            # 所以标题也随目标单独给一份；页面用它把"当前这条"补进左栏。
+            "session_title": str(meta.get("title") or ""),
+            "session_title_source": str(meta.get("title_source") or ""),
             "pinned": self._pinned,
             "workspace_source": target.workspace_source,
             "session_source": target.session_source,
@@ -468,6 +485,122 @@ class WebState:
         # 也什么都不该记（`spool ws use` 同一个口径）。写指针不影响这次切换的结果。
         self._remember(changed, explicit=bool(name or wanted))
         return 200, self.snapshot()
+
+    def bump(self) -> None:
+        """推一帧 `/state`：SSE 循环看到版本号变了就会补发快照。"""
+        with self._lock:
+            self._version += 1
+
+    def _title_namer_for(self, root: str) -> TitleNamer:
+        namer = self._title_namers.get(root)
+        if namer is None:
+            namer = TitleNamer(root, self._extra_args)
+            self._title_namers[root] = namer
+        return namer
+
+    @staticmethod
+    def _first_user_text(messages: list[dict]) -> str:
+        for item in messages:
+            if str(item.get("role") or "") == "user":
+                return str(item.get("content") or "").strip()
+        return ""
+
+    @staticmethod
+    def _last_assistant_text(messages: list[dict]) -> str:
+        for item in reversed(messages):
+            if str(item.get("role") or "") == "assistant":
+                return str(item.get("content") or "").strip()
+        return ""
+
+    def generate_title(self, session: str = "") -> tuple[int, dict]:
+        """让 Agent 给**当前会话**起一个可读标题（`POST /session/title`）。
+
+        只在"当前会话"上做：标题要参考这一轮的目标与结论，而模型一次只该服务
+        一个正在看的目标。生成失败保留种子标题；手工标题从不被覆盖。
+        """
+        target = self.target()
+        if target is None:
+            return 409, {"error": "还没有选工作区：先在左边选一个，再给会话起名。"}
+        wanted = str(session or "").strip()
+        if wanted and wanted != target.session:
+            return 400, {"error": "只能给当前会话起标题：先切到那一条。"}
+        sid = target.session
+        root = str(target.root)
+
+        def current_title() -> tuple[str, str]:
+            meta = kernel_sessions.read_meta(root, sid)
+            return str(meta.get("title") or "").strip(), str(
+                meta.get("title_source") or ""
+            ).strip()
+
+        title, source = current_title()
+        if title and source != TITLE_SEED:
+            return 200, {
+                "ok": True,
+                "title": title,
+                "generated": False,
+                "source": source,
+            }
+
+        _version, runner = self.current()
+        if runner is None:
+            return 409, {"error": "当前目标还没有可读取的会话。"}
+        if runner.running:
+            return 409, {"error": "这一轮还没跑完：等它收尾后自动起标题。"}
+
+        snapshot = runner.snapshot(health={})
+        messages = [
+            item for item in (snapshot.get("messages") or []) if isinstance(item, dict)
+        ]
+        goal = self._first_user_text(messages)
+        if not goal:
+            trace = snapshot.get("trace") or {}
+            goal = str(trace.get("goal") or "").strip()
+        reply = self._last_assistant_text(messages)
+        final = snapshot.get("final") or {}
+        if not reply and isinstance(final, dict):
+            reply = str(final.get("text") or "").strip()
+        if not goal:
+            return 409, {"error": "这条会话还没有可用目标，暂时起不了标题。"}
+
+        with self._title_lock:
+            # 等锁期间别人可能已经写好了；再读一次，避免覆盖/重复调模型。
+            title, source = current_title()
+            if title and source != TITLE_SEED:
+                return 200, {
+                    "ok": True,
+                    "title": title,
+                    "generated": False,
+                    "source": source,
+                }
+            generated = ""
+            try:
+                if self._title_namer is not None:
+                    generated = str(self._title_namer(goal, reply) or "")
+                else:
+                    generated = self._title_namer_for(root).generate(goal, reply)
+            except Exception:  # noqa: BLE001 - 标题失败不该冒泡成 500
+                generated = ""
+            generated = kernel_sessions.clean_title(generated)
+            if generated:
+                final_title = kernel_sessions.set_agent_title(root, sid, generated)
+                if final_title != title:
+                    self.bump()
+                return 200, {
+                    "ok": True,
+                    "title": final_title,
+                    "generated": True,
+                    "source": TITLE_AGENT,
+                }
+            seeded = kernel_sessions.ensure_title(root, sid, goal)
+            if seeded != title:
+                self.bump()
+            return 200, {
+                "ok": True,
+                "title": seeded,
+                "generated": False,
+                "source": TITLE_SEED if seeded else "",
+            }
 
     def create_session(self, name: str | None = None, *, title: str = "") -> tuple[int, dict]:
         """新建一条会话（`POST /session/new`），返回（状态码, 响应体）。
@@ -685,6 +818,9 @@ def _session_rows(target: Target | None) -> list[dict]:
         {
             "id": item.id,
             "title": item.title,
+            # 标题是谁起的：seed（第一句目标）/ agent（模型命名）/ manual（人命名）。
+            # 页面据此判断"还值不值得请 Agent 再起一次名"。
+            "title_source": item.title_source,
             "archived": item.archived,
             "last_active": item.last_active,
             "current": item.id == target.session,
@@ -732,9 +868,27 @@ def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
             raw = body.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
+
+        def _asset(self, url_path: str) -> None:
+            """`GET /assets/<path>`：白名单扩展名，拒绝穿越、绝对路径和符号链接。"""
+            try:
+                asset = load_asset(url_path[len("/assets/") :])
+            except AssetError:
+                self._json(404, {"error": "没有这个路径"})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", asset.mime)
+            self.send_header("Content-Length", str(len(asset.body)))
+            self.send_header("ETag", asset.etag)
+            if asset.last_modified:
+                self.send_header("Last-Modified", asset.last_modified)
+            self.send_header("Cache-Control", asset.cache_control)
+            self.end_headers()
+            self.wfile.write(asset.body)
 
         def _body(self) -> dict:
             length = int(self.headers.get("Content-Length") or 0)
@@ -780,11 +934,13 @@ def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:  # noqa: N802 - 基类约定的方法名
             if self.path == "/":
-                self._html(HTML)
+                self._html(INDEX)
             elif self.path == "/state":
                 self._json(200, state.snapshot())
             elif self.path == "/events":
                 self._stream()
+            elif self.path.startswith("/assets/"):
+                self._asset(self.path)
             else:
                 self._json(404, {"error": "没有这个路径"})
 
@@ -910,6 +1066,12 @@ def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
                 self._json(status, body)
                 return
 
+            if self.path == "/session/title":
+                payload = self._body()
+                status, body = state.generate_title(str(payload.get("session") or ""))
+                self._json(status, body)
+                return
+
             if self.path == "/session/new":
                 payload = self._body()
                 # `session` 这个键**在不在这**是有意义的：给了空串是"名字非法"（400），
@@ -941,7 +1103,25 @@ def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
                 if not runner.start(goal):
                     self._json(409, {"error": "已有运行在进行，等它结束再发"})
                     return
-                self._json(202, {"ok": True})
+                # 种子标题：模型还没起名、或模型不可用时，左栏至少有一个可读的名字。
+                # 真正由 Agent 起的标题在 final 之后走 `POST /session/title`。
+                title = ""
+                title_source = ""
+                target = state.target()
+                if target is not None:
+                    title = kernel_sessions.ensure_title(
+                        target.root, target.session, goal
+                    )
+                    title_source = str(
+                        kernel_sessions.read_meta(target.root, target.session).get(
+                            "title_source"
+                        )
+                        or ""
+                    )
+                self._json(
+                    202,
+                    {"ok": True, "title": title, "title_source": title_source},
+                )
                 return
 
             if self.path == "/run/stop":

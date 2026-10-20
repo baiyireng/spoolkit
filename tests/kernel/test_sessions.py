@@ -32,8 +32,36 @@ def test_建一条就能列出来(tmp_path: Path) -> None:
 def test_标题从第一句目标截出来(tmp_path: Path) -> None:
     assert sessions.title_from_goal("  ") == ""
     assert sessions.title_from_goal("修好 sum_to") == "修好 sum_to"
+    # 口令要去掉，不把"请/帮我"当标题正文。
+    assert sessions.title_from_goal("请帮我修好登录页") == "修好登录页"
     long_goal = "把" + "很长的目标" * 20
     assert len(sessions.title_from_goal(long_goal)) == sessions.TITLE_LIMIT
+
+
+def test_种子标题与Agent标题的来源(tmp_path: Path) -> None:
+    root = _ws(tmp_path)
+    made = sessions.create_session(root)
+    assert sessions.ensure_title(root, made, "修好登录页") == "修好登录页"
+    meta = sessions.read_meta(root, made)
+    assert meta["title_source"] == sessions.TITLE_SEED
+
+    # Agent 标题可以覆盖种子。
+    assert sessions.set_agent_title(root, made, "登录页并发崩溃修复") == "登录页并发崩溃修复"
+    meta = sessions.read_meta(root, made)
+    assert meta["title"] == "登录页并发崩溃修复"
+    assert meta["title_source"] == sessions.TITLE_AGENT
+
+    # 人点名的标题不被 Agent 覆盖。
+    manual = sessions.create_session(root, title="我起的名字")
+    assert sessions.read_meta(root, manual)["title_source"] == sessions.TITLE_MANUAL
+    assert sessions.set_agent_title(root, manual, "模型起的名字") == "我起的名字"
+    assert sessions.read_meta(root, manual)["title"] == "我起的名字"
+
+
+def test_Agent标题清洗到一行(tmp_path: Path) -> None:
+    assert sessions.clean_title("标题：修复登录页。") == "修复登录页"
+    assert sessions.clean_title("“修好 sum_to”\n第二行") == "修好 sum_to"
+    assert sessions.clean_title("") == ""
 
 
 def test_第一句目标填标题之后不再覆盖(tmp_path: Path) -> None:
