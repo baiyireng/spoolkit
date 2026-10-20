@@ -186,6 +186,7 @@ from spoolkit.tools.capabilities import (
 from spoolkit.tools.capabilities import of_spec as capability_of_spec
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools import types as _types
+from spoolkit.agent.contract import project_for_model
 from spoolkit.tools.types import REVERSE_CLAUSE, ToolCall, ToolResult
 from spoolkit.tools.verify import (
     CANNOT_CHECK,
@@ -3315,6 +3316,10 @@ class AgentLoop:
                             )
                     result = self._invoke_guarded(call, repeats, seen)
                     shown = self._present_read(call, result)
+                    # 编辑回执的整份 diff 留在 raw / 待确认清单里。
+                    # 模型只看 summary；没填 summary 的失败和暂存重写仍走原文。
+                    if result.summary and call.name in ("write_file", "replace_lines"):
+                        shown = project_for_model(result)
                     # ---- 素材卡原料（P0 修②）--------------------------------
                     #
                     # 只收**真的执行过**的调用（被拦的那一次没有拿到任何东西，

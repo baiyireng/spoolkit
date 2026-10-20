@@ -23,7 +23,7 @@ from spoolkit import limits
 from spoolkit import runlog
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable, resolve_within
-from spoolkit.tools.types import NEXT_STEP_MARKER, ToolResult, ToolSpec
+from spoolkit.tools.types import NEXT_STEP_MARKER, Artifact, ToolResult, ToolSpec
 from spoolkit.check.constraints import check_source, format_violations
 from spoolkit.tools.view import WorkspaceView
 
@@ -2271,6 +2271,82 @@ def _normalize_span(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n"))
 
 
+def _diff_line_counts(diff: str) -> tuple[int, int]:
+    """统一 diff 里真正的增删行，不计文件头。"""
+    added = removed = 0
+    for line in diff.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
+def _project_edit(
+    result: ToolResult,
+    pending: PendingChanges,
+    args: dict,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+) -> ToolResult:
+    """待确认的编辑回执拆成信封。content 原样留下，模型只该看 summary。
+
+    暂存重写、没改动、失败都不进这里：那些回执里的令牌和清单项还得整段给模型。
+    """
+    if not result.ok or STAGE_MARKER in result.content:
+        return result
+    path = args.get("path")
+    if not isinstance(path, str) or not path:
+        return result
+    try:
+        stored = pending.path_of(path)
+    except PathOutsideProjectError:
+        return result
+    change = next(
+        (
+            item
+            for item in reversed(pending.items())
+            if item.path == stored and not item.deleted
+        ),
+        None,
+    )
+    if change is None or not change.diff or change.diff not in result.content:
+        return result
+    before = _count_lines(change.old_text)
+    after = _count_lines(change.new_text)
+    added, removed = _diff_line_counts(change.diff)
+    nxt = "继续改下一个文件，或改完给出结论；不要调 confirm_rewrite。"
+    summary = (
+        f"{stored}：{before}→{after} 行（+{added} −{removed}），"
+        f"待确认，尚未写入磁盘。下一步：{nxt}"
+    )
+    if is_test_path(stored):
+        summary += "这是测试文件，改它不会让验证通过。"
+    data: dict[str, Any] = {
+        "path": stored,
+        "lines_before": before,
+        "lines_after": after,
+    }
+    if isinstance(start, int):
+        data["start"] = start
+    if isinstance(end, int):
+        data["end"] = end
+    return ToolResult(
+        ok=True,
+        content=result.content,
+        facts=result.facts,
+        usage=result.usage,
+        raw=result.content,
+        summary=summary,
+        data=data,
+        artifacts=(Artifact(type="diff", path=stored),),
+        next=nxt,
+    )
+
+
 def _line_edit_receipt(root: Path, pending: PendingChanges, args: dict) -> str:
     """一次按行替换之后的行号回执。
 
@@ -2482,10 +2558,11 @@ def write_file_spec(
     """
 
     def handler(args: dict) -> ToolResult:
-        return _propose(
+        result = _propose(
             root, pending, args, lambda _old: args["content"],
             alternatives=alternatives,
         )
+        return _project_edit(result, pending, args)
 
     return ToolSpec(
         name="write_file",
@@ -2742,9 +2819,22 @@ def replace_lines_spec(
         )
         if not result.ok:
             return result
-        return ToolResult(
-            ok=result.ok,
-            content=result.content + _line_edit_receipt(root, pending, args),
+        receipt = _line_edit_receipt(root, pending, args)
+        if receipt:
+            result = ToolResult(
+                ok=True,
+                content=result.content + receipt,
+                facts=result.facts,
+                usage=result.usage,
+            )
+        start = args.get("start_line")
+        end = args.get("end_line")
+        return _project_edit(
+            result,
+            pending,
+            args,
+            start=start if isinstance(start, int) else None,
+            end=end if isinstance(end, int) else None,
         )
 
     return ToolSpec(
