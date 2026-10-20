@@ -186,7 +186,15 @@ from spoolkit.tools.capabilities import (
 from spoolkit.tools.capabilities import of_spec as capability_of_spec
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools import types as _types
-from spoolkit.agent.contract import SUMMARY_MAX_CHARS, project_for_model
+from spoolkit.agent.contract import (
+    SUMMARY_MAX_CHARS,
+    error_from_exception,
+    error_from_final,
+    error_from_tool,
+    project_for_model,
+    retrieval_event,
+    tool_event,
+)
 from spoolkit.tools.types import REVERSE_CLAUSE, ToolCall, ToolResult
 from spoolkit.tools.verify import (
     CANNOT_CHECK,
@@ -1765,6 +1773,11 @@ class AgentLoop:
         self.environment_blocked = False
         self.persona = persona
         self.on_event = on_event
+        # 这一次 run() 的任务事件序号。旧的 tool/diff/await 通道不走这里。
+        self._event_seq = 0
+        self._event_task_id = ""
+        self._event_run_id = str(getattr(pending, "run_id", "") or "")
+        self._event_step = 0
         self.from_channel = from_channel
         # 「最终验证」那一条阶段行的**推迟出口**（见 `_emit_final_verify`）。
         # 不给就是当场发（终端那条路：`settle` 与收尾在同一口气里，没有"等确认"
@@ -2143,9 +2156,37 @@ class AgentLoop:
             bind(self._cancel)
         started = time.perf_counter()
         result: LoopResult | None = None
+        self._event_seq = 0
+        self._event_task_id = task_id
+        self._event_run_id = str(getattr(self.pending, "run_id", "") or "")
+        self._event_step = 0
         previous_sigint = self._install_stop_signal()
         try:
             result = self._run(goal, task_id=task_id, resume=resume, prompt=prompt)
+        except Exception as exc:
+            self._emit_task(
+                error_from_exception(
+                    task_id=self._event_task_id or task_id,
+                    run_id=self._event_run_id,
+                    turn_id=current_turn_id(),
+                    seq=self._next_event_seq(),
+                    step=self._event_step,
+                    exc=exc,
+                )
+            )
+            raise
+        else:
+            if result is not None and not result.finished:
+                self._emit_task(
+                    error_from_final(
+                        task_id=result.state.task_id,
+                        run_id=self._event_run_id,
+                        turn_id=current_turn_id(),
+                        seq=self._next_event_seq(),
+                        step=result.state.step,
+                        summary=result.failed_reason or result.final or "未完成",
+                    )
+                )
             return result
         finally:
             if previous_sigint is not None:
@@ -2205,6 +2246,8 @@ class AgentLoop:
         resumed = state is not None
         if state is None:
             state = TaskState(task_id=task_id, goal=goal)
+        self._event_task_id = state.task_id
+        self._event_step = state.step
         goal = state.goal
         # 「上次建议 + 它的表态」是**本次会话内**的对照，不是任务状态：
         # 续跑时读到上一段留下的表态，等于让新的一次运行替上一次认账。
@@ -2346,6 +2389,17 @@ class AgentLoop:
         state_seconds = 0.0
         supervisor_seconds = 0.0
         prefetched = self.prefetch(goal) if self.prefetch is not None else ""
+        if prefetched.strip():
+            self._emit_task(
+                retrieval_event(
+                    task_id=state.task_id,
+                    run_id=self._event_run_id,
+                    turn_id=current_turn_id(),
+                    seq=self._next_event_seq(),
+                    step=state.step,
+                    summary=prefetched,
+                )
+            )
         hot = self.memory.hot_text() if self.memory is not None else ""
         # 「原地打转」检测：连续相同的调用计数。跨步骤累计，
         # 中间只要出现一个不同的调用就清零。
@@ -2414,6 +2468,8 @@ class AgentLoop:
             ))
 
         while True:
+            self._event_task_id = state.task_id
+            self._event_step = state.step
             self._guard_trace_step = state.step
             if state.step >= limit and not self.config.supervise:
                 # 关掉督导就退回老行为：撞上上限即停。这条路仍然要留着——
@@ -3292,7 +3348,7 @@ class AgentLoop:
                     changed_paths=changed_paths,
                     fail_streak=edit_fail_streak,
                 )
-                for call in turn.tool_calls:
+                for index, call in enumerate(turn.tool_calls):
                     signature = call_signature(call)
                     repeats = repeats + 1 if signature == last_signature else 1
                     last_signature = signature
@@ -3447,6 +3503,7 @@ class AgentLoop:
                         payload["completion_tokens"] = result.usage.completion_tokens
                         payload["calls"] = result.usage.calls
                     self._emit("tool", payload)
+                    self._emit_task(self._task_event_for_tool(state, call, result, index))
                     status = "成功" if result.ok else "失败"
                     if _is_repeat_output(shown, prefetched, seen_outputs):
                         # 相同正文仍在提示词里（预取或上一轮），只是不再重复第二遍。
@@ -7435,6 +7492,40 @@ class AgentLoop:
         self._streamed_final = acc
         self._truncation_replay = False
         return ""
+
+    def _next_event_seq(self) -> int:
+        self._event_seq += 1
+        return self._event_seq
+
+    def _emit_task(self, event: object) -> None:
+        """新通道。载荷里没有 thought，也没有工具 raw。"""
+        payload = event.to_dict()  # type: ignore[attr-defined]
+        payload.pop("thought", None)
+        payload.pop("raw", None)
+        self._emit("task_event", payload)
+
+    def _task_event_for_tool(self, state: TaskState, call: ToolCall, result: ToolResult, index: int):
+        """成功走 observe，失败走 error。摘要只用 summary，没有就用截断后的正文。"""
+        summary = result.summary or result.content
+        common = dict(
+            task_id=state.task_id,
+            run_id=self._event_run_id,
+            turn_id=current_turn_id(),
+            seq=self._next_event_seq(),
+            step=state.step,
+            tool_call_id=f"tc-{state.step}-{index}",
+        )
+        if result.ok:
+            blob = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, default=str)
+            return tool_event(
+                **common,
+                intent=call.intent,
+                args_digest=hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12],
+                status="ok",
+                summary=summary,
+                artifacts=result.artifacts,
+            )
+        return error_from_tool(**common, summary=summary)
 
     def _emit(self, kind: str, data: dict[Any, Any]) -> None:
         """向外部观察者发一条事件。

@@ -30,6 +30,8 @@ FINAL_DELTA = "final_delta"
 # 长文一节的草稿开始 / 正式提交。重写只再发这一节，不重放前面的节。
 SECTION_START = "section_start"
 SECTION_DONE = "section_done"
+# 任务时间线。与 tool / diff / await / final 并行，不替换它们。
+TASK_EVENT = "task_event"
 
 KNOWN = frozenset(
     {
@@ -48,6 +50,7 @@ KNOWN = frozenset(
         FINAL_DELTA,
         SECTION_START,
         SECTION_DONE,
+        TASK_EVENT,
     }
 )
 

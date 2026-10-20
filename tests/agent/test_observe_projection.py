@@ -87,8 +87,10 @@ def test_模型看见卡和摘要看不见整份raw(tmp_path: Path) -> None:
     covered = [hit for hit in search.data["hits"] if hit["text"] in search.summary]
     assert len(search.data["hits"]) == 8
     assert len(covered) >= 5 or "摘要已截断" in search.summary
-    hidden = next(hit["text"] for hit in search.data["hits"] if hit["text"] not in search.summary)
-    assert hidden not in shown
+    # rg 不保证文件顺序，两次搜索的「被摘要丢掉的那一条」可能不是同一条。
+    # 模型侧只要求：8 条命中没有全部进提示，完整 raw 也不在。
+    visible = [hit["text"] for hit in search.data["hits"] if hit["text"] in shown]
+    assert len(visible) < len(search.data["hits"])
     assert search.raw not in shown
     assert "ERROR_KEY_LINE boom" in shown
     assert "LAST_CONTEXT_LINE" in shown
