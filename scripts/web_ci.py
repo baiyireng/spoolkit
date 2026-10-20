@@ -59,6 +59,7 @@ def main() -> int:
         "tests/web",
         "tests/kernel/test_sessions.py",
         "tests/mcp/test_server.py",
+        "tests/agent/test_task_contract.py",
     ], env=env))
     return 0 if all(code == 0 for code in codes) else 1
 

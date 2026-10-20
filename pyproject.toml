@@ -54,6 +54,9 @@ packages = ["src/spoolkit"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: 需要本机 llama.cpp /tokenize；服务不可用时跳过",
+]
 
 # ---- 类型检查（开发侧关口之一，见 scripts/gate.py）----------------------------
 #

@@ -58,18 +58,19 @@ def clip_summary(text: str) -> str:
 
 
 def adapt_legacy(result: ToolResult) -> ToolResult:
-    """把旧工具结果收成新信封。原对象不动，content 原样留下。
+    """把旧工具结果收成新信封。原对象不动。
 
-    没填 summary 时，用截断后的 content 填上。raw 清空，data 保持空
-    （旧工具本来就没有结构化结果）。facts 和 usage 照抄，核对和记账还要它们。
+    summary 用截断后的 summary；没填就用截断后的 content。
+    content、raw、data、artifacts、next、facts、usage 照抄。
+    raw 留给界面和证据。模型只通过 project_for_model 看 summary。
     """
-    summary = result.summary if result.summary else result.content
+    summary = result.summary or result.content
     return ToolResult(
         ok=result.ok,
         content=result.content,
         facts=result.facts,
         usage=result.usage,
-        raw="",
+        raw=result.raw,
         summary=clip_summary(summary),
         data=dict(result.data),
         artifacts=result.artifacts,

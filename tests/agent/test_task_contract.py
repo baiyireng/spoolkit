@@ -40,13 +40,54 @@ def test_旧工具适配成信封且不改原件() -> None:
     assert original.raw == "证据-RAW-不要进模型"
     assert original.summary == ""
     assert adapted.content == original.content
-    assert adapted.raw == ""
+    assert adapted.raw == original.raw
     assert adapted.data == {}
     assert adapted.artifacts == ()
     assert adapted.summary == clip_summary(original.content)
     assert len(adapted.summary) <= SUMMARY_MAX_CHARS
     assert adapted.usage == original.usage
     assert adapted.ok is True
+
+
+def test_适配器保留raw并照抄data() -> None:
+    content = "甲" * (SUMMARY_MAX_CHARS + 30)
+    original = ToolResult(
+        ok=False,
+        content=content,
+        raw="原始证据-不要进模型",
+        data={"lines": 9},
+        artifacts=(Artifact(type="diff", path="a.py", ref="h1"),),
+        next="再看 b.py",
+    )
+    adapted = adapt_legacy(original)
+
+    assert adapted.raw == "原始证据-不要进模型"
+    assert adapted.content == original.content
+    assert adapted.data == {"lines": 9}
+    assert adapted.data is not original.data
+    assert adapted.artifacts == original.artifacts
+    assert adapted.next == "再看 b.py"
+    assert adapted.summary == clip_summary(content)
+    assert len(adapted.summary) == SUMMARY_MAX_CHARS
+    assert adapted.summary.endswith("…")
+    assert adapted.summary != content
+    text = project_for_model(adapted, thought="整段思考-不要进模型")
+    assert "原始证据-不要进模型" not in text
+    assert "整段思考-不要进模型" not in text
+    assert text == adapted.summary
+
+
+def test_旧位置参数构造不变() -> None:
+    result = ToolResult(True, "正文")
+    assert result.ok is True
+    assert result.content == "正文"
+    assert result.raw == ""
+    assert result.summary == ""
+    assert result.data == {}
+    assert result.artifacts == ()
+    assert result.next == ""
+    assert result.facts == ()
+    assert result.usage is None
 
 
 def test_已有summary时适配器只截断不改回content() -> None:
@@ -93,6 +134,7 @@ def test_运行时上限按字符不按离线分词() -> None:
     assert clipped != long
 
 
+@pytest.mark.integration
 def test_summary最坏分词不超过服务端预算() -> None:
     url, _source = settings.resolve("base_url", "")
     counter = LlamaCppTokenCounter(url or DEFAULT_BASE_URL, timeout=30)
@@ -105,8 +147,8 @@ def test_summary最坏分词不超过服务端预算() -> None:
     samples["ascii"] = samples["ascii"][:width]
     try:
         counts = {name: counter.count(text) for name, text in samples.items()}
-    except Exception as exc:  # noqa: BLE001 - 服务端不可用时这条契约测不了
-        pytest.fail(f"需要 llama.cpp /tokenize 验证 summary 上限，连不上：{exc}")
+    except Exception as exc:  # noqa: BLE001 - 服务端不可用时跳过，不让普通 CI 红
+        pytest.skip(f"llama.cpp /tokenize 不可用：{exc}")
     finally:
         counter.close()
     worst = max(counts.values())
