@@ -34,7 +34,7 @@ from spoolkit.interpreter import (
 )
 from spoolkit.paths import resolve_within
 from spoolkit.tools.trial import trial_workspace
-from spoolkit.tools.types import ToolResult, ToolSpec
+from spoolkit.tools.types import Artifact, ToolResult, ToolSpec
 from spoolkit import limits as _limits
 from spoolkit.tools.grant import ALLOWED, ASK, DENIED, Grants, classify
 
@@ -347,6 +347,25 @@ def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     )
 
 
+def _key_output(stdout: str, stderr: str, code: int) -> str:
+    """summary 里的那一行：失败优先拿第一处错误，否则拿第一行输出。"""
+    if code != 0:
+        for line in (stderr or "").splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped[:160]
+        for line in (stdout or "").splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("FAILED ", "ERROR ", "Traceback", "Error")) or "Error" in stripped:
+                return stripped[:160]
+    for source in (stdout, stderr):
+        for line in (source or "").splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped[:160]
+    return ""
+
+
 def _execute(
     base: Path,
     argv: list[str],
@@ -355,6 +374,7 @@ def _execute(
     timeout: int,
     max_output: int = MAX_OUTPUT_CHARS,
     extra_env: dict | None = None,
+    requested_argv: list[str] | None = None,
 ) -> ToolResult:
     """在指定目录里执行。base 可能是原目录，也可能是试跑副本。
 
@@ -408,14 +428,30 @@ def _execute(
     except OSError as exc:
         return ToolResult(ok=False, content=f"命令执行失败: {exc}")
 
-    body = _truncate(
-        ((proc.stdout or "") + (proc.stderr or "")).strip())
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    body = _truncate((stdout + stderr).strip())
     status = "成功" if proc.returncode == 0 else "失败"
     # 输出放在前面：模型和人都先要知道「错在哪」，
     # 而不是先看到自己刚才发了什么命令。
+    content = f"退出码 {proc.returncode}（{status}）\n$ {requested}\n{body}"
+    key = _key_output(stdout, stderr, proc.returncode)
+    summary = f"退出码 {proc.returncode}。"
+    if key:
+        summary += key
+    command = list(requested_argv) if requested_argv is not None else list(argv)
     return ToolResult(
         ok=proc.returncode == 0,
-        content=f"退出码 {proc.returncode}（{status}）\n$ {requested}\n{body}",
+        content=content,
+        raw=f"stdout:\n{stdout}\nstderr:\n{stderr}",
+        summary=summary,
+        data={
+            "argv": command,
+            "cwd": cwd_arg,
+            "exit": proc.returncode,
+            "timed_out": False,
+        },
+        artifacts=(Artifact(type="command", ref=requested),),
     )
 
 
@@ -593,10 +629,26 @@ def _run(
         with trial_workspace(root, pending.items(), report=report) as work_root:
             _restore_originals(work_root, pending, revert)
             result = _execute(
-                work_root, resolved, requested, cwd_arg, timeout, max_output, extra_env
+                work_root,
+                resolved,
+                requested,
+                cwd_arg,
+                timeout,
+                max_output,
+                extra_env,
+                requested_argv=original,
             )
         return _with_trial_notice(result, report)
-    return _execute(root, resolved, requested, cwd_arg, timeout, max_output, extra_env)
+    return _execute(
+        root,
+        resolved,
+        requested,
+        cwd_arg,
+        timeout,
+        max_output,
+        extra_env,
+        requested_argv=original,
+    )
 
 
 def _with_trial_notice(result: ToolResult, report: dict) -> ToolResult:
@@ -629,6 +681,10 @@ def _with_trial_notice(result: ToolResult, report: dict) -> ToolResult:
         facts=result.facts,
         usage=result.usage,
         raw=result.raw,
+        summary=result.summary,
+        data=dict(result.data),
+        artifacts=result.artifacts,
+        next=result.next,
     )
 
 

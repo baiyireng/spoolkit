@@ -35,7 +35,7 @@ from spoolkit.prompt_sanitize import for_prompt
 from spoolkit.tools.edit import PendingChanges, is_test_path
 from spoolkit.tools.exec import DEFAULT_TIMEOUT, run_once
 from spoolkit.tools.grant import ALLOWED, classify
-from spoolkit.tools.types import ToolResult, ToolSpec
+from spoolkit.tools.types import Artifact, ToolResult, ToolSpec
 from spoolkit.tools.view import WorkspaceView
 
 TEST_COMMAND = ("python", "-m", "pytest", "-q")
@@ -1591,16 +1591,8 @@ def analyze_text(
     )
 
 
-def check_text(
-    root: Path,
-    label: str,
-    text: str,
-    base_dir: Path | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
-    exists: Callable[[Path], bool] | None = None,
-) -> ToolResult:
+def _render_check(label: str, report: CheckReport) -> ToolResult:
     """模型可见的验证结论：问题、查不了的步骤、通过的步骤全说。"""
-    report = analyze_text(root, label, text, base_dir, timeout, exists)
     kind = _suffix(label) or "无扩展名"
     head = f"{label}（{kind}）：" + (
         f"发现 {len(report.problems)} 处问题"
@@ -1615,6 +1607,47 @@ def check_text(
     if report.problems:
         lines.append("按「文件:行」逐条改。")
     return ToolResult(ok=not report.problems, content="\n".join(lines))
+
+
+def _envelope_verify(label: str, report: CheckReport, result: ToolResult) -> ToolResult:
+    """成功验完的信封。summary 是一行结论，问题清单在 data，不进提示。"""
+    kind = _suffix(label) or "无扩展名"
+    head = result.content.split("\n", 1)[0]
+    extra = ""
+    if report.problems:
+        extra = report.problems[0]
+    elif report.cannot:
+        extra = report.cannot[0]
+    elif report.uncovered:
+        extra = report.uncovered[0]
+    summary = head if not extra else f"{head} {extra}"
+    summary = " ".join(summary.split())
+    return ToolResult(
+        ok=result.ok,
+        content=result.content,
+        raw="",
+        summary=summary,
+        data={
+            "path": label,
+            "suffix": kind,
+            "problems": list(report.problems),
+            "notes": list(report.notes),
+        },
+        artifacts=(Artifact(type="file", path=label),),
+    )
+
+
+def check_text(
+    root: Path,
+    label: str,
+    text: str,
+    base_dir: Path | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    exists: Callable[[Path], bool] | None = None,
+) -> ToolResult:
+    """模型可见的验证结论：问题、查不了的步骤、通过的步骤全说。"""
+    report = analyze_text(root, label, text, base_dir, timeout, exists)
+    return _render_check(label, report)
 
 
 def verify_file_spec(
@@ -1654,7 +1687,7 @@ def verify_file_spec(
                 content=f"文件不是 UTF-8 文本，无法做静态检查: {args['path']}",
             )
         label = pending.path_of(args["path"]) if pending is not None else args["path"]
-        return check_text(
+        report = analyze_text(
             root,
             label,
             text,
@@ -1662,6 +1695,7 @@ def verify_file_spec(
             timeout=timeout,
             exists=view.exists,
         )
+        return _envelope_verify(label, report, _render_check(label, report))
 
     return ToolSpec(
         name="verify_file",

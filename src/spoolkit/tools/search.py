@@ -19,7 +19,7 @@ from pathlib import Path
 
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable
-from spoolkit.tools.types import ToolResult, ToolSpec
+from spoolkit.tools.types import Artifact, ToolResult, ToolSpec
 from spoolkit.tools.view import WorkspaceView
 
 DEFAULT_MAX_RESULTS = 50
@@ -44,6 +44,10 @@ _UNREADABLE_HINTS = (
 _ERROR_LINE = re.compile(r"^rg:\s*(?P<path>.+?):\s+(?P<why>\S.*)$")
 #: 结果里最多点名几个被跳过的路径（点太多会把结果本身挤没）；剩下的只报个数。
 _SKIP_SHOWN = 5
+#: summary 里带上的命中条数。完整列表在 data / raw，不进模型。
+_SUMMARY_HITS = 3
+_HIT_TEXT_CHARS = 80
+_HIT_LINE = re.compile(r"^(?P<path>.*?):(?P<line>\d+):(?P<text>.*)$")
 
 
 def _skip_note(skipped, limit=_SKIP_SHOWN) -> str:
@@ -161,9 +165,16 @@ def _search_code(root: Path, args: dict, pending=None, read_roots=()) -> ToolRes
         merged.extend(_search_overlay(view, pattern, base, max_results))
         cleaned = merged[:max_results]
 
+    truncated = len(proc.stdout.splitlines()) > max_results
+    if view.overridden:
+        # 叠加上限之前的条数：改过的文件可能再贡献命中。
+        truncated = truncated or len(merged) > max_results
+
     if cleaned:
         content = "\n".join(cleaned)
-        return ToolResult(ok=True, content=content + (f"\n{note}" if note else ""))
+        if note:
+            content = f"{content}\n{note}"
+        return _envelope_search(content, cleaned, truncated=truncated)
 
     # 一条都没搜到。这时「没匹配」与「根本没搜成」必须分得开：搜索的**起点**
     # 自己就读不了的话，这次搜索一次都没真正执行过，不能拿空结果冒充成功。
@@ -178,7 +189,56 @@ def _search_code(root: Path, args: dict, pending=None, read_roots=()) -> ToolRes
                 + _skip_note(unreadable)
             ),
         )
-    return ToolResult(ok=True, content=note)
+    return _envelope_search(note, [], truncated=truncated)
+
+
+def _parse_hit(line: str) -> dict | None:
+    match = _HIT_LINE.match(line)
+    if match is None:
+        return None
+    return {
+        "path": match.group("path"),
+        "line": int(match.group("line")),
+        "text": match.group("text"),
+    }
+
+
+def _short_hit(hit: dict) -> str:
+    text = hit["text"]
+    if len(text) > _HIT_TEXT_CHARS:
+        text = text[: _HIT_TEXT_CHARS - 1] + "…"
+    return f"{hit['path']}:{hit['line']}:{text}"
+
+
+def _envelope_search(content: str, lines: list[str], *, truncated: bool) -> ToolResult:
+    """成功搜索的信封。summary 带前几条 path:line:text，raw 是完整结果。"""
+    hits: list[dict] = []
+    for line in lines:
+        hit = _parse_hit(line)
+        if hit is not None:
+            hits.append(hit)
+    if hits:
+        top = "\n".join(_short_hit(hit) for hit in hits[:_SUMMARY_HITS])
+        tail = f"命中 {len(hits)} 条"
+        if truncated:
+            tail += "，已按 max_results 截断"
+        summary = f"{top}\n{tail}。"
+    else:
+        summary = "没有命中。"
+        if content.strip():
+            summary = f"没有命中。{content.strip()}"
+    paths: list[str] = []
+    for hit in hits:
+        if hit["path"] not in paths:
+            paths.append(hit["path"])
+    return ToolResult(
+        ok=True,
+        content=content,
+        raw=content,
+        summary=summary,
+        data={"hits": hits, "count": len(hits), "truncated": truncated},
+        artifacts=tuple(Artifact(type="file", path=path) for path in paths),
+    )
 
 
 def _search_overlay(

@@ -186,7 +186,7 @@ from spoolkit.tools.capabilities import (
 from spoolkit.tools.capabilities import of_spec as capability_of_spec
 from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools import types as _types
-from spoolkit.agent.contract import project_for_model
+from spoolkit.agent.contract import clip_summary, project_for_model
 from spoolkit.tools.types import REVERSE_CLAUSE, ToolCall, ToolResult
 from spoolkit.tools.verify import (
     CANNOT_CHECK,
@@ -1655,6 +1655,28 @@ def _requested_span(call: ToolCall, total: int) -> tuple[bool, str, int]:
     first = as_int(start, 1)
     last = as_int(end, total)
     return True, f"{first}-{last}", max(0, last - first + 1)
+
+
+def project_search_result(result: ToolResult) -> str:
+    """模型看带前几条命中的 summary。raw 里的完整结果不进提示。"""
+    if not result.summary:
+        return result.content
+    return clip_summary(result.summary)
+
+
+def project_run_result(result: ToolResult) -> str:
+    """模型看退出码和第一处关键输出。stdout/stderr 留在 raw。
+
+    试跑副本的提醒不在 summary 里，但模型仍要看见，否则会把副本缺依赖当成没装。
+    """
+    if not result.summary:
+        return result.content
+    text = result.summary
+    if "试跑副本" in result.content and "试跑副本" not in text:
+        text += " 本次在试跑副本执行，真实工作区未改动。"
+    if "没能接进副本" in result.content and "没接进副本" not in text:
+        text += " 有依赖目录没接进副本，不要当成没装依赖。"
+    return clip_summary(text)
 
 
 class AgentLoop:
@@ -3316,9 +3338,15 @@ class AgentLoop:
                             )
                     result = self._invoke_guarded(call, repeats, seen)
                     shown = self._present_read(call, result)
-                    # 编辑回执的整份 diff 留在 raw / 待确认清单里。
-                    # 模型只看 summary；没填 summary 的失败和暂存重写仍走原文。
+                    # 按工具投影。read_file 即使带了 summary，仍走上面的卡/片段。
+                    # 没填 summary 的失败、暂存重写、没改动仍走原文。
                     if result.summary and call.name in ("write_file", "replace_lines"):
+                        shown = project_for_model(result)
+                    elif call.name == "search_code" and result.summary:
+                        shown = project_search_result(result)
+                    elif call.name == "run_command" and result.summary:
+                        shown = project_run_result(result)
+                    elif call.name == "verify_file" and result.summary:
                         shown = project_for_model(result)
                     # ---- 素材卡原料（P0 修②）--------------------------------
                     #

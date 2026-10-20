@@ -4,11 +4,12 @@
 工具失败一律返回 ok=False，不抛异常。
 """
 
+import hashlib
 from pathlib import Path
 
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable
-from spoolkit.tools.types import ToolResult, ToolSpec
+from spoolkit.tools.types import Artifact, ToolResult, ToolSpec
 from spoolkit.tools.view import WorkspaceView
 
 
@@ -56,7 +57,7 @@ def _read_file(root: Path, args: dict, pending=None, read_roots=()) -> ToolResul
     start = args.get("start_line")
     end = args.get("end_line")
     if start is None and end is None:
-        return ToolResult(ok=True, content=text)
+        return _envelope_read(root, target, args["path"], text, text)
 
     start = 1 if start is None else start
     if start < 1:
@@ -69,7 +70,60 @@ def _read_file(root: Path, args: dict, pending=None, read_roots=()) -> ToolResul
 
     chunk = lines[start - 1 : end]
     numbered = "\n".join(f"{start + i}\t{line}" for i, line in enumerate(chunk))
-    return ToolResult(ok=True, content=numbered)
+    return _envelope_read(
+        root, target, args["path"], text, numbered, start=start, end=end
+    )
+
+
+def _stored_path(root: Path, target: Path, fallback: str) -> str:
+    try:
+        return target.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return str(fallback).replace("\\", "/")
+
+
+def _fingerprint(text: str) -> str:
+    """与循环里的内容指纹同一算法：sha1 前 12 位 + 行数。"""
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    return f"{digest}/{len(text.splitlines())}行"
+
+
+def _envelope_read(
+    root: Path,
+    target: Path,
+    fallback: str,
+    text: str,
+    content: str,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+) -> ToolResult:
+    """成功读取的信封。content 仍是正文或带行号片段，呈现规则留给循环。"""
+    del end
+    stored = _stored_path(root, target, fallback)
+    total = len(text.splitlines())
+    if start is None:
+        shown_start, shown_end = 1, total
+        summary = f"{stored}：{total} 行"
+    else:
+        span = len(content.splitlines()) if content else 0
+        shown_start = start
+        shown_end = start + span - 1 if span else start - 1
+        summary = f"{stored} 第 {shown_start}–{shown_end} 行（文件 {total} 行）"
+    return ToolResult(
+        ok=True,
+        content=content,
+        raw=content,
+        summary=summary,
+        data={
+            "path": stored,
+            "start": shown_start,
+            "end": shown_end,
+            "lines": total,
+            "fingerprint": _fingerprint(text),
+        },
+        artifacts=(Artifact(type="file", path=stored),),
+    )
 
 
 def _list_dir(root: Path, args: dict, pending=None, read_roots=()) -> ToolResult:
