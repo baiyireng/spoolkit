@@ -210,8 +210,8 @@ def test_页面按快照显示待批准的配对码() -> None:
     # 钉要点：那两个按钮**不批配对**这件事必须说得出（口径可以换词，这条事实不行）。
     assert "不批准配对" in section, "没说清那两个按钮不批配对"
     assert "批准在终端" in section, "没说清批配对到底在哪做"
-    assert "'配对码 ' + ctx.store.get('pairingRows')[0].code" in _body("drawStatus"), (
-        "只有一条配对时码没有直接写在徽标上"
+    assert "stPair" in _body("drawStatus") and "classList.add('hidden')" in _body("drawStatus"), (
+        "配对又被画成单独的浮块"
     )
 
 
@@ -902,9 +902,10 @@ def test_状态区常态只剩一枚圆点() -> None:
     )
     assert "'模型未连接'" in body, "连接不通那一档没有短标签"
     status = _body("drawStatus")
-    assert "healthLabel.classList.toggle('hidden', ctx.store.get('healthView').label === '')" in status, (
-        "常态那枚圆点旁边还挂着空标签"
-    )
+    assert "healthLabel.textContent = word" in status, "状态入口没有写出三档里的那一个词"
+    assert "return '正常'" in _body("statusEntryWord")
+    assert "return '未连接'" in _body("statusEntryWord")
+    assert "return '异常'" in _body("statusEntryWord")
     # 那一行与"Enter 发送"仍是同一个 flex 行（`.st-hint` 靠 margin-left:auto 靠右）。
     assert "margin-left:auto" in _rule(".st-hint")
 
@@ -969,7 +970,7 @@ def test_只读与钉住的模式信息仍然可发现() -> None:
 
     # 徽标上的短标签由这两件事拼出来（同时成立时说全）。
     badge = _body("modeBadgeText")
-    assert "'只读'" in badge and "'已钉住'" in badge
+    assert "'只读'" in badge and "'目标已固定'" in badge
     # 配色：只读是紫的、异常是红的、待配对是黄的（"低调"不等于"看不见"）。
     assert "var(--ro-line)" in _rule(".st-item.ro")
     assert "var(--danger-line)" in _rule(".st-item.bad")

@@ -1346,8 +1346,34 @@ function createStatus(ctx) {
 function modeBadgeText() {
   const parts = [];
   if (ctx.store.get('readonly')) { parts.push('只读'); }
-  if (ctx.store.get('pinned')) { parts.push('已钉住'); }
+  if (ctx.store.get('pinned')) { parts.push('目标已固定'); }
   return parts.join(' · ');
+}
+
+// 顶栏状态入口只说三档。详情里的超时、未探测、外接服务仍留在面板。
+function statusEntryWord() {
+  const view = ctx.store.get('healthView') || {};
+  if (view.cls === 'ok') { return '正常'; }
+  if (view.label === '模型未连接' || view.label === '未探测' || view.cls === 'warn') {
+    return '未连接';
+  }
+  return '异常';
+}
+
+function approvalCount() {
+  const groups = ((ctx.store.get('lastState') || {}).task_groups) || [];
+  let waiting = 0;
+  for (let index = 0; index < groups.length; index += 1) {
+    const events = groups[index].events || [];
+    for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
+      const event = events[eventIndex];
+      if (String(event.phase || '') === 'approval' && approvalWaiting(event.status)) {
+        waiting += 1;
+        break;
+      }
+    }
+  }
+  return waiting;
 }
 
 // 探活那一节：**状态 / 地址 / 探活时间 / 可能原因 / 下一步**（下一步是真存在的命令）。
@@ -1383,11 +1409,15 @@ function modeLines() {
   const rows = [{text: '驱动：' + (ctx.store.get('readonly')
     ? '不可用（这一页只读，写请求会被服务端拒）'
     : '可用（本机回环）')}];
+  if (ctx.store.get('readonly')) { rows.push({text: '只读'}); }
   if (ctx.store.get('readOnlyNote')) { rows.push({text: ctx.store.get('readOnlyNote')}); }
+  if (ctx.store.get('pinned')) { rows.push({text: '目标已固定'}); }
   if (ctx.store.get('pinnedNote')) { rows.push({text: ctx.store.get('pinnedNote')}); }
   if (!ctx.store.get('readOnlyNote') && !ctx.store.get('pinnedNote')) {
-    rows.push({text: '目标未钉住：在左栏点一行即可切换。'});
+    rows.push({text: '目标未固定：在左栏点一行即可切换。'});
   }
+  const waiting = approvalCount();
+  if (waiting) { rows.push({text: '待审批：' + waiting}); }
   return rows;
 }
 
@@ -1459,8 +1489,8 @@ function statusSection(title, lines, raw) {
 function renderStatusPanel() {
   if (!ctx.store.get('statusOpen')) { return; }
   const nodes = [
-    statusSection('模型探活', healthLines(), ctx.store.get('healthView').raw),
-    statusSection('这一页的运行模式', modeLines(), ''),
+    statusSection('模型连接', healthLines(), ctx.store.get('healthView').raw),
+    statusSection('运行模式', modeLines(), ''),
     statusSection('当前目标', targetLines(), ''),
   ];
   for (const one of elsewhereSections()) {
@@ -1495,41 +1525,23 @@ function setStatusOpen(open) {
 // 徽标 + 面板一次画出来。状态每次都从**最近一帧**重算，所以"跑完了还写着正在跑"
 // 这类陈旧话不会留在上面；节点只在面板开着时才重建（关着就只改类与文字）。
 function drawStatus() {
-  const bad = ctx.store.get('healthView').cls === 'bad' || ctx.store.get('healthView').cls === 'warn';
-  stHealth.className = 'st-item ' + (bad ? ctx.store.get('healthView').cls : 'ok');
-  healthLabel.classList.toggle('hidden', ctx.store.get('healthView').label === '');
-  healthLabel.textContent = ctx.store.get('healthView').label;
-  stHealth.title = '模型探活：' + (ctx.store.get('healthView').label || '正常') + '（点开查看）';
+  const word = statusEntryWord();
+  stHealth.className = 'st-item ' + (word === '正常' ? 'ok' : (word === '未连接' ? 'warn' : 'bad'));
+  healthLabel.classList.remove('hidden');
+  healthLabel.textContent = word;
+  stHealth.title = '模型连接：' + word;
   stHealth.setAttribute('aria-label', stHealth.title);
 
-  const mode = modeBadgeText();
-  stMode.classList.toggle('hidden', mode === '');
-  modeLabel.textContent = mode;
-  const modeWhy = [ctx.store.get('readOnlyNote'), ctx.store.get('pinnedNote')].filter(Boolean).join(' ');
-  stMode.title = mode === '' ? '这一页的运行模式' : (mode + '：' + modeWhy);
-  stMode.setAttribute('aria-label', stMode.title);
-
-  stTarget.classList.toggle('hidden', !ctx.store.get('targetMissing'));
-  targetLabelBox.textContent = ctx.store.get('targetMissing') ? '未选工作区' : '';
-  stTarget.title = ctx.store.get('targetMissing')
-    ? '尚未选择工作区（点开查看可选范围）' : '当前目标';
-  stTarget.setAttribute('aria-label', stTarget.title);
-
-  stPair.classList.toggle('hidden', ctx.store.get('pairingRows').length === 0);
-  // 只有一条时**把码写在徽标上**：配对码人要去终端敲，藏进详情就等于没提示。
-  pairLabel.textContent = ctx.store.get('pairingRows').length === 1
-    ? ('配对码 ' + ctx.store.get('pairingRows')[0].code)
-    : (ctx.store.get('pairingRows').length ? ('待配对 ' + ctx.store.get('pairingRows').length) : '');
-  stPair.title = ctx.store.get('pairingRows').length
-    ? '有通道配对请求待在本机终端批准（点开查看配对码与命令）' : '通道配对';
-  stPair.setAttribute('aria-label', stPair.title);
-
-  stElsewhere.classList.toggle('hidden', ctx.store.get('elsewhereRows').length === 0);
-  elsewhereLabel.textContent = ctx.store.get('elsewhereRows').length
-    ? ('别处 ' + ctx.store.get('elsewhereRows').length + ' 条在跑') : '';
-  stElsewhere.title = ctx.store.get('elsewhereRows').length
-    ? '其他目标上还有任务在运行（点开查看是哪些）' : '别处的任务';
-  stElsewhere.setAttribute('aria-label', stElsewhere.title);
+  // 固定、只读、待配对、其他会话都进面板，不再各占一枚浮块。
+  modeLabel.textContent = '';
+  targetLabelBox.textContent = '';
+  pairLabel.textContent = '';
+  elsewhereLabel.textContent = '';
+  for (const badge of [stMode, stTarget, stPair, stElsewhere]) {
+    badge.classList.add('hidden');
+    badge.title = '';
+    badge.setAttribute('aria-label', '');
+  }
 
   renderStatusPanel();
 }
@@ -1547,7 +1559,7 @@ function showElsewhere(state) {
   ctx.store.set('elsewhereRows', others.map(function (row) {
     const lines = ['会话 ' + row.session + ' — ' + short(row.goal, 60)];
     if (row.awaiting) { lines.push('该会话正在等待确认'); }
-    return {title: '其他目标仍在运行：' + (row.name || row.root), lines: lines};
+    return {title: '其他会话运行中：' + (row.name || row.root), lines: lines};
   }));
   drawStatus();
 }
@@ -2525,7 +2537,7 @@ function getLastDrawn() { return lastDrawn; }
 const TASK_FILTERS = [
   ['all', '全部'],
   ['running', '进行中'],
-  ['await', '等审批'],
+  ['await', '待审批'],
   ['failed', '失败'],
   ['done', '完成'],
 ];

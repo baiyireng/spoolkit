@@ -155,7 +155,7 @@ def test_别处还有一条在跑() -> None:
 
     assert "state.running_targets" in body
     assert "!row.current" in body
-    assert "仍在运行" in body, "读不出「别处还有任务在跑」"
+    assert "其他会话运行中" in body, "读不出其他会话仍在运行"
     assert "row.name" in body, "没说是哪个目标在跑"
     assert "awaiting" in body and "等待确认" in body, "它在等确认这件事丢了"
     assert "short(row.goal, 60)" in body, "目标要截断，一条长 goal 会把这一行撑爆"

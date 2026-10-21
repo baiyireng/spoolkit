@@ -166,6 +166,59 @@ def _status_box(page) -> dict:
     )
 
 
+def _shot_actions(page, name: str) -> None:
+    box = page.eval(
+        r"""
+        (() => {
+          const top = document.getElementById('top').getBoundingClientRect();
+          const brand = document.querySelector('.brand').getBoundingClientRect();
+          const tasks = document.getElementById('tasks-btn').getBoundingClientRect();
+          const status = document.getElementById('st-health').getBoundingClientRect();
+          const hidden = ['st-mode', 'st-target', 'st-pair', 'st-elsewhere'].map((id) => {
+            const node = document.getElementById(id);
+            return getComputedStyle(node).display;
+          });
+          const chrome = [
+            document.getElementById('top').innerText,
+            document.getElementById('st-health').innerText,
+            document.getElementById('tasks-btn').innerText,
+          ].join('\n');
+          return {
+            word: document.querySelector('#st-health .st-label').textContent,
+            hidden: hidden,
+            chrome: chrome,
+            brand_l: Math.round(brand.left),
+            tasks_l: Math.round(tasks.left),
+            tasks_r: Math.round(tasks.right),
+            status_l: Math.round(status.left),
+            status_r: Math.round(status.right),
+            status_t: Math.round(status.top),
+            status_b: Math.round(status.bottom),
+            top_t: Math.round(top.top),
+            top_b: Math.round(top.bottom),
+            view_w: window.innerWidth,
+            overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+            wait: document.getElementById('tasks-wait').textContent,
+            count: document.getElementById('tasks-count').textContent,
+          };
+        })()
+        """
+    )
+    page.shot(str(SHOTS / name))
+    assert box["word"] in ("正常", "异常", "未连接"), box
+    assert box["hidden"] == ["none", "none", "none", "none"], box
+    for old in ("已钉住", "等审批", "模型探活", "目标未钉住", "点开查看是哪些"):
+        assert old not in box["chrome"], (old, box["chrome"])
+    assert box["brand_l"] >= 0, box
+    assert box["tasks_l"] > box["brand_l"], box
+    assert box["status_l"] >= box["tasks_r"] - 4, box
+    assert box["status_r"] <= box["view_w"] + 1, box
+    assert box["status_t"] >= box["top_t"] - 1, box
+    assert box["status_b"] <= box["top_b"] + 8, box
+    assert box["overflow"] <= 1, box
+    assert box["count"] != "", box
+
+
 def _shot_status(page, name: str, *, narrow: bool) -> None:
     page.eval("document.getElementById('st-health').click()")
     assert _wait(page, "!document.getElementById('st-panel').classList.contains('hidden')"), "状态面板没有打开"
@@ -471,6 +524,7 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "shell-visual-1440.png")
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "type-composer-1440.png")
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "brand-topbar-1440.png")
+        _shot_actions(page, "top-actions-1440.png")
         _shot_status(page, "overlays-visual-1440.png", narrow=False)
 
         page.eval("document.querySelector('.task-card-running .task-head').click()")
@@ -580,6 +634,7 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "shell-visual-390.png")
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "type-composer-390.png")
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "brand-topbar-390.png")
+        _shot_actions(page, "top-actions-390.png")
         _shot_status(page, "overlays-visual-390.png", narrow=True)
         assert narrow["page_overflow"] <= 1, narrow
         assert narrow["card_overflow"] <= 1, narrow

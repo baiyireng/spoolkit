@@ -112,6 +112,13 @@
   .st-item.ro { color:var(--ro-text); border-color:var(--ro-line); }
   .st-item.ask { color:var(--pair-text); border-color:var(--pair-line); }
   .st-item svg { width:12px; height:12px; flex:0 0 12px; }
+  /* 顶栏右侧只留任务和状态两枚入口。状态钮留在 #corner 里，点外部仍认这一列。 */
+  #st-health { position:fixed; top:8px; right:12px; z-index:2; height:32px;
+               min-width:88px; max-width:112px; padding:0 10px; border-radius:999px;
+               gap:6px; justify-content:center;
+               font-size:var(--font-xs); line-height:1; white-space:nowrap; }
+  #st-health .st-label { display:inline; overflow:visible; text-overflow:clip; }
+  #st-mode, #st-target, #st-pair, #st-elsewhere { display:none !important; }
   /* 详情面板：以 `#hints` 为锚**绝对定位**，从徽标下面朝下展开（**不占文档流**）。
      高度自适应内容、超过 56vh 才自己滚：面板再长也不会把右上角那一列撑出屏。 */
   /* 详情在徽标下面、通知上面，三者同一列往下排，展开时把通知往下推。 */
@@ -122,7 +129,7 @@
               background:var(--panel); color:var(--text); font-size:var(--font-sm);
               box-shadow:var(--shadow-overlay); pointer-events:auto;
               animation:toast-in .14s ease-out; }
-  .st-close { align-self:flex-end; width:30px; height:30px; padding:0;
+  .st-close { align-self:flex-end; flex:0 0 auto; width:30px; height:30px; padding:0;
               border:0; border-radius:var(--radius-sm); background:transparent;
               color:var(--text-dim); cursor:pointer; pointer-events:auto;
               display:flex; align-items:center; justify-content:center; }

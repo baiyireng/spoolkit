@@ -8,7 +8,7 @@ import "../render/failure.js";
 const TASK_FILTERS = [
   ['all', '全部'],
   ['running', '进行中'],
-  ['await', '等审批'],
+  ['await', '待审批'],
   ['failed', '失败'],
   ['done', '完成'],
 ];

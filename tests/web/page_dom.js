@@ -1276,6 +1276,7 @@ async function extras2() {
   ctx.__spoolTest.setStatusOpen(true);
   const opened = room();
   const panelNodes = allNodes(ids.get('st-panel')).length;
+  const busyPanel = ids.get('st-panel').textContent;
   ctx.__spoolTest.setStatusOpen(false);
   ctx.__spoolTest.applyState(hintFrame({}));
   const clean = room();
@@ -1283,6 +1284,7 @@ async function extras2() {
   out.no_squeeze = {
     quiet: quiet, busy: busy, opened: opened, clean: clean,
     panel_nodes: panelNodes,
+    panel_text: busyPanel,
     busy_badges: busyBadges,
     clean_badges: cleanBadges,
   };
@@ -2102,10 +2104,14 @@ async function extras2() {
     }
     return false;
   }
+  ctx.__spoolTest.setStatusOpen(true);
+  const approvalPanel = ids.get('st-panel').textContent;
+  ctx.__spoolTest.setStatusOpen(false);
   const closedCount = ids.get('tasks-count').textContent;
   const closedWait = ids.get('tasks-wait').textContent;
   const closedHidden = taskPanel.classList.contains('hidden');
   if (taskBtn) { taskBtn.onclick(); }
+  const filterLabels = ids.get('tasks-filters').children.map((node) => node.textContent);
   const openedExpanded = taskBtn ? taskBtn.getAttribute('aria-expanded') : '';
   const openedFocus = document.activeElement ? document.activeElement._id : '';
   const openedLines = panelLines().map((node) => node.querySelector('.task-goal').textContent);
@@ -2132,7 +2138,7 @@ async function extras2() {
   const failedGoals = panelLines().map((node) => node.querySelector('.task-goal').textContent);
   clickFilter('完成');
   const doneGoals = panelLines().map((node) => node.querySelector('.task-goal').textContent);
-  clickFilter('等审批');
+  clickFilter('待审批');
   const awaitGoals = panelLines().map((node) => node.querySelector('.task-goal').textContent);
   clickFilter('进行中');
   const runningGoals = panelLines().map((node) => node.querySelector('.task-goal').textContent);
@@ -2154,6 +2160,8 @@ async function extras2() {
   out.task_panel = {
     count: closedCount,
     wait: closedWait,
+    filters: filterLabels,
+    approval_panel: approvalPanel,
     closed: closedHidden,
     opened: openedExpanded,
     focus: openedFocus,

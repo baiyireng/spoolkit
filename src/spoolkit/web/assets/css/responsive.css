@@ -31,6 +31,7 @@
                 padding-bottom:calc(var(--space-4) + env(safe-area-inset-bottom)); }
     body:has(#st-panel:not(.hidden))::before { content:""; position:fixed; inset:0;
                 z-index:29; background:rgba(0,0,0,.5); pointer-events:none; }
+    #st-health { top:8px; height:44px; max-width:128px; }
     #st-health, #menu, #send, .toast-close, .row-act,
     .ask-apply, .ask-reject, #toast-all, #st-close {
       min-width:44px; min-height:44px;

@@ -199,9 +199,13 @@ def test_常驻提示出现展开收起都不挤对话区(dom: dict) -> None:
             f"{name} 那一下动了对话流的节点"
         )
     # ① 反证：提示真的出现了，而且详情展开是真的建了节点。
-    assert squeeze["busy_badges"] == ["st-health", "st-mode", "st-pair", "st-elsewhere"], (
-        f"那几枚徽标没亮起来：{squeeze['busy_badges']}"
+    assert squeeze["busy_badges"] == ["st-health"], (
+        f"右上角又冒出浮块：{squeeze['busy_badges']}"
     )
+    assert "只读" in squeeze["panel_text"] and "其他会话运行中" in squeeze["panel_text"], (
+        squeeze["panel_text"]
+    )
+    assert "482913" in squeeze["panel_text"], squeeze["panel_text"]
     assert squeeze["clean_badges"] == ["st-health"], "收起来之后常态那枚圆点也不见了"
     assert squeeze["panel_nodes"] > 0, "详情面板是空的"
     # ② 反证：搬回输入条那一行就挤，搬回去就不挤——模型量得出"挤"。
@@ -316,6 +320,36 @@ def test_任务面板列出当前会话并可筛选(dom: dict) -> None:
     assert panel["close_focus"] == "tasks-btn"
     assert panel["esc"] is True
     assert panel["esc_focus"] == "tasks-btn"
+    assert "待审批" in panel["filters"]
+    assert "待审批：" in panel["approval_panel"]
+
+
+def test_可见文案不用旧术语(dom: dict) -> None:
+    """顶栏、状态面板和任务筛选不再出现旧说法。用户目标正文不在这张清单里。"""
+    blobs = [
+        dom["health_ok"]["title"],
+        dom["health_ok"]["label"],
+        dom["health_down"]["label"],
+        dom["status_readonly_panel"]["text"],
+        dom["status_pinned_panel"]["text"],
+        dom["status_pair_panel"]["text"],
+        dom["status_elsewhere_panel"]["text"],
+        dom["status_no_target_panel"]["text"],
+        dom["no_squeeze"]["panel_text"],
+        dom["task_panel"]["approval_panel"],
+        " ".join(dom["task_panel"]["filters"]),
+    ]
+    old = (
+        "已钉住", "目标未钉住", "等审批", "模型探活", "这一页的运行模式",
+        "别处还有一条在跑", "点开查看是哪些",
+    )
+    for blob in blobs:
+        for word in old:
+            assert word not in blob, (word, blob)
+    assert "目标已固定" in dom["status_pinned_panel"]["text"]
+    assert "目标未固定" in dom["status_no_target_panel"]["text"]
+    assert "模型连接" in dom["health_ok"]["title"]
+    assert "运行模式" in dom["status_readonly_panel"]["text"]
 
 
 # --- ② AI 回复后消息卡自动更新；思考过程可折叠、事后还能回看 ---
@@ -589,12 +623,12 @@ def test_探活正常时只剩一枚圆点(dom: dict) -> None:
     再走 `showToast`，这条立刻红。
     """
     ok = dom["health_ok"]
-    assert ok["label"] == "", f"常态下还写着一句话：{ok}"
+    assert ok["label"] == "正常", f"常态入口不是「正常」：{ok}"
     assert "ok" in ok["cls"] and "bad" not in ok["cls"], f"常态不是低调那档：{ok['cls']}"
     assert ok["visible"] == ["st-health"], f"常态下多出了别的徽标：{ok['visible']}"
     assert ok["parts"] == 2, "常态那枚徽标就只有圆点 + 空标签两块"
     assert ok["keys"] == [], f"探活还弹气泡：{ok['keys']}"
-    assert "模型探活" in ok["title"], "那枚圆点悬停/读屏说不出它是什么"
+    assert "模型连接：正常" in ok["title"], "状态入口悬停/读屏说不出它是什么"
 
 
 def test_探活异常时变色带字而不是一枚沉默的绿点(dom: dict) -> None:
@@ -604,8 +638,8 @@ def test_探活异常时变色带字而不是一枚沉默的绿点(dom: dict) ->
     证伪法：把 `showHealth` 里的 `label` 去掉（只留变色），这条红。
     """
     down = dom["health_down"]
-    assert down["label"] == "模型未连接", f"异常没有带字：{down}"
-    assert "bad" in down["cls"], f"异常没有变色：{down}"
+    assert down["label"] == "未连接", f"连接失败没有落成「未连接」：{down}"
+    assert "warn" in down["cls"], f"未连接没有变色：{down}"
     assert down["visible"] == ["st-health"], "异常时冒出了别的徽标"
     # 变色那一下不该重建节点（`/state` 是 3 秒一拍，重建就是每 3 秒抖一次）。
     assert down["cost"]["created"] == 0, f"改个颜色重建了节点：{down['cost']}"
@@ -613,12 +647,11 @@ def test_探活异常时变色带字而不是一枚沉默的绿点(dom: dict) ->
     assert dom["health_repeat"]["created"] == 0, "同一份探活被重建了"
 
     unknown = dom["health_unknown"]
-    assert unknown["label"] == "未探测" and "warn" in unknown["cls"]
-    assert "未连接" not in dom["health_line_unknown"], "未探测被画成了未连接"
+    assert unknown["label"] == "未连接" and "warn" in unknown["cls"]
 
     # 模型又通了：回到常态，而且没有留下任何气泡。
     back = dom["health_back"]
-    assert back["label"] == "" and back["keys"] == [], f"通了之后还留着东西：{back}"
+    assert back["label"] == "正常" and back["keys"] == [], f"通了之后还留着东西：{back}"
 
 
 def test_探活详情保留状态地址探活时间与下一步(dom: dict) -> None:
@@ -679,17 +712,15 @@ def test_只读与钉住收进模式徽标并说得出为什么点不动(dom: di
     """只读（非回环）与 `--root` 钉住回答的是"为什么点不动"，所以**不许变得不可发现**：
     徽标悬停就有标题、点开是全文。"""
     ro = dom["status_readonly"]
-    assert ro["mode"] == "只读"
-    assert "st-mode" in ro["visible"]
-    assert "非回环" in ro["title"] and "只能看" in ro["title"], f"悬停说不出原因：{ro['title']}"
+    assert "st-mode" not in ro["visible"]
     panel = dom["status_readonly_panel"]["text"]
-    assert "写请求会被服务端拒" in panel and "--host" in panel, panel
+    assert "只读" in panel and "写请求会被服务端拒" in panel and "--host" in panel, panel
 
     pinned = dom["status_pinned"]
-    assert pinned["mode"] == "已钉住"
+    assert "st-mode" not in pinned["visible"]
+    assert "目标已固定" in dom["status_pinned_panel"]["text"]
     assert "--root" in dom["status_pinned_panel"]["text"]
 
-    # 常态（可写、没钉住）时这枚徽标根本不摆出来。
     assert "st-mode" not in dom["status_clean"]["visible"]
 
 
@@ -697,19 +728,15 @@ def test_待配对与别处在跑收进状态区但都不丢(dom: dict) -> None:
     """配对码与"别处还有一条在跑"都收进同一行了，但**都不许变得不可发现**：
     配对码直接写在徽标上（人要去终端敲它），别处那条点开看是哪几条。"""
     pair = dom["status_pair"]
-    assert pair["pair"] == "配对码 482913", f"配对码没有直接写在徽标上：{pair}"
-    assert "st-pair" in pair["visible"]
+    assert "st-pair" not in pair["visible"]
     text = dom["status_pair_panel"]["text"]
     assert "spool approve 482913" in text and "来自：u-1" in text, text
-    # 钉要点：那两个按钮**不批配对**这件事必须说得出（措辞可以换，这条事实不行）。
     assert "不批准配对" in text, "没说清那两个按钮不批配对"
 
     elsewhere = dom["status_elsewhere"]
-    assert elsewhere["label"] == "别处 1 条在跑"
-    assert "st-elsewhere" in elsewhere["visible"]
+    assert "st-elsewhere" not in elsewhere["visible"]
     et = dom["status_elsewhere_panel"]["text"]
-    # 钉要点：是**哪个**目标在跑、以及它在等确认——这两件事都不许丢。
-    assert "ws-c" in et and "仍在运行" in et, et
+    assert "ws-c" in et and "其他会话运行中" in et, et
     assert "等待确认" in et, et
 
     # 都收掉之后那一行又只剩圆点。
@@ -723,8 +750,7 @@ def test_没有目标时那枚徽标仍然指得动路(dom: dict) -> None:
     而不是只摆一个"没目标"。
     """
     empty = dom["status_no_target"]
-    assert empty["label"] == "未选工作区"
-    assert "st-target" in empty["visible"]
+    assert "st-target" not in empty["visible"]
     text = dom["status_no_target_panel"]["text"]
     assert "未选择工作区" in text and "工作区" in text, text
     assert "spool init" in text or "选一项" in text, f"空态没给出路：{text}"
