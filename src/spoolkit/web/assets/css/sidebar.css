@@ -6,58 +6,66 @@
   /* 两条原生选择器：留着当左栏两段的控件层（键鼠 / 读屏都能用），视觉上让位给行。 */
   .sr-only { position:absolute; width:1px; height:1px; margin:-1px; padding:0;
              border:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
-  .side-head { padding:10px 10px 2px; min-width:0; }
-  .side-head .meta { font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+  .side-head { padding:var(--space-3) var(--space-2) var(--space-1); min-width:0; }
+  .side-head .meta { font-size:var(--font-xs); font-weight:650; letter-spacing:.06em;
+                     color:var(--text-dim); }
   #side-search { display:block; width:100%; box-sizing:border-box; min-width:0;
-                 margin:8px 0 4px; padding:8px 10px; border-radius:10px;
-                 border:1px solid var(--line); background:var(--bg); color:var(--text);
-                 font:13px/1.4 inherit; }
-  .new { display:flex; align-items:center; gap:8px; width:100%; margin:8px 0 2px;
-         padding:8px 10px; border-radius:10px; border:1px solid var(--line);
+                 margin:var(--space-2) 0 var(--space-1); padding:var(--space-2) var(--space-3);
+                 border-radius:var(--radius-md); border:1px solid var(--line);
+                 background:var(--bg); color:var(--text);
+                 font:var(--font-sm)/var(--leading-tight) var(--sans); }
+  #side-search:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .new { display:flex; align-items:center; gap:var(--space-2); width:100%;
+         margin:var(--space-2) 0 var(--space-1); padding:var(--space-2) var(--space-3);
+         border-radius:var(--radius-md); border:1px solid var(--line);
          background:transparent; color:var(--text); cursor:pointer;
-         font-size:13.5px; text-align:left; }
+         font-size:var(--font-sm); text-align:left; }
   .new:hover { background:var(--bubble-user); }
   .new svg { width:16px; height:16px; }
   .new.locked { opacity:.45; cursor:default; }
   .new.locked:hover { background:transparent; }
   #panel { flex:1; overflow-y:auto; padding:6px 8px 12px; }
   .grp { margin:6px 0 12px; }
-  .grp-name { display:flex; align-items:center; gap:8px; padding:6px 8px;
-              border-radius:8px; cursor:pointer; font-weight:600; font-size:13.5px; }
+  .grp-name { display:flex; align-items:center; gap:var(--space-2); padding:6px var(--space-2);
+              border-radius:var(--radius-sm); cursor:pointer; font-weight:600;
+              font-size:var(--font-sm); line-height:var(--leading-tight); }
   .grp-name:hover { background:var(--bubble-user); }
-  .grp-name .caret { color:var(--text-dim); font-size:11px; width:10px; }
+  .grp-name .caret { color:var(--text-dim); font-size:var(--font-xs); width:10px; }
   .grp-name .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* 会话行两行：标题独占一行，id 退到下面一行的小字。uuid 很长，放在标题右边
      会把标题挤成"重构会话标..."——那是把主信息让给了内部 id。 */
   .nm-wrap { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:1px; }
-  .grp-name .src { color:var(--text-dim); font-size:10.5px; line-height:1.3;
+  .grp-name .src { color:var(--text-dim); font-size:var(--font-xs); line-height:1.35;
                    opacity:.85;
                    margin:0; max-width:100%;
                    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .grp-name .nm { min-width:0; }
-  .grp-name.on, #sessions .grp-name.on { background:var(--accent-soft); }
+  .grp-name.on, #sessions .grp-name.on { background:var(--accent-soft);
+              box-shadow:inset 2px 0 0 var(--accent); }
   .empty-line { color:var(--text-faint); font-size:12.5px; padding:2px 8px 8px; }
-  #sessions .grp-name { font-weight:400; padding-left:24px; font-size:13.5px; }
+  #sessions .grp-name { font-weight:400; padding-left:var(--space-5); font-size:var(--font-sm); }
   .li { display:flex; align-items:center; gap:8px; }
   .li .nm { flex:1 1 auto; }
   .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* 行上那个小按钮（移除 / 恢复）。一直看得见，不藏在 hover 里——触屏没有 hover。
      第一次点只是**变成确认态**，第二次点才真的发请求（一点就删太容易误伤）。 */
-  .row-act { flex:0 0 auto; padding:1px 7px; border-radius:7px; cursor:pointer;
-             border:1px solid var(--line); background:transparent;
-             color:var(--text-dim); font-size:11.5px; }
-  .row-act:hover { color:var(--text); border-color:var(--text-dim); }
+  .row-act { flex:0 0 auto; padding:2px var(--space-2); border-radius:var(--radius-sm);
+             cursor:pointer; border:1px solid var(--line); background:transparent;
+             color:var(--text-faint); font-size:var(--font-xs); }
+  .row-act:hover, .row-act:focus-visible { color:var(--text); border-color:var(--text-dim); }
   .row-act.armed { background:var(--danger-bg); color:var(--danger-text);
                    border-color:var(--danger-line); }
   .row-act.back { color:var(--accent); border-color:var(--accent-soft); }
   /* 「已移除」那一行：只是摆在那里等「恢复」，点它是没有用的。 */
   .li.gone { opacity:.6; cursor:default; }
-  .grp-sub { padding:6px 8px 2px; color:var(--text-faint); font-size:11.5px; }
+  .grp-sub { padding:6px var(--space-2) 2px; color:var(--text-dim);
+             font-size:var(--font-xs); font-weight:650; letter-spacing:.04em; }
   .dot { width:7px; height:7px; flex:0 0 7px; border-radius:50%;
          background:var(--ok); animation:pulse 1.6s ease-in-out infinite; }
   .lock { opacity:.5; }
   .lock .grp-name, .lock .new { pointer-events:none; cursor:default; }
-  #side-foot { display:flex; align-items:center; gap:8px;
-               padding:8px 12px; border-top:1px solid var(--line-soft); font-size:12px; }
+  #side-foot { display:flex; align-items:center; gap:var(--space-2);
+               padding:var(--space-2) var(--space-3); border-top:1px solid var(--line-soft);
+               font-size:var(--font-xs); }
   #meta { flex:1 1 auto; min-width:0; overflow:hidden;
           text-overflow:ellipsis; white-space:nowrap; }

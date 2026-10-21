@@ -294,6 +294,7 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         SHOTS.mkdir(parents=True, exist_ok=True)
         page.shot(str(SHOTS / "task-card-1440.png"))
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "task-card-visual-1440.png")
+        shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "shell-visual-1440.png")
 
         page.eval("document.querySelector('.task-card-running .task-head').click()")
         _patch_summary(runner, live_id, "understand", LONG_GOAL + "重绑甲")
@@ -396,6 +397,7 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         )
         page.shot(str(SHOTS / "task-card-390.png"))
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "task-card-visual-390.png")
+        shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "shell-visual-390.png")
         assert narrow["page_overflow"] <= 1, narrow
         assert narrow["card_overflow"] <= 1, narrow
         assert narrow["card_right"] <= narrow["stream_right"] + 1, narrow

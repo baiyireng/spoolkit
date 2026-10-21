@@ -39,6 +39,22 @@
     --pair-text:#f0c674;
     --sans:-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
     --mono:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono","Liberation Mono",monospace;
+    --font-xs:12px;
+    --font-sm:13px;
+    --font-md:15px;
+    --font-lg:18px;
+    --leading-body:1.55;
+    --leading-tight:1.4;
+    --space-1:4px;
+    --space-2:8px;
+    --space-3:12px;
+    --space-4:16px;
+    --space-5:24px;
+    --radius-sm:8px;
+    --radius-md:10px;
+    --radius-lg:14px;
+    --shadow-raised:0 1px 2px rgba(0,0,0,.22);
+    --shadow-overlay:0 8px 24px rgba(0,0,0,.28);
   }
   @media (prefers-color-scheme: light) {
     :root {
@@ -78,5 +94,7 @@
       --pair-bg:#fff3d6;
       --pair-line:#e6cf94;
       --pair-text:#6b4e00;
+      --shadow-raised:0 1px 2px rgba(0,0,0,.08);
+      --shadow-overlay:0 8px 24px rgba(0,0,0,.12);
     }
   }

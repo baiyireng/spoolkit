@@ -9,7 +9,9 @@
     body.drawer #sidebar { transform:none; pointer-events:auto; }
     #stream { padding:14px 12px 20px; }
     .msg.user { max-width:92%; }
-    #composer { padding:8px 10px calc(10px + env(safe-area-inset-bottom)); }
+    #composer { padding:var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom));
+                padding-left:max(var(--space-3), env(safe-area-inset-left));
+                padding-right:max(var(--space-3), env(safe-area-inset-right)); }
     /* 手机宽度：提示与通知那一列不越界——左右都压住（`left`/`right` 同时写），
        宽度交给 `auto` 去算，但它**仍然 fixed**（这里刻意一个 `position` 都不写：
        写上去就等于把它拉回文档流，"挤下去"那个毛病就回来了）。

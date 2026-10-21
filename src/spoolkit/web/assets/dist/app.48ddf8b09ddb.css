@@ -39,6 +39,22 @@
     --pair-text:#f0c674;
     --sans:-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
     --mono:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono","Liberation Mono",monospace;
+    --font-xs:12px;
+    --font-sm:13px;
+    --font-md:15px;
+    --font-lg:18px;
+    --leading-body:1.55;
+    --leading-tight:1.4;
+    --space-1:4px;
+    --space-2:8px;
+    --space-3:12px;
+    --space-4:16px;
+    --space-5:24px;
+    --radius-sm:8px;
+    --radius-md:10px;
+    --radius-lg:14px;
+    --shadow-raised:0 1px 2px rgba(0,0,0,.22);
+    --shadow-overlay:0 8px 24px rgba(0,0,0,.28);
   }
   @media (prefers-color-scheme: light) {
     :root {
@@ -78,6 +94,8 @@
       --pair-bg:#fff3d6;
       --pair-line:#e6cf94;
       --pair-text:#6b4e00;
+      --shadow-raised:0 1px 2px rgba(0,0,0,.08);
+      --shadow-overlay:0 8px 24px rgba(0,0,0,.12);
     }
   }
 
@@ -100,7 +118,7 @@
   html, body { height:100%; }
   body {
     margin:0; background:var(--bg); color:var(--text);
-    font:15px/1.6 var(--sans);
+    font:var(--font-md)/var(--leading-body) var(--sans);
     display:flex; flex-direction:column; overflow:hidden;
     -webkit-text-size-adjust:100%;
   }
@@ -265,16 +283,20 @@
 
   /* ── 顶条：抽屉开关 + 当前目标（"我在哪儿"必须直接可读） ── */
   #top {
-    display:flex; align-items:center; gap:10px; padding:8px 12px;
+    display:flex; align-items:center; gap:var(--space-2);
+    min-height:48px; padding:var(--space-2) var(--space-3);
     border-bottom:1px solid var(--line-soft); background:var(--panel);
     min-width:0;
   }
-  #menu { display:none; width:34px; height:34px; border-radius:8px; border:0;
+  #menu { display:none; width:34px; height:34px; border-radius:var(--radius-sm); border:0;
           background:transparent; color:var(--text); cursor:pointer;
           align-items:center; justify-content:center; }
   #menu:hover { background:var(--bubble-user); }
   #menu svg { width:18px; height:18px; }
-  #where { color:var(--text); font-weight:600; font-size:13.5px;
+  .brand { flex:0 0 auto; color:var(--text-dim); font-size:var(--font-xs);
+           font-weight:650; letter-spacing:.04em; line-height:1; white-space:nowrap; }
+  #where { color:var(--text); font-weight:600; font-size:var(--font-sm);
+           line-height:var(--leading-tight);
            flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
            white-space:nowrap; }
   #where.empty { color:var(--text-dim); font-weight:400; }
@@ -292,59 +314,67 @@
   /* 两条原生选择器：留着当左栏两段的控件层（键鼠 / 读屏都能用），视觉上让位给行。 */
   .sr-only { position:absolute; width:1px; height:1px; margin:-1px; padding:0;
              border:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
-  .side-head { padding:10px 10px 2px; min-width:0; }
-  .side-head .meta { font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+  .side-head { padding:var(--space-3) var(--space-2) var(--space-1); min-width:0; }
+  .side-head .meta { font-size:var(--font-xs); font-weight:650; letter-spacing:.06em;
+                     color:var(--text-dim); }
   #side-search { display:block; width:100%; box-sizing:border-box; min-width:0;
-                 margin:8px 0 4px; padding:8px 10px; border-radius:10px;
-                 border:1px solid var(--line); background:var(--bg); color:var(--text);
-                 font:13px/1.4 inherit; }
-  .new { display:flex; align-items:center; gap:8px; width:100%; margin:8px 0 2px;
-         padding:8px 10px; border-radius:10px; border:1px solid var(--line);
+                 margin:var(--space-2) 0 var(--space-1); padding:var(--space-2) var(--space-3);
+                 border-radius:var(--radius-md); border:1px solid var(--line);
+                 background:var(--bg); color:var(--text);
+                 font:var(--font-sm)/var(--leading-tight) var(--sans); }
+  #side-search:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .new { display:flex; align-items:center; gap:var(--space-2); width:100%;
+         margin:var(--space-2) 0 var(--space-1); padding:var(--space-2) var(--space-3);
+         border-radius:var(--radius-md); border:1px solid var(--line);
          background:transparent; color:var(--text); cursor:pointer;
-         font-size:13.5px; text-align:left; }
+         font-size:var(--font-sm); text-align:left; }
   .new:hover { background:var(--bubble-user); }
   .new svg { width:16px; height:16px; }
   .new.locked { opacity:.45; cursor:default; }
   .new.locked:hover { background:transparent; }
   #panel { flex:1; overflow-y:auto; padding:6px 8px 12px; }
   .grp { margin:6px 0 12px; }
-  .grp-name { display:flex; align-items:center; gap:8px; padding:6px 8px;
-              border-radius:8px; cursor:pointer; font-weight:600; font-size:13.5px; }
+  .grp-name { display:flex; align-items:center; gap:var(--space-2); padding:6px var(--space-2);
+              border-radius:var(--radius-sm); cursor:pointer; font-weight:600;
+              font-size:var(--font-sm); line-height:var(--leading-tight); }
   .grp-name:hover { background:var(--bubble-user); }
-  .grp-name .caret { color:var(--text-dim); font-size:11px; width:10px; }
+  .grp-name .caret { color:var(--text-dim); font-size:var(--font-xs); width:10px; }
   .grp-name .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* 会话行两行：标题独占一行，id 退到下面一行的小字。uuid 很长，放在标题右边
      会把标题挤成"重构会话标..."——那是把主信息让给了内部 id。 */
   .nm-wrap { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:1px; }
-  .grp-name .src { color:var(--text-dim); font-size:10.5px; line-height:1.3;
+  .grp-name .src { color:var(--text-dim); font-size:var(--font-xs); line-height:1.35;
                    opacity:.85;
                    margin:0; max-width:100%;
                    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .grp-name .nm { min-width:0; }
-  .grp-name.on, #sessions .grp-name.on { background:var(--accent-soft); }
+  .grp-name.on, #sessions .grp-name.on { background:var(--accent-soft);
+              box-shadow:inset 2px 0 0 var(--accent); }
   .empty-line { color:var(--text-faint); font-size:12.5px; padding:2px 8px 8px; }
-  #sessions .grp-name { font-weight:400; padding-left:24px; font-size:13.5px; }
+  #sessions .grp-name { font-weight:400; padding-left:var(--space-5); font-size:var(--font-sm); }
   .li { display:flex; align-items:center; gap:8px; }
   .li .nm { flex:1 1 auto; }
   .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* 行上那个小按钮（移除 / 恢复）。一直看得见，不藏在 hover 里——触屏没有 hover。
      第一次点只是**变成确认态**，第二次点才真的发请求（一点就删太容易误伤）。 */
-  .row-act { flex:0 0 auto; padding:1px 7px; border-radius:7px; cursor:pointer;
-             border:1px solid var(--line); background:transparent;
-             color:var(--text-dim); font-size:11.5px; }
-  .row-act:hover { color:var(--text); border-color:var(--text-dim); }
+  .row-act { flex:0 0 auto; padding:2px var(--space-2); border-radius:var(--radius-sm);
+             cursor:pointer; border:1px solid var(--line); background:transparent;
+             color:var(--text-faint); font-size:var(--font-xs); }
+  .row-act:hover, .row-act:focus-visible { color:var(--text); border-color:var(--text-dim); }
   .row-act.armed { background:var(--danger-bg); color:var(--danger-text);
                    border-color:var(--danger-line); }
   .row-act.back { color:var(--accent); border-color:var(--accent-soft); }
   /* 「已移除」那一行：只是摆在那里等「恢复」，点它是没有用的。 */
   .li.gone { opacity:.6; cursor:default; }
-  .grp-sub { padding:6px 8px 2px; color:var(--text-faint); font-size:11.5px; }
+  .grp-sub { padding:6px var(--space-2) 2px; color:var(--text-dim);
+             font-size:var(--font-xs); font-weight:650; letter-spacing:.04em; }
   .dot { width:7px; height:7px; flex:0 0 7px; border-radius:50%;
          background:var(--ok); animation:pulse 1.6s ease-in-out infinite; }
   .lock { opacity:.5; }
   .lock .grp-name, .lock .new { pointer-events:none; cursor:default; }
-  #side-foot { display:flex; align-items:center; gap:8px;
-               padding:8px 12px; border-top:1px solid var(--line-soft); font-size:12px; }
+  #side-foot { display:flex; align-items:center; gap:var(--space-2);
+               padding:var(--space-2) var(--space-3); border-top:1px solid var(--line-soft);
+               font-size:var(--font-xs); }
   #meta { flex:1 1 auto; min-width:0; overflow:hidden;
           text-overflow:ellipsis; white-space:nowrap; }
 
@@ -661,10 +691,10 @@
   }
 
   /* 当前会话的任务入口和面板。桌面是右侧抽屉，窄屏是全屏 sheet。 */
-  #tasks-btn { flex:0 0 auto; display:inline-flex; align-items:center; gap:4px;
-               padding:4px 8px; border-radius:999px; border:1px solid var(--line);
-               background:var(--panel-2); color:var(--text); cursor:pointer;
-               font:12px/1.3 var(--sans); white-space:nowrap; }
+  #tasks-btn { flex:0 0 auto; display:inline-flex; align-items:center; gap:var(--space-1);
+               padding:var(--space-1) var(--space-2); border-radius:999px;
+               border:1px solid var(--line); background:var(--panel-2); color:var(--text);
+               cursor:pointer; font:var(--font-xs)/1.3 var(--sans); white-space:nowrap; }
   #tasks-btn:hover { border-color:var(--text-dim); }
   #tasks-count, #tasks-wait { min-width:16px; height:16px; padding:0 5px;
                border-radius:999px; border:1px solid var(--line);
@@ -677,38 +707,40 @@
   #tasks-panel.hidden { display:none; }
   .tasks-sheet { width:100%; height:100%; min-height:0; display:flex;
                  flex-direction:column; background:var(--panel); color:var(--text);
-                 border-left:1px solid var(--line); }
-  .tasks-head { display:flex; align-items:center; gap:8px; padding:12px 12px 8px;
+                 border-left:1px solid var(--line); box-shadow:var(--shadow-overlay); }
+  .tasks-head { display:flex; align-items:center; gap:var(--space-2);
+                padding:var(--space-3) var(--space-3) var(--space-2);
                 border-bottom:1px solid var(--line-soft); }
-  .tasks-head h2 { margin:0; flex:1; font-size:15px; font-weight:650; }
+  .tasks-head h2 { margin:0; flex:1; font-size:var(--font-md); font-weight:650; }
   .tasks-head .icon-btn { width:30px; height:30px; padding:0; border:0;
-                          border-radius:8px; background:transparent;
+                          border-radius:var(--radius-sm); background:transparent;
                           color:var(--text-dim); cursor:pointer;
                           display:flex; align-items:center; justify-content:center; }
   .tasks-head .icon-btn:hover { color:var(--text); background:var(--bubble-user); }
   .tasks-head .icon-btn svg { width:15px; height:15px; }
-  #tasks-filters { display:flex; flex-wrap:wrap; gap:6px; padding:8px 12px; }
-  .tasks-filter { padding:2px 8px; border-radius:999px; border:1px solid var(--line);
+  #tasks-filters { display:flex; flex-wrap:wrap; gap:var(--space-2); padding:var(--space-2) var(--space-3); }
+  .tasks-filter { padding:2px var(--space-2); border-radius:999px; border:1px solid var(--line);
                   background:transparent; color:var(--text-dim); cursor:pointer;
-                  font:12px/1.4 var(--sans); }
+                  font:var(--font-xs)/var(--leading-tight) var(--sans); }
   .tasks-filter.on { color:var(--text); border-color:var(--text-dim);
                      background:var(--panel-2); }
   #tasks-body { flex:1; min-height:0; overflow-x:hidden; overflow-y:auto;
-                padding:0 12px 12px; }
-  .task-line { display:flex; flex-direction:column; align-items:flex-start; gap:4px;
-               width:100%; margin:0 0 6px; padding:8px 10px; box-sizing:border-box;
-               border:1px solid var(--line); border-radius:10px; background:transparent;
-               color:var(--text); cursor:pointer; text-align:left; font:12.5px/1.35 var(--sans); }
+                padding:0 var(--space-3) var(--space-3); }
+  .task-line { display:flex; flex-direction:column; align-items:flex-start; gap:var(--space-1);
+               width:100%; margin:0 0 var(--space-2); padding:var(--space-2) var(--space-3);
+               box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius-md);
+               background:transparent; color:var(--text); cursor:pointer; text-align:left;
+               font:var(--font-sm)/var(--leading-tight) var(--sans); }
   .task-line.on { border-color:var(--text-dim); }
   .task-line .task-goal { width:100%; }
   .task-line-meta { display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
   .task-wait { color:var(--warn-text); background:var(--warn-bg);
                border-color:var(--warn-line); }
-  .tasks-empty { margin:8px 0; color:var(--text-dim); font-size:13px; }
+  .tasks-empty { margin:var(--space-2) 0; color:var(--text-dim); font-size:var(--font-sm); }
   #tasks-detail { margin-top:4px; min-width:0; }
   @media (max-width: 860px) {
     #tasks-panel { left:0; width:auto; }
-    .tasks-sheet { border-left:0; }
+    .tasks-sheet { border-left:0; box-shadow:none; }
     #tasks-btn, #tasks-close { min-height:44px; }
     #tasks-close { min-width:44px; }
   }
@@ -741,20 +773,28 @@
   #toBottom.show { display:flex; }
   #toBottom svg { width:18px; height:18px; }
 
-  #composer { position:relative; display:flex; flex-direction:column; gap:8px;
-              padding:10px 18px 14px; }
-  .box { position:relative; display:flex; align-items:flex-end; gap:8px; max-width:800px;
-         margin:0 auto; padding:8px 8px 8px 16px; border-radius:22px;
-         border:1px solid var(--line); background:var(--panel-2); }
+  #composer { position:relative; display:flex; flex-direction:column; gap:var(--space-2);
+              padding:var(--space-2) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom));
+              padding-left:max(var(--space-4), env(safe-area-inset-left));
+              padding-right:max(var(--space-4), env(safe-area-inset-right)); }
+  .box { position:relative; display:flex; align-items:flex-end; gap:var(--space-2);
+         max-width:800px; margin:0 auto; padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+         border-radius:var(--radius-lg); border:1px solid var(--line);
+         background:var(--panel); box-shadow:var(--shadow-raised); }
   .box:focus-within { border-color:var(--accent); }
   #goal { flex:1; min-height:26px; max-height:190px; resize:none; border:0;
-          outline:none; background:transparent; padding:4px 0; line-height:1.5; }
-  #goal::placeholder { color:var(--text-dim); opacity:1; }
+          outline:none; background:transparent; padding:var(--space-1) 0;
+          font-size:var(--font-md); line-height:var(--leading-body); }
+  #goal::placeholder { color:var(--text-dim); opacity:1; font-size:var(--font-md); }
+  .st-hint { font-size:var(--font-sm); line-height:var(--leading-tight); }
   #send { flex:0 0 auto; width:36px; height:36px; border-radius:50%; border:0;
           background:var(--accent); color:#fff; cursor:pointer;
           display:flex; align-items:center; justify-content:center; }
   #send svg { width:18px; height:18px; }
-  #send:disabled { background:var(--line); color:var(--text-faint); cursor:default; }
+  #send[data-mode="stop"] { background:var(--danger-bg); color:var(--danger-text);
+                            box-shadow:inset 0 0 0 1px var(--danger-line); }
+  #send:disabled, #send[data-mode="stopping"] { background:var(--line);
+                            color:var(--text-faint); cursor:default; box-shadow:none; }
 
 
   /* ── 手机：左栏收成抽屉、气泡占满、输入条不被键盘顶掉 ── */
@@ -767,7 +807,9 @@
     body.drawer #sidebar { transform:none; pointer-events:auto; }
     #stream { padding:14px 12px 20px; }
     .msg.user { max-width:92%; }
-    #composer { padding:8px 10px calc(10px + env(safe-area-inset-bottom)); }
+    #composer { padding:var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom));
+                padding-left:max(var(--space-3), env(safe-area-inset-left));
+                padding-right:max(var(--space-3), env(safe-area-inset-right)); }
     /* 手机宽度：提示与通知那一列不越界——左右都压住（`left`/`right` 同时写），
        宽度交给 `auto` 去算，但它**仍然 fixed**（这里刻意一个 `position` 都不写：
        写上去就等于把它拉回文档流，"挤下去"那个毛病就回来了）。
