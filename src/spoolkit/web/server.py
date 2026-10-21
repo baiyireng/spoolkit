@@ -73,6 +73,7 @@ from spoolkit.web.probe import (
 )
 from spoolkit.web.registry import RunnerRegistry
 from spoolkit.web.runner import Runner, health_snapshot
+from spoolkit.web.task_history import read_task_history
 from spoolkit.web.titles import TitleNamer
 
 KEEPALIVE_SECONDS = 15
@@ -850,6 +851,17 @@ def _removed_rows(target: Target | None) -> list[dict]:
     ]
 
 
+def _task_catalog(state: WebState) -> dict:
+    """当前工作区的任务历史。没有目标、或这一下读失败，给空目录。"""
+    target = state.target()
+    if target is None:
+        return {"sessions": [], "groups": []}
+    try:
+        return read_task_history(target.root)
+    except OSError:
+        return {"sessions": [], "groups": []}
+
+
 def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -938,6 +950,9 @@ def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
                 self._html(INDEX)
             elif self.path == "/state":
                 self._json(200, state.snapshot())
+            elif self.path == "/tasks":
+                # 跨会话任务历史只读目录。不写进 /state，请求里也不接收路径。
+                self._json(200, _task_catalog(state))
             elif self.path == "/events":
                 self._stream()
             elif self.path.startswith("/assets/"):
