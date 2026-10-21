@@ -47,8 +47,12 @@
   .tasks-empty { margin:var(--space-2) 0; color:var(--text-dim); font-size:var(--font-sm); }
   #tasks-detail { margin-top:4px; min-width:0; }
   @media (max-width: 860px) {
-    #tasks-panel { left:0; width:auto; }
-    .tasks-sheet { border-left:0; box-shadow:none; }
+    #tasks-panel { left:0; right:0; top:auto; bottom:0; width:auto;
+                   height:min(78vh, 100%); }
+    .tasks-sheet { height:100%; border-left:0;
+                   border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                   box-shadow:var(--shadow-overlay);
+                   padding-bottom:env(safe-area-inset-bottom); }
     #tasks-btn, #tasks-close { min-height:44px; }
     #tasks-close { min-width:44px; }
   }

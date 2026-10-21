@@ -130,6 +130,71 @@ def _assert_topbar(bar: dict, *, narrow: bool) -> None:
     assert bar["overflow"] <= 1, bar
 
 
+def _status_box(page) -> dict:
+    return page.eval(
+        r"""
+        (() => {
+          const panel = document.getElementById('st-panel');
+          const hints = document.getElementById('hints');
+          const toasts = document.getElementById('toasts');
+          const close = document.getElementById('st-close');
+          const composer = document.getElementById('composer').getBoundingClientRect();
+          const box = panel.getBoundingClientRect();
+          const hintBox = hints.getBoundingClientRect();
+          const toastBox = toasts.getBoundingClientRect();
+          const closeBox = close.getBoundingClientRect();
+          const scrim = getComputedStyle(document.body, '::before').content;
+          return {
+            position: getComputedStyle(panel).position,
+            w: Math.round(box.width),
+            left: Math.round(box.left),
+            right: Math.round(box.right),
+            top: Math.round(box.top),
+            bottom: Math.round(box.bottom),
+            hints_bottom: Math.round(hintBox.bottom),
+            toasts_top: Math.round(toastBox.top),
+            toasts_shown: getComputedStyle(toasts).display !== 'none',
+            close_h: Math.round(closeBox.height),
+            scrim: scrim,
+            composer_bottom: Math.round(composer.bottom),
+            view_w: window.innerWidth,
+            view_h: window.innerHeight,
+            overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          };
+        })()
+        """
+    )
+
+
+def _shot_status(page, name: str, *, narrow: bool) -> None:
+    page.eval("document.getElementById('st-health').click()")
+    assert _wait(page, "!document.getElementById('st-panel').classList.contains('hidden')"), "状态面板没有打开"
+    assert _wait(
+        page,
+        "getComputedStyle(document.getElementById('st-panel')).opacity === '1'",
+    ), "状态面板入场还没停"
+    time.sleep(0.2)
+    box = _status_box(page)
+    page.shot(str(SHOTS / name))
+    page.eval("document.getElementById('st-close').click()")
+    assert _wait(page, "document.getElementById('st-panel').classList.contains('hidden')"), "状态面板没有关上"
+    assert box["overflow"] <= 1, box
+    assert box["composer_bottom"] <= box["view_h"] + 1, box
+    assert box["close_h"] >= (44 if narrow else 24), box
+    if narrow:
+        assert box["position"] == "fixed", box
+        assert box["left"] <= 1, box
+        assert box["right"] >= box["view_w"] - 1, box
+        assert box["bottom"] >= box["view_h"] - 8, box
+        assert box["hints_bottom"] <= box["top"] + 1, box
+        assert box["scrim"] != "none", box
+    else:
+        assert box["position"] == "static", box
+        assert 340 <= box["w"] <= 380, box
+        if box["toasts_shown"]:
+            assert box["toasts_top"] >= box["bottom"] - 1, box
+
+
 def _browser() -> str | None:
     from tests.web.test_assets import _browser as pick
 
@@ -406,6 +471,7 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "shell-visual-1440.png")
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "type-composer-1440.png")
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "brand-topbar-1440.png")
+        _shot_status(page, "overlays-visual-1440.png", narrow=False)
 
         page.eval("document.querySelector('.task-card-running .task-head').click()")
         _patch_summary(runner, live_id, "understand", LONG_GOAL + "重绑甲")
@@ -514,6 +580,7 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "shell-visual-390.png")
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "type-composer-390.png")
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "brand-topbar-390.png")
+        _shot_status(page, "overlays-visual-390.png", narrow=True)
         assert narrow["page_overflow"] <= 1, narrow
         assert narrow["card_overflow"] <= 1, narrow
         assert narrow["card_right"] <= narrow["stream_right"] + 1, narrow

@@ -156,12 +156,12 @@
                cursor:pointer; font-size:12px; pointer-events:auto; }
   .toast-all.show { display:inline-flex; }
   .toast-all:hover { color:var(--text); border-color:var(--text-dim); }
-  .toast { display:flex; align-items:flex-start; gap:8px;
-           border:1px solid var(--line); border-radius:12px;
-           padding:9px 10px 9px 12px; background:var(--panel-2);
-           color:var(--text); font-size:13px; overflow-wrap:anywhere;
-           box-shadow:0 8px 26px rgba(0,0,0,.34); pointer-events:auto;
-           animation:toast-in .14s ease-out; }
+  .toast { display:flex; align-items:flex-start; gap:var(--space-2);
+           border:1px solid var(--line); border-radius:var(--radius-lg);
+           padding:var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+           background:var(--panel); color:var(--text); font-size:var(--font-sm);
+           overflow-wrap:anywhere; box-shadow:var(--shadow-overlay);
+           pointer-events:auto; animation:toast-in .14s ease-out; }
   .toast-body { flex:1 1 auto; min-width:0; }
   .toast-title { font-weight:600; }
   .toast-line { margin-top:3px; color:var(--text-dim); }
@@ -222,8 +222,8 @@
             gap:8px; pointer-events:none; }
   #hints { position:relative; width:100%; height:auto; display:flex;
            flex-wrap:wrap; justify-content:flex-end; align-items:flex-start; gap:6px; }
-  #toasts { display:none; width:100%; max-height:60vh; overflow-y:auto;
-            flex-direction:column; gap:8px; }
+  #toasts { display:none; width:min(360px, 100%); max-height:60vh; overflow-y:auto;
+            align-self:flex-end; flex-direction:column; gap:var(--space-2); }
   #toasts.show { display:flex; }
 
   /* ══ 状态区：右上角那一列里的常驻提示（`.st-item` 徽标 + `#st-panel` 详情） ══
@@ -260,21 +260,22 @@
   /* 详情面板：以 `#hints` 为锚**绝对定位**，从徽标下面朝下展开（**不占文档流**）。
      高度自适应内容、超过 56vh 才自己滚：面板再长也不会把右上角那一列撑出屏。 */
   /* 详情在徽标下面、通知上面，三者同一列往下排，展开时把通知往下推。 */
-  .st-panel { position:static; width:100%; max-height:56vh; overflow-y:auto;
-              display:flex; flex-direction:column; gap:8px;
-              padding:12px 14px; border-radius:14px; border:1px solid var(--line);
-              background:var(--panel); color:var(--text); font-size:12.5px;
-              box-shadow:0 10px 30px rgba(0,0,0,.4); pointer-events:auto;
+  .st-panel { position:static; width:min(360px, 100%); max-height:56vh; overflow-y:auto;
+              align-self:flex-end; display:flex; flex-direction:column; gap:var(--space-2);
+              padding:var(--space-3) var(--space-3) var(--space-4);
+              border-radius:var(--radius-lg); border:1px solid var(--line);
+              background:var(--panel); color:var(--text); font-size:var(--font-sm);
+              box-shadow:var(--shadow-overlay); pointer-events:auto;
               animation:toast-in .14s ease-out; }
-  .st-close { align-self:flex-end; width:28px; height:28px; padding:0;
-              border:0; border-radius:8px; background:transparent;
+  .st-close { align-self:flex-end; width:30px; height:30px; padding:0;
+              border:0; border-radius:var(--radius-sm); background:transparent;
               color:var(--text-dim); cursor:pointer; pointer-events:auto;
               display:flex; align-items:center; justify-content:center; }
   .st-close:hover { background:var(--bubble-user); color:var(--text); }
   .st-close svg { width:14px; height:14px; }
   .st-sec + .st-sec { margin-top:10px; padding-top:10px;
                       border-top:1px solid var(--line-soft); }
-  .st-sec-head { font-weight:600; }
+  .st-sec-head { font-weight:650; font-size:var(--font-sm); }
   .st-line { margin-top:3px; color:var(--text-dim); overflow-wrap:anywhere; }
   .st-line.bad { color:var(--danger-text); }
   .st-raw { margin-top:6px; color:var(--text-faint);
@@ -298,7 +299,7 @@
           align-items:center; justify-content:center; }
   #menu:hover { background:var(--bubble-user); }
   #menu svg { width:18px; height:18px; }
-  .brand { flex:0 0 auto; display:inline-flex; align-items:center; gap:var(--space-2);
+  .brand { flex:0 0 auto; display:inline-flex; align-items:center; gap:var(--space-1);
            min-width:0; color:var(--text); white-space:nowrap; letter-spacing:0; }
   .brand-mark { width:20px; height:20px; flex:0 0 auto; display:block; }
   .brand-name { flex:0 0 auto; font-size:var(--font-md); font-weight:650;
@@ -404,24 +405,25 @@
   #settings-btn .count.hidden { display:none; }
   /* 设置弹层：默认不出现；归档列表在打开时才建节点。 */
   #settings { position:fixed; inset:0; z-index:40; display:flex;
-              align-items:center; justify-content:center; padding:24px;
-              background:rgba(0,0,0,.55); }
+              align-items:center; justify-content:center; padding:var(--space-5);
+              background:rgba(0,0,0,.5); }
   #settings.hidden { display:none; }
-  .settings-card { width:min(460px, 100%); max-height:min(72vh, 620px);
+  .settings-card { width:min(400px, 100%); max-height:min(72vh, 620px);
                    display:flex; flex-direction:column; min-height:0;
-                   border:1px solid var(--line); border-radius:16px;
+                   border:1px solid var(--line); border-radius:var(--radius-lg);
                    background:var(--panel); color:var(--text);
-                   box-shadow:0 20px 60px rgba(0,0,0,.5); overflow:hidden; }
-  .settings-head { display:flex; align-items:center; gap:10px;
-                   padding:14px 16px 10px; border-bottom:1px solid var(--line-soft); }
-  .settings-head h2 { margin:0; flex:1 1 auto; font-size:16px; font-weight:650; }
+                   box-shadow:var(--shadow-overlay); overflow:hidden; }
+  .settings-head { display:flex; align-items:center; gap:var(--space-2);
+                   padding:var(--space-3) var(--space-3) var(--space-2);
+                   border-bottom:1px solid var(--line-soft); }
+  .settings-head h2 { margin:0; flex:1 1 auto; font-size:var(--font-md); font-weight:650; }
   .settings-head .icon-btn { width:30px; height:30px; padding:0; border:0;
-                             border-radius:8px; background:transparent;
+                             border-radius:var(--radius-sm); background:transparent;
                              color:var(--text-dim); cursor:pointer;
                              display:flex; align-items:center; justify-content:center; }
   .settings-head .icon-btn:hover { color:var(--text); background:var(--bubble-user); }
   .settings-head .icon-btn svg { width:15px; height:15px; }
-  .settings-body { flex:1 1 auto; min-height:0; overflow-y:auto; padding:12px 16px 16px; }
+  .settings-body { flex:1 1 auto; min-height:0; overflow-y:auto; padding:var(--space-3); }
   .set-sec + .set-sec { margin-top:14px; padding-top:12px; border-top:1px solid var(--line-soft); }
   .set-head { display:flex; align-items:center; gap:8px; font-size:12px;
               font-weight:650; color:var(--text-dim); margin-bottom:8px; }
@@ -760,8 +762,12 @@
   .tasks-empty { margin:var(--space-2) 0; color:var(--text-dim); font-size:var(--font-sm); }
   #tasks-detail { margin-top:4px; min-width:0; }
   @media (max-width: 860px) {
-    #tasks-panel { left:0; width:auto; }
-    .tasks-sheet { border-left:0; box-shadow:none; }
+    #tasks-panel { left:0; right:0; top:auto; bottom:0; width:auto;
+                   height:min(78vh, 100%); }
+    .tasks-sheet { height:100%; border-left:0;
+                   border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                   box-shadow:var(--shadow-overlay);
+                   padding-bottom:env(safe-area-inset-bottom); }
     #tasks-btn, #tasks-close { min-height:44px; }
     #tasks-close { min-width:44px; }
   }
@@ -840,13 +846,18 @@
        宽度交给 `auto` 去算，但它**仍然 fixed**（这里刻意一个 `position` 都不写：
        写上去就等于把它拉回文档流，"挤下去"那个毛病就回来了）。
        高低再收一档，免得整列把对话流里那张卡片盖住。 */
-    #corner { top:52px; left:10px; right:10px; width:auto; }
+    #corner { top:52px; left:10px; right:10px; width:auto; overflow:visible; }
     #toasts { max-height:45vh; }
     #hints { gap:4px; }
     #hints .st-item { max-width:38vw; padding:2px 7px; }
     .st { gap:4px; }
     .st-hint { display:none; }
-    .st-panel { max-height:50vh; }
+    .st-panel { position:fixed; left:0; right:0; bottom:0; top:auto; width:auto;
+                max-height:52vh; z-index:1;
+                border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                padding-bottom:calc(var(--space-4) + env(safe-area-inset-bottom)); }
+    body:has(#st-panel:not(.hidden))::before { content:""; position:fixed; inset:0;
+                z-index:29; background:rgba(0,0,0,.5); pointer-events:none; }
     #st-health, #menu, #send, .toast-close, .row-act,
     .ask-apply, .ask-reject, #toast-all, #st-close {
       min-width:44px; min-height:44px;
@@ -855,7 +866,7 @@
     #menu { width:44px; height:44px; }
     #settings { align-items:flex-end; padding:0; }
     .settings-card { width:100%; max-height:78vh;
-                     border-radius:18px 18px 0 0;
+                     border-radius:var(--radius-lg) var(--radius-lg) 0 0;
                      padding-bottom:env(safe-area-inset-bottom); }
   }
   @media (prefers-reduced-motion: reduce) {

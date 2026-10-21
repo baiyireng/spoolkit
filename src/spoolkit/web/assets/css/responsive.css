@@ -19,13 +19,18 @@
        宽度交给 `auto` 去算，但它**仍然 fixed**（这里刻意一个 `position` 都不写：
        写上去就等于把它拉回文档流，"挤下去"那个毛病就回来了）。
        高低再收一档，免得整列把对话流里那张卡片盖住。 */
-    #corner { top:52px; left:10px; right:10px; width:auto; }
+    #corner { top:52px; left:10px; right:10px; width:auto; overflow:visible; }
     #toasts { max-height:45vh; }
     #hints { gap:4px; }
     #hints .st-item { max-width:38vw; padding:2px 7px; }
     .st { gap:4px; }
     .st-hint { display:none; }
-    .st-panel { max-height:50vh; }
+    .st-panel { position:fixed; left:0; right:0; bottom:0; top:auto; width:auto;
+                max-height:52vh; z-index:1;
+                border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                padding-bottom:calc(var(--space-4) + env(safe-area-inset-bottom)); }
+    body:has(#st-panel:not(.hidden))::before { content:""; position:fixed; inset:0;
+                z-index:29; background:rgba(0,0,0,.5); pointer-events:none; }
     #st-health, #menu, #send, .toast-close, .row-act,
     .ask-apply, .ask-reject, #toast-all, #st-close {
       min-width:44px; min-height:44px;
@@ -34,7 +39,7 @@
     #menu { width:44px; height:44px; }
     #settings { align-items:flex-end; padding:0; }
     .settings-card { width:100%; max-height:78vh;
-                     border-radius:18px 18px 0 0;
+                     border-radius:var(--radius-lg) var(--radius-lg) 0 0;
                      padding-bottom:env(safe-area-inset-bottom); }
   }
   @media (prefers-reduced-motion: reduce) {

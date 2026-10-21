@@ -11,7 +11,7 @@
           align-items:center; justify-content:center; }
   #menu:hover { background:var(--bubble-user); }
   #menu svg { width:18px; height:18px; }
-  .brand { flex:0 0 auto; display:inline-flex; align-items:center; gap:var(--space-2);
+  .brand { flex:0 0 auto; display:inline-flex; align-items:center; gap:var(--space-1);
            min-width:0; color:var(--text); white-space:nowrap; letter-spacing:0; }
   .brand-mark { width:20px; height:20px; flex:0 0 auto; display:block; }
   .brand-name { flex:0 0 auto; font-size:var(--font-md); font-weight:650;
