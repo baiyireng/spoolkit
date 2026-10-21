@@ -180,6 +180,8 @@ def test_taskevent字段顺序稳定且没有thought() -> None:
     assert again["phase"] == "observe"
     assert again["source"] == "tool"
     assert again["tool_call_id"] == "tc-2"
+    assert list(FIELD_ORDER)[list(FIELD_ORDER).index("tool_call_id") + 1] == "tool"
+    assert again["tool"] == ""
     assert again["artifacts"] == [{"type": "file", "path": "README.md", "ref": ""}]
 
 
@@ -210,6 +212,13 @@ def test_失败与异常收成phase_error而不是新类型() -> None:
     assert type(tool_failed) is TaskEvent
     assert exploded.source == "system"
     assert "boom" in exploded.summary
+    named = error_from_tool(
+        task_id="t", run_id="r", turn_id="u", seq=7, step=2,
+        tool_call_id="tc-7", summary="没搜到", tool="search_code",
+    )
+    assert named.tool == "search_code"
+    assert named.to_dict()["tool"] == "search_code"
+    assert final_failed.tool == ""
     assert set(PHASES) >= {
         "understand", "act", "observe", "decide", "verify",
         "final", "error", "retrieval", "approval",
@@ -226,6 +235,7 @@ def test_预取是retrieval事件() -> None:
     assert event.source == "prefetch"
     assert "测量夹具" in event.summary
     assert event.to_dict()["phase"] == "retrieval"
+    assert event.tool == ""
 
 
 def test_diff与await用tool_call_id关联tool() -> None:
@@ -243,6 +253,12 @@ def test_diff与await用tool_call_id关联tool() -> None:
     assert diff.phase == "approval"
     assert diff.tool_call_id == "tc-9"
     assert diff.tool_call_id == observed.tool_call_id
+    assert diff.tool == ""
+    named = tool_event(
+        task_id="t", run_id="r", turn_id="u", seq=3, step=1,
+        tool_call_id="tc-9", tool="read_file", status="ok", summary="4 行",
+    )
+    assert named.to_dict()["tool"] == "read_file"
 
 
 def test_非法phase被拒绝() -> None:

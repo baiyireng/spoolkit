@@ -7581,6 +7581,7 @@ class AgentLoop:
             seq=self._next_event_seq(),
             step=state.step,
             tool_call_id=f"tc-{state.step}-{index}",
+            tool=call.name,
         )
         if result.ok:
             blob = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, default=str)

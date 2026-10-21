@@ -170,3 +170,40 @@ def test_异常出口收成error事件(tmp_path: Path) -> None:
     assert "RuntimeError" in task_events[-1]["summary"]
     assert "thought" not in task_events[-1]
     assert "raw" not in task_events[-1]
+
+
+def test_read_file和search_code带上工具名(tmp_path: Path) -> None:
+    events: list[tuple[str, dict]] = []
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(_spec("read_file", True, "读过了", "RAW_READ"))
+    registry.register(_spec("search_code", True, "搜过了", "RAW_SEARCH"))
+    tokenizer = OfflineTokenCounter()
+    loop = AgentLoop(
+        gateway=FakeModel(
+            script=[
+                _turn([
+                    {"name": "read_file", "arguments": {}},
+                    {"name": "search_code", "arguments": {}},
+                ]),
+                _turn([], final="看完了"),
+            ],
+            tokenizer=tokenizer,
+        ),
+        tokenizer=tokenizer,
+        registry=registry,
+        config=Config(project_root=tmp_path, context_window=4096, max_steps=4, supervise=False),
+        pending=pending,
+        prefetch=lambda _goal: "预取",
+        on_event=lambda kind, data: events.append((kind, dict(data))),
+    )
+    loop.run("看一下")
+    task_events = [data for kind, data in events if kind == TASK_EVENT]
+    by_phase = {}
+    for item in task_events:
+        by_phase.setdefault(item["phase"], []).append(item)
+    assert [item["tool"] for item in by_phase["observe"]] == ["read_file", "search_code"]
+    assert by_phase["retrieval"][0]["tool"] == ""
+    assert by_phase["final"][0]["tool"] == ""
+    assert by_phase["understand"][0]["tool"] == ""
+    assert "RAW_READ" not in json.dumps(task_events, ensure_ascii=False)

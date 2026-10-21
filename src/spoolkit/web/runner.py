@@ -814,6 +814,7 @@ class Runner:
                 phase=phase,
                 source=source,
                 tool_call_id=str(data.get("tool_call_id") or ""),
+                tool=str(data.get("tool") or ""),
                 intent=str(data.get("intent") or ""),
                 args_digest=str(data.get("args_digest") or ""),
                 status=str(data.get("status") or ""),

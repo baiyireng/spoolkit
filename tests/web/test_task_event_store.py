@@ -246,3 +246,38 @@ def test_协议行能进runner(tmp_path: Path) -> None:
     runner = Runner(tmp_path, session="t")
     runner._absorb(event)
     assert _events(runner)[0]["task_id"] == "job"
+
+
+def test_恢复后tool还在且旧行缺tool为空(tmp_path: Path) -> None:
+    folder = tmp_path / ".agent" / "task-events"
+    folder.mkdir(parents=True)
+    old = {
+        "task_id": "run-1:old",
+        "run_id": "run-1",
+        "turn_id": "old",
+        "seq": 1,
+        "step": 0,
+        "phase": "observe",
+        "source": "tool",
+        "tool_call_id": "tc-0-0",
+        "status": "ok",
+        "summary": "旧记录",
+    }
+    fresh = {
+        **old,
+        "task_id": "run-1:new",
+        "turn_id": "new",
+        "seq": 2,
+        "tool": "search_code",
+        "summary": "搜过了",
+    }
+    (folder / "t.jsonl").write_text(
+        json.dumps(old, ensure_ascii=False) + "\n" + json.dumps(fresh, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    runner = Runner(tmp_path, session="t")
+    stored = _events(runner)
+    assert [item["tool"] for item in stored] == ["", "search_code"]
+    groups = runner.snapshot(health={"ok": True})["task_groups"]
+    assert [item["events"][0]["tool"] for item in groups] == ["", "search_code"]
+    assert [item["task_id"] for item in groups] == ["run-1:old", "run-1:new"]

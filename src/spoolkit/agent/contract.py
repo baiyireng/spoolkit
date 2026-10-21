@@ -37,6 +37,7 @@ FIELD_ORDER = (
     "phase",
     "source",
     "tool_call_id",
+    "tool",
     "intent",
     "args_digest",
     "status",
@@ -101,6 +102,7 @@ class TaskEvent:
     phase: str
     source: str
     tool_call_id: str = ""
+    tool: str = ""
     intent: str = ""
     args_digest: str = ""
     status: str = ""
@@ -127,6 +129,7 @@ class TaskEvent:
             "phase": self.phase,
             "source": self.source,
             "tool_call_id": self.tool_call_id,
+            "tool": self.tool,
             "intent": self.intent,
             "args_digest": self.args_digest,
             "status": self.status,
@@ -160,6 +163,7 @@ def tool_event(
     seq: int,
     step: int,
     tool_call_id: str,
+    tool: str = "",
     intent: str = "",
     args_digest: str = "",
     status: str = "",
@@ -179,6 +183,7 @@ def tool_event(
         phase="observe",
         source="tool",
         tool_call_id=tool_call_id,
+        tool=tool,
         intent=intent,
         args_digest=args_digest,
         status=status,
@@ -252,6 +257,7 @@ def error_from_tool(
     step: int,
     tool_call_id: str,
     summary: str,
+    tool: str = "",
 ) -> TaskEvent:
     """工具 ok=false 收成 phase=error，不另造错误通道。"""
     return TaskEvent(
@@ -263,6 +269,7 @@ def error_from_tool(
         phase="error",
         source="tool",
         tool_call_id=tool_call_id,
+        tool=tool,
         status="error",
         summary=summary,
     )

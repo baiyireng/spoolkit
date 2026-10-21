@@ -18,6 +18,7 @@ _EVENT_FIELDS = (
     "phase",
     "source",
     "tool_call_id",
+    "tool",
     "intent",
     "args_digest",
     "status",
