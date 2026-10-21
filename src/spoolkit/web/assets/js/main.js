@@ -112,7 +112,11 @@ function onEvent(event) {
   if (data.type === 'diff') {
     store.update('pendings', function (rows) {
       const next = (rows || []).slice();
-      next.push({path: data.path, text: data.text});
+      next.push({
+        path: data.path,
+        text: data.text,
+        tool_call_id: String(data.tool_call_id || ''),
+      });
       return next;
     });
     app.confirm.showApproval({

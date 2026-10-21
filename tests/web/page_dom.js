@@ -166,6 +166,7 @@ class El {
   addEventListener(kind, fn) { (this.listeners[kind] = this.listeners[kind] || []).push(fn); }
   dispatchEvent(event) { (this.listeners[event.type] || []).forEach((fn) => fn.call(this, event)); return true; }
   scrollTo() { this.scrollTop = this.scrollHeight; }
+  scrollIntoView() { this._scrolled = (this._scrolled || 0) + 1; }
 }
 
 class Event {
@@ -1838,14 +1839,15 @@ async function extras2() {
       refs: [], artifacts: [], raw: 'RAW_SECRET',
     }, extra || {});
   }
-  function taskGroup(status, events) {
+  function taskGroup(status, events, goal) {
     return {
       task_id: 'run:' + status, run_id: 'run', turn_id: status,
-      goal: '写一个文件', status: status, artifacts: [], events: events,
+      goal: goal || '写一个文件', status: status, artifacts: [], events: events,
     };
   }
+  const longGoal = '写一个文件' + '而且目标很长'.repeat(6);
   const story = [
-    taskEvent(1, 'understand', 'running', '写一个文件'),
+    taskEvent(1, 'understand', 'running', longGoal),
     taskEvent(2, 'retrieval', 'ok', '预取目录'),
     taskEvent(3, 'observe', 'ok', '4 行', { tool: 'read_file', intent: '读源码', tool_call_id: 'tc-1-0', source: 'tool' }),
     taskEvent(4, 'approval', 'await', 'a.py 待确认', { tool_call_id: 'tc-1-0' }),
@@ -1863,7 +1865,7 @@ async function extras2() {
     { role: 'assistant', content: '写好了', created_at: 4,
       trace: [{ type: 'step', text: '不该出现的轨迹' }],
       tasks: [
-        taskGroup('verify_failed', story),
+        taskGroup('verify_failed', story, longGoal),
         taskGroup('failed', [
           taskEvent(1, 'understand', 'running', '做不完'),
           taskEvent(2, 'error', 'error', '已达步数上限'),
@@ -1872,8 +1874,15 @@ async function extras2() {
           taskEvent(1, 'understand', 'running', '停下来'),
           taskEvent(2, 'final', 'cancelled', '已取消的长文'),
         ]),
+        taskGroup('done', [
+          taskEvent(1, 'understand', 'running', '做完了'),
+          taskEvent(2, 'final', 'ok', '做完的长文'),
+        ]),
       ] },
-  ]));
+  ], {
+    diffs: [{ path: 'a.py', text: '+x\n', tool_call_id: 'tc-1-0' }],
+    awaiting: 1,
+  }));
   const assistants = ids.get('stream').querySelectorAll('.msg').filter((node) =>
     String(node._cls || '').indexOf('assistant') >= 0);
   const oldCard = assistants[0];
@@ -1883,13 +1892,38 @@ async function extras2() {
   const cards = newCard ? newCard.querySelectorAll('.task-card') : [];
   const first = cards[0] || null;
   const firstHead = first ? first.querySelector('.task-head') : null;
+  const arias = cards.map((node) => node.querySelector('.task-head').getAttribute('aria-expanded'));
   const collapsed = firstHead ? firstHead.getAttribute('aria-expanded') : '';
+  const goalNode = first ? first.querySelector('.task-goal') : null;
   if (firstHead) { firstHead.onclick(); }
   const openedAria = firstHead ? firstHead.getAttribute('aria-expanded') : '';
   const openedBody = first ? first.querySelector('.task-body') : null;
   const openedText = openedBody ? openedBody.textContent : '';
   const approvalRows = openedBody ? openedBody.querySelectorAll('.task-approval').length : 0;
   const observeRows = openedBody ? openedBody.querySelectorAll('.task-observe').length : 0;
+  const jump = openedBody ? openedBody.querySelector('.task-jump') : null;
+  const ask = ids.get('stream').querySelector('.ask-card');
+  const toolText = openedBody && openedBody.querySelector('.task-tool')
+    ? openedBody.querySelector('.task-tool').textContent : '';
+  const intentText = openedBody && openedBody.querySelector('.task-intent')
+    ? openedBody.querySelector('.task-intent').textContent : '';
+  const summaryNode = openedBody ? openedBody.querySelector('.task-summary') : null;
+  const verifyNode = openedBody ? openedBody.querySelector('.task-verify') : null;
+  const rowStatus = openedBody && openedBody.querySelector('.task-row-status')
+    ? openedBody.querySelector('.task-row-status').textContent : '';
+  const rowCounts = {
+    retrieval: openedBody ? openedBody.querySelectorAll('.task-retrieval').length : 0,
+    verify: openedBody ? openedBody.querySelectorAll('.task-verify').length : 0,
+    final: openedBody ? openedBody.querySelectorAll('.task-final').length : 0,
+  };
+  if (jump) { jump.onclick(); }
+  const askScrolled = ask ? ask._scrolled || 0 : 0;
+  const askFocus = document.activeElement ? document.activeElement.className : '';
+  const failedCard = cards[1] || null;
+  const failedHead = failedCard ? failedCard.querySelector('.task-head') : null;
+  if (failedHead) { failedHead.onclick(); }
+  const errorRow = failedCard ? failedCard.querySelector('.task-error') : null;
+  const errorText = errorRow ? errorRow.textContent : '';
   if (firstHead) { firstHead.onclick(); }
   out.task_cards = {
     old_trace: oldCard ? Boolean(oldCard.querySelector('.trace')) : false,
@@ -1898,12 +1932,31 @@ async function extras2() {
     new_trace: newCard ? Boolean(newCard.querySelector('.trace')) : true,
     count: cards.length,
     heads: cards.map((node) => node.querySelector('.task-head').textContent),
+    arias: arias,
+    chevrons: newCard ? newCard.querySelectorAll('.task-chevron').length : 0,
+    chips: newCard ? newCard.querySelectorAll('.task-chip').length : 0,
     collapsed: collapsed,
     opened_aria: openedAria,
     closed_again: firstHead ? firstHead.getAttribute('aria-expanded') : '',
     opened: openedText,
     approval_rows: approvalRows,
     observe_rows: observeRows,
+    retrieval_rows: rowCounts.retrieval,
+    verify_rows: rowCounts.verify,
+    verify_text: verifyNode ? verifyNode.textContent : '',
+    final_rows: rowCounts.final,
+    error_text: errorText,
+    tool: toolText,
+    intent: intentText,
+    summary: summaryNode ? summaryNode.textContent : '',
+    summary_title: summaryNode ? summaryNode.getAttribute('title') : '',
+    row_status: rowStatus,
+    jump: jump ? jump.textContent : '',
+    ask_id: ask ? ask.getAttribute('data-tool-call-id') : '',
+    ask_scrolled: askScrolled,
+    ask_focus: askFocus,
+    task_apply: newCard ? newCard.querySelectorAll('.ask-apply').length : 1,
+    goal_title: goalNode ? goalNode.getAttribute('title') : '',
     raw: newCard ? newCard.textContent.indexOf('RAW_SECRET') >= 0 : true,
     goal_times: openedText.split('写一个文件').length - 1,
   };
@@ -1923,15 +1976,78 @@ async function extras2() {
   const liveCard = lastCard();
   const liveTrace = liveCard ? liveCard.querySelector('.trace') : null;
   const liveTask = liveCard ? liveCard.querySelector('.task-card') : null;
+  const liveHead = liveTask ? liveTask.querySelector('.task-head') : null;
   out.task_running = {
     role: liveCard ? liveCard._cls : '',
-    head: liveTask && liveTask.querySelector('.task-head')
-      ? liveTask.querySelector('.task-head').textContent : '',
-    aria: liveTask && liveTask.querySelector('.task-head')
-      ? liveTask.querySelector('.task-head').getAttribute('aria-expanded') : '',
+    head: liveHead ? liveHead.textContent : '',
+    aria: liveHead ? liveHead.getAttribute('aria-expanded') : '',
+    body: liveTask && liveTask.querySelector('.task-body')
+      ? liveTask.querySelector('.task-body').textContent : '',
     trace_hidden: liveTrace ? liveTrace.classList.contains('hidden') : false,
     trace_visible_text: liveTrace && !liveTrace.classList.contains('hidden')
       ? liveTrace.textContent : '',
+  };
+  function liveFrame(summary) {
+    return frame('D:/task-live', 'a1', WROWS, SROWS_A, [
+      { role: 'user', content: '写一个文件', created_at: 1 },
+    ], {
+      running: true,
+      goal: '写一个文件',
+      trace: { open: true, goal: '写一个文件', lines: [{ type: 'step', text: '第 1 步' }] },
+      task_groups: [taskGroup('running', [
+        taskEvent(1, 'understand', 'running', '写一个文件'),
+        taskEvent(2, 'retrieval', 'ok', '预取目录'),
+        taskEvent(3, 'observe', 'ok', summary, { tool: 'search_code', step: 0, tool_call_id: 'tc-0-0' }),
+      ])],
+    });
+  }
+  if (liveHead) { liveHead.onclick(); }
+  ctx.__spoolTest.applyState(liveFrame('又读了一段'));
+  const afterClose = liveHead ? liveHead.getAttribute('aria-expanded') : '';
+  if (liveHead) { liveHead.onclick(); }
+  const openedNow = liveHead ? liveHead.getAttribute('aria-expanded') : '';
+  const openedSummary = liveTask && liveTask.querySelector('.task-summary')
+    ? liveTask.querySelector('.task-summary').textContent : '';
+  ctx.__spoolTest.applyState(liveFrame('第三次'));
+  out.task_pin = {
+    closed: afterClose,
+    opened: openedNow,
+    stayed: liveHead ? liveHead.getAttribute('aria-expanded') : '',
+    opened_summary: openedSummary,
+    rebound_summary: liveTask && liveTask.querySelector('.task-summary')
+      ? liveTask.querySelector('.task-summary').textContent : '',
+  };
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.applyState(frame('D:/task-cmd', 'a1', WROWS, SROWS_A, [
+    { role: 'user', content: '跑一下', created_at: 1 },
+    { role: 'assistant', content: '等确认', created_at: 2, tasks: [
+      taskGroup('done', [
+        taskEvent(1, 'understand', 'running', '跑一下'),
+        taskEvent(2, 'observe', 'ok', 'find .', {
+          tool: 'exec', intent: '找文件', tool_call_id: 'tc-cmd', step: 0,
+        }),
+        taskEvent(3, 'approval', 'await', 'find .', { tool_call_id: 'tc-cmd' }),
+      ]),
+    ] },
+  ], {
+    awaiting: 1,
+    awaiting_detail: { command: 'find .', reason: '找文件', tool_call_id: 'tc-cmd' },
+  }));
+  const cmdCard = ids.get('stream').querySelector('.task-card');
+  const cmdHead = cmdCard ? cmdCard.querySelector('.task-head') : null;
+  const cmdCollapsed = cmdHead ? cmdHead.getAttribute('aria-expanded') : '';
+  if (cmdHead) { cmdHead.onclick(); }
+  const cmdJump = cmdCard ? cmdCard.querySelector('.task-jump') : null;
+  const cmdAsk = ids.get('stream').querySelector('.ask-card');
+  if (cmdJump) { cmdJump.onclick(); }
+  out.task_command = {
+    collapsed: cmdCollapsed,
+    jump: cmdJump ? cmdJump.textContent : '',
+    ask_id: cmdAsk ? cmdAsk.getAttribute('data-tool-call-id') : '',
+    ask_cls: cmdAsk ? cmdAsk.className : '',
+    ask_scrolled: cmdAsk ? cmdAsk._scrolled || 0 : 0,
+    ask_focus: document.activeElement ? document.activeElement.className : '',
+    task_apply: cmdCard ? cmdCard.querySelectorAll('.ask-apply').length : 1,
   };
 }
 

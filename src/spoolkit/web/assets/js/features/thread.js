@@ -370,7 +370,7 @@ function syncLiveTasks(state) {
     const card = seen[id];
     if (!card) { fresh.push(group); continue; }
     card._task = group;
-    card.className = 'task-card task-card-' + taskStatusClass(group.status);
+    card.className = taskCardClass(group.status, taskOpen(card));
     drawTaskHead(card);
     if (taskOpen(card)) { drawTaskBody(card); }
   }

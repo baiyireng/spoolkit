@@ -220,35 +220,68 @@ def test_任务卡默认折叠且有卡时不画旧轨迹(dom: dict) -> None:
     assert "第 1 步" in cards["old_trace_text"]
     assert "read_file → 失败" in cards["old_trace_text"]
     assert cards["new_trace"] is False
-    assert cards["count"] == 3
+    assert cards["count"] == 4
+    assert cards["arias"] == ["false", "false", "false", "false"]
+    assert cards["chevrons"] == 4
+    assert cards["chips"] == 4
     assert cards["collapsed"] == "false"
     assert cards["opened_aria"] == "true"
     assert cards["closed_again"] == "false"
     assert "验证未过" in cards["heads"][0]
     assert "写一个文件" in cards["heads"][0]
     assert "2 步" in cards["heads"][0]
+    assert cards["goal_title"].startswith("写一个文件")
+    assert "而且目标很长" in cards["goal_title"]
+    assert len(cards["goal_title"]) > len("写一个文件")
     assert "失败" in cards["heads"][1]
     assert "已达步数上限" not in cards["heads"][1]
     assert "已取消" in cards["heads"][2]
-    assert "read_file" in cards["opened"]
-    assert "读源码" in cards["opened"]
-    assert "4 行" in cards["opened"]
-    assert "编译失败" in cards["opened"]
-    assert "等待" in cards["opened"]
+    assert "完成" in cards["heads"][3]
+    assert cards["tool"] == "read_file"
+    assert cards["intent"] == "读源码"
+    assert cards["summary"] == "4 行"
+    assert cards["summary_title"] == "4 行"
+    assert cards["row_status"] == "完成"
+    assert cards["jump"] == "查看改动"
     assert cards["observe_rows"] == 1
-    assert cards["approval_rows"] == 1
+    assert cards["approval_rows"] == 0
+    assert cards["retrieval_rows"] == 1
+    assert cards["verify_rows"] == 1
+    assert cards["verify_text"] == "编译失败"
+    assert cards["final_rows"] == 1
+    assert cards["error_text"] == "已达步数上限"
+    assert "预取目录" in cards["opened"]
     assert "结论已生成" in cards["opened"]
     assert "不应该出现在任务卡里" not in cards["opened"]
     assert cards["goal_times"] == 0
     assert cards["raw"] is False
+    assert cards["ask_id"] == "tc-1-0"
+    assert cards["ask_scrolled"] == 1
+    assert cards["ask_focus"] == "ask-apply"
+    assert cards["task_apply"] == 0
     running = dom["task_running"]
     assert "assistant" in running["role"]
     assert running["head"].startswith("进行中")
     assert "写一个文件" in running["head"]
     assert "未验证" in running["head"]
-    assert running["aria"] == "false"
+    assert running["aria"] == "true"
+    assert "search_code" in running["body"]
     assert running["trace_hidden"] is True
     assert running["trace_visible_text"] == ""
+    pin = dom["task_pin"]
+    assert pin["closed"] == "false"
+    assert pin["opened"] == "true"
+    assert pin["stayed"] == "true"
+    assert pin["opened_summary"] == "又读了一段"
+    assert pin["rebound_summary"] == "第三次"
+    command = dom["task_command"]
+    assert command["collapsed"] == "false"
+    assert command["jump"] == "去确认"
+    assert command["ask_id"] == "tc-cmd"
+    assert "command" in command["ask_cls"]
+    assert command["ask_scrolled"] == 1
+    assert command["ask_focus"] == "ask-apply"
+    assert command["task_apply"] == 0
 
 
 # --- ② AI 回复后消息卡自动更新；思考过程可折叠、事后还能回看 ---

@@ -167,6 +167,28 @@ function settleCard(outcome) {
   ctx.thread.updateToBottom();
 }
 
+function stampAskCalls(node, items, detail) {
+  if (!node) { return; }
+  const ids = [];
+  function rememberCall(value) {
+    const text = String(value || '');
+    if (text && ids.indexOf(text) < 0) { ids.push(text); }
+  }
+  for (const item of items || []) { rememberCall(item && item.tool_call_id); }
+  if (detail) {
+    rememberCall(detail.tool_call_id);
+    const many = detail.tool_call_ids;
+    if (many && many.length) { for (const id of many) { rememberCall(id); } }
+  }
+  if (!ids.length) {
+    node.removeAttribute('data-tool-call-id');
+    node.removeAttribute('data-tool-call-ids');
+    return;
+  }
+  node.setAttribute('data-tool-call-id', ids[0]);
+  node.setAttribute('data-tool-call-ids', ids.join(' '));
+}
+
 function showPending(items) {
   if (!items.length) { clearPending(); return; }
   ctx.store.set('pendings', items);
@@ -175,13 +197,17 @@ function showPending(items) {
   const sig = JSON.stringify(['diffs', items.map(function (one) {
     return [one.path, one.text];
   })]);
-  if (ctx.store.get('card') && ctx.store.get('cardAsking') && ctx.store.get('cardSig') === sig) { return; }
+  if (ctx.store.get('card') && ctx.store.get('cardAsking') && ctx.store.get('cardSig') === sig) {
+    stampAskCalls(ctx.store.get('card'), items, null);
+    return;
+  }
   const node = ensureCard();
   ctx.store.set('cardSig', sig);
   const stick = ctx.thread.atBottom();
   node.className = 'ask-card';
   node.dataset.kind = 'diff';
   node.dataset.state = 'asking';
+  stampAskCalls(node, items, null);
   setAskLabels(false);
   node._what = items.length + ' 处改动';
   node._who.textContent = targetLabel();
@@ -224,11 +250,15 @@ function showCombined(items, detail) {
   const sig = JSON.stringify(['combined', items.map(function (one) {
     return [one.path, one.text];
   }), detail.command, detail.reason || '']);
-  if (ctx.store.get('card') && ctx.store.get('cardAsking') && ctx.store.get('cardSig') === sig) { return; }
+  if (ctx.store.get('card') && ctx.store.get('cardAsking') && ctx.store.get('cardSig') === sig) {
+    stampAskCalls(ctx.store.get('card'), items, detail);
+    return;
+  }
   const node = ensureCard();
   ctx.store.set('cardSig', sig);
   const stick = ctx.thread.atBottom();
   node.className = 'ask-card combined';
+  stampAskCalls(node, items, detail);
   node.dataset.kind = 'combined';
   node.dataset.state = 'asking';
   setAskLabels('combined');
@@ -272,7 +302,11 @@ function showApproval(spec) {
   const command = detail && detail.command ? detail : null;
   heldCommand = command;
   if (diffs.length && command) { showCombined(diffs, command); return; }
-  if (command) { ctx.status.showCommandAsk(command); return; }
+  if (command) {
+    ctx.status.showCommandAsk(command);
+    stampAskCalls(ctx.store.get('card'), [], command);
+    return;
+  }
   if (diffs.length) { showPending(diffs); return; }
 }
 

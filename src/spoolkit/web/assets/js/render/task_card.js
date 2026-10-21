@@ -1,8 +1,8 @@
 // spool web · js/render/task_card.js
 import "../core/dom.js";
 import "./failure.js";
-/* 任务卡：挂在助手回复下面。只读 summary，不画 raw。展开与收起和思考过程同一口径。 */
-// 任务卡只读 summary / refs / artifacts。事件上没有 raw，这里也不画。
+/* 任务卡：挂在助手回复下面。只读 summary，不画 raw。
+   running 第一次出现时展开；其余状态收起。人点过之后，重绑不再改开合。 */
 const TASK_STATUS_LABEL = {
   done: '完成',
   verify_failed: '验证未过',
@@ -13,6 +13,10 @@ const TASK_STATUS_LABEL = {
 
 function taskStatusClass(status) {
   return Object.prototype.hasOwnProperty.call(TASK_STATUS_LABEL, status) ? status : 'running';
+}
+
+function taskCardClass(status, open) {
+  return 'task-card task-card-' + taskStatusClass(status) + (open ? ' open' : '');
 }
 
 function taskStepCount(task) {
@@ -40,7 +44,22 @@ function taskVerifyText(task) {
 function approvalLabel(status) {
   if (status === 'confirmed') { return '已确认'; }
   if (status === 'rejected') { return '已拒绝'; }
-  return '等待';
+  return '';
+}
+
+function approvalWaiting(status) {
+  return status !== 'confirmed' && status !== 'rejected';
+}
+
+function approvalJump(event) {
+  const artifacts = event.artifacts || [];
+  for (const item of artifacts) {
+    if (item && String(item.type || '') === 'diff') { return '查看改动'; }
+  }
+  const summary = String(event.summary || '');
+  if (summary.indexOf('待确认命令') >= 0) { return '去确认'; }
+  if (summary.indexOf('待确认') >= 0) { return '查看改动'; }
+  return '去确认';
 }
 
 function observeStatus(status) {
@@ -61,12 +80,19 @@ function taskRows(task) {
     if (phase === 'understand') { continue; }
     if (phase === 'approval') {
       const call = String(event.tool_call_id || '');
-      const label = approvalLabel(event.status);
+      const waiting = approvalWaiting(event.status);
+      const patch = {
+        approval: waiting ? '' : approvalLabel(event.status),
+        jump: waiting ? approvalJump(event) : '',
+        callId: call,
+      };
       if (call && byCall[call]) {
-        byCall[call].approval = label;
+        byCall[call].approval = patch.approval;
+        byCall[call].jump = patch.jump;
+        byCall[call].callId = call;
         continue;
       }
-      rows.push({kind: 'approval', text: label});
+      rows.push({kind: 'approval', text: patch.approval, jump: patch.jump, callId: call});
       continue;
     }
     if (phase === 'observe') {
@@ -78,6 +104,8 @@ function taskRows(task) {
         status: observeStatus(event.status),
         bad: event.status === 'error',
         approval: '',
+        jump: '',
+        callId: String(event.tool_call_id || ''),
       };
       rows.push(row);
       if (event.tool_call_id) { byCall[String(event.tool_call_id)] = row; }
@@ -99,22 +127,60 @@ function taskRows(task) {
 function drawTaskHead(box) {
   const task = box._task || {};
   const head = box._head;
+  const goalText = redact(String(task.goal || ''));
   head.replaceChildren();
-  const mark = h('span', 'task-mark');
+  head.title = goalText;
+  head.setAttribute('title', goalText);
+  const mark = h('span', 'task-mark task-chip');
   mark.textContent = TASK_STATUS_LABEL[task.status] || TASK_STATUS_LABEL.running;
   const goal = h('span', 'task-goal');
-  goal.textContent = redact(String(task.goal || ''));
+  goal.textContent = goalText;
+  goal.title = goalText;
+  goal.setAttribute('title', goalText);
   const steps = h('span', 'task-steps');
   steps.textContent = taskStepCount(task) + ' 步';
   const verify = h('span', 'task-verify');
   verify.textContent = taskVerifyText(task);
+  const chevron = h('span', 'task-chevron');
+  chevron.setAttribute('aria-hidden', 'true');
   head.appendChild(mark);
-  head.appendChild(document.createTextNode(' · '));
   head.appendChild(goal);
-  head.appendChild(document.createTextNode(' · '));
   head.appendChild(steps);
-  head.appendChild(document.createTextNode(' · '));
   head.appendChild(verify);
+  head.appendChild(chevron);
+}
+
+function focusAsk(callId) {
+  const want = String(callId || '');
+  const cards = document.querySelectorAll('.ask-card');
+  let hit = null;
+  for (const node of cards) {
+    const ids = (
+      String(node.getAttribute('data-tool-call-id') || '') + ' '
+      + String(node.getAttribute('data-tool-call-ids') || '')
+    ).split(/\s+/);
+    if (want && ids.indexOf(want) >= 0) { hit = node; break; }
+  }
+  if (!hit && cards.length === 1) { hit = cards[0]; }
+  if (!hit) { return; }
+  if (typeof hit.scrollIntoView === 'function') {
+    hit.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  }
+  const apply = hit.querySelector('.ask-apply');
+  if (apply && typeof apply.focus === 'function') { apply.focus(); }
+}
+
+function appendJump(line, row) {
+  if (!row.jump) { return; }
+  const jump = document.createElement('button');
+  jump.type = 'button';
+  jump.className = 'task-jump';
+  jump.textContent = row.jump;
+  jump.onclick = function (event) {
+    if (event && event.stopPropagation) { event.stopPropagation(); }
+    focusAsk(row.callId);
+  };
+  line.appendChild(jump);
 }
 
 function drawTaskBody(box) {
@@ -122,29 +188,37 @@ function drawTaskBody(box) {
   for (const row of taskRows(box._task || {})) {
     const line = h('div', 'task-row task-' + row.kind + (row.bad ? ' bad' : ''));
     if (row.kind === 'observe') {
+      const meta = h('div', 'task-row-line');
       const tool = h('span', 'task-tool');
       tool.textContent = redact(row.tool);
-      line.appendChild(tool);
+      meta.appendChild(tool);
       if (row.intent) {
         const intent = h('span', 'task-intent');
         intent.textContent = redact(row.intent);
-        line.appendChild(document.createTextNode(' · '));
-        line.appendChild(intent);
+        meta.appendChild(document.createTextNode(' · '));
+        meta.appendChild(intent);
       }
-      const summary = h('span', 'task-summary');
-      summary.textContent = redact(row.summary);
-      line.appendChild(document.createTextNode(' · '));
-      line.appendChild(summary);
       const status = h('span', 'task-row-status');
       status.textContent = row.status;
-      line.appendChild(document.createTextNode(' · '));
-      line.appendChild(status);
+      meta.appendChild(document.createTextNode(' · '));
+      meta.appendChild(status);
       if (row.approval) {
         const approval = h('span', 'task-approval');
         approval.textContent = row.approval;
-        line.appendChild(document.createTextNode(' · '));
-        line.appendChild(approval);
+        meta.appendChild(document.createTextNode(' · '));
+        meta.appendChild(approval);
       }
+      appendJump(meta, row);
+      line.appendChild(meta);
+      const summary = h('div', 'task-summary');
+      const summaryText = redact(row.summary);
+      summary.textContent = summaryText;
+      summary.title = summaryText;
+      summary.setAttribute('title', summaryText);
+      line.appendChild(summary);
+    } else if (row.kind === 'approval') {
+      if (row.text) { line.appendChild(document.createTextNode(row.text)); }
+      appendJump(line, row);
     } else {
       line.textContent = redact(row.text);
     }
@@ -154,28 +228,32 @@ function drawTaskBody(box) {
 
 function taskOpen(box) { return !box._body.classList.contains('hidden'); }
 
-function setTaskOpen(box, open) {
+function setTaskOpen(box, open, fromUser) {
+  if (fromUser) { box._userSet = true; }
   box._body.classList.toggle('hidden', !open);
+  box.classList.toggle('open', open);
   box._head.setAttribute('aria-expanded', open ? 'true' : 'false');
   if (open) { drawTaskBody(box); }
   else { box._body.replaceChildren(); }
 }
 
 function makeTaskCard(task) {
-  const box = h('div', 'task-card task-card-' + taskStatusClass(task.status));
+  const box = h('div', taskCardClass(task.status, false));
   box.setAttribute('data-task-id', String(task.task_id || ''));
   const head = document.createElement('button');
   head.type = 'button';
   head.className = 'task-head';
   head.setAttribute('aria-expanded', 'false');
   const body = h('div', 'task-body hidden');
-  head.onclick = function () { setTaskOpen(box, !taskOpen(box)); };
+  head.onclick = function () { setTaskOpen(box, !taskOpen(box), true); };
   box.appendChild(head);
   box.appendChild(body);
   box._head = head;
   box._body = body;
   box._task = task;
+  box._userSet = false;
   drawTaskHead(box);
+  if (taskStatusClass(task.status) === 'running') { setTaskOpen(box, true, false); }
   return box;
 }
 
@@ -197,7 +275,7 @@ function syncTaskCards(wrap, tasks) {
       continue;
     }
     card._task = task;
-    card.className = 'task-card task-card-' + taskStatusClass(task.status);
+    card.className = taskCardClass(task.status, taskOpen(card));
     drawTaskHead(card);
     if (taskOpen(card)) { drawTaskBody(card); }
   }

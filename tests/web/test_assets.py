@@ -516,14 +516,27 @@ def test_390任务卡单列且不溢出(server: str, tmp_path: Path) -> None:
               head.type = 'button';
               head.setAttribute('aria-expanded', 'true');
               const goal = '写一个文件' + '很长的目标'.repeat(12);
-              head.innerHTML = '<span class="task-mark">进行中</span><span class="task-goal"></span><span class="task-steps">1 步</span><span class="task-verify">未验证</span>';
-              head.querySelector('.task-goal').textContent = goal;
+              head.innerHTML = '<span class="task-mark task-chip">进行中</span><span class="task-goal"></span><span class="task-steps">1 步</span><span class="task-verify">未验证</span><span class="task-chevron"></span>';
+              const goalNode = head.querySelector('.task-goal');
+              goalNode.textContent = goal;
+              goalNode.title = goal;
               const body = document.createElement('div');
               body.className = 'task-body';
               const row = document.createElement('div');
               row.className = 'task-row task-observe';
-              row.textContent = 'read_file · 读源码 · ' + '摘要'.repeat(40);
+              const summary = document.createElement('div');
+              summary.className = 'task-summary';
+              const summaryText = '摘要'.repeat(40);
+              summary.textContent = summaryText;
+              summary.title = summaryText;
+              row.appendChild(summary);
               body.appendChild(row);
+              for (let i = 0; i < 24; i += 1) {
+                const extra = document.createElement('div');
+                extra.className = 'task-row';
+                extra.textContent = '第 ' + i + ' 行 ' + '内容'.repeat(8);
+                body.appendChild(extra);
+              }
               card.appendChild(head);
               card.appendChild(body);
               list.appendChild(card);
@@ -532,6 +545,9 @@ def test_390任务卡单列且不溢出(server: str, tmp_path: Path) -> None:
               const cardBox = card.getBoundingClientRect();
               const streamBox = stream.getBoundingClientRect();
               const headStyle = getComputedStyle(head);
+              const goalStyle = getComputedStyle(goalNode);
+              const summaryStyle = getComputedStyle(summary);
+              const bodyStyle = getComputedStyle(body);
               return {
                 card_right: Math.round(cardBox.right),
                 stream_right: Math.round(streamBox.right),
@@ -541,6 +557,13 @@ def test_390任务卡单列且不溢出(server: str, tmp_path: Path) -> None:
                 card_overflow: card.scrollWidth - card.clientWidth,
                 head_direction: headStyle.flexDirection,
                 head_width: Math.round(cardBox.width),
+                goal_clamp: goalStyle.webkitLineClamp,
+                summary_clamp: summaryStyle.webkitLineClamp,
+                goal_title: goalNode.title,
+                goal_h: Math.round(goalNode.getBoundingClientRect().height),
+                summary_h: Math.round(summary.getBoundingClientRect().height),
+                body_overflow_x: bodyStyle.overflowX,
+                body_scrolls: body.scrollHeight > body.clientHeight + 1,
               };
             })()
             """
@@ -554,6 +577,14 @@ def test_390任务卡单列且不溢出(server: str, tmp_path: Path) -> None:
         proc.kill()
         proc.wait(timeout=10)
     assert metrics["head_direction"] == "column", metrics
+    assert metrics["goal_clamp"] == "2", metrics
+    assert metrics["summary_clamp"] == "2", metrics
+    assert metrics["goal_title"].startswith("写一个文件")
+    assert len(metrics["goal_title"]) > 40
+    assert metrics["goal_h"] <= 48, metrics
+    assert metrics["summary_h"] <= 48, metrics
+    assert metrics["body_overflow_x"] in ("hidden", "clip", "auto"), metrics
+    assert metrics["body_scrolls"] is True, metrics
     assert metrics["card_right"] <= metrics["stream_right"] + 1, metrics
     assert metrics["card_left"] >= metrics["stream_left"] - 1, metrics
     assert metrics["page_overflow"] <= 1, metrics
