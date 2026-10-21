@@ -516,7 +516,7 @@ def test_390任务卡单列且不溢出(server: str, tmp_path: Path) -> None:
               head.type = 'button';
               head.setAttribute('aria-expanded', 'true');
               const goal = '写一个文件' + '很长的目标'.repeat(12);
-              head.innerHTML = '<span class="task-mark task-chip">进行中</span><span class="task-goal"></span><span class="task-steps">1 步</span><span class="task-verify">未验证</span><span class="task-chevron"></span>';
+              head.innerHTML = '<span class="task-mark task-chip">进行中</span><span class="task-goal"></span><span class="task-meta"><span class="task-steps task-chip">1 步</span><span class="task-verify task-chip">未验证</span></span><span class="task-chevron"></span>';
               const goalNode = head.querySelector('.task-goal');
               goalNode.textContent = goal;
               goalNode.title = goal;
@@ -548,6 +548,8 @@ def test_390任务卡单列且不溢出(server: str, tmp_path: Path) -> None:
               const goalStyle = getComputedStyle(goalNode);
               const summaryStyle = getComputedStyle(summary);
               const bodyStyle = getComputedStyle(body);
+              const goalBox = goalNode.getBoundingClientRect();
+              const markBox = head.querySelector('.task-mark').getBoundingClientRect();
               return {
                 card_right: Math.round(cardBox.right),
                 stream_right: Math.round(streamBox.right),
@@ -555,12 +557,15 @@ def test_390任务卡单列且不溢出(server: str, tmp_path: Path) -> None:
                 stream_left: Math.round(streamBox.left),
                 page_overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
                 card_overflow: card.scrollWidth - card.clientWidth,
-                head_direction: headStyle.flexDirection,
-                head_width: Math.round(cardBox.width),
+                head_display: headStyle.display,
+                head_width: Math.round(head.getBoundingClientRect().width),
+                goal_w: Math.round(goalBox.width),
+                goal_top: Math.round(goalBox.top),
+                mark_bottom: Math.round(markBox.bottom),
                 goal_clamp: goalStyle.webkitLineClamp,
                 summary_clamp: summaryStyle.webkitLineClamp,
                 goal_title: goalNode.title,
-                goal_h: Math.round(goalNode.getBoundingClientRect().height),
+                goal_h: Math.round(goalBox.height),
                 summary_h: Math.round(summary.getBoundingClientRect().height),
                 body_overflow_x: bodyStyle.overflowX,
                 body_scrolls: body.scrollHeight > body.clientHeight + 1,
@@ -576,7 +581,9 @@ def test_390任务卡单列且不溢出(server: str, tmp_path: Path) -> None:
     finally:
         proc.kill()
         proc.wait(timeout=10)
-    assert metrics["head_direction"] == "column", metrics
+    assert metrics["head_display"] == "grid", metrics
+    assert metrics["goal_top"] >= metrics["mark_bottom"] - 1, metrics
+    assert metrics["goal_w"] >= metrics["head_width"] - 28, metrics
     assert metrics["goal_clamp"] == "2", metrics
     assert metrics["summary_clamp"] == "2", metrics
     assert metrics["goal_title"].startswith("写一个文件")

@@ -1903,8 +1903,8 @@ async function extras2() {
   const observeRows = openedBody ? openedBody.querySelectorAll('.task-observe').length : 0;
   const jump = openedBody ? openedBody.querySelector('.task-jump') : null;
   const ask = ids.get('stream').querySelector('.ask-card');
-  const toolText = openedBody && openedBody.querySelector('.task-tool')
-    ? openedBody.querySelector('.task-tool').textContent : '';
+  const toolNode = openedBody ? openedBody.querySelector('.task-tool') : null;
+  const toolText = toolNode ? toolNode.textContent : '';
   const intentText = openedBody && openedBody.querySelector('.task-intent')
     ? openedBody.querySelector('.task-intent').textContent : '';
   const summaryNode = openedBody ? openedBody.querySelector('.task-summary') : null;
@@ -1935,6 +1935,7 @@ async function extras2() {
     arias: arias,
     chevrons: newCard ? newCard.querySelectorAll('.task-chevron').length : 0,
     chips: newCard ? newCard.querySelectorAll('.task-chip').length : 0,
+    marks: cards.map((node) => node.querySelector('.task-mark').textContent),
     collapsed: collapsed,
     opened_aria: openedAria,
     closed_again: firstHead ? firstHead.getAttribute('aria-expanded') : '',
@@ -1950,6 +1951,9 @@ async function extras2() {
     intent: intentText,
     summary: summaryNode ? summaryNode.textContent : '',
     summary_title: summaryNode ? summaryNode.getAttribute('title') : '',
+    summary_parent: summaryNode && summaryNode.parentNode
+      ? summaryNode.parentNode.className : '',
+    tool_parent: toolNode && toolNode.parentNode ? toolNode.parentNode.className : '',
     row_status: rowStatus,
     jump: jump ? jump.textContent : '',
     ask_id: ask ? ask.getAttribute('data-tool-call-id') : '',

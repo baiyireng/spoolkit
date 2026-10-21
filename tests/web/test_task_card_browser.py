@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -203,8 +204,11 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
               const goalStyle = getComputedStyle(goal);
               const summaryStyle = getComputedStyle(summary);
               const card = live.getBoundingClientRect();
+              const bubble = liveMsg.querySelector('.bubble').getBoundingClientRect();
               const composer = document.getElementById('composer').getBoundingClientRect();
               const send = document.getElementById('send').getBoundingClientRect();
+              const lineStyle = getComputedStyle(live.querySelector('.task-row-line'));
+              const jumpStyle = getComputedStyle(live.querySelector('.task-jump'));
               return {
                 done_aria: done.querySelector('.task-head').getAttribute('aria-expanded'),
                 live_aria: live.querySelector('.task-head').getAttribute('aria-expanded'),
@@ -221,7 +225,11 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
                 summary_clamp: summaryStyle.webkitLineClamp,
                 goal_h: Math.round(goal.getBoundingClientRect().height),
                 summary_h: Math.round(summary.getBoundingClientRect().height),
-                chip: live.querySelector('.task-chip').textContent,
+                chip: live.querySelector('.task-mark').textContent,
+                done_mark: done.querySelector('.task-mark').textContent,
+                row_display: lineStyle.display,
+                jump_border: parseFloat(jumpStyle.borderTopWidth),
+                gap: Math.round(card.top - bubble.bottom),
                 chevron: !!live.querySelector('.task-chevron'),
                 verify: done.querySelector('.task-verify')
                   ? done.querySelector('.task-body .task-verify').textContent : '',
@@ -258,6 +266,10 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         assert detail["goal_h"] <= 48, detail
         assert detail["summary_h"] <= 48, detail
         assert detail["chip"] == "进行中", detail
+        assert detail["done_mark"] == "完成", detail
+        assert detail["row_display"] == "grid", detail
+        assert detail["jump_border"] >= 1, detail
+        assert 6 <= detail["gap"] <= 16, detail
         assert detail["chevron"] is True
         assert detail["verify"] == "没有发现问题", detail
         assert detail["final"] == "结论已生成", detail
@@ -281,6 +293,7 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         )
         SHOTS.mkdir(parents=True, exist_ok=True)
         page.shot(str(SHOTS / "task-card-1440.png"))
+        shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "task-card-visual-1440.png")
 
         page.eval("document.querySelector('.task-card-running .task-head').click()")
         _patch_summary(runner, live_id, "understand", LONG_GOAL + "重绑甲")
@@ -382,6 +395,7 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
             """
         )
         page.shot(str(SHOTS / "task-card-390.png"))
+        shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "task-card-visual-390.png")
         assert narrow["page_overflow"] <= 1, narrow
         assert narrow["card_overflow"] <= 1, narrow
         assert narrow["card_right"] <= narrow["stream_right"] + 1, narrow
@@ -393,6 +407,35 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         assert "long-workspace-path-" in narrow["where_title"], narrow
         assert narrow["where_text"].endswith("…") or "…" in narrow["where_text"] or len(narrow["where_text"]) < len(narrow["where_title"]), narrow
         assert narrow["goal_clamp"] == "2", narrow
+        page.viewport(360, 800, mobile=True)
+        assert _wait(
+            page,
+            "document.getElementById('sidebar').getBoundingClientRect().right <= 1",
+            timeout=4,
+        ), "360 侧栏没有收起"
+        tight = page.eval(
+            r"""
+            (() => {
+              const card = document.querySelector('.task-card-running');
+              const body = card.querySelector('.task-body');
+              const bodyStyle = getComputedStyle(body);
+              return {
+                page_overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                card_overflow: card.scrollWidth - card.clientWidth,
+                body_x: bodyStyle.overflowX,
+                body_max_px: Math.round(parseFloat(bodyStyle.maxHeight)),
+                card_right: Math.round(card.getBoundingClientRect().right),
+                view_w: window.innerWidth,
+                view_h: window.innerHeight,
+              };
+            })()
+            """
+        )
+        assert tight["page_overflow"] <= 1, tight
+        assert tight["card_overflow"] <= 1, tight
+        assert tight["card_right"] <= tight["view_w"] + 1, tight
+        assert tight["body_x"] in ("hidden", "clip", "auto"), tight
+        assert tight["body_max_px"] <= tight["view_h"] * 0.46 + 1, tight
     finally:
         proc.kill()
         proc.wait(timeout=10)

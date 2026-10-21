@@ -590,52 +590,74 @@
   .bubble a { color:var(--accent); }
   .bubble strong { font-weight:600; }
 
-  /* ── 任务卡：挂在助手回复下面。running 展开，其余收起。只替代有 tasks 的旧轨迹。 ── */
-  .task-list { display:flex; flex-direction:column; gap:6px; margin:6px 0 0;
+  /* ── 任务卡：挂在助手气泡下面。状态色只用现有变量。 ── */
+  .task-list { display:flex; flex-direction:column; gap:8px; margin:8px 0 0;
                min-width:0; max-width:100%; }
   .task-card { min-width:0; max-width:100%; border:1px solid var(--line);
-               border-radius:10px; background:transparent; overflow:hidden; }
-  .task-head { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:center;
+               border-radius:10px; background:var(--panel); overflow:hidden; }
+  .task-head { display:grid; grid-template-columns:auto minmax(0,1fr) 16px;
+               grid-template-areas:"mark goal chev" "meta meta chev";
+               column-gap:8px; row-gap:4px; align-items:center;
                width:100%; max-width:100%; min-width:0; box-sizing:border-box;
-               padding:6px 10px; cursor:pointer; border:0; background:transparent;
-               color:var(--text); font-size:12.5px; text-align:left; }
-  .task-goal { flex:1 1 8em; min-width:0; overflow-wrap:anywhere;
+               padding:8px 10px; cursor:pointer; border:0; background:transparent;
+               color:var(--text); font:12.5px/1.35 var(--sans); text-align:left; }
+  .task-mark { grid-area:mark; }
+  .task-goal { grid-area:goal; min-width:0; overflow-wrap:anywhere;
                display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
                line-clamp:2; overflow:hidden; line-height:1.35; max-height:2.7em; }
-  .task-mark { font-weight:600; }
-  .task-chip { flex:0 0 auto; padding:1px 6px; border-radius:999px;
-               border:1px solid var(--line); font-size:11px; line-height:1.4; }
-  .task-card-done .task-mark { color:var(--ok); }
-  .task-card-verify_failed .task-mark,
-  .task-card-failed .task-mark { color:var(--danger-text); }
-  .task-card-cancelled .task-mark,
-  .task-card-running .task-mark { color:var(--text-dim); }
-  .task-head .task-steps, .task-head .task-verify {
-    color:var(--text-dim); white-space:nowrap; flex:0 0 auto; }
-  .task-chevron { flex:0 0 auto; width:7px; height:7px; margin-left:auto;
-                  border-right:1.5px solid var(--text-dim);
-                  border-bottom:1.5px solid var(--text-dim);
-                  transform:rotate(45deg); }
-  .task-card.open .task-chevron { transform:rotate(225deg); }
-  .task-body { padding:2px 10px 8px; min-width:0; max-width:100%;
-               max-height:46vh; overflow-x:hidden; overflow-y:auto; }
-  .task-row { margin-top:6px; font-size:12.5px; color:var(--text-dim);
+  .task-meta { grid-area:meta; display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
+  .task-chip { display:inline-flex; align-items:center; gap:4px;
+               padding:1px 7px; border-radius:999px; border:1px solid var(--line);
+               background:var(--panel-2); color:var(--text-dim);
+               font-size:11px; line-height:1.45; font-weight:600; white-space:nowrap; }
+  .task-mark::before { font-weight:700; line-height:1; }
+  .task-card-done .task-mark { color:var(--ok); border-color:var(--ok); background:transparent; }
+  .task-card-done .task-mark::before { content:"✓"; }
+  .task-card-running .task-mark { color:var(--info-text); background:var(--info-bg);
+                                  border-color:var(--info-line); }
+  .task-card-running .task-mark::before { content:"●"; font-size:8px; }
+  .task-card-verify_failed .task-mark { color:var(--warn-text); background:var(--warn-bg);
+                                        border-color:var(--warn-line); }
+  .task-card-verify_failed .task-mark::before { content:"!"; }
+  .task-card-failed .task-mark { color:var(--danger-text); background:var(--danger-bg);
+                                 border-color:var(--danger-line); }
+  .task-card-failed .task-mark::before { content:"×"; }
+  .task-card-cancelled .task-mark { color:var(--text-dim); background:var(--panel-2);
+                                    border-color:var(--line); }
+  .task-card-cancelled .task-mark::before { content:"–"; }
+  .task-chevron { grid-area:chev; width:16px; height:16px; position:relative;
+                  justify-self:end; align-self:center; }
+  .task-chevron::before { content:""; position:absolute; left:4px; top:3px;
+                          width:6px; height:6px; border-right:2px solid var(--text);
+                          border-bottom:2px solid var(--text); transform:rotate(45deg); }
+  .task-card.open .task-chevron::before { top:5px; transform:rotate(225deg); }
+  .task-body { padding:0 10px 10px; min-width:0; max-width:100%;
+               max-height:46vh; overflow-x:hidden; overflow-y:auto;
+               border-top:1px solid var(--line-soft); }
+  .task-row { display:flex; flex-direction:column; align-items:flex-start; gap:4px;
+              margin:0; padding:8px 0; border-top:1px solid var(--line-soft);
+              font-size:12.5px; line-height:1.4; color:var(--text-dim); text-align:left;
               min-width:0; max-width:100%; overflow-wrap:anywhere; word-break:break-word; }
-  .task-row:first-child { margin-top:0; }
-  .task-row-line { display:flex; flex-wrap:wrap; gap:0 4px; align-items:baseline;
-                   min-width:0; max-width:100%; }
-  .task-tool { color:var(--text); font-weight:600; }
+  .task-row:first-child { border-top:0; padding-top:8px; }
+  .task-row-line { display:grid; width:100%; min-width:0;
+                   grid-template-columns:minmax(0,1.1fr) minmax(0,1.6fr) auto;
+                   gap:2px 10px; align-items:baseline; }
+  .task-tool { grid-column:1; color:var(--text); font-weight:600; min-width:0;
+               overflow-wrap:anywhere; }
+  .task-intent { grid-column:2; color:var(--text-dim); min-width:0; overflow-wrap:anywhere; }
+  .task-row-status { grid-column:3; justify-self:end; white-space:nowrap; color:var(--text); }
   .task-summary { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
-                  line-clamp:2; overflow:hidden; min-width:0; max-width:100%;
+                  line-clamp:2; overflow:hidden; width:100%; min-width:0; max-width:100%;
                   overflow-wrap:anywhere; line-height:1.35; max-height:2.7em; }
-  .task-jump { margin:0; padding:0 2px; border:0; background:transparent;
-               color:var(--accent); cursor:pointer; font:inherit; }
-  .task-row.bad { color:var(--danger-text); }
+  .task-jump { margin:2px 0 0; padding:3px 10px; border-radius:8px;
+               border:1px solid var(--line); background:var(--panel-2); color:var(--text);
+               cursor:pointer; font:12px/1.4 var(--sans); }
+  .task-jump:hover { border-color:var(--text-dim); }
+  .task-row.bad, .task-row.bad .task-row-status { color:var(--danger-text); }
   @media (max-width: 420px) {
-    .task-head { flex-direction:column; align-items:stretch; }
-    .task-goal { flex-basis:auto; width:100%; }
-    .task-head .task-steps, .task-head .task-verify { white-space:normal; }
-    .task-chevron { margin-left:0; }
+    .task-head { grid-template-columns:minmax(0,1fr) 16px;
+                 grid-template-areas:"mark chev" "goal goal" "meta meta"; }
+    .task-goal { width:100%; }
   }
 
 

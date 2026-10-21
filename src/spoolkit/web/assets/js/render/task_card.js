@@ -137,16 +137,18 @@ function drawTaskHead(box) {
   goal.textContent = goalText;
   goal.title = goalText;
   goal.setAttribute('title', goalText);
-  const steps = h('span', 'task-steps');
+  const meta = h('span', 'task-meta');
+  const steps = h('span', 'task-steps task-chip');
   steps.textContent = taskStepCount(task) + ' 步';
-  const verify = h('span', 'task-verify');
+  const verify = h('span', 'task-verify task-chip');
   verify.textContent = taskVerifyText(task);
+  meta.appendChild(steps);
+  meta.appendChild(verify);
   const chevron = h('span', 'task-chevron');
   chevron.setAttribute('aria-hidden', 'true');
   head.appendChild(mark);
   head.appendChild(goal);
-  head.appendChild(steps);
-  head.appendChild(verify);
+  head.appendChild(meta);
   head.appendChild(chevron);
 }
 
@@ -195,20 +197,11 @@ function drawTaskBody(box) {
       if (row.intent) {
         const intent = h('span', 'task-intent');
         intent.textContent = redact(row.intent);
-        meta.appendChild(document.createTextNode(' · '));
         meta.appendChild(intent);
       }
       const status = h('span', 'task-row-status');
       status.textContent = row.status;
-      meta.appendChild(document.createTextNode(' · '));
       meta.appendChild(status);
-      if (row.approval) {
-        const approval = h('span', 'task-approval');
-        approval.textContent = row.approval;
-        meta.appendChild(document.createTextNode(' · '));
-        meta.appendChild(approval);
-      }
-      appendJump(meta, row);
       line.appendChild(meta);
       const summary = h('div', 'task-summary');
       const summaryText = redact(row.summary);
@@ -216,6 +209,12 @@ function drawTaskBody(box) {
       summary.title = summaryText;
       summary.setAttribute('title', summaryText);
       line.appendChild(summary);
+      if (row.approval) {
+        const approval = h('span', 'task-approval');
+        approval.textContent = row.approval;
+        line.appendChild(approval);
+      }
+      appendJump(line, row);
     } else if (row.kind === 'approval') {
       if (row.text) { line.appendChild(document.createTextNode(row.text)); }
       appendJump(line, row);

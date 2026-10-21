@@ -223,7 +223,8 @@ def test_任务卡默认折叠且有卡时不画旧轨迹(dom: dict) -> None:
     assert cards["count"] == 4
     assert cards["arias"] == ["false", "false", "false", "false"]
     assert cards["chevrons"] == 4
-    assert cards["chips"] == 4
+    assert cards["chips"] == 12
+    assert cards["marks"] == ["验证未过", "失败", "已取消", "完成"]
     assert cards["collapsed"] == "false"
     assert cards["opened_aria"] == "true"
     assert cards["closed_again"] == "false"
@@ -241,6 +242,9 @@ def test_任务卡默认折叠且有卡时不画旧轨迹(dom: dict) -> None:
     assert cards["intent"] == "读源码"
     assert cards["summary"] == "4 行"
     assert cards["summary_title"] == "4 行"
+    assert "task-observe" in cards["summary_parent"]
+    assert "task-row-line" not in cards["summary_parent"]
+    assert cards["tool_parent"] == "task-row-line"
     assert cards["row_status"] == "完成"
     assert cards["jump"] == "查看改动"
     assert cards["observe_rows"] == 1
