@@ -27,6 +27,7 @@ from spoolkit.bridge.pairing import Pairings
 from spoolkit.memory.transcript import ASSISTANT, recent_messages
 from spoolkit.session_state import safe as safe_session
 from spoolkit.tools.types import Artifact
+from spoolkit.web.task_view import attach_task_groups, build_task_groups
 from spoolkit.web.protocol import (
     AWAIT,
     CONFIRM,
@@ -364,13 +365,16 @@ class Runner:
         # tool_call_id -> 最近一次出现它的 run_id。现场派生用它，不按路径猜。
         self._tool_latest: dict[str, str] = {}
         self._task_seq = 1
+        # 这一轮收到过哪些 turn_id。封存时抄进轮次，快照靠它把任务卡挂回消息。
+        # 必须在读盘之前就有：读盘会插入事件，那时还没有打开的轮次。
+        self._turn_ids: set[str] = set()
+        self._turn_open = False
         self._load_task_events()
         # 这一轮的思考轨迹（`trace_line` 推出来的行），以及封存下来的前几轮。
         # 页面刷新 / 切走再切回时，排错要看的正是这两样（见 `attach_traces`）。
         self._trace: list[dict] = []
         self._turns: list[dict] = []
         self._turn_started = 0.0
-        self._turn_open = False
         # 这一轮是不是被用户手动停掉的（`stop()` 里置位，`start()` 清位）。
         # `/state` 只增地带出去：页面据此说"已停止"，而不是把一次主动停止
         # 画成一次神秘失败。
@@ -426,6 +430,7 @@ class Runner:
             self._trace = []
             self._turn_started = time.time()
             self._turn_open = True
+            self._turn_ids = set()
             self._stopped = False
             self._process = subprocess.Popen(
                 self.command(goal),
@@ -571,6 +576,8 @@ class Runner:
             # 刷新 / 切走再切回时，页面靠它把「思考过程」重新画出来——那一轮停在
             # 哪一步、哪次调用为什么失败，是排错唯一需要的内容。
             attach_traces(messages, self._turns)
+            task_groups = build_task_groups(self._task_events)
+            attach_task_groups(messages, self._turns_for_tasks(), task_groups)
             data = {
                 "running": self.running,
                 "finished": self._finished,
@@ -596,6 +603,7 @@ class Runner:
                 },
                 "stopped": self._stopped,
                 "task_events": [dict(item) for item in self._task_events],
+                "task_groups": task_groups,
             }
         data["pairings"] = self._pending_pairings()
         data["health"] = self._health_snapshot(health)
@@ -839,6 +847,8 @@ class Runner:
         if payload.get("phase") == "approval":
             self._task_event_ids.add(approval_key)
         self._task_events.append(payload)
+        if self._turn_open and turn_id:
+            self._turn_ids.add(turn_id)
         if call_id:
             slot = (run_id, call_id)
             if slot not in self._tool_context:
@@ -1012,9 +1022,27 @@ class Runner:
                 "started_at": self._turn_started,
                 "ended_at": time.time(),
                 "lines": [dict(item) for item in self._trace],
+                "turn_ids": sorted(self._turn_ids),
             }
         )
         del self._turns[:-TRACE_TURNS]
+
+    def _turns_for_tasks(self) -> list[dict]:
+        """封存的轮次，加上还没封存的这一轮。
+
+        正在跑的时候助手消息可能还没写，用户那条已经在窗口里。
+        任务卡先挂在能挂的那条上，和轨迹同一条规矩。
+        """
+        turns = [dict(item) for item in self._turns]
+        if self._turn_open:
+            turns.append(
+                {
+                    "started_at": self._turn_started,
+                    "ended_at": time.time(),
+                    "turn_ids": sorted(self._turn_ids),
+                }
+            )
+        return turns
 
     def events(self, since: int = 0) -> list[dict]:
         """序号大于 since 的事件。外部驱动者按 last_seq 往下拉。"""

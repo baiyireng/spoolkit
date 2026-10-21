@@ -198,6 +198,7 @@ def _empty_snapshot(health: dict) -> dict:
         # 页面不该去猜"键缺了是因为没这个功能、还是因为现在没有值"。
         "trace": {"open": False, "goal": "", "lines": []},
         "stopped": False,
+        "task_groups": [],
     }
 
 
