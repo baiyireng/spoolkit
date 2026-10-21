@@ -41,7 +41,7 @@
   .msg.assistant .bubble { background:var(--bubble-assistant);
                            border:1px solid var(--line-soft);
                            border-bottom-left-radius:4px;
-                           line-height:var(--leading-body); letter-spacing:0.01em; }
+                           line-height:var(--leading-body); letter-spacing:0.03em; }
   .msg.assistant .bubble :is(pre, code, .inline-code, .code) { letter-spacing:0; }
   @media (prefers-color-scheme: light) {
     .msg.assistant .bubble { border-color:#c8c8ce;
@@ -57,7 +57,7 @@
                       background:var(--danger-bg); color:var(--danger-text);
                       border-radius:0 8px 8px 0;
                       font-size:var(--font-sm); line-height:var(--leading-body);
-                      letter-spacing:0.01em; }
+                      letter-spacing:0.03em; }
   .sys-line.failure .fail-head { font-weight:600; }
   .sys-line.failure .fail-line { margin-top:2px; }
   .sys-line.failure .fail-raw { margin-top:6px; color:var(--text-dim);
@@ -251,7 +251,7 @@
   .task-summary { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
                   line-clamp:2; overflow:hidden; width:100%; min-width:0; max-width:100%;
                   overflow-wrap:anywhere; font-size:var(--font-sm);
-                  line-height:var(--leading-body); letter-spacing:0.01em;
+                  line-height:var(--leading-body); letter-spacing:0.03em;
                   max-height:3.4em; }
   .task-jump { margin:2px 0 0; padding:3px 10px; border-radius:8px;
                border:1px solid var(--line); background:var(--panel-2); color:var(--text);

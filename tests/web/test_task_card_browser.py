@@ -70,7 +70,64 @@ def _assert_columns(edges: dict) -> None:
     assert abs(_px(edges["bubble_lh"]) - 24.75) <= 0.6, edges
     assert _px(edges["side_lh"]) <= 20, edges
     assert "MiSans" in edges["font"], edges
-    assert abs(_px(edges["tracking"]) - 0.15) <= 0.05, edges
+    assert abs(_px(edges["tracking"]) - 0.45) <= 0.05, edges
+
+
+def _topbar(page) -> dict:
+    return page.eval(
+        r"""
+        (() => {
+          const top = document.getElementById('top');
+          const brand = document.querySelector('.brand');
+          const name = document.querySelector('.brand-name');
+          const mark = document.querySelector('.brand-mark');
+          const rule = document.querySelector('.top-rule');
+          const tasks = document.getElementById('tasks-btn');
+          const where = document.getElementById('where');
+          const nameStyle = getComputedStyle(name);
+          const markBox = mark.getBoundingClientRect();
+          const tasksBox = tasks.getBoundingClientRect();
+          return {
+            label: brand.getAttribute('aria-label'),
+            title: brand.getAttribute('title'),
+            name: name.textContent,
+            name_size: nameStyle.fontSize,
+            name_weight: String(nameStyle.fontWeight),
+            name_track: parseFloat(nameStyle.letterSpacing),
+            name_display: nameStyle.display,
+            mark_w: Math.round(markBox.width),
+            mark_h: Math.round(markBox.height),
+            rule: getComputedStyle(rule).display,
+            wrap: getComputedStyle(top).flexWrap,
+            where_ws: getComputedStyle(where).whiteSpace,
+            top_h: Math.round(top.getBoundingClientRect().height),
+            tasks_l: Math.round(tasksBox.left),
+            tasks_r: Math.round(tasksBox.right),
+            view_w: window.innerWidth,
+            overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          };
+        })()
+        """
+    )
+
+
+def _assert_topbar(bar: dict, *, narrow: bool) -> None:
+    assert bar["label"] == "spool", bar
+    assert bar["title"] == "spool", bar
+    assert bar["name"] == "spool", bar
+    assert bar["name_display"] != "none", bar
+    assert bar["name_size"] == "15px", bar
+    assert bar["name_weight"] in ("650", "700"), bar
+    assert bar["name_track"] < 0, bar
+    assert 18 <= bar["mark_w"] <= 20, bar
+    assert 18 <= bar["mark_h"] <= 20, bar
+    assert bar["wrap"] == "nowrap", bar
+    assert bar["where_ws"] == "nowrap", bar
+    assert bar["top_h"] <= 68, bar
+    assert bar["rule"] == ("none" if narrow else "block"), bar
+    assert bar["tasks_l"] >= 0, bar
+    assert bar["tasks_r"] <= bar["view_w"] + 1, bar
+    assert bar["overflow"] <= 1, bar
 
 
 def _browser() -> str | None:
@@ -342,11 +399,13 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         )
         wide_cols = _columns(page)
         _assert_columns(wide_cols)
+        _assert_topbar(_topbar(page), narrow=False)
         SHOTS.mkdir(parents=True, exist_ok=True)
         page.shot(str(SHOTS / "task-card-1440.png"))
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "task-card-visual-1440.png")
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "shell-visual-1440.png")
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "type-composer-1440.png")
+        shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "brand-topbar-1440.png")
 
         page.eval("document.querySelector('.task-card-running .task-head').click()")
         _patch_summary(runner, live_id, "understand", LONG_GOAL + "重绑甲")
@@ -449,10 +508,12 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         )
         narrow_cols = _columns(page)
         _assert_columns(narrow_cols)
+        _assert_topbar(_topbar(page), narrow=True)
         page.shot(str(SHOTS / "task-card-390.png"))
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "task-card-visual-390.png")
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "shell-visual-390.png")
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "type-composer-390.png")
+        shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "brand-topbar-390.png")
         assert narrow["page_overflow"] <= 1, narrow
         assert narrow["card_overflow"] <= 1, narrow
         assert narrow["card_right"] <= narrow["stream_right"] + 1, narrow

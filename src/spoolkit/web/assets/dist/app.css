@@ -121,7 +121,7 @@
   body {
     margin:0; background:var(--bg); color:var(--text);
     font:var(--font-md)/var(--leading-body) var(--sans);
-    letter-spacing:0.01em;
+    letter-spacing:0.03em;
     display:flex; flex-direction:column; overflow:hidden;
     -webkit-text-size-adjust:100%;
   }
@@ -288,7 +288,7 @@
 
   /* ── 顶条：抽屉开关 + 当前目标（"我在哪儿"必须直接可读） ── */
   #top {
-    display:flex; align-items:center; gap:var(--space-2);
+    display:flex; align-items:center; flex-wrap:nowrap; gap:var(--space-2);
     min-height:48px; padding:var(--space-2) var(--space-3);
     border-bottom:1px solid var(--line-soft); background:var(--panel);
     min-width:0;
@@ -298,8 +298,13 @@
           align-items:center; justify-content:center; }
   #menu:hover { background:var(--bubble-user); }
   #menu svg { width:18px; height:18px; }
-  .brand { flex:0 0 auto; color:var(--text-dim); font-size:var(--font-xs);
-           font-weight:650; letter-spacing:.04em; line-height:1; white-space:nowrap; }
+  .brand { flex:0 0 auto; display:inline-flex; align-items:center; gap:var(--space-2);
+           min-width:0; color:var(--text); white-space:nowrap; letter-spacing:0; }
+  .brand-mark { width:20px; height:20px; flex:0 0 auto; display:block; }
+  .brand-name { flex:0 0 auto; font-size:var(--font-md); font-weight:650;
+                letter-spacing:-0.02em; line-height:1; }
+  .top-rule { flex:0 0 auto; width:1px; height:16px; display:block;
+              background:var(--text-faint); }
   #where { color:var(--text); font-weight:600; font-size:var(--font-sm);
            line-height:var(--leading-tight);
            flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
@@ -483,7 +488,7 @@
   .msg.assistant .bubble { background:var(--bubble-assistant);
                            border:1px solid var(--line-soft);
                            border-bottom-left-radius:4px;
-                           line-height:var(--leading-body); letter-spacing:0.01em; }
+                           line-height:var(--leading-body); letter-spacing:0.03em; }
   .msg.assistant .bubble :is(pre, code, .inline-code, .code) { letter-spacing:0; }
   @media (prefers-color-scheme: light) {
     .msg.assistant .bubble { border-color:#c8c8ce;
@@ -499,7 +504,7 @@
                       background:var(--danger-bg); color:var(--danger-text);
                       border-radius:0 8px 8px 0;
                       font-size:var(--font-sm); line-height:var(--leading-body);
-                      letter-spacing:0.01em; }
+                      letter-spacing:0.03em; }
   .sys-line.failure .fail-head { font-weight:600; }
   .sys-line.failure .fail-line { margin-top:2px; }
   .sys-line.failure .fail-raw { margin-top:6px; color:var(--text-dim);
@@ -693,7 +698,7 @@
   .task-summary { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
                   line-clamp:2; overflow:hidden; width:100%; min-width:0; max-width:100%;
                   overflow-wrap:anywhere; font-size:var(--font-sm);
-                  line-height:var(--leading-body); letter-spacing:0.01em;
+                  line-height:var(--leading-body); letter-spacing:0.03em;
                   max-height:3.4em; }
   .task-jump { margin:2px 0 0; padding:3px 10px; border-radius:8px;
                border:1px solid var(--line); background:var(--panel-2); color:var(--text);
@@ -818,6 +823,7 @@
   /* ── 手机：左栏收成抽屉、气泡占满、输入条不被键盘顶掉 ── */
   @media (max-width:860px) {
     #menu { display:flex; }
+    .top-rule { display:none; }
     #sidebar { position:fixed; top:0; bottom:0; left:0; width:282px;
                transform:translateX(-100%); transition:transform .18s ease;
                pointer-events:none;

@@ -2,6 +2,7 @@
   /* ── 手机：左栏收成抽屉、气泡占满、输入条不被键盘顶掉 ── */
   @media (max-width:860px) {
     #menu { display:flex; }
+    .top-rule { display:none; }
     #sidebar { position:fixed; top:0; bottom:0; left:0; width:282px;
                transform:translateX(-100%); transition:transform .18s ease;
                pointer-events:none;
