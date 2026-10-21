@@ -159,6 +159,7 @@ def _events_approver(writer: EventWriter, reader=None):
         # --check」）。读的人（外部 agent、MCP 客户端、页面）会把它读成"批准也没用"，
         # 于是放弃申请——实测我自己就是这么判的。它其实是**升级申请的说明**：
         # 批准之后这条命令照常执行。所以文案必须说清"这是要你批准"这件事。
+        call_id = current_tool_call_id()
         writer.emit(
             AWAIT,
             count=1,
@@ -167,7 +168,7 @@ def _events_approver(writer: EventWriter, reader=None):
                 f"这条命令需要你批准才执行（默认策略不允许它：{reason}）。"
                 "y=只允许这一次，a=始终允许，b=本轮全拒，其它=拒绝。"
             ),
-            tool_call_id=current_tool_call_id(),
+            tool_call_id=call_id,
         )
         answer = ""
         try:
@@ -176,7 +177,13 @@ def _events_approver(writer: EventWriter, reader=None):
             answer = ""
         once = ("y", "o", "yes", "ok")
         always = ("a", "s", "always")
-        writer.emit(CONFIRM, applied=answer in once + always, count=1, command=command)
+        writer.emit(
+            CONFIRM,
+            applied=answer in once + always,
+            count=1,
+            command=command,
+            tool_call_id=call_id,
+        )
         if answer in once:
             return "once"
         if answer in always:

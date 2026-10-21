@@ -23,6 +23,8 @@ from typing import Sequence
 from spoolkit import health as health_mod
 from spoolkit.bridge.pairing import Pairings
 from spoolkit.memory.transcript import ASSISTANT, recent_messages
+from spoolkit.agent.contract import approval_event
+from spoolkit.tools.types import Artifact
 from spoolkit.web.protocol import (
     AWAIT,
     CONFIRM,
@@ -31,6 +33,7 @@ from spoolkit.web.protocol import (
     FINAL,
     NOTE,
     STEP,
+    TASK_EVENT,
     TOOL,
     USAGE,
     WAIT,
@@ -188,6 +191,8 @@ def trace_line(event: Event) -> dict | None:
     """
     kind = event.type
     data = event.data
+    if kind == TASK_EVENT:
+        return None
     if kind == STEP:
         return {"type": STEP, "text": f"第 {data.get('n', '?')} 步"}
     if kind == TOOL:
@@ -345,6 +350,11 @@ class Runner:
         # 因为"上次看到第几条"是驱动者唯一能说的话。
         self._log: list[dict] = []
         self._log_seq = 0
+        # 任务时间线只留在这次运行的内存里。派生的 approval 也写在这里。
+        self._task_events: list[dict] = []
+        self._task_event_ids: set[tuple] = set()
+        self._tool_context: dict[str, dict] = {}
+        self._task_seq = 1
         # 这一轮的思考轨迹（`trace_line` 推出来的行），以及封存下来的前几轮。
         # 页面刷新 / 切走再切回时，排错要看的正是这两样（见 `attach_traces`）。
         self._trace: list[dict] = []
@@ -400,6 +410,10 @@ class Runner:
             self._diffs = []
             self._log = []
             self._log_seq = 0
+            self._task_events = []
+            self._task_event_ids = set()
+            self._tool_context = {}
+            self._task_seq = 1
             # 新的一轮：轨迹重新开始攒，上一轮已经由 `_seal_turn_locked` 封存
             # （刷新 / 切回时还能回看它），停止标记也要清掉——那是上一轮的事。
             self._trace = []
@@ -574,6 +588,7 @@ class Runner:
                     "lines": [dict(item) for item in self._trace],
                 },
                 "stopped": self._stopped,
+                "task_events": [dict(item) for item in self._task_events],
             }
         data["pairings"] = self._pending_pairings()
         data["health"] = self._health_snapshot(health)
@@ -680,6 +695,140 @@ class Runner:
                 self._await_detail = {}
                 self._diffs = []
                 self._seal_turn_locked()
+            self._absorb_task_locked(event)
+
+    def _absorb_task_locked(self, event: Event) -> None:
+        """收下 task_event，并从 diff / await / confirm 派生 approval。持锁调用。"""
+        if event.type == TASK_EVENT:
+            self._store_task_event_locked(dict(event.data))
+            return
+        if event.type == DIFF:
+            self._derive_diff_locked(event.data)
+        elif event.type == AWAIT and str(event.data.get("command") or "").strip():
+            self._derive_command_locked(event.data, status="await")
+        elif event.type == AWAIT:
+            self._derive_edit_wait_locked(event.data)
+        elif event.type == CONFIRM and str(event.data.get("command") or "").strip():
+            status = "confirmed" if event.data.get("applied") else "rejected"
+            self._derive_command_locked(event.data, status=status)
+        elif event.type == CONFIRM and isinstance(event.data.get("tool_call_ids"), list):
+            status = "confirmed" if event.data.get("applied") else "rejected"
+            self._derive_edit_confirm_locked(event.data, status)
+
+    def _store_task_event_locked(self, payload: dict) -> None:
+        seq = int(payload.get("seq") or 0)
+        if seq >= self._task_seq:
+            self._task_seq = seq + 1
+        key = (
+            "task",
+            str(payload.get("task_id") or ""),
+            str(payload.get("run_id") or ""),
+            str(payload.get("turn_id") or ""),
+            seq,
+        )
+        if key in self._task_event_ids:
+            return
+        self._task_event_ids.add(key)
+        self._task_events.append(payload)
+        call_id = str(payload.get("tool_call_id") or "")
+        if call_id and call_id not in self._tool_context:
+            self._tool_context[call_id] = {
+                "task_id": str(payload.get("task_id") or ""),
+                "run_id": str(payload.get("run_id") or ""),
+                "turn_id": str(payload.get("turn_id") or ""),
+                "step": int(payload.get("step") or 0),
+                "seq": seq,
+            }
+
+    def _derive_diff_locked(self, data: dict) -> None:
+        call_id = str(data.get("tool_call_id") or "")
+        path = str(data.get("path") or "")
+        self._approval_locked(
+            tool_call_id=call_id,
+            status="await",
+            summary=f"{path} 待确认" if path else "待确认",
+            artifacts=(Artifact(type="diff", path=path, ref=call_id),),
+        )
+
+    def _derive_edit_wait_locked(self, data: dict) -> None:
+        """编辑 await 只补还没有 await 的 call_id。diff 已经挂过的不再加一条。"""
+        for call_id in self._edit_call_ids(data):
+            if ("approval", call_id, "await") in self._task_event_ids:
+                continue
+            self._approval_locked(
+                tool_call_id=call_id,
+                status="await",
+                summary="待确认",
+            )
+
+    def _derive_edit_confirm_locked(self, data: dict, status: str) -> None:
+        summary = "已确认" if status == "confirmed" else "已拒绝"
+        for call_id in self._edit_call_ids(data):
+            self._approval_locked(
+                tool_call_id=call_id,
+                status=status,
+                summary=summary,
+            )
+
+    def _derive_command_locked(self, data: dict, status: str) -> None:
+        call_id = str(data.get("tool_call_id") or "")
+        command = str(data.get("command") or "")
+        if status == "await":
+            summary = command or "待确认命令"
+        elif status == "confirmed":
+            summary = "已确认"
+        else:
+            summary = "已拒绝"
+        self._approval_locked(
+            tool_call_id=call_id,
+            status=status,
+            summary=summary,
+        )
+
+    @staticmethod
+    def _edit_call_ids(data: dict) -> list[str]:
+        raw = data.get("tool_call_ids")
+        if not isinstance(raw, list):
+            return []
+        return [str(item or "") for item in raw]
+
+    def _approval_locked(
+        self,
+        *,
+        tool_call_id: str,
+        status: str,
+        summary: str,
+        artifacts: tuple[Artifact, ...] = (),
+    ) -> None:
+        """按 tool_call_id 挂回工具上下文。对不上就留空，不拿别的调用来填。"""
+        key = ("approval", tool_call_id, status)
+        if key in self._task_event_ids:
+            return
+        ctx = self._tool_context.get(tool_call_id) if tool_call_id else None
+        event = approval_event(
+            task_id=str(ctx["task_id"]) if ctx else "",
+            run_id=str(ctx["run_id"]) if ctx else "",
+            turn_id=str(ctx["turn_id"]) if ctx else "",
+            seq=self._task_seq,
+            step=int(ctx["step"]) if ctx else 0,
+            tool_call_id=tool_call_id,
+            status=status,
+            summary=summary,
+            artifacts=artifacts,
+        )
+        self._task_seq += 1
+        payload = event.to_dict()
+        self._task_event_ids.add(key)
+        self._task_event_ids.add(
+            (
+                "task",
+                str(payload["task_id"]),
+                str(payload["run_id"]),
+                str(payload["turn_id"]),
+                int(payload["seq"]),
+            )
+        )
+        self._task_events.append(payload)
 
     def _seal_turn_locked(self) -> None:
         """把这一轮的轨迹封存下来（刷新 / 切走再切回时还要能回看）。持锁调用。

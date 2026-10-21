@@ -164,11 +164,41 @@ def test_命令授权await带上这次run_command的id(tmp_path: Path) -> None:
     )
     loop.run("找文件", task_id="job-cmd")
     waiting = next(data for kind, data in writer.events if kind == "await")
+    confirm = next(data for kind, data in writer.events if kind == "confirm")
     assert waiting["command"] == "find ."
     assert waiting["count"] == 1
     assert "需要你批准" in waiting["reason"]
     assert waiting["tool_call_id"] == "tc-0-0"
+    assert confirm["tool_call_id"] == "tc-0-0"
+    assert confirm["command"] == "find ."
+    assert confirm["count"] == 1
+    assert confirm["applied"] is False
     assert current_tool_call_id() == ""
+
+
+def test_命令confirm不改读后来的call_id(monkeypatch) -> None:
+    """confirm 用的是发出 await 时留下的 ID，不重新读当前上下文。"""
+    answers = iter(("tc-0-0", "tc-9-9"))
+    monkeypatch.setattr(
+        "spoolkit.cli.commands.run.current_tool_call_id",
+        lambda: next(answers),
+    )
+
+    class _Writer:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict]] = []
+
+        def emit(self, kind: str, **data) -> None:
+            self.events.append((kind, data))
+
+    writer = _Writer()
+    approver = _events_approver(writer, reader=_Lines("y"))
+    assert approver(["find", "."], "找文件") == "once"
+    waiting = next(data for kind, data in writer.events if kind == "await")
+    confirm = next(data for kind, data in writer.events if kind == "confirm")
+    assert waiting["tool_call_id"] == "tc-0-0"
+    assert confirm["tool_call_id"] == "tc-0-0"
+    assert confirm["applied"] is True
 
 
 def test_没有调用上下文时call_id留空(tmp_path: Path) -> None:
