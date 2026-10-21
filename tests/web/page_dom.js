@@ -2816,6 +2816,57 @@ async function extras2() {
     clocks: clocks,
     days: ids.get('stream').querySelectorAll('.day-sep').map((node) => node.textContent),
   };
+  const themeRoot = new El('html');
+  ctx.document.documentElement = themeRoot;
+  const themeMem = { throw: false, store: {} };
+  ctx.localStorage = {
+    getItem(key) {
+      if (themeMem.throw) { throw new Error('storage'); }
+      return Object.prototype.hasOwnProperty.call(themeMem.store, key) ? themeMem.store[key] : null;
+    },
+    setItem(key, value) {
+      if (themeMem.throw) { throw new Error('storage'); }
+      themeMem.store[key] = String(value);
+    },
+  };
+  ctx.matchMedia = () => ({ matches: true, addEventListener() {} });
+  const darkMode = ctx.__spoolTest.setTheme('dark');
+  const lightMode = ctx.__spoolTest.setTheme('light');
+  const lightAttr = themeRoot.getAttribute('data-theme');
+  const lightColor = ids.get('theme-color').getAttribute('content');
+  const lightChecked = ids.get('theme-light').getAttribute('aria-checked');
+  const systemMode = ctx.__spoolTest.setTheme('system');
+  const systemAttr = themeRoot.getAttribute('data-theme');
+  const systemColor = ids.get('theme-color').getAttribute('content');
+  const systemChecked = ids.get('theme-system').getAttribute('aria-checked');
+  const stored = themeMem.store['spool:theme'];
+  themeMem.throw = true;
+  let themeThrew = false;
+  try { ctx.__spoolTest.setTheme('dark'); } catch (err) { themeThrew = true; }
+  const afterWrite = themeRoot.getAttribute('data-theme');
+  let readThrew = false;
+  try { ctx.__spoolTest.applyStoredTheme(); } catch (err) { readThrew = true; }
+  const afterRead = themeRoot.getAttribute('data-theme');
+  delete ctx.localStorage;
+  delete ctx.matchMedia;
+  ctx.document.documentElement = undefined;
+  out.theme = {
+    dark: darkMode,
+    light: lightMode,
+    light_attr: lightAttr,
+    light_color: lightColor,
+    light_checked: lightChecked,
+    system: systemMode,
+    system_attr: systemAttr,
+    system_color: systemColor,
+    system_checked: systemChecked,
+    stored: stored,
+    theme_threw: themeThrew,
+    after_write: afterWrite,
+    read_threw: readThrew,
+    after_read: afterRead,
+    click: typeof ids.get('theme-dark').onclick === 'function',
+  };
   ctx.__fetchImpl = null;
 }
 

@@ -904,3 +904,77 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         proc.wait(timeout=10)
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_深浅色主题在宽屏和窄屏(tmp_path: Path) -> None:
+    """手动主题盖住系统偏好。1440 与 390 各留一张深色、一张浅色。"""
+    browser = _browser()
+    if browser is None:
+        pytest.skip("没有 Chrome/Edge，无法做真实浏览器验收")
+    sys.path.insert(0, str(ROOT / "recon"))
+    from cdp import CDP
+
+    root = tmp_path / "theme-shot"
+    root.mkdir()
+    conn = _memory(root)
+    _say(conn, "user", "看一下主题", 1_760_918_400)
+    _say(conn, "assistant", "浅色和深色都该一眼能分开。", 1_760_918_400 + 60)
+    conn.close()
+    runner = Runner(root, session="t", extra_args=["--provider", "fake", "--script", ""])
+    httpd = build_server(runner, "127.0.0.1", 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    server = f"http://127.0.0.1:{httpd.server_port}"
+    profile = tmp_path / "theme-browser"
+    proc = subprocess.Popen(
+        [
+            browser,
+            "--headless",
+            "--disable-gpu",
+            "--no-first-run",
+            "--disable-extensions",
+            "--remote-debugging-port=9354",
+            "--user-data-dir=" + str(profile),
+            "about:blank",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        page = CDP(9354)
+        page.viewport(1440, 900, mobile=False)
+        page.navigate(server + "/")
+        assert _wait(
+            page,
+            "!!document.getElementById('where') && !!document.getElementById('theme-light')",
+        ), "主题页没有打开"
+        SHOTS.mkdir(parents=True, exist_ok=True)
+
+        def shoot(mode: str, rgb: str, width: int, height: int, name: str) -> None:
+            page.viewport(width, height, mobile=width < 800)
+            page.eval("localStorage.setItem('spool:theme', %s)" % json.dumps(mode))
+            page.navigate(server + "/")
+            assert _wait(
+                page,
+                "(() => { const color = getComputedStyle(document.body).backgroundColor.replace(/\\s/g,'');"
+                " return document.documentElement.getAttribute('data-theme')===%s"
+                " && (color===%s || color===%s); })()"
+                % (json.dumps(mode), json.dumps(rgb), json.dumps("rgba" + rgb[3:-1] + ",1)")),
+            ), mode
+            page.shot(str(SHOTS / name))
+
+        shoot("dark", "rgb(33,33,33)", 1440, 900, "theme-dark-1440.png")
+        shoot("dark", "rgb(33,33,33)", 390, 844, "theme-dark-390.png")
+        shoot("light", "rgb(255,255,255)", 1440, 900, "theme-light-1440.png")
+        shoot("light", "rgb(255,255,255)", 390, 844, "theme-light-390.png")
+        meta = page.eval("document.getElementById('theme-color').getAttribute('content')")
+        assert meta == "#ffffff", meta
+        labels = page.eval(
+            "['跟随系统','深色','浅色'].map((text) => document.body.textContent.indexOf(text) >= 0)"
+        )
+        assert labels == [True, True, True], labels
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+        httpd.shutdown()
+        httpd.server_close()

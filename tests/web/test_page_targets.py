@@ -12,7 +12,7 @@ from spoolkit.web.page import HTML
 
 
 def _script() -> str:
-    start = HTML.find("<script>")
+    start = HTML.rfind("<script>")
     end = HTML.rfind("</script>")
     assert start != -1 and end > start, "页面里没有脚本段"
     return HTML[start + len("<script>") : end]

@@ -53,9 +53,80 @@ function renderArchived() {
   }
 }
 
+const THEME_KEY = 'spool:theme';
+
+function readStoredTheme() {
+  try {
+    if (typeof localStorage === 'undefined' || !localStorage || typeof localStorage.getItem !== 'function') {
+      return 'system';
+    }
+    const value = localStorage.getItem(THEME_KEY);
+    if (value === 'dark' || value === 'light' || value === 'system') { return value; }
+  } catch (err) { /* 存储不可用就当跟随系统 */ }
+  return 'system';
+}
+
+function themeColor(theme) {
+  if (theme === 'light') { return '#ffffff'; }
+  if (theme === 'dark') { return '#212121'; }
+  let light = false;
+  try {
+    light = Boolean(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
+  } catch (err) { light = false; }
+  return light ? '#ffffff' : '#212121';
+}
+
+function markThemeChoice(mode) {
+  const pairs = [[themeSystem, 'system'], [themeDark, 'dark'], [themeLight, 'light']];
+  for (const pair of pairs) {
+    const button = pair[0];
+    if (!button || typeof button.setAttribute !== 'function') { continue; }
+    const on = pair[1] === mode;
+    button.setAttribute('aria-checked', on ? 'true' : 'false');
+    if (button.classList) { button.classList.toggle('on', on); }
+  }
+}
+
+function applyTheme(theme) {
+  const mode = theme === 'dark' || theme === 'light' ? theme : 'system';
+  const root = document.documentElement;
+  if (root && typeof root.setAttribute === 'function') {
+    if (mode === 'system') {
+      if (typeof root.removeAttribute === 'function') { root.removeAttribute('data-theme'); }
+    } else {
+      root.setAttribute('data-theme', mode);
+    }
+  }
+  const meta = document.getElementById('theme-color');
+  if (meta && typeof meta.setAttribute === 'function') {
+    meta.setAttribute('content', themeColor(mode));
+  }
+  markThemeChoice(mode);
+  return mode;
+}
+
+function setTheme(theme) {
+  const mode = applyTheme(theme);
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage && typeof localStorage.setItem === 'function') {
+      localStorage.setItem(THEME_KEY, mode);
+    }
+  } catch (err) { /* 写不进也先把这一下画出来 */ }
+  return mode;
+}
+
+function applyStoredTheme() {
+  return applyTheme(readStoredTheme());
+}
+
+function wireTheme(button, value) {
+  if (!button) { return; }
+  button.onclick = function () { setTheme(value); };
+}
+
 function settingsFocusables() {
   if (!settingsBox) { return []; }
-  const nodes = [settingsClose].concat(
+  const nodes = [settingsClose, themeSystem, themeDark, themeLight].concat(
     settingsBox.querySelectorAll ? settingsBox.querySelectorAll(".arc-restore") : []
   );
   return nodes.filter(function (node) {
@@ -86,5 +157,21 @@ function setSettingsOpen(open) {
   }
 }
 
-  return { updateArchiveBadge: updateArchiveBadge, renderArchived: renderArchived, settingsFocusables: settingsFocusables, setSettingsOpen: setSettingsOpen };
+  wireTheme(themeSystem, 'system');
+  wireTheme(themeDark, 'dark');
+  wireTheme(themeLight, 'light');
+  applyStoredTheme();
+  try {
+    if (window.matchMedia) {
+      const query = window.matchMedia('(prefers-color-scheme: light)');
+      const follow = function () {
+        if (readStoredTheme() === 'system') { applyTheme('system'); }
+      };
+      if (query && typeof query.addEventListener === 'function') {
+        query.addEventListener('change', follow);
+      }
+    }
+  } catch (err) { /* 没有媒体查询就保持启动时那一档 */ }
+
+  return { updateArchiveBadge: updateArchiveBadge, renderArchived: renderArchived, settingsFocusables: settingsFocusables, setSettingsOpen: setSettingsOpen, setTheme: setTheme, applyStoredTheme: applyStoredTheme };
 }

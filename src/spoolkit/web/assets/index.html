@@ -4,9 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark light">
+<meta id="theme-color" name="theme-color" content="#212121">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<script src="/assets/theme-boot.js"></script>
 <title>spool</title>
 
-<link rel="stylesheet" href="/assets/dist/app.2b69fda6dafe.css">
+<link rel="stylesheet" href="/assets/dist/app.03f3536dbfb3.css">
 </head>
 <body>
 <!-- 右上角那一列：常驻提示（徽标 + 详情浮层）与通知。两者都在**文档流之外**
@@ -104,6 +107,17 @@
     </div>
     <div class="settings-body">
       <div class="set-sec">
+        <div class="set-head">外观</div>
+        <div id="theme-choices" class="theme-choices" role="radiogroup" aria-label="外观">
+          <button id="theme-system" type="button" class="on" role="radio" aria-checked="true"
+                  data-focusable="true">跟随系统</button>
+          <button id="theme-dark" type="button" role="radio" aria-checked="false"
+                  data-focusable="true">深色</button>
+          <button id="theme-light" type="button" role="radio" aria-checked="false"
+                  data-focusable="true">浅色</button>
+        </div>
+      </div>
+      <div class="set-sec">
         <div class="set-head">已归档会话
           <span id="archived-count-inline" class="count">0</span>
         </div>
@@ -153,6 +167,6 @@
   </form>
 </div>
 
-<script src="/assets/dist/app.166bded7633d.js" defer></script>
+<script src="/assets/dist/app.fec6fb5961d3.js" defer></script>
 </body>
 </html>

@@ -163,7 +163,7 @@ def test_页面把撤销摆成一个可点的动作() -> None:
     """
     from spoolkit.web.page import HTML
 
-    script = HTML[HTML.find("<script>") + len("<script>"): HTML.rfind("</script>")]
+    script = HTML[HTML.rfind("<script>") + len("<script>"): HTML.rfind("</script>")]
     assert "function showUndo(" in script, "页面里没有那个可点的撤销动作"
     assert "post('/revert', {run: runId})" in script, "按钮没有走 /revert"
     final_at = script.find("data.type === 'final'")

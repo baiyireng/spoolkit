@@ -59,4 +59,5 @@
     /* 通知与状态详情的入场也关掉：不动画不等于不出现（它只是直接在那里）。 */
     .toast { animation:none; }
     .st-panel { animation:none; }
+    #sidebar, .toast, .st-panel, .thinking-dots i { transition:none; }
   }

@@ -54,6 +54,14 @@ def _get(url: str) -> tuple[int, bytes, dict[str, str]]:
         return exc.code, exc.read(), headers
 
 
+def test_favicon能取到(server: str) -> None:
+    status, body, headers = _get(server + "/assets/favicon.svg")
+    assert status == 200, status
+    assert b"<svg" in body
+    assert b"M4.2 3.4v13.2" in body
+    assert "image/svg+xml" in headers.get("content-type", "")
+
+
 def test_page_py只做加载() -> None:
     text = PAGE.read_text(encoding="utf-8")
     assert len(text.splitlines()) < 120
@@ -68,7 +76,7 @@ def test_page_py只做加载() -> None:
 
 
 def test_兼容页和产物都留着标题归档草稿和失败路径() -> None:
-    script = HTML[HTML.find("<script>") + len("<script>") : HTML.rfind("</script>")]
+    script = HTML[HTML.rfind("<script>") + len("<script>") : HTML.rfind("</script>")]
     bundled = (ASSETS / "dist" / "app.js").read_text(encoding="utf-8")
     for text in (script, bundled):
         assert "maybeAgentTitle(true)" in text
@@ -715,6 +723,8 @@ def test_wheel带上资源且安装布局能开首页(tmp_path: Path) -> None:
         names = archive.namelist()
         archive.extractall(tmp_path / "site")
     assert "spoolkit/web/assets/index.html" in names
+    assert "spoolkit/web/assets/favicon.svg" in names
+    assert "spoolkit/web/assets/theme-boot.js" in names
     assert any(
         name.startswith("spoolkit/web/assets/dist/app.") and name.endswith(".js")
         for name in names
@@ -766,10 +776,10 @@ try:
         page = response.read().decode("utf-8")
         assert response.status == 200
     assert 'id="st-mode"' in page
-    marker = '<script src="'
+    marker = 'src="/assets/dist/app.'
     start = page.find(marker)
     assert start != -1
-    src = page[start + len(marker) : page.find('"', start + len(marker))]
+    src = page[start + len('src="') : page.find('"', start + len('src="'))]
     assert src.startswith("/assets/dist/app.") and src.endswith(".js")
     with urllib.request.urlopen(base + src, timeout=10) as response:
         script = response.read()

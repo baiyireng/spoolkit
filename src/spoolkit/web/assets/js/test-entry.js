@@ -34,4 +34,6 @@ globalThis.__spoolTest = {
   showPairings: app.status.showPairings,
   showElsewhere: app.status.showElsewhere,
   maybeAgentTitle: app.sessions.maybeAgentTitle,
+  setTheme: app.settings.setTheme,
+  applyStoredTheme: app.settings.applyStoredTheme,
 };

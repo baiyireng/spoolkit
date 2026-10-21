@@ -12,14 +12,16 @@
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from spoolkit.web.page import HTML
+from spoolkit.web.page import HTML, INDEX
 
 
 def _script() -> str:
-    start = HTML.find("<script>")
+    # 头部那小段主题引导也是 script。应用脚本是最后一块。
+    start = HTML.rfind("<script>")
     end = HTML.rfind("</script>")
     assert start != -1 and end > start, "页面里没有脚本段"
     return HTML[start + len("<script>") : end]
@@ -765,7 +767,7 @@ _VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input",
 def _static_html() -> str:
     """静态那一半（`<script>` 之前）。脚本里全是 JS 字符串里的 `<`，
     拿它一起扫标签栈会被内联 SVG 搅乱——而通知在不在滚动容器里，只看静态这一半。"""
-    return HTML[: HTML.find("<script>")]
+    return HTML[: HTML.rfind("<script>")]
 
 
 def _ancestors(element_id: str) -> list:
@@ -1004,6 +1006,8 @@ def test_减少动效时提示与通知都不动画() -> None:
     block = block[: block.find("</style>")]
     assert ".toast { animation:none; }" in block, f"减少动效那一档没有关掉入场动画：{block}"
     assert ".st-panel { animation:none; }" in block, "状态详情那一档还在动画"
+    assert "#stream { scroll-behavior:auto; }" in block
+    assert "#sidebar, .toast, .st-panel, .thinking-dots i { transition:none; }" in block
     assert "animation:toast-in" in _rule(".toast"), "入场动画的钥匙丢了"
     assert "animation:toast-in" in _rule(".st-panel"), "详情面板的入场动画钥匙丢了"
 
@@ -1337,6 +1341,22 @@ def test_主题变量表一处定义() -> None:
     style = HTML[HTML.find("<style>") : HTML.find("</style>")]
     assert "#212121" in style, "默认那一档要是深色（ChatGPT 观感）"
     assert "background:var(--bg)" in style
+    assert ':root:not([data-theme="dark"])' in style
+    assert ':root[data-theme="dark"]' in style
+    assert ':root[data-theme="light"]' in style
+    assert "--bg:#fff" in style
+    boot = INDEX.find('src="/assets/theme-boot.js"')
+    sheet = INDEX.find('rel="stylesheet"')
+    assert 0 <= boot < sheet, "主题引导必须写在样式表之前"
+    boot_js = Path(__file__).resolve().parents[2].joinpath(
+        "src/spoolkit/web/assets/theme-boot.js"
+    ).read_text(encoding="utf-8")
+    assert "spool:theme" in boot_js
+    assert "removeAttribute('data-theme')" in boot_js
+    assert "setAttribute('data-theme', theme)" in boot_js
+    assert 'href="/assets/favicon.svg"' in INDEX
+    assert 'name="theme-color"' in INDEX
+    assert 'content="#212121"' in INDEX
 
 
 def test_手机上输入条不被键盘顶掉() -> None:

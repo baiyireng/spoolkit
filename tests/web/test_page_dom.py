@@ -154,6 +154,26 @@ def test_代码溢出才提示时间只在有时间戳时出现(dom: dict) -> No
     assert found["days"] == ["10月20日", "10月21日"], found
 
 
+def test_三种外观能切换且存储坏了也不抛(dom: dict) -> None:
+    """深色 / 浅色写 data-theme。跟随系统把属性拿掉。存储抛错就静默。"""
+    found = dom["theme"]
+    assert found["dark"] == "dark", found
+    assert found["light"] == "light", found
+    assert found["light_attr"] == "light", found
+    assert found["light_color"] == "#ffffff", found
+    assert found["light_checked"] == "true", found
+    assert found["system"] == "system", found
+    assert found["system_attr"] is None, found
+    assert found["system_color"] == "#ffffff", found
+    assert found["system_checked"] == "true", found
+    assert found["stored"] == "system", found
+    assert found["theme_threw"] is False, found
+    assert found["after_write"] == "dark", found
+    assert found["read_threw"] is False, found
+    assert found["after_read"] is None, found
+    assert found["click"] is True, found
+
+
 def test_空闲窗口里又开始跑就不起标题(dom: dict) -> None:
     """final/state 后先等一会儿。这段里已经在跑就放弃，下次空闲还能再问。"""
     found = dom["title_idle"]
