@@ -24,6 +24,55 @@ LONG_GOAL = "把配置文件整理成可提交的说明" + "而且目标很长" 
 LONG_SUMMARY = "读到的配置分成三段，每段都有注释" + "摘要很长" * 12
 
 
+def _px(value: str) -> float:
+    return float(str(value).replace("px", ""))
+
+
+def _columns(page) -> dict:
+    return page.eval(
+        r"""
+        (() => {
+          const rect = (node) => {
+            const box = node.getBoundingClientRect();
+            return { l: Math.round(box.left), r: Math.round(box.right) };
+          };
+          const col = rect(document.querySelector('#stream .col'));
+          const box = rect(document.querySelector('#composer .box'));
+          const tools = rect(document.getElementById('composer-tools'));
+          const hint = rect(document.querySelector('#composer .st'));
+          const bubble = getComputedStyle(document.querySelector('.msg.assistant .bubble'));
+          const side = getComputedStyle(document.getElementById('sidebar'));
+          const body = getComputedStyle(document.body);
+          return {
+            col_l: col.l, col_r: col.r,
+            box_l: box.l, box_r: box.r,
+            tools_l: tools.l, tools_r: tools.r,
+            hint_l: hint.l, hint_r: hint.r,
+            bubble_lh: bubble.lineHeight,
+            bubble_size: bubble.fontSize,
+            side_lh: side.lineHeight,
+            font: body.fontFamily,
+            tracking: body.letterSpacing,
+          };
+        })()
+        """
+    )
+
+
+def _assert_columns(edges: dict) -> None:
+    assert abs(edges["col_l"] - edges["box_l"]) <= 1, edges
+    assert abs(edges["col_r"] - edges["box_r"]) <= 1, edges
+    assert abs(edges["tools_l"] - edges["box_l"]) <= 1, edges
+    assert abs(edges["tools_r"] - edges["box_r"]) <= 1, edges
+    assert abs(edges["hint_l"] - edges["box_l"]) <= 1, edges
+    assert abs(edges["hint_r"] - edges["box_r"]) <= 1, edges
+    assert edges["bubble_size"] == "15px", edges
+    assert abs(_px(edges["bubble_lh"]) - 24.75) <= 0.6, edges
+    assert _px(edges["side_lh"]) <= 20, edges
+    assert "MiSans" in edges["font"], edges
+    assert abs(_px(edges["tracking"]) - 0.15) <= 0.05, edges
+
+
 def _browser() -> str | None:
     from tests.web.test_assets import _browser as pick
 
@@ -291,10 +340,13 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
             })()
             """
         )
+        wide_cols = _columns(page)
+        _assert_columns(wide_cols)
         SHOTS.mkdir(parents=True, exist_ok=True)
         page.shot(str(SHOTS / "task-card-1440.png"))
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "task-card-visual-1440.png")
         shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "shell-visual-1440.png")
+        shutil.copyfile(SHOTS / "task-card-1440.png", SHOTS / "type-composer-1440.png")
 
         page.eval("document.querySelector('.task-card-running .task-head').click()")
         _patch_summary(runner, live_id, "understand", LONG_GOAL + "重绑甲")
@@ -395,9 +447,12 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
             })()
             """
         )
+        narrow_cols = _columns(page)
+        _assert_columns(narrow_cols)
         page.shot(str(SHOTS / "task-card-390.png"))
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "task-card-visual-390.png")
         shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "shell-visual-390.png")
+        shutil.copyfile(SHOTS / "task-card-390.png", SHOTS / "type-composer-390.png")
         assert narrow["page_overflow"] <= 1, narrow
         assert narrow["card_overflow"] <= 1, narrow
         assert narrow["card_right"] <= narrow["stream_right"] + 1, narrow

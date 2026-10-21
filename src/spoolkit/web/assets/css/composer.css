@@ -1,7 +1,8 @@
 
   /* ── 底部输入条：生成中 / 回到最新排在输入框上方，跟着输入条走 ── */
   #composer-tools { display:flex; justify-content:flex-end; align-items:center;
-                    gap:8px; max-width:800px; width:100%; margin:0 auto; min-height:0; }
+                    gap:8px; width:100%; max-width:var(--content-width);
+                    margin:0 auto; min-height:0; }
   #thinking { position:static; display:none; align-items:center; gap:8px;
               padding:7px 13px; border-radius:999px; background:var(--panel-2);
               border:1px solid var(--line); color:var(--text-dim);
@@ -29,9 +30,10 @@
   #composer { position:relative; display:flex; flex-direction:column; gap:var(--space-2);
               padding:var(--space-2) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom));
               padding-left:max(var(--space-4), env(safe-area-inset-left));
-              padding-right:max(var(--space-4), env(safe-area-inset-right)); }
+              padding-right:calc(var(--scrollbar) + max(var(--space-4), env(safe-area-inset-right))); }
   .box { position:relative; display:flex; align-items:flex-end; gap:var(--space-2);
-         max-width:800px; margin:0 auto; padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+         width:100%; max-width:var(--content-width); margin:0 auto;
+         padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);
          border-radius:var(--radius-lg); border:1px solid var(--line);
          background:var(--panel); box-shadow:var(--shadow-raised); }
   .box:focus-within { border-color:var(--accent); }

@@ -88,8 +88,9 @@
      ② 只读（非回环）与 `--root` 钉住才摆出一枚锁徽标——它回答"为什么点不动"；
      ③ 待配对 / 别处还有一条在跑收进同一行，详情里仍然是完整的码与命令。
      点徽标（或那枚圆点）展开详情；再点、点别处、按 Esc 收起。 */
-  .st { display:flex; align-items:center; gap:6px; max-width:800px;
-        margin:8px auto 0; font-size:11.5px; color:var(--text-faint); }
+  .st { display:flex; align-items:center; gap:6px; width:100%;
+        max-width:var(--content-width); margin:8px auto 0;
+        font-size:var(--font-xs); color:var(--text-faint); }
   .st-hint { margin-left:auto; padding-left:10px; color:var(--text-dim);
              white-space:nowrap; }
   .st-item { display:inline-flex; align-items:center; gap:6px; max-width:44vw;

@@ -2,6 +2,7 @@
     width:260px; flex:0 0 260px; border-right:1px solid var(--line-soft);
     background:var(--panel); display:flex; flex-direction:column;
     min-height:0; z-index:12;
+    font-size:var(--font-sm); line-height:var(--leading-tight); letter-spacing:0;
   }
   /* 两条原生选择器：留着当左栏两段的控件层（键鼠 / 读屏都能用），视觉上让位给行。 */
   .sr-only { position:absolute; width:1px; height:1px; margin:-1px; padding:0;
@@ -42,7 +43,7 @@
   .grp-name .nm { min-width:0; }
   .grp-name.on, #sessions .grp-name.on { background:var(--accent-soft);
               box-shadow:inset 2px 0 0 var(--accent); }
-  .empty-line { color:var(--text-faint); font-size:12.5px; padding:2px 8px 8px; }
+  .empty-line { color:var(--text-faint); font-size:var(--font-xs); padding:2px 8px 8px; }
   #sessions .grp-name { font-weight:400; padding-left:var(--space-5); font-size:var(--font-sm); }
   .li { display:flex; align-items:center; gap:8px; }
   .li .nm { flex:1 1 auto; }

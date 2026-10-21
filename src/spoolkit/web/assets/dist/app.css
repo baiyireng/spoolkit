@@ -37,14 +37,16 @@
     --pair-bg:#3d2a00;
     --pair-line:#5c4300;
     --pair-text:#f0c674;
-    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
+    --sans:"MiSans","HarmonyOS Sans SC","Source Han Sans SC","Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
     --mono:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono","Liberation Mono",monospace;
     --font-xs:12px;
     --font-sm:13px;
     --font-md:15px;
     --font-lg:18px;
-    --leading-body:1.55;
+    --leading-body:1.65;
     --leading-tight:1.4;
+    --content-width:760px;
+    --scrollbar:10px;
     --space-1:4px;
     --space-2:8px;
     --space-3:12px;
@@ -106,7 +108,7 @@
      thumb 平时低调、悬停才亮，"看不见"不等于"不能滚"——真的 `display:none`
      会让鼠标用户没有任何抓手（触屏与键盘还能滚，但那是另一个故事）。 */
   * { scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
-  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar { width:var(--scrollbar); height:var(--scrollbar); }
   ::-webkit-scrollbar-track { background:transparent; }
   ::-webkit-scrollbar-thumb {
     background:var(--scroll-thumb); border-radius:8px;
@@ -119,10 +121,12 @@
   body {
     margin:0; background:var(--bg); color:var(--text);
     font:var(--font-md)/var(--leading-body) var(--sans);
+    letter-spacing:0.01em;
     display:flex; flex-direction:column; overflow:hidden;
     -webkit-text-size-adjust:100%;
   }
   button, input, textarea, select { font:inherit; color:inherit; }
+  code, pre, kbd, samp { letter-spacing:0; }
   button:focus-visible, [role="button"]:focus-visible, .st-item:focus-visible,
   .toast-close:focus-visible, .row-act:focus-visible, #menu:focus-visible {
     outline:2px solid var(--accent); outline-offset:2px;
@@ -229,8 +233,9 @@
      ② 只读（非回环）与 `--root` 钉住才摆出一枚锁徽标——它回答"为什么点不动"；
      ③ 待配对 / 别处还有一条在跑收进同一行，详情里仍然是完整的码与命令。
      点徽标（或那枚圆点）展开详情；再点、点别处、按 Esc 收起。 */
-  .st { display:flex; align-items:center; gap:6px; max-width:800px;
-        margin:8px auto 0; font-size:11.5px; color:var(--text-faint); }
+  .st { display:flex; align-items:center; gap:6px; width:100%;
+        max-width:var(--content-width); margin:8px auto 0;
+        font-size:var(--font-xs); color:var(--text-faint); }
   .st-hint { margin-left:auto; padding-left:10px; color:var(--text-dim);
              white-space:nowrap; }
   .st-item { display:inline-flex; align-items:center; gap:6px; max-width:44vw;
@@ -310,6 +315,7 @@
     width:260px; flex:0 0 260px; border-right:1px solid var(--line-soft);
     background:var(--panel); display:flex; flex-direction:column;
     min-height:0; z-index:12;
+    font-size:var(--font-sm); line-height:var(--leading-tight); letter-spacing:0;
   }
   /* 两条原生选择器：留着当左栏两段的控件层（键鼠 / 读屏都能用），视觉上让位给行。 */
   .sr-only { position:absolute; width:1px; height:1px; margin:-1px; padding:0;
@@ -350,7 +356,7 @@
   .grp-name .nm { min-width:0; }
   .grp-name.on, #sessions .grp-name.on { background:var(--accent-soft);
               box-shadow:inset 2px 0 0 var(--accent); }
-  .empty-line { color:var(--text-faint); font-size:12.5px; padding:2px 8px 8px; }
+  .empty-line { color:var(--text-faint); font-size:var(--font-xs); padding:2px 8px 8px; }
   #sessions .grp-name { font-weight:400; padding-left:var(--space-5); font-size:var(--font-sm); }
   .li { display:flex; align-items:center; gap:8px; }
   .li .nm { flex:1 1 auto; }
@@ -437,9 +443,11 @@
 
   /* ── 对话面 ── */
   #thread { flex:1; position:relative; display:flex; flex-direction:column; min-width:0; }
-  #stream { flex:1; overflow-y:auto; overflow-x:hidden;
-            padding:20px 18px 26px; scroll-behavior:smooth; }
-  #stream .col { max-width:760px; margin:0 auto;
+  #stream { flex:1; overflow-y:auto; overflow-x:hidden; scrollbar-gutter:stable;
+            padding:20px var(--space-4) 26px; scroll-behavior:smooth;
+            padding-left:max(var(--space-4), env(safe-area-inset-left));
+            padding-right:max(var(--space-4), env(safe-area-inset-right)); }
+  #stream .col { width:100%; max-width:var(--content-width); margin:0 auto;
                  display:flex; flex-direction:column; gap:12px; }
   /* 消息成块：用户在右、助手在左（宽屏留白更像文档流） */
   .msg { display:flex; flex-direction:column; min-width:0; }
@@ -474,7 +482,9 @@
                color:var(--danger-text); font-size:12.5px; }
   .msg.assistant .bubble { background:var(--bubble-assistant);
                            border:1px solid var(--line-soft);
-                           border-bottom-left-radius:4px; }
+                           border-bottom-left-radius:4px;
+                           line-height:var(--leading-body); letter-spacing:0.01em; }
+  .msg.assistant .bubble :is(pre, code, .inline-code, .code) { letter-spacing:0; }
   @media (prefers-color-scheme: light) {
     .msg.assistant .bubble { border-color:#c8c8ce;
                              box-shadow:0 1px 2px rgba(0,0,0,.08); }
@@ -487,11 +497,14 @@
   /* 连不上模型这类失败：一行原始异常谁也读不出下一步。做成一块带左边框的说明。 */
   .sys-line.failure { margin-top:2px; padding:8px 12px; border-left:3px solid var(--danger-line);
                       background:var(--danger-bg); color:var(--danger-text);
-                      border-radius:0 8px 8px 0; }
+                      border-radius:0 8px 8px 0;
+                      font-size:var(--font-sm); line-height:var(--leading-body);
+                      letter-spacing:0.01em; }
   .sys-line.failure .fail-head { font-weight:600; }
   .sys-line.failure .fail-line { margin-top:2px; }
   .sys-line.failure .fail-raw { margin-top:6px; color:var(--text-dim);
-                                font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
+                                font:12px/1.5 var(--mono); letter-spacing:0;
+                                overflow-wrap:anywhere; }
 
   /* ── 消息卡片上的「思考过程」：**默认收起**，收起时一个节点都不建 ──
      它回答的是"这一轮它到底干了什么、卡在哪一步"（排错用），而这份内容平时不该占版面：
@@ -630,7 +643,8 @@
                column-gap:8px; row-gap:4px; align-items:center;
                width:100%; max-width:100%; min-width:0; box-sizing:border-box;
                padding:8px 10px; cursor:pointer; border:0; background:transparent;
-               color:var(--text); font:12.5px/1.35 var(--sans); text-align:left; }
+               color:var(--text); font:12.5px/1.35 var(--sans); letter-spacing:0;
+               text-align:left; }
   .task-mark { grid-area:mark; }
   .task-goal { grid-area:goal; min-width:0; overflow-wrap:anywhere;
                display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
@@ -678,7 +692,9 @@
   .task-row-status { grid-column:3; justify-self:end; white-space:nowrap; color:var(--text); }
   .task-summary { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
                   line-clamp:2; overflow:hidden; width:100%; min-width:0; max-width:100%;
-                  overflow-wrap:anywhere; line-height:1.35; max-height:2.7em; }
+                  overflow-wrap:anywhere; font-size:var(--font-sm);
+                  line-height:var(--leading-body); letter-spacing:0.01em;
+                  max-height:3.4em; }
   .task-jump { margin:2px 0 0; padding:3px 10px; border-radius:8px;
                border:1px solid var(--line); background:var(--panel-2); color:var(--text);
                cursor:pointer; font:12px/1.4 var(--sans); }
@@ -748,7 +764,8 @@
 
   /* ── 底部输入条：生成中 / 回到最新排在输入框上方，跟着输入条走 ── */
   #composer-tools { display:flex; justify-content:flex-end; align-items:center;
-                    gap:8px; max-width:800px; width:100%; margin:0 auto; min-height:0; }
+                    gap:8px; width:100%; max-width:var(--content-width);
+                    margin:0 auto; min-height:0; }
   #thinking { position:static; display:none; align-items:center; gap:8px;
               padding:7px 13px; border-radius:999px; background:var(--panel-2);
               border:1px solid var(--line); color:var(--text-dim);
@@ -776,9 +793,10 @@
   #composer { position:relative; display:flex; flex-direction:column; gap:var(--space-2);
               padding:var(--space-2) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom));
               padding-left:max(var(--space-4), env(safe-area-inset-left));
-              padding-right:max(var(--space-4), env(safe-area-inset-right)); }
+              padding-right:calc(var(--scrollbar) + max(var(--space-4), env(safe-area-inset-right))); }
   .box { position:relative; display:flex; align-items:flex-end; gap:var(--space-2);
-         max-width:800px; margin:0 auto; padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+         width:100%; max-width:var(--content-width); margin:0 auto;
+         padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);
          border-radius:var(--radius-lg); border:1px solid var(--line);
          background:var(--panel); box-shadow:var(--shadow-raised); }
   .box:focus-within { border-color:var(--accent); }
@@ -805,7 +823,9 @@
                pointer-events:none;
                box-shadow:0 0 40px rgba(0,0,0,.5); }
     body.drawer #sidebar { transform:none; pointer-events:auto; }
-    #stream { padding:14px 12px 20px; }
+    #stream { padding:14px var(--space-3) 20px;
+              padding-left:max(var(--space-3), env(safe-area-inset-left));
+              padding-right:max(var(--space-3), env(safe-area-inset-right)); }
     .msg.user { max-width:92%; }
     #composer { padding:var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom));
                 padding-left:max(var(--space-3), env(safe-area-inset-left));

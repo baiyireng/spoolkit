@@ -7,7 +7,9 @@
                pointer-events:none;
                box-shadow:0 0 40px rgba(0,0,0,.5); }
     body.drawer #sidebar { transform:none; pointer-events:auto; }
-    #stream { padding:14px 12px 20px; }
+    #stream { padding:14px var(--space-3) 20px;
+              padding-left:max(var(--space-3), env(safe-area-inset-left));
+              padding-right:max(var(--space-3), env(safe-area-inset-right)); }
     .msg.user { max-width:92%; }
     #composer { padding:var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom));
                 padding-left:max(var(--space-3), env(safe-area-inset-left));

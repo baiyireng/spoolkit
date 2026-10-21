@@ -37,14 +37,16 @@
     --pair-bg:#3d2a00;
     --pair-line:#5c4300;
     --pair-text:#f0c674;
-    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
+    --sans:"MiSans","HarmonyOS Sans SC","Source Han Sans SC","Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
     --mono:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono","Liberation Mono",monospace;
     --font-xs:12px;
     --font-sm:13px;
     --font-md:15px;
     --font-lg:18px;
-    --leading-body:1.55;
+    --leading-body:1.65;
     --leading-tight:1.4;
+    --content-width:760px;
+    --scrollbar:10px;
     --space-1:4px;
     --space-2:8px;
     --space-3:12px;

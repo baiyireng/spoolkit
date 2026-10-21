@@ -5,7 +5,7 @@
      thumb 平时低调、悬停才亮，"看不见"不等于"不能滚"——真的 `display:none`
      会让鼠标用户没有任何抓手（触屏与键盘还能滚，但那是另一个故事）。 */
   * { scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
-  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar { width:var(--scrollbar); height:var(--scrollbar); }
   ::-webkit-scrollbar-track { background:transparent; }
   ::-webkit-scrollbar-thumb {
     background:var(--scroll-thumb); border-radius:8px;
@@ -18,10 +18,12 @@
   body {
     margin:0; background:var(--bg); color:var(--text);
     font:var(--font-md)/var(--leading-body) var(--sans);
+    letter-spacing:0.01em;
     display:flex; flex-direction:column; overflow:hidden;
     -webkit-text-size-adjust:100%;
   }
   button, input, textarea, select { font:inherit; color:inherit; }
+  code, pre, kbd, samp { letter-spacing:0; }
   button:focus-visible, [role="button"]:focus-visible, .st-item:focus-visible,
   .toast-close:focus-visible, .row-act:focus-visible, #menu:focus-visible {
     outline:2px solid var(--accent); outline-offset:2px;
