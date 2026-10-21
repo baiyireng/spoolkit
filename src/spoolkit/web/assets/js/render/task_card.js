@@ -186,8 +186,14 @@ function appendJump(line, row) {
 }
 
 function drawTaskBody(box) {
+  const task = box._task || {};
   box._body.replaceChildren();
-  for (const row of taskRows(box._task || {})) {
+  if (task.currentSession === false) {
+    const note = h('div', 'task-other');
+    note.textContent = '该任务属于其他会话';
+    box._body.appendChild(note);
+  }
+  for (const row of taskRows(task)) {
     const line = h('div', 'task-row task-' + row.kind + (row.bad ? ' bad' : ''));
     if (row.kind === 'observe') {
       const meta = h('div', 'task-row-line');
@@ -214,10 +220,12 @@ function drawTaskBody(box) {
         approval.textContent = row.approval;
         line.appendChild(approval);
       }
-      appendJump(line, row);
+      if (task.canJump !== false) { appendJump(line, row); }
     } else if (row.kind === 'approval') {
+      const showJump = row.jump && task.canJump !== false;
+      if (!row.text && !showJump) { continue; }
       if (row.text) { line.appendChild(document.createTextNode(row.text)); }
-      appendJump(line, row);
+      if (showJump) { appendJump(line, row); }
     } else {
       line.textContent = redact(row.text);
     }

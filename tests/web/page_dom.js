@@ -2297,5 +2297,162 @@ async function extras2() {
     second_esc_closed: taskPanel.classList.contains('hidden'),
     count: ids.get('tasks-count').textContent,
   };
+
+  async function settleTasks() {
+    for (let step = 0; step < 6; step += 1) { await Promise.resolve(); }
+  }
+  await settleTasks();
+  const historyLive = [
+    searchTask('live-now', 'running', '现场目标', [
+      taskEvent(1, 'understand', 'running', '现场目标'),
+      taskEvent(2, 'observe', 'ok', '读了一份', { tool: 'read_file', tool_call_id: 'tc-live' }),
+      taskEvent(3, 'approval', 'await', 'a.py 待确认', {
+        tool_call_id: 'tc-live',
+        artifacts: [{ type: 'diff', path: 'a.py', ref: 'tc-live' }],
+      }),
+    ]),
+    searchTask('live-old', 'done', '旧的现场', [
+      taskEvent(1, 'understand', 'ok', '旧的现场'),
+      taskEvent(2, 'final', 'ok', '写好了'),
+    ]),
+  ];
+  const historyPayload = {
+    sessions: [
+      { id: 'a1', title: '当前这条' },
+      { id: 'other', title: '归档标题' },
+    ],
+    groups: [
+      searchTask('other-new', 'done', '别人的新任务', [
+        taskEvent(1, 'understand', 'ok', '别人的新任务'),
+        taskEvent(2, 'approval', 'await', '待确认命令', { tool_call_id: 'tc-other' }),
+      ]),
+      searchTask('live-old', 'failed', '历史旧说法', [
+        taskEvent(1, 'understand', 'error', '历史旧说法'),
+      ]),
+      searchTask('other-old', 'running', '别人的旧任务', [
+        taskEvent(1, 'understand', 'running', '别人的旧任务'),
+      ]),
+    ],
+  };
+  historyPayload.groups[0].session = 'other';
+  historyPayload.groups[1].session = 'a1';
+  historyPayload.groups[2].session = 'other';
+  let historyMode = 'hang';
+  let releaseHistory = null;
+  ctx.__fetchImpl = (url) => {
+    if (url !== '/tasks') {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    }
+    if (historyMode === 'hang') {
+      return new Promise((resolve) => {
+        releaseHistory = () => resolve({
+          ok: false, status: 500, json: async () => ({ error: 'nope' }),
+        });
+      });
+    }
+    if (historyMode === 'fail') {
+      return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'nope' }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => historyPayload });
+  };
+  ctx.__spoolTest.applyState(frame('D:/task-history', 'a1', WROWS, SROWS_A, [], {
+    task_groups: [historyLive[1], historyLive[0]],
+  }));
+  const beforeOpen = ctx.fetchCalls.length;
+  if (taskBtn) { taskBtn.onclick(); }
+  clickFilter('全部');
+  const historyNode = ids.get('tasks-history');
+  const loadingText = historyNode ? historyNode.textContent : '';
+  const loadingLines = searchLines();
+  const loadingPosts = ctx.fetchCalls.length - beforeOpen;
+  const beforeFilter = ctx.fetchCalls.length;
+  clickFilter('完成');
+  runSearch('现场');
+  const duringLoadPosts = ctx.fetchCalls.length - beforeFilter;
+  if (releaseHistory) { releaseHistory(); }
+  await settleTasks();
+  clickFilter('全部');
+  runSearch('');
+  const failedText = historyNode ? historyNode.textContent : '';
+  const failedLines = searchLines();
+  const failedCount = ids.get('tasks-count').textContent;
+  historyMode = 'ok';
+  const retry = historyNode ? historyNode.querySelector('button') : null;
+  const beforeRetry = ctx.fetchCalls.length;
+  if (retry) { retry.onclick(); }
+  await settleTasks();
+  const retryPosts = ctx.fetchCalls.length - beforeRetry;
+  clickFilter('全部');
+  runSearch('');
+  function scopeButton(label) {
+    const nodes = ids.get('tasks-scope') ? ids.get('tasks-scope').children : [];
+    for (const node of nodes) {
+      if (node.textContent === label) { return node; }
+    }
+    return null;
+  }
+  const currentScope = scopeButton('当前会话');
+  const allScope = scopeButton('全部会话');
+  const currentLines = searchLines();
+  const currentChips = ids.get('tasks-list').querySelectorAll('.task-session').length;
+  const beforeScope = ctx.fetchCalls.length;
+  if (allScope) { allScope.onclick(); }
+  const scopePosts = ctx.fetchCalls.length - beforeScope;
+  const allLines = searchLines();
+  const allChips = ids.get('tasks-list').querySelectorAll('.task-line').map((node) => {
+    const chip = node.querySelector('.task-session');
+    return chip ? chip.textContent : '';
+  });
+  const titleHit = { lines: null, posts: runSearch('归档标题') };
+  titleHit.lines = searchLines();
+  clickFilter('进行中');
+  const stackedScope = { lines: null, posts: runSearch('归档标题') };
+  stackedScope.lines = searchLines();
+  stackedScope.match = ids.get('tasks-match').textContent;
+  stackedScope.count = ids.get('tasks-count').textContent;
+  runSearch('');
+  clickFilter('全部');
+  function openGoal(goal) {
+    const rows = ids.get('tasks-list').querySelectorAll('.task-line');
+    for (const node of rows) {
+      const text = node.querySelector('.task-goal');
+      if (text && text.textContent === goal) { node.onclick(); return; }
+    }
+  }
+  openGoal('别人的新任务');
+  const foreignDetail = ids.get('tasks-detail');
+  const foreign = {
+    note: foreignDetail.textContent.indexOf('该任务属于其他会话') >= 0,
+    jump: foreignDetail.querySelectorAll('.task-jump').map((node) => node.textContent),
+  };
+  openGoal('现场目标');
+  const mineDetail = ids.get('tasks-detail');
+  const mine = {
+    note: mineDetail.textContent.indexOf('该任务属于其他会话') >= 0,
+    jump: mineDetail.querySelector('.task-jump') ? mineDetail.querySelector('.task-jump').textContent : '',
+  };
+  if (currentScope) { currentScope.onclick(); }
+  out.task_history = {
+    loading: loadingText,
+    loading_lines: loadingLines,
+    loading_posts: loadingPosts,
+    during_load_posts: duringLoadPosts,
+    failed: failedText,
+    failed_lines: failedLines,
+    failed_count: failedCount,
+    retry_posts: retryPosts,
+    current_pressed: currentScope ? currentScope.getAttribute('aria-pressed') : '',
+    current_lines: currentLines,
+    current_chips: currentChips,
+    scope_posts: scopePosts,
+    all_lines: allLines,
+    all_chips: allChips,
+    title: titleHit,
+    stacked: stackedScope,
+    foreign: foreign,
+    mine: mine,
+    ready: historyNode ? historyNode.textContent : '',
+  };
+  ctx.__fetchImpl = null;
 }
 

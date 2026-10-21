@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -379,6 +381,31 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
     )
     runner._diffs = [{"path": "a.py", "text": "+x\n", "tool_call_id": "tc-run"}]
     runner._awaiting = 1
+    other_events = root / ".agent" / "task-events" / "other.jsonl"
+    other_events.parent.mkdir(parents=True, exist_ok=True)
+    other_events.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    _event("other-1", "other", 1, "understand", "running", "其他会话的任务"),
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    _event(
+                        "other-1", "other", 2, "approval", "await", "待确认命令",
+                        tool_call_id="tc-other",
+                    ),
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    later = time.time() + 60
+    os.utime(other_events, (later, later))
+    from spoolkit.kernel.sessions import write_meta
+    write_meta(root, "other", title="其他会话的很长标题用来检查窄屏")
 
     state = _as_state(runner)
     httpd = build_server(state, "127.0.0.1", 0)
@@ -667,6 +694,8 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
                 search_left: Math.round(document.getElementById('tasks-search').getBoundingClientRect().left),
                 search_right: Math.round(document.getElementById('tasks-search').getBoundingClientRect().right),
                 search_w: Math.round(document.getElementById('tasks-search').getBoundingClientRect().width),
+                scope_left: Math.round(document.getElementById('tasks-scope').getBoundingClientRect().left),
+                scope_right: Math.round(document.getElementById('tasks-scope').getBoundingClientRect().right),
                 search_type: document.getElementById('tasks-search').getAttribute('type'),
                 search_label: document.getElementById('tasks-search').getAttribute('aria-label'),
                 goal_clamp: getComputedStyle(goal).webkitLineClamp,
@@ -694,6 +723,8 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         assert panel["search_right"] <= panel["view_w"] + 1, panel
         assert panel["search_left"] >= panel["panel_left"] - 1, panel
         assert panel["search_w"] > 40, panel
+        assert panel["scope_right"] <= panel["view_w"] + 1, panel
+        assert panel["scope_left"] >= panel["panel_left"] - 1, panel
         assert panel["wait"] == "1", panel
         assert panel["goal_clamp"] == "2", panel
         assert panel["goal_title"].startswith("把配置文件整理成可提交的说明"), panel
@@ -706,6 +737,53 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         assert panel["panel_position"] == "fixed", panel
         assert panel["body_y"] in ("auto", "scroll"), panel
         assert panel["composer_bottom"] <= panel["view_h"] + 1, panel
+        assert _wait(
+            page,
+            "document.getElementById('tasks-history').textContent.indexOf('正在加载') < 0",
+        ), "任务历史没有加载完"
+        page.eval("document.querySelector('#tasks-scope [data-scope=\"all\"]').click()")
+        assert _wait(
+            page,
+            "!![...document.querySelectorAll('#tasks-list .task-goal')].find((node) => node.textContent === '其他会话的任务')",
+        ), "全部会话里没有其他会话的任务"
+        page.eval(
+            """
+            [...document.querySelectorAll('#tasks-list .task-line')].find((node) => {
+              const goal = node.querySelector('.task-goal');
+              return goal && goal.textContent === '其他会话的任务';
+            }).click()
+            """
+        )
+        history = page.eval(
+            r"""
+            (() => {
+              const box = document.getElementById('tasks-panel');
+              const chip = document.querySelector('#tasks-list .task-session');
+              const chipBox = chip.getBoundingClientRect();
+              const detail = document.getElementById('tasks-detail');
+              return {
+                count: document.getElementById('tasks-count').textContent,
+                chip: chip.textContent,
+                chip_right: Math.round(chipBox.right),
+                chip_left: Math.round(chipBox.left),
+                note: detail.textContent.indexOf('该任务属于其他会话') >= 0,
+                jumps: detail.querySelectorAll('.task-jump').length,
+                panel_overflow: box.scrollWidth - box.clientWidth,
+                panel_right: Math.round(box.getBoundingClientRect().right),
+                view_w: window.innerWidth,
+              };
+            })()
+            """
+        )
+        page.shot(str(SHOTS / "task-history-390.png"))
+        assert history["count"] == "2", history
+        assert history["chip"] == "其他会话的很长标题用来检查窄屏", history
+        assert history["note"] is True, history
+        assert history["jumps"] == 0, history
+        assert history["chip_right"] <= history["panel_right"] + 1, history
+        assert history["chip_left"] >= 0, history
+        assert history["panel_overflow"] <= 1, history
+        assert history["panel_right"] <= history["view_w"] + 1, history
         page.viewport(360, 800, mobile=True)
         assert _wait(
             page,

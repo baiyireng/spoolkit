@@ -757,6 +757,19 @@
   #tasks-search:focus { outline:2px solid var(--accent); outline-offset:1px; }
   .tasks-match { margin-top:var(--space-1); color:var(--text-dim); font-size:var(--font-xs);
                  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #tasks-scope { display:flex; flex-wrap:wrap; gap:var(--space-2); min-width:0;
+                 padding:var(--space-2) var(--space-3) 0; }
+  .tasks-scope { max-width:100%; padding:2px var(--space-2); border-radius:999px;
+                 border:1px solid var(--line); background:transparent; color:var(--text-dim);
+                 cursor:pointer; font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .tasks-scope.on { color:var(--text); border-color:var(--text-dim); background:var(--panel-2); }
+  .tasks-history { min-width:0; padding:var(--space-1) var(--space-3) 0; color:var(--text-dim);
+                   font-size:var(--font-xs); }
+  .tasks-history:empty { display:none; }
+  .tasks-history-retry { display:block; width:100%; max-width:100%; box-sizing:border-box;
+                         margin:0; padding:0; border:0; background:transparent; color:var(--warn-text);
+                         cursor:pointer; text-align:left; white-space:normal;
+                         font:var(--font-xs)/var(--leading-tight) var(--sans); }
   #tasks-filters { display:flex; flex-wrap:wrap; gap:var(--space-2); padding:var(--space-2) var(--space-3); }
   .tasks-filter { padding:2px var(--space-2); border-radius:999px; border:1px solid var(--line);
                   background:transparent; color:var(--text-dim); cursor:pointer;
@@ -772,7 +785,9 @@
                font:var(--font-sm)/var(--leading-tight) var(--sans); }
   .task-line.on { border-color:var(--text-dim); }
   .task-line .task-goal { width:100%; }
-  .task-line-meta { display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
+  .task-line-meta { display:flex; flex-wrap:wrap; gap:4px; min-width:0; max-width:100%; }
+  .task-session { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .task-other { margin:0 0 var(--space-2); color:var(--text-dim); font-size:var(--font-xs); }
   .task-wait { color:var(--warn-text); background:var(--warn-bg);
                border-color:var(--warn-line); }
   .tasks-empty { margin:var(--space-2) 0; color:var(--text-dim); font-size:var(--font-sm); }

@@ -357,6 +357,36 @@ def test_任务搜索只在本地叠在状态筛选上(dom: dict) -> None:
     assert found["count"] == "5", found
 
 
+def test_任务面板接上跨会话历史(dom: dict) -> None:
+    """打开时读 /tasks。现场覆盖同 id，当前会话不重复。搜索和筛选不再请求。"""
+    found = dom["task_history"]
+    assert found["loading"] == "正在加载历史", found
+    assert found["loading_lines"] == ["现场目标", "旧的现场"], found
+    assert found["loading_posts"] == 1, found
+    assert found["during_load_posts"] == 0, found
+    assert found["failed"] == "历史加载失败，可重试", found
+    assert found["failed_lines"] == ["现场目标", "旧的现场"], found
+    assert found["failed_count"] == "2", found
+    assert found["retry_posts"] == 1, found
+    assert found["current_pressed"] == "true", found
+    assert found["current_lines"] == ["现场目标", "旧的现场"], found
+    assert found["current_chips"] == 0, found
+    assert "历史旧说法" not in found["current_lines"], found
+    assert found["scope_posts"] == 0, found
+    assert found["all_lines"] == ["现场目标", "别人的新任务", "旧的现场", "别人的旧任务"], found
+    assert found["all_chips"] == ["当前这条", "归档标题", "当前这条", "归档标题"], found
+    assert found["title"]["lines"] == ["别人的新任务", "别人的旧任务"], found["title"]
+    assert found["title"]["posts"] == 0, found["title"]
+    assert found["stacked"]["lines"] == ["别人的旧任务"], found["stacked"]
+    assert found["stacked"]["match"] == "共 4 项，匹配 1", found["stacked"]
+    assert found["stacked"]["count"] == "2", found["stacked"]
+    assert found["foreign"]["note"] is True, found["foreign"]
+    assert found["foreign"]["jump"] == [], found["foreign"]
+    assert found["mine"]["note"] is False, found["mine"]
+    assert found["mine"]["jump"] == "查看改动", found["mine"]
+    assert found["ready"] == "", found
+
+
 def test_可见文案不用旧术语(dom: dict) -> None:
     """顶栏、状态面板和任务筛选不再出现旧说法。用户目标正文不在这张清单里。"""
     blobs = [
