@@ -844,11 +844,11 @@ def test_顶部没有横幅带也没有常驻提示() -> None:
     for gone in ('id="readonly"', 'id="target-note"', 'id="health"',
                  'id="pairing"', 'id="elsewhere"'):
         assert gone not in HTML, f"{gone} 还常驻在页面上"
-    # `#top` 里只有三样：它自己、抽屉开关、当前目标（多一个都算"顶部有提示"）。
+    # `#top` 里是抽屉开关、当前目标、任务入口。旧的状态横幅不在这里。
     top = HTML[HTML.find('<div id="top">') : HTML.find('<div id="scrim">')]
-    assert re.findall(r'id="([^"]+)"', top) == ["top", "menu", "where"], (
-        f"顶部多出了东西：{top}"
-    )
+    assert re.findall(r'id="([^"]+)"', top) == [
+        "top", "menu", "where", "tasks-btn", "tasks-count", "tasks-wait",
+    ], f"顶部多出了东西：{top}"
     assert 'id="where"' in top and 'id="menu"' in top
 
 

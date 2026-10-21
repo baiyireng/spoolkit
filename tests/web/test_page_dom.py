@@ -288,6 +288,36 @@ def test_任务卡默认折叠且有卡时不画旧轨迹(dom: dict) -> None:
     assert command["task_apply"] == 0
 
 
+def test_任务面板列出当前会话并可筛选(dom: dict) -> None:
+    """顶栏任务数来自 task_groups。筛选在本地做，详情复用任务卡正文。"""
+    panel = dom["task_panel"]
+    assert panel["count"] == "4"
+    assert panel["wait"] == "1"
+    assert panel["closed"] is True
+    assert panel["opened"] == "true"
+    assert panel["focus"] == "tasks-close"
+    assert panel["lines"] == ["还在跑的长目标", "做不完", "验证那件", "先做完"]
+    assert panel["marks"] == ["进行中", "失败", "验证未过", "完成"]
+    assert panel["wait_mark"] == "待确认"
+    assert panel["detail_open"] == "true"
+    assert panel["tool"] == "read_file"
+    assert panel["jump"] == "查看改动"
+    assert panel["raw"] is False
+    assert panel["detail_apply"] == 0
+    assert panel["ask_id"] == "tc-panel"
+    assert panel["ask_scrolled"] == 1
+    assert panel["ask_focus"] == "ask-apply"
+    assert panel["failed"] == ["做不完", "验证那件"]
+    assert panel["done"] == ["先做完"]
+    assert panel["awaiting"] == ["还在跑的长目标"]
+    assert panel["running"] == ["还在跑的长目标"]
+    assert panel["empty"] == "没有匹配的任务"
+    assert panel["shrunk"] == "1"
+    assert panel["close_focus"] == "tasks-btn"
+    assert panel["esc"] is True
+    assert panel["esc_focus"] == "tasks-btn"
+
+
 # --- ② AI 回复后消息卡自动更新；思考过程可折叠、事后还能回看 ---
 
 

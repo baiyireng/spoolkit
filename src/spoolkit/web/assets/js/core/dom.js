@@ -47,6 +47,14 @@ const settingsIcon = document.getElementById('settings-icon');
 const archivedList = document.getElementById('archived-list');
 const archivedCount = document.getElementById('archived-count');
 const archivedCountInline = document.getElementById('archived-count-inline');
+const tasksBtn = document.getElementById('tasks-btn');
+const tasksPanel = document.getElementById('tasks-panel');
+const tasksClose = document.getElementById('tasks-close');
+const tasksCount = document.getElementById('tasks-count');
+const tasksWait = document.getElementById('tasks-wait');
+const tasksFilters = document.getElementById('tasks-filters');
+const tasksList = document.getElementById('tasks-list');
+const tasksDetail = document.getElementById('tasks-detail');
 
 function h(tag, className) {
   const node = document.createElement(tag);

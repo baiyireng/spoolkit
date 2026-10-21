@@ -1,0 +1,52 @@
+  /* 当前会话的任务入口和面板。桌面是右侧抽屉，窄屏是全屏 sheet。 */
+  #tasks-btn { flex:0 0 auto; display:inline-flex; align-items:center; gap:4px;
+               padding:4px 8px; border-radius:999px; border:1px solid var(--line);
+               background:var(--panel-2); color:var(--text); cursor:pointer;
+               font:12px/1.3 var(--sans); white-space:nowrap; }
+  #tasks-btn:hover { border-color:var(--text-dim); }
+  #tasks-count, #tasks-wait { min-width:16px; height:16px; padding:0 5px;
+               border-radius:999px; border:1px solid var(--line);
+               background:var(--bg); color:var(--text-dim); font-size:11px;
+               display:inline-flex; align-items:center; justify-content:center; }
+  #tasks-wait { color:var(--warn-text); background:var(--warn-bg);
+                border-color:var(--warn-line); }
+  #tasks-panel { position:fixed; top:0; right:0; bottom:0; z-index:36;
+                 width:min(400px, 100%); display:flex; }
+  #tasks-panel.hidden { display:none; }
+  .tasks-sheet { width:100%; height:100%; min-height:0; display:flex;
+                 flex-direction:column; background:var(--panel); color:var(--text);
+                 border-left:1px solid var(--line); }
+  .tasks-head { display:flex; align-items:center; gap:8px; padding:12px 12px 8px;
+                border-bottom:1px solid var(--line-soft); }
+  .tasks-head h2 { margin:0; flex:1; font-size:15px; font-weight:650; }
+  .tasks-head .icon-btn { width:30px; height:30px; padding:0; border:0;
+                          border-radius:8px; background:transparent;
+                          color:var(--text-dim); cursor:pointer;
+                          display:flex; align-items:center; justify-content:center; }
+  .tasks-head .icon-btn:hover { color:var(--text); background:var(--bubble-user); }
+  .tasks-head .icon-btn svg { width:15px; height:15px; }
+  #tasks-filters { display:flex; flex-wrap:wrap; gap:6px; padding:8px 12px; }
+  .tasks-filter { padding:2px 8px; border-radius:999px; border:1px solid var(--line);
+                  background:transparent; color:var(--text-dim); cursor:pointer;
+                  font:12px/1.4 var(--sans); }
+  .tasks-filter.on { color:var(--text); border-color:var(--text-dim);
+                     background:var(--panel-2); }
+  #tasks-body { flex:1; min-height:0; overflow-x:hidden; overflow-y:auto;
+                padding:0 12px 12px; }
+  .task-line { display:flex; flex-direction:column; align-items:flex-start; gap:4px;
+               width:100%; margin:0 0 6px; padding:8px 10px; box-sizing:border-box;
+               border:1px solid var(--line); border-radius:10px; background:transparent;
+               color:var(--text); cursor:pointer; text-align:left; font:12.5px/1.35 var(--sans); }
+  .task-line.on { border-color:var(--text-dim); }
+  .task-line .task-goal { width:100%; }
+  .task-line-meta { display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
+  .task-wait { color:var(--warn-text); background:var(--warn-bg);
+               border-color:var(--warn-line); }
+  .tasks-empty { margin:8px 0; color:var(--text-dim); font-size:13px; }
+  #tasks-detail { margin-top:4px; min-width:0; }
+  @media (max-width: 860px) {
+    #tasks-panel { left:0; width:auto; }
+    .tasks-sheet { border-left:0; }
+    #tasks-btn, #tasks-close { min-height:44px; }
+    #tasks-close { min-width:44px; }
+  }

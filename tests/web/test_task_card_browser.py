@@ -407,6 +407,54 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         assert "long-workspace-path-" in narrow["where_title"], narrow
         assert narrow["where_text"].endswith("…") or "…" in narrow["where_text"] or len(narrow["where_text"]) < len(narrow["where_title"]), narrow
         assert narrow["goal_clamp"] == "2", narrow
+        page.eval("document.getElementById('tasks-btn').click()")
+        assert _wait(page, "!document.getElementById('tasks-panel').classList.contains('hidden')"), "任务面板没有打开"
+        page.eval("document.querySelector('#tasks-list .task-line').click()")
+        assert _wait(page, "!!document.querySelector('#tasks-detail .task-card')"), "任务详情没有展开"
+        panel = page.eval(
+            r"""
+            (() => {
+              const box = document.getElementById('tasks-panel');
+              const body = document.getElementById('tasks-body');
+              const goal = document.querySelector('#tasks-list .task-goal');
+              const composer = document.getElementById('composer').getBoundingClientRect();
+              const panelBox = box.getBoundingClientRect();
+              const bodyStyle = getComputedStyle(body);
+              const panelStyle = getComputedStyle(box);
+              return {
+                count: document.getElementById('tasks-count').textContent,
+                wait: document.getElementById('tasks-wait').textContent,
+                goal_clamp: getComputedStyle(goal).webkitLineClamp,
+                goal_title: goal.title,
+                tool: document.querySelector('#tasks-detail .task-tool').textContent,
+                jump: document.querySelector('#tasks-detail .task-jump').textContent,
+                page_overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                panel_overflow: box.scrollWidth - box.clientWidth,
+                panel_left: Math.round(panelBox.left),
+                panel_right: Math.round(panelBox.right),
+                panel_position: panelStyle.position,
+                body_y: bodyStyle.overflowY,
+                composer_bottom: Math.round(composer.bottom),
+                view_w: window.innerWidth,
+                view_h: window.innerHeight,
+              };
+            })()
+            """
+        )
+        page.shot(str(SHOTS / "task-panel-390.png"))
+        assert panel["count"] == "2", panel
+        assert panel["wait"] == "1", panel
+        assert panel["goal_clamp"] == "2", panel
+        assert panel["goal_title"].startswith("把配置文件整理成可提交的说明"), panel
+        assert panel["tool"] == "read_file", panel
+        assert panel["jump"] == "查看改动", panel
+        assert panel["page_overflow"] <= 1, panel
+        assert panel["panel_overflow"] <= 1, panel
+        assert panel["panel_left"] <= 1, panel
+        assert panel["panel_right"] <= panel["view_w"] + 1, panel
+        assert panel["panel_position"] == "fixed", panel
+        assert panel["body_y"] in ("auto", "scroll"), panel
+        assert panel["composer_bottom"] <= panel["view_h"] + 1, panel
         page.viewport(360, 800, mobile=True)
         assert _wait(
             page,

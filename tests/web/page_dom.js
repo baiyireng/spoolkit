@@ -2053,5 +2053,130 @@ async function extras2() {
     ask_focus: document.activeElement ? document.activeElement.className : '',
     task_apply: cmdCard ? cmdCard.querySelectorAll('.ask-apply').length : 1,
   };
+
+  function panelGroup(status, goal, events) {
+    return taskGroup(status, events, goal);
+  }
+  const panelGroups = [
+    panelGroup('done', '先做完', [
+      taskEvent(1, 'understand', 'running', '先做完'),
+      taskEvent(2, 'final', 'ok', '结论'),
+    ]),
+    panelGroup('verify_failed', '验证那件', [
+      taskEvent(1, 'understand', 'running', '验证那件'),
+      taskEvent(2, 'verify', 'error', '编译失败'),
+      taskEvent(3, 'final', 'ok', '仍收尾'),
+    ]),
+    panelGroup('failed', '做不完', [
+      taskEvent(1, 'understand', 'running', '做不完'),
+      taskEvent(2, 'error', 'error', '已达步数上限'),
+    ]),
+    panelGroup('running', '还在跑的长目标', [
+      taskEvent(1, 'understand', 'running', '还在跑的长目标'),
+      taskEvent(2, 'observe', 'ok', '4 行', {
+        tool: 'read_file', intent: '读源码', tool_call_id: 'tc-panel', source: 'tool',
+      }),
+      taskEvent(3, 'approval', 'await', 'a.py 待确认', {
+        tool_call_id: 'tc-panel',
+        artifacts: [{ type: 'diff', path: 'a.py', ref: 'tc-panel' }],
+      }),
+    ]),
+  ];
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.applyState(frame('D:/task-panel', 'a1', WROWS, SROWS_A, [
+    { role: 'user', content: '列一下', created_at: 1 },
+  ], {
+    task_groups: panelGroups,
+    diffs: [{ path: 'a.py', text: '+x\n', tool_call_id: 'tc-panel' }],
+    awaiting: 1,
+  }));
+  const taskBtn = ids.get('tasks-btn');
+  const taskPanel = ids.get('tasks-panel');
+  function panelLines() {
+    return ids.get('tasks-list').querySelectorAll('.task-line');
+  }
+  function clickFilter(label) {
+    const nodes = ids.get('tasks-filters').children;
+    for (const node of nodes) {
+      if (node.textContent === label) { node.onclick(); return true; }
+    }
+    return false;
+  }
+  const closedCount = ids.get('tasks-count').textContent;
+  const closedWait = ids.get('tasks-wait').textContent;
+  const closedHidden = taskPanel.classList.contains('hidden');
+  if (taskBtn) { taskBtn.onclick(); }
+  const openedExpanded = taskBtn ? taskBtn.getAttribute('aria-expanded') : '';
+  const openedFocus = document.activeElement ? document.activeElement._id : '';
+  const openedLines = panelLines().map((node) => node.querySelector('.task-goal').textContent);
+  const openedMarks = panelLines().map((node) => node.querySelector('.task-mark').textContent);
+  const openedWait = panelLines()[0] && panelLines()[0].querySelector('.task-wait')
+    ? panelLines()[0].querySelector('.task-wait').textContent : '';
+  if (panelLines()[0]) { panelLines()[0].onclick(); }
+  const detail = ids.get('tasks-detail');
+  const detailJump = detail.querySelector('.task-jump');
+  const detailTool = detail.querySelector('.task-tool')
+    ? detail.querySelector('.task-tool').textContent : '';
+  const detailOpen = detail.querySelector('.task-head')
+    ? detail.querySelector('.task-head').getAttribute('aria-expanded') : '';
+  const detailRaw = detail.textContent.indexOf('RAW_SECRET') >= 0;
+  const detailApply = detail.querySelectorAll('.ask-apply').length;
+  const panelAsk = ids.get('stream').querySelector('.ask-card');
+  if (detailJump) { detailJump.onclick(); }
+  const jumped = {
+    id: panelAsk ? panelAsk.getAttribute('data-tool-call-id') : '',
+    scrolled: panelAsk ? panelAsk._scrolled || 0 : 0,
+    focus: document.activeElement ? document.activeElement.className : '',
+  };
+  clickFilter('失败');
+  const failedGoals = panelLines().map((node) => node.querySelector('.task-goal').textContent);
+  clickFilter('完成');
+  const doneGoals = panelLines().map((node) => node.querySelector('.task-goal').textContent);
+  clickFilter('等审批');
+  const awaitGoals = panelLines().map((node) => node.querySelector('.task-goal').textContent);
+  clickFilter('进行中');
+  const runningGoals = panelLines().map((node) => node.querySelector('.task-goal').textContent);
+  ctx.__spoolTest.applyState(frame('D:/task-panel', 'a1', WROWS, SROWS_A, [
+    { role: 'user', content: '列一下', created_at: 1 },
+  ], {
+    task_groups: [panelGroup('running', '只剩这一件', [
+      taskEvent(1, 'understand', 'running', '只剩这一件'),
+    ])],
+  }));
+  clickFilter('完成');
+  const emptyText = ids.get('tasks-list').textContent;
+  const shrunkCount = ids.get('tasks-count').textContent;
+  const closeBtn = ids.get('tasks-close');
+  if (closeBtn) { closeBtn.onclick(); }
+  const closedBack = document.activeElement ? document.activeElement._id : '';
+  if (taskBtn) { taskBtn.onclick(); }
+  document.onkeydown({ key: 'Escape' });
+  out.task_panel = {
+    count: closedCount,
+    wait: closedWait,
+    closed: closedHidden,
+    opened: openedExpanded,
+    focus: openedFocus,
+    lines: openedLines,
+    marks: openedMarks,
+    wait_mark: openedWait,
+    detail_open: detailOpen,
+    tool: detailTool,
+    jump: detailJump ? detailJump.textContent : '',
+    raw: detailRaw,
+    detail_apply: detailApply,
+    ask_id: jumped.id,
+    ask_scrolled: jumped.scrolled,
+    ask_focus: jumped.focus,
+    failed: failedGoals,
+    done: doneGoals,
+    awaiting: awaitGoals,
+    running: runningGoals,
+    empty: emptyText,
+    shrunk: shrunkCount,
+    close_focus: closedBack,
+    esc: taskPanel.classList.contains('hidden'),
+    esc_focus: document.activeElement ? document.activeElement._id : '',
+  };
 }
 

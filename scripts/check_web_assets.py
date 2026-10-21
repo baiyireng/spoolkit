@@ -118,6 +118,7 @@ _FEATURE_INIT = (
     ("js/features/settings.js", "createSettings"),
     ("js/features/sessions.js", "createSessions"),
     ("js/features/thread.js", "createThread"),
+    ("js/features/tasks.js", "createTasks"),
     ("js/features/confirm.js", "createConfirm"),
     ("js/features/sidebar.js", "createSidebar"),
     ("js/features/composer.js", "createComposer"),

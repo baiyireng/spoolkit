@@ -35,6 +35,7 @@ CSS_ORDER = (
     "css/sidebar.css",
     "css/settings.css",
     "css/thread.css",
+    "css/tasks.css",
     "css/composer.css",
     "css/responsive.css",
 )
@@ -56,6 +57,7 @@ JS_ORDER = (
     "js/features/settings.js",
     "js/features/sessions.js",
     "js/features/thread.js",
+    "js/features/tasks.js",
     "js/features/confirm.js",
     "js/features/sidebar.js",
     "js/features/composer.js",

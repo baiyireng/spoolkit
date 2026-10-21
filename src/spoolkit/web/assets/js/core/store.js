@@ -92,6 +92,7 @@ const INITIAL_STATE = {
   targetMissing: false,
   statusOpen: false,
   settingsOpen: false,
+  tasksOpen: false,
   lastSettingsFocus: null,
   drafts: {},
 };

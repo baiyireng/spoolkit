@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark light">
 <title>spool</title>
 
-<link rel="stylesheet" href="/assets/dist/app.4698bbfdf8cd.css">
+<link rel="stylesheet" href="/assets/dist/app.eb277844052a.css">
 </head>
 <body>
 <!-- 右上角那一列：常驻提示（徽标 + 详情浮层）与通知。两者都在**文档流之外**
@@ -29,6 +29,12 @@
 <div id="top">
   <button id="menu" title="会话列表" aria-label="会话列表" aria-expanded="false" aria-controls="sidebar"></button>
   <span id="where" class="empty">连接中</span>
+  <button id="tasks-btn" type="button" title="任务" aria-label="任务"
+          aria-expanded="false" aria-controls="tasks-panel">
+    <span>任务</span>
+    <span id="tasks-count">0</span>
+    <span id="tasks-wait" class="hidden"></span>
+  </button>
 </div>
 <div id="scrim"></div>
 <div id="body">
@@ -91,7 +97,22 @@
     </div>
   </div>
 </div>
+<div id="tasks-panel" class="hidden" role="dialog" aria-modal="true"
+     aria-labelledby="tasks-title" aria-hidden="true">
+  <div class="tasks-sheet">
+    <div class="tasks-head">
+      <h2 id="tasks-title">任务</h2>
+      <button id="tasks-close" type="button" class="icon-btn"
+              aria-label="关闭任务" title="关闭任务"></button>
+    </div>
+    <div id="tasks-filters" role="tablist" aria-label="筛选任务"></div>
+    <div id="tasks-body">
+      <div id="tasks-list"></div>
+      <div id="tasks-detail"></div>
+    </div>
+  </div>
+</div>
 
-<script src="/assets/dist/app.1821bb7e1d7b.js" defer></script>
+<script src="/assets/dist/app.accdeab2529a.js" defer></script>
 </body>
 </html>

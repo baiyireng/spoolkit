@@ -49,6 +49,7 @@ function applyState(state) {
   app.thread.drawHistory(state.messages);
   app.thread.restoreLive(state);
   app.thread.syncLiveTasks(state);
+  app.tasks.sync(state);
   // ⑤ 可做的动作（问题④）：这一轮有可退的成果时，摆一枚**真能点**的
   // 「撤销这一轮」。刷新 / 切走再切回也照旧——它读的是快照里 `final` 上那个
   // 只增的 `revert_run_id`（服务端在 `final` 事件上给的，见 `run.py`）。
@@ -316,6 +317,10 @@ document.onkeydown = function (event) {
     }
     return;
   }
+  if (store.get('tasksOpen')) {
+    if (event.key === 'Escape') { app.tasks.setTasksOpen(false); }
+    return;
+  }
   if (document.body.classList.contains('drawer') && event.key === 'Escape') {
     app.sidebar.closeDrawer();
     return;
@@ -329,6 +334,7 @@ function wireFeatures() {
   app.settings = createSettings(app);
   app.sessions = createSessions(app);
   app.thread = createThread(app);
+  app.tasks = createTasks(app);
   app.confirm = createConfirm(app);
   app.sidebar = createSidebar(app);
   app.composer = createComposer(app);
