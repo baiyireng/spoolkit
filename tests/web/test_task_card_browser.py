@@ -342,6 +342,12 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
     _say(conn, "assistant", "配置已经整理好。", 20)
     _say(conn, "user", "继续看长文件", 40)
     _say(conn, "assistant", "还在读配置。", 50)
+    _say(conn, "user", "昨天的问题", 1_760_918_400)
+    _say(
+        conn, "assistant",
+        "```python\nprint('" + ("abc" * 40) + "')\n```",
+        1_760_918_400 + 90_000,
+    )
     conn.close()
 
     done_id = "run-1:done"
@@ -575,6 +581,11 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         ), "手动展开后重绑把开合重置了"
 
         page.eval("document.querySelector('.task-card-running .task-jump').click()")
+        assert _wait(
+            page,
+            "(() => { const box = document.querySelector('.ask-card').getBoundingClientRect();"
+            " return box.top < window.innerHeight && box.bottom > 0; })()",
+        ), "跳到审批后卡片不在视口里"
         located = page.eval(
             r"""
             (() => {
@@ -675,6 +686,35 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         assert "long-workspace-path-" in narrow["where_title"], narrow
         assert narrow["where_text"].endswith("…") or "…" in narrow["where_text"] or len(narrow["where_text"]) < len(narrow["where_title"]), narrow
         assert narrow["goal_clamp"] == "2", narrow
+        page.eval("document.querySelector('.code').scrollIntoView({block:'center'})")
+        assert _wait(
+            page,
+            "document.querySelector('.code').classList.contains('code-x')",
+        ), "窄屏代码块没有横向滚动提示"
+        readable = page.eval(
+            r"""
+            (() => {
+              const block = document.querySelector('.code');
+              const pre = block.querySelector('pre');
+              const copy = block.querySelector('.copy-btn');
+              return {
+                page_overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                overflow_x: getComputedStyle(pre).overflowX,
+                copy: copy.textContent,
+                times: document.querySelectorAll('.msg-time').length,
+                days: document.querySelectorAll('.day-sep').length,
+                hint: getComputedStyle(block, '::after').content,
+              };
+            })()
+            """
+        )
+        page.shot(str(SHOTS / "message-readability-390.png"))
+        assert readable["page_overflow"] <= 1, readable
+        assert readable["overflow_x"] == "auto", readable
+        assert readable["copy"] == "复制", readable
+        assert "横向滚动" in readable["hint"], readable
+        assert readable["times"] >= 1, readable
+        assert readable["days"] >= 2, readable
         page.eval("document.getElementById('tasks-btn').click()")
         assert _wait(page, "!document.getElementById('tasks-panel').classList.contains('hidden')"), "任务面板没有打开"
         page.eval("document.querySelector('#tasks-list .task-line').click()")

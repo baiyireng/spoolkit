@@ -139,6 +139,21 @@ def test_复制失败时改走文本框再提示手动复制(dom: dict) -> None:
     assert found["throw_label"] == "已复制", found
 
 
+def test_代码溢出才提示时间只在有时间戳时出现(dom: dict) -> None:
+    """横向溢出才挂提示。没有 created_at 的旧消息不画时间。"""
+    found = dom["message_read"]
+    assert found["overflow_on"] is True, found
+    assert found["overflow_end"] is False, found
+    assert found["overflow_fit"] is False, found
+    assert found["copy"] == "复制", found
+    assert found["copy_click"] is True, found
+    assert found["code_text"] == "x" * 40, found
+    assert found["bare"] == "", found
+    assert found["zero"] == "", found
+    assert found["clocks"] == ["09:05", "18:40", "08:01"], found
+    assert found["days"] == ["10月20日", "10月21日"], found
+
+
 def test_空闲窗口里又开始跑就不起标题(dom: dict) -> None:
     """final/state 后先等一会儿。这段里已经在跑就放弃，下次空闲还能再问。"""
     found = dom["title_idle"]

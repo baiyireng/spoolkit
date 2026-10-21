@@ -93,7 +93,7 @@
 
   /* 代码块：**明显**的一块——底色、边框、圆角、内边距；自己横向/纵向滚，
      不撑破气泡（`.bubble` 与 `.msg` 上的 min-width:0 是这条能成立的前提）。 */
-  .code { margin:10px 0 0; border:1px solid var(--code-line); border-radius:10px;
+  .code { position:relative; margin:10px 0 0; border:1px solid var(--code-line); border-radius:10px;
           overflow:hidden; background:var(--code-bg); max-width:100%; }
   .code-bar { display:flex; align-items:center; gap:8px; padding:5px 8px 5px 12px;
               background:var(--code-bar); color:var(--text-dim);
@@ -105,9 +105,13 @@
               border:1px solid var(--line); background:transparent;
               color:var(--text-dim); cursor:pointer; font:12px/1.6 var(--sans); }
   .copy-btn:hover { color:var(--text); border-color:var(--text-dim); }
-  .code pre { margin:0; padding:11px 13px; max-height:360px; overflow:auto;
+  .code pre { margin:0; padding:11px 13px; max-height:360px; overflow:auto; overflow-x:auto;
               font:13px/1.55 var(--mono); color:var(--text);
               scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
+  .code.code-x::after { content:"横向滚动"; position:absolute; right:0; bottom:0; z-index:1;
+              pointer-events:none; padding:2px 8px 3px 28px;
+              font:10px/16px var(--sans); color:var(--text-faint);
+              background:linear-gradient(to left, var(--code-bg) 58%, transparent); }
   .msg.user .code { border-color:var(--line); }
 
   /* 历史：一条分隔线 + 略淡。**不在页面上写任何实现说明**——
@@ -117,6 +121,11 @@
   .history-sep::before, .history-sep::after { content:""; flex:1;
                  border-top:1px solid var(--line-soft); }
   .msg.history { opacity:.86; }
+  .msg-time { align-self:flex-end; margin:1px 2px 0; color:var(--text-faint);
+              font-size:11px; line-height:1.15; }
+  .day-sep { display:flex; align-items:center; gap:8px; margin:6px 0 2px;
+             color:var(--text-faint); font-size:11px; line-height:1.2; }
+  .day-sep::before, .day-sep::after { content:""; flex:1; height:1px; background:var(--line-soft); }
 
   /* ── 待确认：**对话流里**的一张卡片（ChatGPT 的工具调用卡片那一挂） ──
      没有待确认内容时它整个不存在：HTML 里没有这块的占位，节点也不建。

@@ -297,7 +297,7 @@
   /* ── 顶条：抽屉开关 + 当前目标（"我在哪儿"必须直接可读） ── */
   #top {
     display:flex; align-items:center; flex-wrap:nowrap; gap:var(--space-2);
-    min-height:48px; padding:var(--space-2) 108px var(--space-2) var(--space-3);
+    min-height:48px; padding:calc(var(--space-2) + env(safe-area-inset-top)) 108px var(--space-2) var(--space-3);
     border-bottom:1px solid var(--line-soft); background:var(--panel);
     min-width:0;
   }
@@ -417,7 +417,8 @@
   #settings-btn .count.hidden { display:none; }
   /* 设置弹层：默认不出现；归档列表在打开时才建节点。 */
   #settings { position:fixed; inset:0; z-index:40; display:flex;
-              align-items:center; justify-content:center; padding:var(--space-5);
+              align-items:center; justify-content:center;
+              padding:max(var(--space-5), env(safe-area-inset-top)) var(--space-5) max(var(--space-5), env(safe-area-inset-bottom));
               background:rgba(0,0,0,.5); }
   #settings.hidden { display:none; }
   .settings-card { width:min(400px, 100%); max-height:min(72vh, 620px);
@@ -586,7 +587,7 @@
 
   /* 代码块：**明显**的一块——底色、边框、圆角、内边距；自己横向/纵向滚，
      不撑破气泡（`.bubble` 与 `.msg` 上的 min-width:0 是这条能成立的前提）。 */
-  .code { margin:10px 0 0; border:1px solid var(--code-line); border-radius:10px;
+  .code { position:relative; margin:10px 0 0; border:1px solid var(--code-line); border-radius:10px;
           overflow:hidden; background:var(--code-bg); max-width:100%; }
   .code-bar { display:flex; align-items:center; gap:8px; padding:5px 8px 5px 12px;
               background:var(--code-bar); color:var(--text-dim);
@@ -598,9 +599,13 @@
               border:1px solid var(--line); background:transparent;
               color:var(--text-dim); cursor:pointer; font:12px/1.6 var(--sans); }
   .copy-btn:hover { color:var(--text); border-color:var(--text-dim); }
-  .code pre { margin:0; padding:11px 13px; max-height:360px; overflow:auto;
+  .code pre { margin:0; padding:11px 13px; max-height:360px; overflow:auto; overflow-x:auto;
               font:13px/1.55 var(--mono); color:var(--text);
               scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
+  .code.code-x::after { content:"横向滚动"; position:absolute; right:0; bottom:0; z-index:1;
+              pointer-events:none; padding:2px 8px 3px 28px;
+              font:10px/16px var(--sans); color:var(--text-faint);
+              background:linear-gradient(to left, var(--code-bg) 58%, transparent); }
   .msg.user .code { border-color:var(--line); }
 
   /* 历史：一条分隔线 + 略淡。**不在页面上写任何实现说明**——
@@ -610,6 +615,11 @@
   .history-sep::before, .history-sep::after { content:""; flex:1;
                  border-top:1px solid var(--line-soft); }
   .msg.history { opacity:.86; }
+  .msg-time { align-self:flex-end; margin:1px 2px 0; color:var(--text-faint);
+              font-size:11px; line-height:1.15; }
+  .day-sep { display:flex; align-items:center; gap:8px; margin:6px 0 2px;
+             color:var(--text-faint); font-size:11px; line-height:1.2; }
+  .day-sep::before, .day-sep::after { content:""; flex:1; height:1px; background:var(--line-soft); }
 
   /* ── 待确认：**对话流里**的一张卡片（ChatGPT 的工具调用卡片那一挂） ──
      没有待确认内容时它整个不存在：HTML 里没有这块的占位，节点也不建。
@@ -774,7 +784,9 @@
   #tasks-panel.hidden { display:none; }
   .tasks-sheet { width:100%; height:100%; min-height:0; display:flex;
                  flex-direction:column; background:var(--panel); color:var(--text);
-                 border-left:1px solid var(--line); box-shadow:var(--shadow-overlay); }
+                 border-left:1px solid var(--line); box-shadow:var(--shadow-overlay);
+                 padding-top:env(safe-area-inset-top);
+                 padding-bottom:env(safe-area-inset-bottom); }
   .tasks-head { display:flex; align-items:center; gap:var(--space-2);
                 padding:var(--space-3) var(--space-3) var(--space-2);
                 border-bottom:1px solid var(--line-soft); }
@@ -835,6 +847,7 @@
     .tasks-sheet { height:100%; border-left:0;
                    border-radius:var(--radius-lg) var(--radius-lg) 0 0;
                    box-shadow:var(--shadow-overlay);
+                   padding-top:env(safe-area-inset-top);
                    padding-bottom:env(safe-area-inset-bottom); }
     #tasks-btn, #tasks-close { min-height:44px; }
     #tasks-close { min-width:44px; }
@@ -899,6 +912,8 @@
     #menu { display:flex; }
     .top-rule { display:none; }
     #sidebar { position:fixed; top:0; bottom:0; left:0; width:282px;
+               padding-top:env(safe-area-inset-top);
+               padding-bottom:env(safe-area-inset-bottom);
                transform:translateX(-100%); transition:transform .18s ease;
                pointer-events:none;
                box-shadow:0 0 40px rgba(0,0,0,.5); }
@@ -923,7 +938,10 @@
     .st-panel { position:fixed; left:0; right:0; bottom:0; top:auto; width:auto;
                 max-height:52vh; z-index:1;
                 border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                padding-top:calc(var(--space-3) + env(safe-area-inset-top));
                 padding-bottom:calc(var(--space-4) + env(safe-area-inset-bottom)); }
+    .msg-time { font-size:10px; margin-top:0; }
+    .day-sep { margin:4px 0 1px; font-size:10px; }
     body:has(#st-panel:not(.hidden))::before { content:""; position:fixed; inset:0;
                 z-index:29; background:rgba(0,0,0,.5); pointer-events:none; }
     #st-health { top:8px; height:44px; max-width:128px; }
@@ -934,7 +952,7 @@
     }
     #send { width:44px; height:44px; }
     #menu { width:44px; height:44px; }
-    #settings { align-items:flex-end; padding:0; }
+    #settings { align-items:flex-end; padding:env(safe-area-inset-top) 0 0; }
     .settings-card { width:100%; max-height:78vh;
                      border-radius:var(--radius-lg) var(--radius-lg) 0 0;
                      padding-bottom:env(safe-area-inset-bottom); }

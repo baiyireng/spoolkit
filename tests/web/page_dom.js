@@ -2767,6 +2767,55 @@ async function extras2() {
     archived_pencils: document.querySelectorAll('.rename').length,
     archived_row: Boolean(archivedRow),
   };
+  const codeHost = document.createElement('div');
+  ctx.__spoolTest.fillRich(codeHost, '```py\n' + 'x'.repeat(40) + '\n```');
+  const overflowBlock = codeHost.querySelector('.code');
+  const overflowPre = overflowBlock.querySelector('pre');
+  const overflowCopy = overflowBlock.querySelector('.copy-btn');
+  const overflowText = overflowBlock.querySelector('code').textContent;
+  overflowPre.clientWidth = 30;
+  overflowPre.scrollWidth = 180;
+  overflowPre.scrollLeft = 0;
+  overflowPre.onscroll();
+  const overflowOn = overflowBlock.classList.contains('code-x');
+  overflowPre.scrollLeft = 160;
+  overflowPre.onscroll();
+  const overflowEnd = overflowBlock.classList.contains('code-x');
+  overflowPre.clientWidth = 180;
+  overflowPre.scrollWidth = 180;
+  overflowPre.scrollLeft = 0;
+  overflowPre.onscroll();
+  const overflowFit = overflowBlock.classList.contains('code-x');
+  const localAt = (year, month, day, hour, minute) => new Date(year, month - 1, day, hour, minute, 0).getTime() / 1000;
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'readability', WROWS, SROWS_A, [
+    { role: 'user', content: '没有时间戳', meta: '' },
+    { role: 'user', content: '第一天早上', meta: '', created_at: localAt(2026, 10, 20, 9, 5) },
+    { role: 'assistant', content: '第一天晚上', meta: '', created_at: localAt(2026, 10, 20, 18, 40) },
+    { role: 'user', content: '第二天早上', meta: '', created_at: localAt(2026, 10, 21, 8, 1) },
+    { role: 'assistant', content: '零时间', meta: '', created_at: 0 },
+  ]));
+  let bare = null;
+  let zero = null;
+  const clocks = [];
+  for (const bubble of ids.get('stream').querySelectorAll('.bubble')) {
+    const wrap = bubble.parentNode;
+    const time = wrap ? wrap.querySelector('.msg-time') : null;
+    if (bubble.textContent === '没有时间戳') { bare = time ? time.textContent : ''; }
+    else if (bubble.textContent === '零时间') { zero = time ? time.textContent : ''; }
+    else if (time) { clocks.push(time.textContent); }
+  }
+  out.message_read = {
+    overflow_on: overflowOn,
+    overflow_end: overflowEnd,
+    overflow_fit: overflowFit,
+    copy: overflowCopy ? overflowCopy.textContent : '',
+    copy_click: overflowCopy ? typeof overflowCopy.onclick === 'function' : false,
+    code_text: overflowText,
+    bare: bare,
+    zero: zero,
+    clocks: clocks,
+    days: ids.get('stream').querySelectorAll('.day-sep').map((node) => node.textContent),
+  };
   ctx.__fetchImpl = null;
 }
 

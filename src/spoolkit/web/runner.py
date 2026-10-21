@@ -667,7 +667,7 @@ class Runner:
                     "meta": row["meta"] or "",
                     # **只增**：写这条消息的墙钟。它给 `attach_traces` 用来认领
                     # "这条消息属于哪一轮"（按时间窗口，不按正文比对——同一句话
-                    # 可能被跑两遍），页面上不显示它。
+                    # 可能被跑两遍）。页面只拿它画轻量时间和跨天分隔。
                     "created_at": float(row["created_at"]),
                 }
                 for row in rows

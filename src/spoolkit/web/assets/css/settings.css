@@ -13,7 +13,8 @@
   #settings-btn .count.hidden { display:none; }
   /* 设置弹层：默认不出现；归档列表在打开时才建节点。 */
   #settings { position:fixed; inset:0; z-index:40; display:flex;
-              align-items:center; justify-content:center; padding:var(--space-5);
+              align-items:center; justify-content:center;
+              padding:max(var(--space-5), env(safe-area-inset-top)) var(--space-5) max(var(--space-5), env(safe-area-inset-bottom));
               background:rgba(0,0,0,.5); }
   #settings.hidden { display:none; }
   .settings-card { width:min(400px, 100%); max-height:min(72vh, 620px);

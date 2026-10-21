@@ -591,8 +591,12 @@ def test_代码块有明显的块样式且不撑破气泡() -> None:
     assert "border:1px solid var(--code-line)" in style
     assert "border-radius:10px" in style
     assert "padding:11px 13px" in style
-    # 自己滚，不撑破气泡
+    # 自己滚，不撑破气泡。溢出时右侧才提示，复制键仍在栏上。
     assert "overflow:auto" in style
+    assert "overflow-x:auto" in style
+    hint = style[style.find("横向滚动") - 40 : style.find("横向滚动") + 180]
+    assert 'content:"横向滚动"' in hint
+    assert "pointer-events:none" in hint
     assert "max-height:360px" in style
     # 气泡与消息必须是 min-width:0，否则 flex 子项不肯收缩，代码会把气泡撑爆
     assert "min-width:0" in style
@@ -1340,6 +1344,9 @@ def test_手机上输入条不被键盘顶掉() -> None:
     assert "interactive-widget=resizes-content" in HTML
     assert "viewport-fit=cover" in HTML
     assert "env(safe-area-inset-bottom)" in HTML
+    assert "env(safe-area-inset-top)" in HTML
+    style = HTML[HTML.find("<style>") : HTML.find("</style>")]
+    assert "padding:calc(var(--space-2) + env(safe-area-inset-top))" in style
     assert "overflow:hidden" in HTML
 
 

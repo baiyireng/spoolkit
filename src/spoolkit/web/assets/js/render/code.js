@@ -107,7 +107,24 @@ function codeBlock(raw) {
   pre.appendChild(codeEl);
   code.appendChild(bar);
   code.appendChild(pre);
+  // 只标记溢出，不改代码节点。滚到最右就收起提示。
+  pre.onscroll = function () { markCodeOverflow(code); };
+  if (typeof ResizeObserver === 'function') {
+    const watch = new ResizeObserver(function () { markCodeOverflow(code); });
+    watch.observe(pre);
+  }
+  markCodeOverflow(code);
   return code;
+}
+
+function markCodeOverflow(block) {
+  const pre = block && block.querySelector ? block.querySelector('pre') : null;
+  if (!pre || !block.classList) { return; }
+  const width = Number(pre.clientWidth) || 0;
+  const full = Number(pre.scrollWidth) || 0;
+  const left = Number(pre.scrollLeft) || 0;
+  const more = width > 0 && full > width + 1 && (left + width) < (full - 1);
+  block.classList.toggle('code-x', more);
 }
 
 // 复制：剪贴板优先，失败再用一次性文本框走 execCommand，

@@ -1064,7 +1064,24 @@ function codeBlock(raw) {
   pre.appendChild(codeEl);
   code.appendChild(bar);
   code.appendChild(pre);
+  // 只标记溢出，不改代码节点。滚到最右就收起提示。
+  pre.onscroll = function () { markCodeOverflow(code); };
+  if (typeof ResizeObserver === 'function') {
+    const watch = new ResizeObserver(function () { markCodeOverflow(code); });
+    watch.observe(pre);
+  }
+  markCodeOverflow(code);
   return code;
+}
+
+function markCodeOverflow(block) {
+  const pre = block && block.querySelector ? block.querySelector('pre') : null;
+  if (!pre || !block.classList) { return; }
+  const width = Number(pre.clientWidth) || 0;
+  const full = Number(pre.scrollWidth) || 0;
+  const left = Number(pre.scrollLeft) || 0;
+  const more = width > 0 && full > width + 1 && (left + width) < (full - 1);
+  block.classList.toggle('code-x', more);
 }
 
 // 复制：剪贴板优先，失败再用一次性文本框走 execCommand，
@@ -2564,6 +2581,45 @@ function adoptMessage(item, isLast) {
 
 // 画一条快照里的往来。助手那一条如果有轨迹，就多一个**默认收起**的「思考过程」；
 // "失败的那一轮"的失败原因与下一步也在这里重新画出来（刷新之后还看得见）。
+let lastMessageDay = '';
+
+function messageDate(item) {
+  if (!item || item.created_at === undefined || item.created_at === null || item.created_at === '') {
+    return null;
+  }
+  const stamp = Number(item.created_at);
+  if (!Number.isFinite(stamp) || stamp <= 0) { return null; }
+  const date = new Date(stamp * 1000);
+  if (Number.isNaN(date.getTime())) { return null; }
+  return date;
+}
+
+function pad2(value) {
+  const number = Number(value) || 0;
+  return number < 10 ? '0' + number : String(number);
+}
+
+function placeMessageTime(wrap, item) {
+  const date = messageDate(item);
+  if (!date || !wrap) { return; }
+  const key = date.getFullYear() + '-' + date.getMonth() + '-' + date.getDate();
+  if (key !== lastMessageDay) {
+    const sep = document.createElement('div');
+    sep.className = 'day-sep';
+    const month = (date.getMonth() + 1) + '月' + date.getDate() + '日';
+    sep.textContent = date.getFullYear() === new Date().getFullYear()
+      ? month
+      : date.getFullYear() + '年' + month;
+    if (wrap.parentNode) { wrap.parentNode.insertBefore(sep, wrap); }
+    lastMessageDay = key;
+  }
+  const time = document.createElement('time');
+  time.className = 'msg-time';
+  time.setAttribute('datetime', date.toISOString());
+  time.textContent = pad2(date.getHours()) + ':' + pad2(date.getMinutes());
+  wrap.appendChild(time);
+}
+
 function concealTrace(card) {
   if (!card || !card.trace) { return; }
   setTraceOpen(card.trace, false);
@@ -2601,6 +2657,7 @@ function historyCard(item) {
     }
     fillReport({bubble: bubble, trace: trace}, item.content);
   }
+  placeMessageTime(wrap, item);
   return wrap;
 }
 
@@ -2674,6 +2731,7 @@ function drawHistory(messages) {
     // 否则卡片引用会指向已经不在页面上的节点。
     stream.replaceChildren();
     ctx.store.set('drawn', 0);
+    lastMessageDay = '';
     live = null;
     pendingReplies = [];
     pendingUser = '';
@@ -2740,6 +2798,7 @@ function add(text, cls) {
 
 function resetView() {
   stream.replaceChildren();
+  lastMessageDay = '';
   ctx.store.set('drawn', 0);
   ctx.store.set('armed', '');
   // 卡片节点已经跟着 `replaceChildren` 一起没了：引用与状态也得一起清，
