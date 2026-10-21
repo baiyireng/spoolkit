@@ -103,7 +103,7 @@ def test_连续两次编辑和未关联diff不串task_id(tmp_path: Path) -> None
     missing = by_call["tc-missing"]
     assert len(missing) == 1
     assert missing[0]["task_id"] == ""
-    assert missing[0]["run_id"] == ""
+    assert missing[0]["run_id"] == "t:-"
     assert missing[0]["turn_id"] == ""
     assert missing[0]["status"] == "await"
     assert [item["seq"] for item in stored] == list(range(1, len(stored) + 1))
@@ -137,6 +137,106 @@ def test_命令授权的await和confirm共用tool_call_id(tmp_path: Path) -> Non
     assert logged[0]["reason"].startswith("这条命令需要你批准")
     assert logged[1]["applied"] is True
     assert logged[1]["count"] == 1
+
+
+def _path(tmp_path: Path, session: str = "t") -> Path:
+    from spoolkit.session_state import safe
+
+    return tmp_path / ".agent" / "task-events" / f"{safe(session)}.jsonl"
+
+
+def test_写入后同会话能恢复(tmp_path: Path) -> None:
+    runner = Runner(tmp_path, session="t")
+    tool = _tool("task", "tc-0-0", 1)
+    tool.data["run_id"] = ""
+    tool.data["turn_id"] = "turn-9"
+    tool.data["raw"] = "SECRET_RAW"
+    tool.data["thought"] = "秘密思考"
+    runner._absorb(tool)
+    runner._absorb(Event("diff", {"path": "a.py", "text": "@@", "tool_call_id": "tc-0-0"}))
+    runner._absorb(Event("confirm", {"applied": True, "count": 1, "tool_call_ids": ["tc-0-0"]}))
+    first = _events(runner)
+    assert first[0]["task_id"] == "task"
+    assert first[0]["run_id"] == "t:turn-9"
+    assert "SECRET_RAW" not in _path(tmp_path).read_text(encoding="utf-8")
+    assert "秘密思考" not in _path(tmp_path).read_text(encoding="utf-8")
+    assert "raw" not in first[0]
+    assert "thought" not in first[0]
+
+    again = Runner(tmp_path, session="t")
+    assert _events(again) == first
+    chained = [item for item in _events(again) if item["tool_call_id"] == "tc-0-0"]
+    assert [item["phase"] for item in chained] == ["observe", "approval", "approval"]
+    assert {item["run_id"] for item in chained} == {"t:turn-9"}
+    logged = runner.events()
+    assert logged[0]["type"] == "task_event"
+    assert logged[1]["type"] == "diff"
+    assert logged[1]["path"] == "a.py"
+
+
+def test_坏行跳过且重复行只留一条(tmp_path: Path) -> None:
+    from spoolkit.agent.contract import tool_event
+
+    payload = tool_event(
+        task_id="job",
+        run_id="run-1",
+        turn_id="turn-1",
+        seq=1,
+        step=0,
+        tool_call_id="tc-0-0",
+        status="ok",
+        summary="看过了",
+    ).to_dict()
+    line = json.dumps(payload, ensure_ascii=False)
+    path = _path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        line + "\nnot-json\n" + line + "\n{\"phase\": \"nope\"}\n\n",
+        encoding="utf-8",
+    )
+    runner = Runner(tmp_path, session="t")
+    assert _events(runner) == [payload]
+    kept = [item for item in path.read_text(encoding="utf-8").splitlines() if item.strip()]
+    assert kept == [line]
+
+
+def test_超过上限只留最近几条(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("spoolkit.web.runner.TASK_EVENT_LIMIT", 2)
+    runner = Runner(tmp_path, session="t")
+    for seq, call_id in enumerate(("tc-0-0", "tc-0-1", "tc-0-2"), start=1):
+        runner._absorb(_tool("job", call_id, seq))
+    stored = _events(runner)
+    assert [item["tool_call_id"] for item in stored] == ["tc-0-1", "tc-0-2"]
+    again = Runner(tmp_path, session="t")
+    assert [item["tool_call_id"] for item in _events(again)] == ["tc-0-1", "tc-0-2"]
+    assert len(_path(tmp_path).read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_不同run的approval互不覆盖(tmp_path: Path) -> None:
+    runner = Runner(tmp_path, session="t")
+    for run_id, seq in (("run-a", 1), ("run-b", 2)):
+        tool = _tool("job", "tc-0-0", seq)
+        tool.data["run_id"] = run_id
+        tool.data["turn_id"] = run_id
+        runner._absorb(tool)
+        runner._absorb(Event("diff", {"path": "a.py", "text": run_id, "tool_call_id": "tc-0-0"}))
+    approvals = [item for item in _events(runner) if item["phase"] == "approval"]
+    assert [(item["run_id"], item["tool_call_id"], item["status"]) for item in approvals] == [
+        ("run-a", "tc-0-0", "await"),
+        ("run-b", "tc-0-0", "await"),
+    ]
+    assert approvals[0]["task_id"] == "job"
+    assert approvals[1]["summary"].startswith("a.py")
+    again = Runner(tmp_path, session="t")
+    assert _events(again) == _events(runner)
+
+
+def test_写入失败不丢掉内存里的事件(tmp_path: Path) -> None:
+    (tmp_path / ".agent").write_text("not-a-directory", encoding="utf-8")
+    runner = Runner(tmp_path, session="t")
+    runner._absorb(_tool("job", "tc-0-0", 1))
+    assert _events(runner)[0]["tool_call_id"] == "tc-0-0"
+    assert _events(runner)[0]["run_id"] == "run-1"
 
 
 def test_协议行能进runner(tmp_path: Path) -> None:

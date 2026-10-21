@@ -10,6 +10,7 @@
 否则「确认流程」这种时序敏感的行为只能靠真 agent 跑几十秒来验证。
 """
 
+import json
 import queue
 import sqlite3
 import subprocess
@@ -21,9 +22,10 @@ from collections.abc import Callable
 from typing import Sequence
 
 from spoolkit import health as health_mod
+from spoolkit.agent.contract import TaskEvent, approval_event
 from spoolkit.bridge.pairing import Pairings
 from spoolkit.memory.transcript import ASSISTANT, recent_messages
-from spoolkit.agent.contract import approval_event
+from spoolkit.session_state import safe as safe_session
 from spoolkit.tools.types import Artifact
 from spoolkit.web.protocol import (
     AWAIT,
@@ -91,6 +93,9 @@ TRACE_TURNS = 4
 # 事件留痕的条数上限。外部驱动者（MCP 那条路）不能订阅 SSE，只能按序号轮询，
 # 所以事件必须留一段。留全量不行：长任务的事件是几千条，内存里攒着没意义。
 EVENT_LOG = 400
+
+#: 每个会话的任务时间线最多留这么多条。再多就丢掉最旧的，快照不跟着文件无限涨。
+TASK_EVENT_LIMIT = 2000
 
 # 聊天区域里回放多少条历史。面向页面的往来；模型拿的是另一份
 # 截断后的最近几轮（`conversational_prompt`），不是这份完整回放。
@@ -350,11 +355,16 @@ class Runner:
         # 因为"上次看到第几条"是驱动者唯一能说的话。
         self._log: list[dict] = []
         self._log_seq = 0
-        # 任务时间线只留在这次运行的内存里。派生的 approval 也写在这里。
+        # 任务时间线按会话落在 `.agent/task-events/<session>.jsonl`。
+        # 派生的 approval 也写在这里。启动时从文件恢复。
         self._task_events: list[dict] = []
         self._task_event_ids: set[tuple] = set()
-        self._tool_context: dict[str, dict] = {}
+        # (run_id, tool_call_id) -> 那次调用的任务坐标。同一调用只记第一次。
+        self._tool_context: dict[tuple[str, str], dict] = {}
+        # tool_call_id -> 最近一次出现它的 run_id。现场派生用它，不按路径猜。
+        self._tool_latest: dict[str, str] = {}
         self._task_seq = 1
+        self._load_task_events()
         # 这一轮的思考轨迹（`trace_line` 推出来的行），以及封存下来的前几轮。
         # 页面刷新 / 切走再切回时，排错要看的正是这两样（见 `attach_traces`）。
         self._trace: list[dict] = []
@@ -410,10 +420,7 @@ class Runner:
             self._diffs = []
             self._log = []
             self._log_seq = 0
-            self._task_events = []
-            self._task_event_ids = set()
-            self._tool_context = {}
-            self._task_seq = 1
+            # 任务时间线跟着会话走，不因新开一轮就清掉。上限在写入时裁。
             # 新的一轮：轨迹重新开始攒，上一轮已经由 `_seal_turn_locked` 封存
             # （刷新 / 切回时还能回看它），停止标记也要清掉——那是上一轮的事。
             self._trace = []
@@ -715,30 +722,190 @@ class Runner:
             status = "confirmed" if event.data.get("applied") else "rejected"
             self._derive_edit_confirm_locked(event.data, status)
 
-    def _store_task_event_locked(self, payload: dict) -> None:
+    def _task_event_path(self) -> Path:
+        return self.project_root / ".agent" / "task-events" / f"{safe_session(self.session)}.jsonl"
+
+    def _fallback_run_id(self, turn_id: str) -> str:
+        """没有 run_id 时用会话和轮次拼一个稳定值。不随机。"""
+        turn = turn_id or "-"
+        return f"{safe_session(self.session)}:{turn}"
+
+    def _load_task_events(self) -> None:
+        """读本会话的 JSONL。坏行跳过，重复行只留一条。读失败就当没有。"""
+        path = self._task_event_path()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        dirty = False
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                dirty = True
+                continue
+            if not isinstance(data, dict):
+                dirty = True
+                continue
+            normalized = self._coerce_task(data)
+            if normalized is None:
+                dirty = True
+                continue
+            if "raw" in data or "thought" in data or str(data.get("run_id") or "") != normalized["run_id"]:
+                dirty = True
+            if not self._insert_task_locked(normalized):
+                dirty = True
+        if len(self._task_events) > TASK_EVENT_LIMIT:
+            self._task_events = self._task_events[-TASK_EVENT_LIMIT:]
+            self._reindex_task_locked()
+            dirty = True
+        if dirty:
+            self._rewrite_task_file_locked()
+
+    def _coerce_task(self, data: dict) -> dict | None:
+        """收成 TaskEvent.to_dict()。raw / thought 不留下。run_id 空则回退。"""
+        phase = str(data.get("phase") or "")
+        source = str(data.get("source") or "")
+        turn_id = str(data.get("turn_id") or "")
+        run_id = str(data.get("run_id") or "") or self._fallback_run_id(turn_id)
+        try:
+            seq = int(data.get("seq") or 0)
+            step = int(data.get("step") or 0)
+        except (TypeError, ValueError):
+            return None
+        artifacts: list[Artifact] = []
+        raw_artifacts = data.get("artifacts") or []
+        if isinstance(raw_artifacts, list):
+            for item in raw_artifacts:
+                if not isinstance(item, dict):
+                    continue
+                artifacts.append(
+                    Artifact(
+                        type=str(item.get("type") or ""),
+                        path=str(item.get("path") or ""),
+                        ref=str(item.get("ref") or ""),
+                    )
+                )
+        raw_refs = data.get("refs") or []
+        refs = tuple(str(item) for item in raw_refs) if isinstance(raw_refs, list) else ()
+        duration = data.get("duration")
+        if duration is not None:
+            try:
+                duration = float(duration)
+            except (TypeError, ValueError):
+                duration = None
+        try:
+            event = TaskEvent(
+                task_id=str(data.get("task_id") or ""),
+                run_id=run_id,
+                turn_id=turn_id,
+                seq=seq,
+                step=step,
+                phase=phase,
+                source=source,
+                tool_call_id=str(data.get("tool_call_id") or ""),
+                intent=str(data.get("intent") or ""),
+                args_digest=str(data.get("args_digest") or ""),
+                status=str(data.get("status") or ""),
+                summary=str(data.get("summary") or ""),
+                refs=refs,
+                artifacts=tuple(artifacts),
+                duration=duration,
+                risk=str(data.get("risk") or ""),
+            )
+        except (TypeError, ValueError):
+            return None
+        return event.to_dict()
+
+    def _insert_task_locked(self, payload: dict) -> bool:
+        """放进内存。同一 (task, run, turn, seq) 或同一 run 的 approval 状态不再收。"""
         seq = int(payload.get("seq") or 0)
+        task_id = str(payload.get("task_id") or "")
+        run_id = str(payload.get("run_id") or "")
+        turn_id = str(payload.get("turn_id") or "")
+        task_key = ("task", task_id, run_id, turn_id, seq)
+        if task_key in self._task_event_ids:
+            return False
+        call_id = str(payload.get("tool_call_id") or "")
+        status = str(payload.get("status") or "")
+        approval_key = ("approval", run_id, call_id, status)
+        if payload.get("phase") == "approval" and approval_key in self._task_event_ids:
+            return False
         if seq >= self._task_seq:
             self._task_seq = seq + 1
-        key = (
-            "task",
-            str(payload.get("task_id") or ""),
-            str(payload.get("run_id") or ""),
-            str(payload.get("turn_id") or ""),
-            seq,
-        )
-        if key in self._task_event_ids:
-            return
-        self._task_event_ids.add(key)
+        self._task_event_ids.add(task_key)
+        if payload.get("phase") == "approval":
+            self._task_event_ids.add(approval_key)
         self._task_events.append(payload)
-        call_id = str(payload.get("tool_call_id") or "")
-        if call_id and call_id not in self._tool_context:
-            self._tool_context[call_id] = {
-                "task_id": str(payload.get("task_id") or ""),
-                "run_id": str(payload.get("run_id") or ""),
-                "turn_id": str(payload.get("turn_id") or ""),
-                "step": int(payload.get("step") or 0),
-                "seq": seq,
-            }
+        if call_id:
+            slot = (run_id, call_id)
+            if slot not in self._tool_context:
+                self._tool_context[slot] = {
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "turn_id": turn_id,
+                    "step": int(payload.get("step") or 0),
+                    "seq": seq,
+                }
+            self._tool_latest[call_id] = run_id
+        return True
+
+    def _reindex_task_locked(self) -> None:
+        kept = list(self._task_events)
+        self._task_events = []
+        self._task_event_ids = set()
+        self._tool_context = {}
+        self._tool_latest = {}
+        self._task_seq = 1
+        for item in kept:
+            self._insert_task_locked(item)
+
+    def _context_for(self, call_id: str) -> dict | None:
+        if not call_id:
+            return None
+        run_id = self._tool_latest.get(call_id)
+        if not run_id:
+            return None
+        return self._tool_context.get((run_id, call_id))
+
+    def _store_task_event_locked(self, payload: dict) -> None:
+        normalized = self._coerce_task(payload)
+        if normalized is None:
+            return
+        if not self._insert_task_locked(normalized):
+            return
+        self._persist_task_locked()
+
+    def _persist_task_locked(self) -> None:
+        """追加一行。超过上限就整份重写为最近 N 条。失败不影响已经收进内存的事件。"""
+        if len(self._task_events) > TASK_EVENT_LIMIT:
+            self._task_events = self._task_events[-TASK_EVENT_LIMIT:]
+            self._reindex_task_locked()
+            self._rewrite_task_file_locked()
+            return
+        self._append_task_line_locked(self._task_events[-1])
+
+    def _append_task_line_locked(self, payload: dict) -> None:
+        try:
+            path = self._task_event_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except OSError:
+            return
+
+    def _rewrite_task_file_locked(self) -> None:
+        try:
+            path = self._task_event_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            body = "".join(
+                json.dumps(item, ensure_ascii=False) + "\n" for item in self._task_events
+            )
+            path.write_text(body, encoding="utf-8")
+        except OSError:
+            return
 
     def _derive_diff_locked(self, data: dict) -> None:
         call_id = str(data.get("tool_call_id") or "")
@@ -753,7 +920,9 @@ class Runner:
     def _derive_edit_wait_locked(self, data: dict) -> None:
         """编辑 await 只补还没有 await 的 call_id。diff 已经挂过的不再加一条。"""
         for call_id in self._edit_call_ids(data):
-            if ("approval", call_id, "await") in self._task_event_ids:
+            ctx = self._context_for(call_id)
+            run_id = str(ctx["run_id"]) if ctx else self._fallback_run_id("")
+            if ("approval", run_id, call_id, "await") in self._task_event_ids:
                 continue
             self._approval_locked(
                 tool_call_id=call_id,
@@ -800,15 +969,21 @@ class Runner:
         summary: str,
         artifacts: tuple[Artifact, ...] = (),
     ) -> None:
-        """按 tool_call_id 挂回工具上下文。对不上就留空，不拿别的调用来填。"""
-        key = ("approval", tool_call_id, status)
-        if key in self._task_event_ids:
+        """按 tool_call_id 挂回最近一次同 ID 的运行。对不上就留空，不按路径猜。
+
+        去重键带 run_id：另一轮里同样的 tc-0-0 / await 不会把这一轮盖掉。
+        """
+        ctx = self._context_for(tool_call_id)
+        turn_id = str(ctx["turn_id"]) if ctx else ""
+        run_id = str(ctx["run_id"]) if ctx else ""
+        if not run_id:
+            run_id = self._fallback_run_id(turn_id)
+        if ("approval", run_id, tool_call_id, status) in self._task_event_ids:
             return
-        ctx = self._tool_context.get(tool_call_id) if tool_call_id else None
         event = approval_event(
             task_id=str(ctx["task_id"]) if ctx else "",
-            run_id=str(ctx["run_id"]) if ctx else "",
-            turn_id=str(ctx["turn_id"]) if ctx else "",
+            run_id=run_id,
+            turn_id=turn_id,
             seq=self._task_seq,
             step=int(ctx["step"]) if ctx else 0,
             tool_call_id=tool_call_id,
@@ -816,19 +991,9 @@ class Runner:
             summary=summary,
             artifacts=artifacts,
         )
-        self._task_seq += 1
-        payload = event.to_dict()
-        self._task_event_ids.add(key)
-        self._task_event_ids.add(
-            (
-                "task",
-                str(payload["task_id"]),
-                str(payload["run_id"]),
-                str(payload["turn_id"]),
-                int(payload["seq"]),
-            )
-        )
-        self._task_events.append(payload)
+        if not self._insert_task_locked(event.to_dict()):
+            return
+        self._persist_task_locked()
 
     def _seal_turn_locked(self) -> None:
         """把这一轮的轨迹封存下来（刷新 / 切走再切回时还要能回看）。持锁调用。
