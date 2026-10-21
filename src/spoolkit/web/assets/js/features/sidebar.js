@@ -22,6 +22,44 @@ function actSpec(label, kind, value, onClick) {
   });
 }
 
+function actGroup(parts) {
+  const items = parts.filter(Boolean);
+  return lineSpec(items.map(function (item) { return item.sig; }).join('|'), function () {
+    const box = document.createElement('span');
+    box.className = 'row-acts';
+    for (let index = 0; index < items.length; index += 1) {
+      box.appendChild(items[index].make());
+    }
+    return box;
+  });
+}
+
+function renameSpec(value) {
+  return lineSpec(JSON.stringify(['rename', value]), function () {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'row-act rename';
+    button.tabIndex = 0;
+    button.dataset.act = 'rename';
+    button.dataset.value = value;
+    button.setAttribute('aria-label', '重命名会话');
+    button.title = '重命名会话';
+    button.innerHTML = ICON.pencil;
+    button.onclick = function (event) {
+      if (event && event.stopPropagation) { event.stopPropagation(); }
+      ctx.sessions.openRename(value, button);
+    };
+    button.onkeydown = function (event) {
+      if (!event) { return; }
+      if (event.stopPropagation) { event.stopPropagation(); }
+      if (event.key !== 'Enter' && event.key !== ' ') { return; }
+      if (event.preventDefault) { event.preventDefault(); }
+      ctx.sessions.openRename(value, button);
+    };
+    return button;
+  });
+}
+
 function rowSpec(label, title, on, onClick, key, kind, act, running) {
   // 签名里**不含**"亮不亮"：切一行的高亮只改类，不重建节点（`markChosen` 收尾）。
   return lineSpec(
@@ -49,6 +87,8 @@ function row(label, title, on, onClick, key, kind, act, running) {
     line.tabIndex = 0;
     line.onkeydown = function (event) {
       if (!event) { return; }
+      const target = event.target;
+      if (target && (target.tagName === 'BUTTON' || (target.closest && target.closest('button')))) { return; }
       if (event.key !== 'Enter' && event.key !== ' ') { return; }
       if (event.preventDefault) { event.preventDefault(); }
       onClick();
@@ -282,6 +322,16 @@ function renderSidebar(wrows, srows, sremoved, key, locked, query) {
     const label = ctx.sessions.sessionRowTitle({id: one.value, title: one.title});
     if (q && !queryHit(q, [one.title, label, one.value]) && !on) { continue; }
     const removable = !locked && !ctx.store.get('readonly');
+    const acts = [];
+    // 只给当前这条、且不是只读/归档的行摆铅笔。点它不能冒泡成切换。
+    if (on && !ctx.store.get('readonly') && !one.archived) {
+      acts.push(renameSpec(one.value));
+    }
+    if (removable) {
+      acts.push(actSpec('移除', 'remove', one.value, (function (value) {
+        return function () { ctx.sessions.requestRemove(value); };
+      })(one.value)));
+    }
     // 标题优先、id 退到右边的小字：uuid / 时间戳只用来定位，不该当名字读。
     sessSpecs.push(rowSpec(
       label,
@@ -292,11 +342,7 @@ function renderSidebar(wrows, srows, sremoved, key, locked, query) {
       })(one.value),
       one.value,
       'sess',
-      removable
-        ? actSpec('移除', 'remove', one.value, (function (value) {
-            return function () { ctx.sessions.requestRemove(value); };
-          })(one.value))
-        : null,
+      acts.length ? actGroup(acts) : null,
       // 「正在跑」的键是 (工作区, 会话)：别的会话在跑也要标出来
       // （切走不杀任务，见设计 §3.4）。
       Boolean(live[keyFor(here, one.value)])
@@ -367,7 +413,7 @@ function drawTarget(state) {
       return {value: w.root, name: w.name || w.root, alias: w.alias || '', ready: w.ready};
     }),
     sessions.map(function (s) {
-      return {value: s.id, title: s.title || '', text: s.title || s.id};
+      return {value: s.id, title: s.title || '', text: s.title || s.id, archived: !!s.archived};
     }),
     // 已移除（归档）的那几条单独一段：删了还能放回来，才算"移除"而不是"毁掉"。
     (state.sessions_removed || []).map(function (s) {

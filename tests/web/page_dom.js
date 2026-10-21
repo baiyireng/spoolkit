@@ -2454,5 +2454,147 @@ async function extras2() {
     ready: historyNode ? historyNode.textContent : '',
   };
   ctx.__fetchImpl = null;
+
+  const renameRows = [
+    { id: 'a1', title: 'A 的第 1 条', title_source: 'agent', archived: false, last_active: 2, current: true },
+    { id: 'a2', title: '另一条', title_source: 'agent', archived: false, last_active: 1, current: false },
+  ];
+  const renameTarget = {
+    root: ROOT_A, session: 'a1', session_title: 'A 的第 1 条',
+    session_title_source: 'agent', pinned: false,
+    workspace_source: 'explicit', session_source: 'explicit', note: '',
+  };
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, renameRows, history(0, ''), {
+    target: renameTarget,
+  }));
+  const streamBefore = ids.get('stream').children.length;
+  const current = rowByName('sessions', 'A 的第 1 条');
+  const other = rowByName('sessions', '另一条');
+  const pencil = current ? current.querySelector('.rename') : null;
+  const posts = [];
+  ctx.__fetchImpl = (url, opts) => {
+    let body = null;
+    try { body = opts && opts.body ? JSON.parse(opts.body) : null; } catch (err) { body = opts && opts.body; }
+    posts.push({ url: url, body: body });
+    return Promise.resolve({
+      ok: true, status: 200,
+      json: async () => ({ session: 'a1', title: '人手标题', title_source: 'manual' }),
+    });
+  };
+  if (pencil) { pencil.focus(); }
+  const pencilFocused = document.activeElement === pencil;
+  if (pencil) { pencil.onclick({ stopPropagation() {} }); }
+  const input = ids.get('rename-input');
+  const dialog = ids.get('rename');
+  const save = ids.get('rename-save');
+  const closer = ids.get('rename-close');
+  const renameOpened = {
+    hidden: dialog ? dialog.classList.contains('hidden') : true,
+    value: input ? input.value : '',
+    focused: document.activeElement === input,
+    selected: Boolean(input) && input.selectionStart === 0 && input.selectionEnd === input.value.length,
+  };
+  if (save) { save.focus(); }
+  document.onkeydown({ key: 'Tab', shiftKey: false, preventDefault() {} });
+  const tabToClose = document.activeElement === closer;
+  if (closer) { closer.focus(); }
+  document.onkeydown({ key: 'Tab', shiftKey: true, preventDefault() {} });
+  const tabToSave = document.activeElement === save;
+  if (input) { input.focus(); }
+  const postsBeforeSave = posts.length;
+  document.onkeydown({ key: 'Enter', preventDefault() {} });
+  await settleTasks();
+  const savedRow = rowByName('sessions', '人手标题');
+  const savedState = ctx.__spoolTest.store.get('lastState') || {};
+  let source = '';
+  for (const one of (savedState.sessions || [])) {
+    if (one.id === 'a1') { source = one.title_source; }
+  }
+  const successFocus = document.activeElement && document.activeElement.dataset
+    ? document.activeElement.dataset.act : '';
+  const closedAfterSave = dialog ? dialog.classList.contains('hidden') : false;
+  const whereAfterSave = ids.get('where').textContent;
+  const again = savedRow ? savedRow.querySelector('.rename') : null;
+  if (again) { again.onclick({ stopPropagation() {} }); }
+  if (input) { input.value = '   '; }
+  const renamePostsBeforeEmpty = posts.length;
+  document.onkeydown({ key: 'Enter', preventDefault() {} });
+  await settleTasks();
+  const emptyError = ids.get('rename-error') ? ids.get('rename-error').textContent : '';
+  const emptyValue = input ? input.value : '';
+  if (input) { input.value = '字'.repeat(41); }
+  const postsBeforeLong = posts.length;
+  document.onkeydown({ key: 'Enter', preventDefault() {} });
+  await settleTasks();
+  const longError = ids.get('rename-error') ? ids.get('rename-error').textContent : '';
+  const longLen = input ? input.value.length : 0;
+  ctx.__fetchImpl = (url, opts) => {
+    let body = null;
+    try { body = opts && opts.body ? JSON.parse(opts.body) : null; } catch (err) { body = opts && opts.body; }
+    posts.push({ url: url, body: body });
+    return Promise.resolve({
+      ok: false, status: 400,
+      json: async () => ({ error: '没有叫 x 的会话。' }),
+    });
+  };
+  if (input) { input.value = '  保留   输入  '; }
+  const postsBeforeServer = posts.length;
+  document.onkeydown({ key: 'Enter', preventDefault() {} });
+  await settleTasks();
+  const serverError = ids.get('rename-error') ? ids.get('rename-error').textContent : '';
+  const serverValue = input ? input.value : '';
+  const serverOpen = dialog ? !dialog.classList.contains('hidden') : false;
+  document.onkeydown({ key: 'Escape', preventDefault() {} });
+  const escFocus = document.activeElement && document.activeElement.dataset
+    ? document.activeElement.dataset.value : '';
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, renameRows, history(0, ''), {
+    readonly: true,
+    target: renameTarget,
+  }));
+  const readonlyPencils = document.querySelectorAll('.rename').length;
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, [
+    { id: 'a1', title: 'A 的第 1 条', title_source: 'agent', archived: true, last_active: 2, current: true },
+  ], history(0, ''), { target: renameTarget }));
+  const archivedRow = rowByName('sessions', 'A 的第 1 条');
+  out.session_rename = {
+    pencil: Boolean(pencil),
+    other_pencil: Boolean(other && other.querySelector('.rename')),
+    label: pencil ? pencil.getAttribute('aria-label') : '',
+    tab: pencil ? pencil.tabIndex : -1,
+    pencil_focused: pencilFocused,
+    role: dialog ? dialog.getAttribute('role') : '',
+    modal: dialog ? dialog.getAttribute('aria-modal') : '',
+    open: renameOpened.hidden === false,
+    value: renameOpened.value,
+    focused: renameOpened.focused,
+    selected: renameOpened.selected,
+    maxlength: input ? input.getAttribute('maxlength') : 'missing',
+    click_posts: posts.slice(0, postsBeforeSave),
+    tab_to_close: tabToClose,
+    tab_to_save: tabToSave,
+    saved_body: posts[postsBeforeSave] ? posts[postsBeforeSave].body : null,
+    name: savedRow ? savedRow.querySelector('.nm').textContent : '',
+    where: whereAfterSave,
+    source: source,
+    stream_same: ids.get('stream').children.length === streamBefore,
+    closed: closedAfterSave,
+    success_focus: successFocus,
+    empty_error: emptyError,
+    empty_value: emptyValue,
+    empty_posts: postsBeforeLong - renamePostsBeforeEmpty,
+    long_error: longError,
+    long_len: longLen,
+    long_posts: postsBeforeServer - postsBeforeLong,
+    server_error: serverError,
+    server_value: serverValue,
+    server_open: serverOpen,
+    server_body: posts[postsBeforeServer] ? posts[postsBeforeServer].body : null,
+    esc_hidden: dialog ? dialog.classList.contains('hidden') : false,
+    esc_focus: escFocus,
+    readonly_pencils: readonlyPencils,
+    archived_pencils: document.querySelectorAll('.rename').length,
+    archived_row: Boolean(archivedRow),
+  };
+  ctx.__fetchImpl = null;
 }
 

@@ -296,6 +296,33 @@ document.onclick = function (event) {
 // 所以除了 `goalBox.onkeydown` 那条，这里再挂一道。
 document.onkeydown = function (event) {
   if (!event) { return; }
+  // 重命名开着时先吃掉 Esc / Enter / Tab，避免落到设置、任务或抽屉上。
+  if (store.get('renameOpen')) {
+    if (event.key === 'Escape') {
+      app.sessions.closeRename();
+      return;
+    }
+    if (event.key === 'Enter') {
+      if (event.preventDefault) { event.preventDefault(); }
+      app.sessions.saveRename();
+      return;
+    }
+    if (event.key === 'Tab') {
+      const nodes = app.sessions.renameFocusables();
+      if (nodes.length < 2) { return; }
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    return;
+  }
   if (store.get('settingsOpen')) {
     if (event.key === 'Escape') {
       app.settings.setSettingsOpen(false);

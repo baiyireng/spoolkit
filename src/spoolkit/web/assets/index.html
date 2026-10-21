@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark light">
 <title>spool</title>
 
-<link rel="stylesheet" href="/assets/dist/app.1db07dda61c2.css">
+<link rel="stylesheet" href="/assets/dist/app.d8e25aacdcbf.css">
 </head>
 <body>
 <!-- 右上角那一列：常驻提示（徽标 + 详情浮层）与通知。两者都在**文档流之外**
@@ -135,6 +135,24 @@
   </div>
 </div>
 
-<script src="/assets/dist/app.7376441450e4.js" defer></script>
+<div id="rename" class="hidden" role="dialog" aria-modal="true"
+     aria-labelledby="rename-title" aria-hidden="true">
+  <form id="rename-form" class="rename-card" action="#" method="post">
+    <div class="rename-head">
+      <h2 id="rename-title">重命名会话</h2>
+      <button id="rename-close" type="button" class="icon-btn"
+              aria-label="取消重命名" title="取消重命名"></button>
+    </div>
+    <label class="rename-label" for="rename-input">会话标题</label>
+    <input id="rename-input" type="text" aria-label="会话标题" autocomplete="off">
+    <p id="rename-error" class="rename-error" role="alert"></p>
+    <div class="rename-actions">
+      <button id="rename-cancel" type="button">取消</button>
+      <button id="rename-save" type="submit">保存</button>
+    </div>
+  </form>
+</div>
+
+<script src="/assets/dist/app.b4ae6a74c82c.js" defer></script>
 </body>
 </html>

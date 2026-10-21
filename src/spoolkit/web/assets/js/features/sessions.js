@@ -112,6 +112,138 @@ function requestRestore(value) {
   act('/session/restore', {session: value}, '已恢复会话 ' + value);
 }
 
+// 人手改标题。空白折成一格，空的和超过 40 字的就地拦住，不发给服务端，也不截断。
+const TITLE_LIMIT = 40;
+let renameSessionId = '';
+let renameOpener = null;
+let renameSaving = false;
+
+function cleanTitle(raw) {
+  return String(raw || '').trim().split(/\s+/).filter(function (part) { return part; }).join(' ');
+}
+
+function lookupTitle(id) {
+  const snap = ctx.store.get('lastState') || {};
+  const rows = snap.sessions || [];
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index].id === id) { return String(rows[index].title || ''); }
+  }
+  const target = snap.target || {};
+  if (target.session === id) { return String(target.session_title || ''); }
+  return '';
+}
+
+function showRenameError(message) {
+  if (renameError) { renameError.textContent = message || ''; }
+}
+
+function setRenameBusy(busy) {
+  renameSaving = busy;
+  const nodes = [renameInput, renameSave, renameCancel, renameClose];
+  for (let index = 0; index < nodes.length; index += 1) {
+    if (nodes[index]) { nodes[index].disabled = busy; }
+  }
+}
+
+function findRenameButton(id) {
+  const buttons = document.querySelectorAll('.rename');
+  for (let index = 0; index < buttons.length; index += 1) {
+    const button = buttons[index];
+    if (button.dataset && button.dataset.value === id) { return button; }
+  }
+  return null;
+}
+
+function renameFocusables() {
+  const nodes = [renameClose, renameInput, renameCancel, renameSave];
+  return nodes.filter(function (node) {
+    return node && !node.disabled && typeof node.focus === 'function';
+  });
+}
+
+function openRename(id, opener) {
+  if (ctx.store.get('readonly') || !renameBox) { return; }
+  renameSessionId = String(id || '');
+  renameOpener = opener || null;
+  const title = lookupTitle(renameSessionId);
+  if (renameInput) {
+    renameInput.value = title;
+    renameInput.selectionStart = 0;
+    renameInput.selectionEnd = title.length;
+  }
+  showRenameError('');
+  setRenameBusy(false);
+  ctx.store.set('renameOpen', true);
+  renameBox.classList.remove('hidden');
+  renameBox.setAttribute('aria-hidden', 'false');
+  if (renameInput && typeof renameInput.focus === 'function') { renameInput.focus(); }
+}
+
+function closeRename() {
+  if (renameSaving || !renameBox) { return; }
+  ctx.store.set('renameOpen', false);
+  renameBox.classList.add('hidden');
+  renameBox.setAttribute('aria-hidden', 'true');
+  const back = findRenameButton(renameSessionId) || renameOpener;
+  if (back && typeof back.focus === 'function') { back.focus(); }
+}
+
+async function saveRename() {
+  if (renameSaving || !ctx.store.get('renameOpen')) { return; }
+  const cleaned = cleanTitle(renameInput ? renameInput.value : '');
+  if (!cleaned) {
+    showRenameError('标题是空的。');
+    return;
+  }
+  if (cleaned.length > TITLE_LIMIT) {
+    showRenameError('标题最长 ' + TITLE_LIMIT + ' 个字。');
+    return;
+  }
+  setRenameBusy(true);
+  showRenameError('');
+  try {
+    const response = await fetch('/session/rename', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session: renameSessionId, title: cleaned}),
+    });
+    let detail = {};
+    try { detail = await response.json(); } catch (err) { detail = {}; }
+    if (!response.ok) {
+      showRenameError(String((detail && detail.error) || '重命名没有完成。'));
+      return;
+    }
+    const title = String((detail && detail.title) || cleaned);
+    applySessionTitle(renameSessionId, title, 'manual');
+    setRenameBusy(false);
+    closeRename();
+  } catch (err) {
+    showRenameError('重命名没有完成。');
+  } finally {
+    if (renameSaving) { setRenameBusy(false); }
+  }
+}
+
+if (renameClose) {
+  renameClose.innerHTML = ICON.close;
+  renameClose.onclick = function (event) {
+    if (event && event.stopPropagation) { event.stopPropagation(); }
+    closeRename();
+  };
+}
+if (renameCancel) {
+  renameCancel.onclick = function (event) {
+    if (event && event.stopPropagation) { event.stopPropagation(); }
+    closeRename();
+  };
+}
+if (renameForm) {
+  renameForm.onsubmit = function (event) {
+    if (event && event.preventDefault) { event.preventDefault(); }
+    saveRename();
+  };
+}
+
 // 会话这一类动作的公共落地：成功就按返回体重绑（它就是新的 /state）。
 async function act(url, payload, note) {
   const next = await ctx.transport.post(url, payload);
@@ -150,5 +282,5 @@ async function newSession() {
   await ctx.switchTarget({session: made.session});
 }
 
-  return { sessionTitle: sessionTitle, sessionRowTitle: sessionRowTitle, maybeAgentTitle: maybeAgentTitle, applySessionTitle: applySessionTitle, requestRemove: requestRemove, requestRestore: requestRestore, act: act, newSession: newSession };
+  return { sessionTitle: sessionTitle, sessionRowTitle: sessionRowTitle, maybeAgentTitle: maybeAgentTitle, applySessionTitle: applySessionTitle, requestRemove: requestRemove, requestRestore: requestRestore, act: act, newSession: newSession, openRename: openRename, saveRename: saveRename, closeRename: closeRename, renameFocusables: renameFocusables };
 }

@@ -57,6 +57,11 @@
   .row-act.armed { background:var(--danger-bg); color:var(--danger-text);
                    border-color:var(--danger-line); }
   .row-act.back { color:var(--accent); border-color:var(--accent-soft); }
+  .row-acts { flex:0 0 auto; display:inline-flex; align-items:center; gap:4px; min-width:0; }
+  .row-act.rename { display:inline-flex; align-items:center; justify-content:center;
+                    width:28px; height:28px; padding:0; }
+  .row-act.rename svg { width:14px; height:14px; display:block; }
+  .lock .row-act.rename { pointer-events:auto; }
   /* 「已移除」那一行：只是摆在那里等「恢复」，点它是没有用的。 */
   .li.gone { opacity:.6; cursor:default; }
   .grp-sub { padding:6px var(--space-2) 2px; color:var(--text-dim);

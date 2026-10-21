@@ -383,6 +383,11 @@
   .row-act.armed { background:var(--danger-bg); color:var(--danger-text);
                    border-color:var(--danger-line); }
   .row-act.back { color:var(--accent); border-color:var(--accent-soft); }
+  .row-acts { flex:0 0 auto; display:inline-flex; align-items:center; gap:4px; min-width:0; }
+  .row-act.rename { display:inline-flex; align-items:center; justify-content:center;
+                    width:28px; height:28px; padding:0; }
+  .row-act.rename svg { width:14px; height:14px; display:block; }
+  .lock .row-act.rename { pointer-events:auto; }
   /* 「已移除」那一行：只是摆在那里等「恢复」，点它是没有用的。 */
   .li.gone { opacity:.6; cursor:default; }
   .grp-sub { padding:6px var(--space-2) 2px; color:var(--text-dim);
@@ -453,6 +458,38 @@
   .arc-restore:hover { border-color:var(--accent); background:var(--accent-soft); }
   .arc-restore:disabled { opacity:.5; cursor:default; }
   #settings [data-focusable]:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  #rename { position:fixed; inset:0; z-index:41; display:flex;
+            align-items:center; justify-content:center; padding:var(--space-5);
+            background:rgba(0,0,0,.5); }
+  #rename.hidden { display:none; }
+  .rename-card { width:min(400px, 100%); box-sizing:border-box; display:flex;
+                 flex-direction:column; gap:8px; margin:0;
+                 border:1px solid var(--line); border-radius:var(--radius-lg);
+                 background:var(--panel); color:var(--text);
+                 box-shadow:var(--shadow-overlay); padding:var(--space-3); }
+  .rename-head { display:flex; align-items:center; gap:var(--space-2); }
+  .rename-head h2 { margin:0; flex:1 1 auto; font-size:var(--font-md); font-weight:650; }
+  .rename-head .icon-btn { width:30px; height:30px; padding:0; border:0;
+                           border-radius:var(--radius-sm); background:transparent;
+                           color:var(--text-dim); cursor:pointer;
+                           display:flex; align-items:center; justify-content:center; }
+  .rename-head .icon-btn:hover { color:var(--text); background:var(--bubble-user); }
+  .rename-head .icon-btn svg { width:15px; height:15px; }
+  .rename-label { font-size:12px; font-weight:650; color:var(--text-dim); }
+  #rename-input { display:block; width:100%; box-sizing:border-box; min-width:0;
+                  margin:0; padding:8px 10px; border-radius:8px;
+                  border:1px solid var(--line); background:var(--panel-2);
+                  color:var(--text); font:inherit; }
+  #rename-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .rename-error { min-height:1.3em; margin:0; color:var(--danger-text); font-size:12.5px; }
+  .rename-actions { display:flex; justify-content:flex-end; gap:8px; }
+  .rename-actions button { padding:6px 12px; border-radius:8px; cursor:pointer;
+                           border:1px solid var(--line); background:transparent;
+                           color:var(--text); font-size:12px; }
+  #rename-save { border-color:var(--accent); background:var(--accent); color:#fff; }
+  #rename-input:disabled, .rename-actions button:disabled, .rename-head .icon-btn:disabled {
+    opacity:.5; cursor:default;
+  }
 
 
   /* ── 对话面 ── */
@@ -891,7 +928,8 @@
                 z-index:29; background:rgba(0,0,0,.5); pointer-events:none; }
     #st-health { top:8px; height:44px; max-width:128px; }
     #st-health, #menu, #send, .toast-close, .row-act,
-    .ask-apply, .ask-reject, #toast-all, #st-close {
+    .ask-apply, .ask-reject, #toast-all, #st-close,
+    #rename-cancel, #rename-save {
       min-width:44px; min-height:44px;
     }
     #send { width:44px; height:44px; }
@@ -900,6 +938,10 @@
     .settings-card { width:100%; max-height:78vh;
                      border-radius:var(--radius-lg) var(--radius-lg) 0 0;
                      padding-bottom:env(safe-area-inset-bottom); }
+    #rename { align-items:flex-end; padding:0; }
+    .rename-card { width:100%; max-height:78vh;
+                   border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                   padding-bottom:calc(var(--space-3) + env(safe-area-inset-bottom)); }
   }
   @media (prefers-reduced-motion: reduce) {
     #stream { scroll-behavior:auto; }

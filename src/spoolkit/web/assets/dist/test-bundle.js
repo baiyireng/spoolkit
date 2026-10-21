@@ -12,6 +12,7 @@ const ICON = {
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg>',
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>',
   gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.08a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6h.08A1.7 1.7 0 0 0 10.63 3V3a2 2 0 1 1 4 0v.08A1.7 1.7 0 0 0 16.18 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 20.55 9v.08A1.7 1.7 0 0 0 22.1 10.63H22a2 2 0 1 1 0 4h-.08A1.7 1.7 0 0 0 20.37 16z"></path></svg>',
+  pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>',
 };
 
 const stream = document.getElementById('stream');
@@ -59,6 +60,13 @@ const tasksHistory = document.getElementById('tasks-history');
 const tasksFilters = document.getElementById('tasks-filters');
 const tasksList = document.getElementById('tasks-list');
 const tasksDetail = document.getElementById('tasks-detail');
+const renameBox = document.getElementById('rename');
+const renameForm = document.getElementById('rename-form');
+const renameInput = document.getElementById('rename-input');
+const renameError = document.getElementById('rename-error');
+const renameClose = document.getElementById('rename-close');
+const renameCancel = document.getElementById('rename-cancel');
+const renameSave = document.getElementById('rename-save');
 
 function h(tag, className) {
   const node = document.createElement(tag);
@@ -176,6 +184,7 @@ const INITIAL_STATE = {
   statusOpen: false,
   settingsOpen: false,
   tasksOpen: false,
+  renameOpen: false,
   lastSettingsFocus: null,
   drafts: {},
 };
@@ -1990,6 +1999,138 @@ function requestRestore(value) {
   act('/session/restore', {session: value}, '已恢复会话 ' + value);
 }
 
+// 人手改标题。空白折成一格，空的和超过 40 字的就地拦住，不发给服务端，也不截断。
+const TITLE_LIMIT = 40;
+let renameSessionId = '';
+let renameOpener = null;
+let renameSaving = false;
+
+function cleanTitle(raw) {
+  return String(raw || '').trim().split(/\s+/).filter(function (part) { return part; }).join(' ');
+}
+
+function lookupTitle(id) {
+  const snap = ctx.store.get('lastState') || {};
+  const rows = snap.sessions || [];
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index].id === id) { return String(rows[index].title || ''); }
+  }
+  const target = snap.target || {};
+  if (target.session === id) { return String(target.session_title || ''); }
+  return '';
+}
+
+function showRenameError(message) {
+  if (renameError) { renameError.textContent = message || ''; }
+}
+
+function setRenameBusy(busy) {
+  renameSaving = busy;
+  const nodes = [renameInput, renameSave, renameCancel, renameClose];
+  for (let index = 0; index < nodes.length; index += 1) {
+    if (nodes[index]) { nodes[index].disabled = busy; }
+  }
+}
+
+function findRenameButton(id) {
+  const buttons = document.querySelectorAll('.rename');
+  for (let index = 0; index < buttons.length; index += 1) {
+    const button = buttons[index];
+    if (button.dataset && button.dataset.value === id) { return button; }
+  }
+  return null;
+}
+
+function renameFocusables() {
+  const nodes = [renameClose, renameInput, renameCancel, renameSave];
+  return nodes.filter(function (node) {
+    return node && !node.disabled && typeof node.focus === 'function';
+  });
+}
+
+function openRename(id, opener) {
+  if (ctx.store.get('readonly') || !renameBox) { return; }
+  renameSessionId = String(id || '');
+  renameOpener = opener || null;
+  const title = lookupTitle(renameSessionId);
+  if (renameInput) {
+    renameInput.value = title;
+    renameInput.selectionStart = 0;
+    renameInput.selectionEnd = title.length;
+  }
+  showRenameError('');
+  setRenameBusy(false);
+  ctx.store.set('renameOpen', true);
+  renameBox.classList.remove('hidden');
+  renameBox.setAttribute('aria-hidden', 'false');
+  if (renameInput && typeof renameInput.focus === 'function') { renameInput.focus(); }
+}
+
+function closeRename() {
+  if (renameSaving || !renameBox) { return; }
+  ctx.store.set('renameOpen', false);
+  renameBox.classList.add('hidden');
+  renameBox.setAttribute('aria-hidden', 'true');
+  const back = findRenameButton(renameSessionId) || renameOpener;
+  if (back && typeof back.focus === 'function') { back.focus(); }
+}
+
+async function saveRename() {
+  if (renameSaving || !ctx.store.get('renameOpen')) { return; }
+  const cleaned = cleanTitle(renameInput ? renameInput.value : '');
+  if (!cleaned) {
+    showRenameError('标题是空的。');
+    return;
+  }
+  if (cleaned.length > TITLE_LIMIT) {
+    showRenameError('标题最长 ' + TITLE_LIMIT + ' 个字。');
+    return;
+  }
+  setRenameBusy(true);
+  showRenameError('');
+  try {
+    const response = await fetch('/session/rename', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session: renameSessionId, title: cleaned}),
+    });
+    let detail = {};
+    try { detail = await response.json(); } catch (err) { detail = {}; }
+    if (!response.ok) {
+      showRenameError(String((detail && detail.error) || '重命名没有完成。'));
+      return;
+    }
+    const title = String((detail && detail.title) || cleaned);
+    applySessionTitle(renameSessionId, title, 'manual');
+    setRenameBusy(false);
+    closeRename();
+  } catch (err) {
+    showRenameError('重命名没有完成。');
+  } finally {
+    if (renameSaving) { setRenameBusy(false); }
+  }
+}
+
+if (renameClose) {
+  renameClose.innerHTML = ICON.close;
+  renameClose.onclick = function (event) {
+    if (event && event.stopPropagation) { event.stopPropagation(); }
+    closeRename();
+  };
+}
+if (renameCancel) {
+  renameCancel.onclick = function (event) {
+    if (event && event.stopPropagation) { event.stopPropagation(); }
+    closeRename();
+  };
+}
+if (renameForm) {
+  renameForm.onsubmit = function (event) {
+    if (event && event.preventDefault) { event.preventDefault(); }
+    saveRename();
+  };
+}
+
 // 会话这一类动作的公共落地：成功就按返回体重绑（它就是新的 /state）。
 async function act(url, payload, note) {
   const next = await ctx.transport.post(url, payload);
@@ -2028,7 +2169,7 @@ async function newSession() {
   await ctx.switchTarget({session: made.session});
 }
 
-  return { sessionTitle: sessionTitle, sessionRowTitle: sessionRowTitle, maybeAgentTitle: maybeAgentTitle, applySessionTitle: applySessionTitle, requestRemove: requestRemove, requestRestore: requestRestore, act: act, newSession: newSession };
+  return { sessionTitle: sessionTitle, sessionRowTitle: sessionRowTitle, maybeAgentTitle: maybeAgentTitle, applySessionTitle: applySessionTitle, requestRemove: requestRemove, requestRestore: requestRestore, act: act, newSession: newSession, openRename: openRename, saveRename: saveRename, closeRename: closeRename, renameFocusables: renameFocusables };
 }
 
 // spool web · js/features/thread.js
@@ -3365,6 +3506,44 @@ function actSpec(label, kind, value, onClick) {
   });
 }
 
+function actGroup(parts) {
+  const items = parts.filter(Boolean);
+  return lineSpec(items.map(function (item) { return item.sig; }).join('|'), function () {
+    const box = document.createElement('span');
+    box.className = 'row-acts';
+    for (let index = 0; index < items.length; index += 1) {
+      box.appendChild(items[index].make());
+    }
+    return box;
+  });
+}
+
+function renameSpec(value) {
+  return lineSpec(JSON.stringify(['rename', value]), function () {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'row-act rename';
+    button.tabIndex = 0;
+    button.dataset.act = 'rename';
+    button.dataset.value = value;
+    button.setAttribute('aria-label', '重命名会话');
+    button.title = '重命名会话';
+    button.innerHTML = ICON.pencil;
+    button.onclick = function (event) {
+      if (event && event.stopPropagation) { event.stopPropagation(); }
+      ctx.sessions.openRename(value, button);
+    };
+    button.onkeydown = function (event) {
+      if (!event) { return; }
+      if (event.stopPropagation) { event.stopPropagation(); }
+      if (event.key !== 'Enter' && event.key !== ' ') { return; }
+      if (event.preventDefault) { event.preventDefault(); }
+      ctx.sessions.openRename(value, button);
+    };
+    return button;
+  });
+}
+
 function rowSpec(label, title, on, onClick, key, kind, act, running) {
   // 签名里**不含**"亮不亮"：切一行的高亮只改类，不重建节点（`markChosen` 收尾）。
   return lineSpec(
@@ -3392,6 +3571,8 @@ function row(label, title, on, onClick, key, kind, act, running) {
     line.tabIndex = 0;
     line.onkeydown = function (event) {
       if (!event) { return; }
+      const target = event.target;
+      if (target && (target.tagName === 'BUTTON' || (target.closest && target.closest('button')))) { return; }
       if (event.key !== 'Enter' && event.key !== ' ') { return; }
       if (event.preventDefault) { event.preventDefault(); }
       onClick();
@@ -3625,6 +3806,16 @@ function renderSidebar(wrows, srows, sremoved, key, locked, query) {
     const label = ctx.sessions.sessionRowTitle({id: one.value, title: one.title});
     if (q && !queryHit(q, [one.title, label, one.value]) && !on) { continue; }
     const removable = !locked && !ctx.store.get('readonly');
+    const acts = [];
+    // 只给当前这条、且不是只读/归档的行摆铅笔。点它不能冒泡成切换。
+    if (on && !ctx.store.get('readonly') && !one.archived) {
+      acts.push(renameSpec(one.value));
+    }
+    if (removable) {
+      acts.push(actSpec('移除', 'remove', one.value, (function (value) {
+        return function () { ctx.sessions.requestRemove(value); };
+      })(one.value)));
+    }
     // 标题优先、id 退到右边的小字：uuid / 时间戳只用来定位，不该当名字读。
     sessSpecs.push(rowSpec(
       label,
@@ -3635,11 +3826,7 @@ function renderSidebar(wrows, srows, sremoved, key, locked, query) {
       })(one.value),
       one.value,
       'sess',
-      removable
-        ? actSpec('移除', 'remove', one.value, (function (value) {
-            return function () { ctx.sessions.requestRemove(value); };
-          })(one.value))
-        : null,
+      acts.length ? actGroup(acts) : null,
       // 「正在跑」的键是 (工作区, 会话)：别的会话在跑也要标出来
       // （切走不杀任务，见设计 §3.4）。
       Boolean(live[keyFor(here, one.value)])
@@ -3710,7 +3897,7 @@ function drawTarget(state) {
       return {value: w.root, name: w.name || w.root, alias: w.alias || '', ready: w.ready};
     }),
     sessions.map(function (s) {
-      return {value: s.id, title: s.title || '', text: s.title || s.id};
+      return {value: s.id, title: s.title || '', text: s.title || s.id, archived: !!s.archived};
     }),
     // 已移除（归档）的那几条单独一段：删了还能放回来，才算"移除"而不是"毁掉"。
     (state.sessions_removed || []).map(function (s) {
@@ -4558,6 +4745,33 @@ document.onclick = function (event) {
 // 所以除了 `goalBox.onkeydown` 那条，这里再挂一道。
 document.onkeydown = function (event) {
   if (!event) { return; }
+  // 重命名开着时先吃掉 Esc / Enter / Tab，避免落到设置、任务或抽屉上。
+  if (store.get('renameOpen')) {
+    if (event.key === 'Escape') {
+      app.sessions.closeRename();
+      return;
+    }
+    if (event.key === 'Enter') {
+      if (event.preventDefault) { event.preventDefault(); }
+      app.sessions.saveRename();
+      return;
+    }
+    if (event.key === 'Tab') {
+      const nodes = app.sessions.renameFocusables();
+      if (nodes.length < 2) { return; }
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    return;
+  }
   if (store.get('settingsOpen')) {
     if (event.key === 'Escape') {
       app.settings.setSettingsOpen(false);

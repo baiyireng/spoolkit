@@ -12,6 +12,7 @@ const ICON = {
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg>',
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>',
   gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.08a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6h.08A1.7 1.7 0 0 0 10.63 3V3a2 2 0 1 1 4 0v.08A1.7 1.7 0 0 0 16.18 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 20.55 9v.08A1.7 1.7 0 0 0 22.1 10.63H22a2 2 0 1 1 0 4h-.08A1.7 1.7 0 0 0 20.37 16z"></path></svg>',
+  pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>',
 };
 
 const stream = document.getElementById('stream');
@@ -59,6 +60,13 @@ const tasksHistory = document.getElementById('tasks-history');
 const tasksFilters = document.getElementById('tasks-filters');
 const tasksList = document.getElementById('tasks-list');
 const tasksDetail = document.getElementById('tasks-detail');
+const renameBox = document.getElementById('rename');
+const renameForm = document.getElementById('rename-form');
+const renameInput = document.getElementById('rename-input');
+const renameError = document.getElementById('rename-error');
+const renameClose = document.getElementById('rename-close');
+const renameCancel = document.getElementById('rename-cancel');
+const renameSave = document.getElementById('rename-save');
 
 function h(tag, className) {
   const node = document.createElement(tag);

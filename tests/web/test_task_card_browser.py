@@ -406,6 +406,7 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
     os.utime(other_events, (later, later))
     from spoolkit.kernel.sessions import write_meta
     write_meta(root, "other", title="其他会话的很长标题用来检查窄屏")
+    write_meta(root, "t", title="整理配置")
 
     state = _as_state(runner)
     httpd = build_server(state, "127.0.0.1", 0)
@@ -784,6 +785,51 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
         assert history["chip_left"] >= 0, history
         assert history["panel_overflow"] <= 1, history
         assert history["panel_right"] <= history["view_w"] + 1, history
+        page.eval("document.getElementById('tasks-close').click()")
+        assert _wait(
+            page,
+            "document.getElementById('tasks-panel').classList.contains('hidden')",
+        ), "任务面板没有关上"
+        page.eval("document.getElementById('menu').click()")
+        assert _wait(page, "!!document.querySelector('#sessions .rename')"), "当前会话没有重命名入口"
+        page.eval("document.querySelector('#sessions .rename').click()")
+        assert _wait(
+            page,
+            "!document.getElementById('rename').classList.contains('hidden')",
+        ), "重命名对话框没有打开"
+        rename = page.eval(
+            r"""
+            (() => {
+              const card = document.querySelector('.rename-card');
+              const input = document.getElementById('rename-input');
+              const cardBox = card.getBoundingClientRect();
+              const inputBox = input.getBoundingClientRect();
+              const dialog = document.getElementById('rename');
+              return {
+                value: input.value,
+                role: dialog.getAttribute('role'),
+                modal: dialog.getAttribute('aria-modal'),
+                card_left: Math.round(cardBox.left),
+                card_right: Math.round(cardBox.right),
+                input_left: Math.round(inputBox.left),
+                input_right: Math.round(inputBox.right),
+                view_w: window.innerWidth,
+                page_overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+              };
+            })()
+            """
+        )
+        page.shot(str(SHOTS / "session-rename-390.png"))
+        assert rename["value"] == "整理配置", rename
+        assert rename["role"] == "dialog", rename
+        assert rename["modal"] == "true", rename
+        assert rename["card_left"] >= 0, rename
+        assert rename["card_right"] <= rename["view_w"] + 1, rename
+        assert rename["input_left"] >= rename["card_left"] - 1, rename
+        assert rename["input_right"] <= rename["card_right"] + 1, rename
+        assert rename["page_overflow"] <= 1, rename
+        page.eval("document.getElementById('rename-cancel').click()")
+        page.eval("document.getElementById('scrim').click()")
         page.viewport(360, 800, mobile=True)
         assert _wait(
             page,

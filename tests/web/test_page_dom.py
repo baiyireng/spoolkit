@@ -1262,3 +1262,45 @@ def test_临时工作区默认隐藏可被搜索找回(dom: dict) -> None:
     assert "tmp-notes" not in current and "temp-scratch" not in current, current
     assert "my-tmp-files" in current and "alpha" in current and "beta" in current, current
 
+
+def test_当前会话可以就地重命名(dom: dict) -> None:
+    """铅笔只在当前行。对话框预填并循环焦点。本地拦住空标题和超长标题。"""
+    found = dom["session_rename"]
+    assert found["pencil"] is True, found
+    assert found["other_pencil"] is False, found
+    assert found["label"] == "重命名会话", found
+    assert found["tab"] == 0, found
+    assert found["pencil_focused"] is True, found
+    assert found["role"] == "dialog", found
+    assert found["modal"] == "true", found
+    assert found["open"] is True, found
+    assert found["value"] == "A 的第 1 条", found
+    assert found["focused"] is True, found
+    assert found["selected"] is True, found
+    assert found["maxlength"] is None, found
+    assert found["click_posts"] == [], found
+    assert found["tab_to_close"] is True, found
+    assert found["tab_to_save"] is True, found
+    assert found["saved_body"] == {"session": "a1", "title": "A 的第 1 条"}, found
+    assert found["name"] == "人手标题", found
+    assert "人手标题" in found["where"], found
+    assert found["source"] == "manual", found
+    assert found["stream_same"] is True, found
+    assert found["closed"] is True, found
+    assert found["success_focus"] == "rename", found
+    assert found["empty_error"] == "标题是空的。", found
+    assert found["empty_value"] == "   ", found
+    assert found["empty_posts"] == 0, found
+    assert found["long_error"] == "标题最长 40 个字。", found
+    assert found["long_len"] == 41, found
+    assert found["long_posts"] == 0, found
+    assert found["server_error"] == "没有叫 x 的会话。", found
+    assert found["server_value"] == "  保留   输入  ", found
+    assert found["server_open"] is True, found
+    assert found["server_body"] == {"session": "a1", "title": "保留 输入"}, found
+    assert found["esc_hidden"] is True, found
+    assert found["esc_focus"] == "a1", found
+    assert found["readonly_pencils"] == 0, found
+    assert found["archived_pencils"] == 0, found
+    assert found["archived_row"] is True, found
+
