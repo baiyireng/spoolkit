@@ -2186,5 +2186,116 @@ async function extras2() {
     esc: taskPanel.classList.contains('hidden'),
     esc_focus: document.activeElement ? document.activeElement._id : '',
   };
+
+  function searchTask(id, status, goal, events, artifacts) {
+    const task = taskGroup(status, events, goal);
+    task.task_id = id;
+    task.artifacts = artifacts || [];
+    return task;
+  }
+  const searchGroups = [
+    searchTask('goal-1', 'done', 'AlphaGoal only', [
+      taskEvent(1, 'understand', 'ok', '普通摘要'),
+    ]),
+    searchTask('tool-1', 'running', '别的目标', [
+      taskEvent(1, 'observe', 'ok', '看代码', { tool: 'SpecialTool' }),
+    ]),
+    searchTask('sum-1', 'failed', '失败的事', [
+      taskEvent(1, 'observe', 'error', 'UniqueSummary', { tool: 'edit' }),
+    ]),
+    searchTask('path-1', 'running', '路径任务', [
+      taskEvent(1, 'observe', 'ok', '读了一份', {
+        tool: 'read_file',
+        artifacts: [{ type: 'file', path: 'src/FromEvent.ts' }],
+      }),
+    ], [{ type: 'file', path: 'docs/FromTask.md' }]),
+    searchTask('hide-1', 'done', '藏起来的完成项', [
+      taskEvent(1, 'observe', 'ok', 'SpecialTool also', { tool: 'write' }),
+    ]),
+  ];
+  ctx.__spoolTest.applyState(frame('D:/task-search', 'a1', WROWS, SROWS_A, [], {
+    task_groups: searchGroups,
+  }));
+  if (taskBtn) { taskBtn.onclick(); }
+  clickFilter('全部');
+  const searchBox = ids.get('tasks-search');
+  function searchLines() {
+    return ids.get('tasks-list').querySelectorAll('.task-line').map((node) => {
+      return node.querySelector('.task-goal').textContent;
+    });
+  }
+  function runSearch(value) {
+    const before = ctx.fetchCalls.length;
+    searchBox.value = value;
+    searchBox.oninput();
+    return ctx.fetchCalls.length - before;
+  }
+  const goalHit = { lines: null, posts: runSearch('alphagoal') };
+  goalHit.lines = searchLines();
+  const toolHit = { lines: null, posts: runSearch('specialtool') };
+  toolHit.lines = searchLines();
+  const summaryHit = { lines: null, posts: runSearch('uniquesummary') };
+  summaryHit.lines = searchLines();
+  const eventPath = { lines: null, posts: runSearch('fromevent.ts') };
+  eventPath.lines = searchLines();
+  const taskPath = { lines: null, posts: runSearch('fromtask.md') };
+  taskPath.lines = searchLines();
+  clickFilter('进行中');
+  const stacked = { lines: null, posts: runSearch('specialtool') };
+  stacked.lines = searchLines();
+  stacked.match = ids.get('tasks-match').textContent;
+  const none = { lines: null, text: '', posts: runSearch('zzzz-nope') };
+  none.text = ids.get('tasks-list').textContent;
+  none.lines = searchLines();
+  const keptId = ids.get('tasks-detail').querySelector('.task-card')
+    ? ids.get('tasks-detail').querySelector('.task-card').getAttribute('data-task-id') : '';
+  runSearch('');
+  const restored = searchLines();
+  const detailBefore = ids.get('tasks-detail').textContent;
+  const detailIdBefore = ids.get('tasks-detail').querySelector('.task-card')
+    ? ids.get('tasks-detail').querySelector('.task-card').getAttribute('data-task-id') : '';
+  if (ids.get('tasks-list').querySelectorAll('.task-line')[0]) {
+    ids.get('tasks-list').querySelectorAll('.task-line')[0].onclick();
+  }
+  const picked = ids.get('tasks-detail').querySelector('.task-card')
+    ? ids.get('tasks-detail').querySelector('.task-card').getAttribute('data-task-id') : '';
+  runSearch('specialtool');
+  const during = {
+    lines: searchLines(),
+    id: ids.get('tasks-detail').querySelector('.task-card')
+      ? ids.get('tasks-detail').querySelector('.task-card').getAttribute('data-task-id') : '',
+    open: ids.get('tasks-detail').querySelector('.task-head')
+      ? ids.get('tasks-detail').querySelector('.task-head').getAttribute('aria-expanded') : '',
+  };
+  document.onkeydown({ key: 'Escape' });
+  const afterFirstEsc = {
+    value: searchBox.value,
+    open: !taskPanel.classList.contains('hidden'),
+    lines: searchLines(),
+    id: ids.get('tasks-detail').querySelector('.task-card')
+      ? ids.get('tasks-detail').querySelector('.task-card').getAttribute('data-task-id') : '',
+  };
+  document.onkeydown({ key: 'Escape' });
+  out.task_search = {
+    label: searchBox.getAttribute('aria-label'),
+    placeholder: searchBox.getAttribute('placeholder'),
+    type: searchBox.getAttribute('type'),
+    goal: goalHit,
+    tool: toolHit,
+    summary: summaryHit,
+    event_path: eventPath,
+    task_path: taskPath,
+    stacked: stacked,
+    none: none,
+    restored: restored,
+    kept_before: keptId,
+    detail_before: detailBefore,
+    detail_id_before: detailIdBefore,
+    picked: picked,
+    during: during,
+    first_esc: afterFirstEsc,
+    second_esc_closed: taskPanel.classList.contains('hidden'),
+    count: ids.get('tasks-count').textContent,
+  };
 }
 

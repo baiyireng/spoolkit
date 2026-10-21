@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark light">
 <title>spool</title>
 
-<link rel="stylesheet" href="/assets/dist/app.22e0a50cd7dd.css">
+<link rel="stylesheet" href="/assets/dist/app.bcbaafeaa822.css">
 </head>
 <body>
 <!-- 右上角那一列：常驻提示（徽标 + 详情浮层）与通知。两者都在**文档流之外**
@@ -120,6 +120,11 @@
       <button id="tasks-close" type="button" class="icon-btn"
               aria-label="关闭任务" title="关闭任务"></button>
     </div>
+    <div class="tasks-find">
+      <input id="tasks-search" type="search" aria-label="搜索任务"
+             placeholder="搜索任务 / 工具 / 文件" autocomplete="off">
+      <div id="tasks-match" class="tasks-match"></div>
+    </div>
     <div id="tasks-filters" role="tablist" aria-label="筛选任务"></div>
     <div id="tasks-body">
       <div id="tasks-list"></div>
@@ -128,6 +133,6 @@
   </div>
 </div>
 
-<script src="/assets/dist/app.256dcd065d2f.js" defer></script>
+<script src="/assets/dist/app.5f8a7ecda636.js" defer></script>
 </body>
 </html>

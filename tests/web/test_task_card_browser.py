@@ -664,6 +664,11 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
               return {
                 count: document.getElementById('tasks-count').textContent,
                 wait: document.getElementById('tasks-wait').textContent,
+                search_left: Math.round(document.getElementById('tasks-search').getBoundingClientRect().left),
+                search_right: Math.round(document.getElementById('tasks-search').getBoundingClientRect().right),
+                search_w: Math.round(document.getElementById('tasks-search').getBoundingClientRect().width),
+                search_type: document.getElementById('tasks-search').getAttribute('type'),
+                search_label: document.getElementById('tasks-search').getAttribute('aria-label'),
                 goal_clamp: getComputedStyle(goal).webkitLineClamp,
                 goal_title: goal.title,
                 tool: document.querySelector('#tasks-detail .task-tool').textContent,
@@ -682,7 +687,13 @@ def test_真实Chrome渲染任务卡并定位审批(tmp_path: Path) -> None:
             """
         )
         page.shot(str(SHOTS / "task-panel-390.png"))
+        page.shot(str(SHOTS / "task-search-390.png"))
         assert panel["count"] == "2", panel
+        assert panel["search_type"] == "search", panel
+        assert panel["search_label"] == "搜索任务", panel
+        assert panel["search_right"] <= panel["view_w"] + 1, panel
+        assert panel["search_left"] >= panel["panel_left"] - 1, panel
+        assert panel["search_w"] > 40, panel
         assert panel["wait"] == "1", panel
         assert panel["goal_clamp"] == "2", panel
         assert panel["goal_title"].startswith("把配置文件整理成可提交的说明"), panel

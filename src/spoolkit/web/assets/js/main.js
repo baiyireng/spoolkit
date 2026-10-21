@@ -318,7 +318,7 @@ document.onkeydown = function (event) {
     return;
   }
   if (store.get('tasksOpen')) {
-    if (event.key === 'Escape') { app.tasks.setTasksOpen(false); }
+    if (event.key === 'Escape' && !app.tasks.clearQuery()) { app.tasks.setTasksOpen(false); }
     return;
   }
   if (document.body.classList.contains('drawer') && event.key === 'Escape') {

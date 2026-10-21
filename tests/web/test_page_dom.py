@@ -324,6 +324,39 @@ def test_任务面板列出当前会话并可筛选(dom: dict) -> None:
     assert "待审批：" in panel["approval_panel"]
 
 
+def test_任务搜索只在本地叠在状态筛选上(dom: dict) -> None:
+    """目标、工具、摘要、路径都能命中。先按标签再按搜索。Esc 先清搜索再关面板。"""
+    found = dom["task_search"]
+    assert found["type"] == "search", found
+    assert found["label"] == "搜索任务", found
+    assert found["placeholder"] == "搜索任务 / 工具 / 文件", found
+    assert found["goal"]["lines"] == ["AlphaGoal only"], found["goal"]
+    assert found["goal"]["posts"] == 0, found["goal"]
+    assert found["tool"]["lines"] == ["藏起来的完成项", "别的目标"], found["tool"]
+    assert found["tool"]["posts"] == 0, found["tool"]
+    assert found["summary"]["lines"] == ["失败的事"], found["summary"]
+    assert found["summary"]["posts"] == 0
+    assert found["event_path"]["lines"] == ["路径任务"], found["event_path"]
+    assert found["event_path"]["posts"] == 0
+    assert found["task_path"]["lines"] == ["路径任务"], found["task_path"]
+    assert found["task_path"]["posts"] == 0
+    assert found["stacked"]["lines"] == ["别的目标"], found["stacked"]
+    assert found["stacked"]["match"] == "共 5 项，匹配 1", found["stacked"]
+    assert found["none"]["text"] == "没有匹配的任务", found["none"]
+    assert found["none"]["lines"] == [], found["none"]
+    assert found["restored"] == ["路径任务", "别的目标"], found["restored"]
+    assert found["picked"], found
+    assert found["during"]["lines"] == ["别的目标"], found["during"]
+    assert found["during"]["id"] == found["picked"], found["during"]
+    assert found["during"]["open"] == "true", found["during"]
+    assert found["first_esc"]["value"] == "", found["first_esc"]
+    assert found["first_esc"]["open"] is True, found["first_esc"]
+    assert found["first_esc"]["lines"] == ["路径任务", "别的目标"], found["first_esc"]
+    assert found["first_esc"]["id"] == found["picked"], found["first_esc"]
+    assert found["second_esc_closed"] is True
+    assert found["count"] == "5", found
+
+
 def test_可见文案不用旧术语(dom: dict) -> None:
     """顶栏、状态面板和任务筛选不再出现旧说法。用户目标正文不在这张清单里。"""
     blobs = [

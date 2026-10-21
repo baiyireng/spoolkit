@@ -16,6 +16,7 @@ const TASK_FILTERS = [
 function createTasks(ctx) {
   let filter = 'all';
   let selected = '';
+  let query = '';
 
   function groupsOf(state) {
     const rows = ((state && state.task_groups) || []).slice();
@@ -40,6 +41,35 @@ function createTasks(ctx) {
     if (name === 'failed') { return task.status === 'failed' || task.status === 'verify_failed'; }
     if (name === 'done') { return task.status === 'done'; }
     return true;
+  }
+
+  function taskPaths(items) {
+    const paths = [];
+    const rows = items || [];
+    for (let index = 0; index < rows.length; index += 1) {
+      const item = rows[index];
+      if (item && item.path) { paths.push(String(item.path)); }
+    }
+    return paths;
+  }
+
+  function taskHaystack(task) {
+    const parts = [String((task && task.goal) || '')];
+    parts.push.apply(parts, taskPaths(task && task.artifacts));
+    const events = (task && task.events) || [];
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index] || {};
+      parts.push(String(event.tool || ''));
+      parts.push(String(event.summary || ''));
+      parts.push.apply(parts, taskPaths(event.artifacts));
+    }
+    return parts.join('\n').toLowerCase();
+  }
+
+  function matchesQuery(task) {
+    const needle = String(query || '').trim().toLowerCase();
+    if (!needle) { return true; }
+    return taskHaystack(task).indexOf(needle) >= 0;
   }
 
   function paintCounts(groups) {
@@ -140,13 +170,20 @@ function createTasks(ctx) {
     paintCounts(groups);
     if (!ctx.store.get('tasksOpen')) { return; }
     paintFilters();
-    const visible = [];
+    const tabbed = [];
     for (let index = 0; index < groups.length; index += 1) {
-      if (matchesTask(groups[index], filter)) { visible.push(groups[index]); }
+      if (matchesTask(groups[index], filter)) { tabbed.push(groups[index]); }
+    }
+    const visible = [];
+    for (let index = 0; index < tabbed.length; index += 1) {
+      if (matchesQuery(tabbed[index])) { visible.push(tabbed[index]); }
+    }
+    if (tasksMatch) {
+      tasksMatch.textContent = '共 ' + groups.length + ' 项，匹配 ' + visible.length;
     }
     let current = null;
-    for (let index = 0; index < visible.length; index += 1) {
-      if (String(visible[index].task_id || '') === selected) { current = visible[index]; }
+    for (let index = 0; index < tabbed.length; index += 1) {
+      if (String(tabbed[index].task_id || '') === selected) { current = tabbed[index]; }
     }
     if (!current) { selected = ''; }
     if (tasksList) {
@@ -162,6 +199,14 @@ function createTasks(ctx) {
       }
     }
     paintDetail(current);
+  }
+
+  function clearQuery() {
+    if (!String(query || '').trim()) { return false; }
+    query = '';
+    if (tasksSearch) { tasksSearch.value = ''; }
+    renderPanel();
+    return true;
   }
 
   function setTasksOpen(open) {
@@ -197,7 +242,13 @@ function createTasks(ctx) {
   if (tasksClose) {
     tasksClose.onclick = function () { setTasksOpen(false); };
   }
+  if (tasksSearch) {
+    tasksSearch.oninput = function () {
+      query = String(tasksSearch.value || '');
+      renderPanel();
+    };
+  }
   paintCounts([]);
 
-  return { sync: sync, setTasksOpen: setTasksOpen, renderPanel: renderPanel };
+  return { sync: sync, setTasksOpen: setTasksOpen, renderPanel: renderPanel, clearQuery: clearQuery };
 }
