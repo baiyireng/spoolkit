@@ -61,7 +61,13 @@ from spoolkit.health import (
 from spoolkit.kernel import pointers as kernel_pointers
 from spoolkit.kernel import sessions as kernel_sessions
 from spoolkit.kernel import workspaces as kernel_workspaces
-from spoolkit.kernel.sessions import TITLE_AGENT, TITLE_SEED, SessionError
+from spoolkit.kernel.sessions import (
+    TITLE_AGENT,
+    TITLE_LIMIT,
+    TITLE_MANUAL,
+    TITLE_SEED,
+    SessionError,
+)
 from spoolkit.kernel.target import Target, resolve_target
 from spoolkit.kernel.workspaces import WorkspaceError
 from spoolkit.web.page import INDEX
@@ -124,6 +130,8 @@ WRITE_PATHS = (
     # 让 Agent 给当前会话起一个可读标题：会写 meta（标题）并推一帧 state，
     # 与新建会话一样属于"驱动这台机器"，远程只读必须拒绝。
     "/session/title",
+    # 人手改标题：写 meta，并把来源标成 manual。远程只读走上面同一张表。
+    "/session/rename",
 )
 
 #: 网页壳在 `clients.json` 里的键。与 `resolve_target(client=…)` 用的是同一套键，
@@ -603,6 +611,36 @@ class WebState:
                 "generated": False,
                 "source": TITLE_SEED if seeded else "",
             }
+
+    def rename_session(self, session: str, title: str) -> tuple[int, dict]:
+        """人手改当前工作区里某条会话的标题（`POST /session/rename`）。
+
+        校验在这里做完再交给 `kernel_sessions.rename_session`：空标题和超长标题
+        都直接拒绝，不把超长的悄悄截成 40 字。写成 manual 之后，Agent 起名不会覆盖。
+        """
+        target = self.target()
+        if target is None:
+            return 409, {"error": "还没有选工作区：先在左边选一个，再改会话标题。"}
+        wanted = str(session or "").strip()
+        if not wanted:
+            return 400, {"error": "没有给会话。"}
+        cleaned = " ".join(str(title or "").split())
+        if not cleaned:
+            return 400, {"error": "标题是空的。"}
+        if len(cleaned) > TITLE_LIMIT:
+            return 400, {
+                "error": f"标题最长 {TITLE_LIMIT} 个字，这一条有 {len(cleaned)} 个字。",
+            }
+        try:
+            kernel_sessions.rename_session(target.root, wanted, cleaned)
+        except SessionError as exc:
+            return 404, {"error": str(exc)}
+        self.bump()
+        return 200, {
+            "session": wanted,
+            "title": cleaned,
+            "title_source": TITLE_MANUAL,
+        }
 
     def create_session(self, name: str | None = None, *, title: str = "") -> tuple[int, dict]:
         """新建一条会话（`POST /session/new`），返回（状态码, 响应体）。
@@ -1085,6 +1123,15 @@ def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
             if self.path == "/session/title":
                 payload = self._body()
                 status, body = state.generate_title(str(payload.get("session") or ""))
+                self._json(status, body)
+                return
+
+            if self.path == "/session/rename":
+                payload = self._body()
+                status, body = state.rename_session(
+                    str(payload.get("session") or ""),
+                    str(payload.get("title") or ""),
+                )
                 self._json(status, body)
                 return
 
