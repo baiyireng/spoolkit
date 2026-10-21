@@ -414,8 +414,9 @@ def run_delegated(
 class _Counting:
     """把网关包一层，数清这一趟花了多少。
 
-    只转 chat：其余属性（context_window / token_counter）原样透传，
-    因为子角色也需要它们。
+    `chat` 与 `chat_stream` 都记账。实现者和审查者跑在 `AgentLoop` 里，
+    主循环会走流式入口；只包 `chat` 时这两笔不进账。
+    其余属性（context_window / token_counter）原样透传。
     """
 
     def __init__(self, inner: ModelGateway) -> None:
@@ -424,12 +425,26 @@ class _Counting:
         self.completion_tokens = 0
         self.calls = 0
 
-    def chat(self, request: ChatRequest) -> ChatResponse:
-        response = self._inner.chat(request)
+    def _note(self, response: ChatResponse) -> ChatResponse:
         self.prompt_tokens += response.prompt_tokens
         self.completion_tokens += response.completion_tokens
         self.calls += 1
         return response
+
+    def chat(self, request: ChatRequest) -> ChatResponse:
+        return self._note(self._inner.chat(request))
+
+    def chat_stream(
+        self,
+        request: ChatRequest,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ChatResponse:
+        stream = getattr(self._inner, "chat_stream", None)
+        if callable(stream):
+            response = stream(request, on_delta=on_delta)
+        else:
+            response = self._inner.chat(request)
+        return self._note(response)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)

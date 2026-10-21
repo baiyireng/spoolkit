@@ -43,9 +43,21 @@ class _Recording(FakeModel):
 
 
 def test_响应后记下实测且次轮用它算预算(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
     tokenizer = OfflineTokenCounter()
     holder: list[AgentLoop] = []
-    gateway = _Recording(holder, [_v2_tool(), _v2_tool()], tokenizer)
+    # 第二次必须换路径。同一路径再列一次会被重复护栏拦住并退还步数，
+    # 循环会多要一条脚本，测不到「下一次调用用上一次的实测」。
+    second = json.dumps(
+        {
+            "thought": "看一下子目录",
+            "tool_calls": [{"name": "list_dir", "arguments": {"path": "sub"}}],
+            "done": False,
+            "summary": "",
+        },
+        ensure_ascii=False,
+    )
+    gateway = _Recording(holder, [_v2_tool(), second], tokenizer)
     loop = AgentLoop(
         gateway=gateway,
         tokenizer=tokenizer,

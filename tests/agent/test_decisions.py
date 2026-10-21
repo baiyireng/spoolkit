@@ -45,7 +45,12 @@ def test_下一节能看见上一节的结论且正文不进提示() -> None:
     second = gateway.requests[1].messages[0].content
     assert "口径按 8192" in second
     assert prose not in second
-    assert "决定：" in gateway.requests[0].messages[0].content
+    instruction = next(
+        message.content
+        for message in gateway.requests[0].messages
+        if message.role == "user"
+    )
+    assert "决定：" in instruction
 
 
 class _Script:

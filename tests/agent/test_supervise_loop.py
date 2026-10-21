@@ -52,6 +52,19 @@ def _read() -> dict:
     return {"name": "read_file", "arguments": {"path": "a.py"}}
 
 
+def _budget_looks(tmp_path: Path) -> list[str]:
+    """两步都计入步数预算。
+
+    同一路径再 `list_dir` 一次会被重复护栏拦住，并且这一步退还预算。
+    退还之后，留给督导的那条脚本会被主循环当成模型回合吃掉。
+    """
+    (tmp_path / "sub").mkdir()
+    return [
+        _turn("看", [{"name": "list_dir", "arguments": {"path": "."}}]),
+        _turn("看", [{"name": "list_dir", "arguments": {"path": "sub"}}]),
+    ]
+
+
 def _build(tmp_path: Path, script: list, **kwargs) -> AgentLoop:
     (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
     registry = ToolRegistry()
@@ -70,8 +83,7 @@ def test_撞上限时督导续期而不是停(tmp_path: Path) -> None:
     loop = _build(
         tmp_path,
         [
-            _turn("看", [_look()]),
-            _turn("看", [_look()]),
+            *_budget_looks(tmp_path),
             _verdict("extend", steps=3, reason="每一步都在读到新的东西"),
             _turn("改好了", final="改好了"),
         ],
@@ -87,8 +99,7 @@ def test_督导说收手就以它的理由收尾(tmp_path: Path) -> None:
     loop = _build(
         tmp_path,
         [
-            _turn("看", [_look()]),
-            _turn("看", [_look()]),
+            *_budget_looks(tmp_path),
             _verdict("stop", reason="缺一个读不到的目录，这条路走不通"),
         ],
     )
@@ -99,7 +110,7 @@ def test_督导说收手就以它的理由收尾(tmp_path: Path) -> None:
 
 def test_督导不可用时退回原行为(tmp_path: Path) -> None:
     """脚本在督导那一步耗尽，对应真实里的「网关报错 / 返回的不是 JSON」。"""
-    loop = _build(tmp_path, [_turn("看", [_look()]), _turn("看", [_look()])])
+    loop = _build(tmp_path, _budget_looks(tmp_path))
     result = loop.run("做点什么")
     assert result.finished is False
     # 说清是**谁**没给出结论：不然用户会以为是模型不想做了。
@@ -109,7 +120,7 @@ def test_督导不可用时退回原行为(tmp_path: Path) -> None:
 def test_关掉督导就回到硬上限(tmp_path: Path) -> None:
     loop = _build(
         tmp_path,
-        [_turn("看", [_look()]), _turn("看", [_look()])],
+        _budget_looks(tmp_path),
         supervise=False,
     )
     result = loop.run("做点什么")
@@ -120,10 +131,18 @@ def test_关掉督导就回到硬上限(tmp_path: Path) -> None:
 
 def test_续期不会越过总上限(tmp_path: Path) -> None:
     """总上限是安全线：没有它，一个卡住的任务能把 GPU 烧一整夜。"""
-    script: list = []
-    for _ in range(3):
-        script.append(_turn("看", [_look()]))
-        script.append(_verdict("extend", steps=50, reason="还在推进"))
+    (tmp_path / "d0").mkdir()
+    (tmp_path / "d1").mkdir()
+    # 第一步用完预算后才问督导。续 50 会被夹进总上限，预算变成 3。
+    # 再走两步不同目录（同一路径会被退还，脚本就对不齐），顶到天花板时
+    # 下一条才是第二次结论；余量为 0，不能再续。
+    script = [
+        _turn("看", [{"name": "list_dir", "arguments": {"path": "."}}]),
+        _verdict("extend", steps=50, reason="还在推进"),
+        _turn("看", [{"name": "list_dir", "arguments": {"path": "d0"}}]),
+        _turn("看", [{"name": "list_dir", "arguments": {"path": "d1"}}]),
+        _verdict("extend", steps=50, reason="还在推进"),
+    ]
     loop = _build(tmp_path, script, max_steps=1, step_ceiling=3)
     result = loop.run("做点什么")
     assert result.steps == 3
@@ -163,8 +182,7 @@ def test_督导那次调用也算进用量(tmp_path: Path) -> None:
     loop = _build(
         tmp_path,
         [
-            _turn("看", [_look()]),
-            _turn("看", [_look()]),
+            *_budget_looks(tmp_path),
             _verdict("extend", steps=3, reason="还在推进"),
             _turn("好了", final="好了"),
         ],
@@ -372,10 +390,11 @@ def test_督导建议要求表态且允许带理由拒绝(tmp_path: Path) -> Non
     判断的东西。
     """
     (tmp_path / "a.py").write_text("x = 0\n", encoding="utf-8")
+    # 第三次相同调用把组合停用并叫起督导。第四次再列同一目录会占掉
+    # 留给结论的那个脚本位，表态段就注不进去。
     loop = _build(
         tmp_path,
         [
-            _turn("看目录", [_look()]),
             _turn("看目录", [_look()]),
             _turn("看目录", [_look()]),
             _turn("看目录", [_look()]),
@@ -434,8 +453,7 @@ def test_督导判可收尾时由模型写结论(tmp_path: Path) -> None:
     loop = _build(
         tmp_path,
         [
-            _turn("看", [_look()]),
-            _turn("看", [_look()]),
+            *_budget_looks(tmp_path),
             _verdict("finish", reason="结论已可写出", message=message),
             _turn("写完", final=written),
         ],
@@ -456,8 +474,7 @@ def test_督导交还后它仍调工具则不执行并沿用原话(tmp_path: Pat
     loop = _build(
         tmp_path,
         [
-            _turn("看", [_look()]),
-            _turn("看", [_look()]),
+            *_budget_looks(tmp_path),
             _verdict("finish", reason="结论已可写出", message=message),
             _turn("再看", [_look()]),
         ],
@@ -481,8 +498,7 @@ def test_督导说完成后按成功收尾(tmp_path: Path) -> None:
     loop = _build(
         tmp_path,
         [
-            _turn("看", [_look()]),
-            _turn("看", [_look()]),
+            *_budget_looks(tmp_path),
             _verdict("finish", reason="自动验证已通过，该做的都做了"),
             _turn("写完", final="自动验证已通过，该做的都做了"),
         ],
@@ -571,8 +587,7 @@ def test_督导说完成时带上它给的话(tmp_path: Path) -> None:
     loop = _build(
         tmp_path,
         [
-            _turn("看", [_look()]),
-            _turn("看", [_look()]),
+            *_budget_looks(tmp_path),
             _verdict(
                 "finish",
                 reason="都做完了",
@@ -692,17 +707,35 @@ def test_收尾交还时确认暂存并写出结论(tmp_path: Path) -> None:
 
 def test_结论里的整份源码不会当成已经落盘(tmp_path: Path) -> None:
     """把文件贴进 final 只是一句话。不写 write_file，磁盘不会变。"""
+    from spoolkit.tools.edit import PendingChanges, write_file_spec
+
     lines = "\n".join(f"<p>line {index}</p>" for index in range(40))
     pasted = f"合并后的代码如下：\n```html\n<html>\n{lines}\n</html>\n```"
     (tmp_path / "snake.html").write_text("<html>\nOLD\n</html>\n", encoding="utf-8")
-    loop = _build(
-        tmp_path,
-        [
-            _turn("贴源码", final=pasted),
-            _turn("改口", final="还没写入文件。"),
-        ],
-        max_steps=4,
-        supervise=False,
+    # 没有写工具时落盘退回整段跳过，系统只说「直接给结论」。
+    # 这条测的是：写工具在，但源码只贴进 final，不会当成已经落盘。
+    pending = PendingChanges(tmp_path)
+    registry = ToolRegistry()
+    registry.register(list_dir_spec(tmp_path))
+    registry.register(read_file_spec(tmp_path))
+    registry.register(write_file_spec(tmp_path, pending))
+    loop = AgentLoop(
+        gateway=FakeModel(
+            script=[
+                _turn("贴源码", final=pasted),
+                _turn("改口", final="还没写入文件。"),
+            ],
+            tokenizer=OfflineTokenCounter(),
+        ),
+        tokenizer=OfflineTokenCounter(),
+        registry=registry,
+        config=Config(
+            project_root=tmp_path,
+            context_window=4096,
+            max_steps=4,
+            supervise=False,
+        ),
+        pending=pending,
     )
     result = loop.run("合并优化代码")
     prompt = "\n".join(item.content for item in loop.gateway.requests[-1].messages)
