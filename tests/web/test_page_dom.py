@@ -107,6 +107,38 @@ def test_种子标题在Agent起名后被替换(dom: dict) -> None:
     assert title["fetched"] == ["/session/title"]
 
 
+def test_草稿刷新后还在且发送后删掉(dom: dict) -> None:
+    """sessionStorage 记住当前草稿。发送成功删掉。存储抛错时输入照旧。"""
+    found = dom["draft_store"]
+    assert found["restored"] == "刷新前的草稿", found
+    assert found["wrote"] == "正在打", found
+    assert found["stored_key"] == "spool:draft:D:/ws-a|stored", found
+    assert found["away"] == "", found
+    assert found["back"] == "正在打", found
+    assert found["send_url"] == "/run", found
+    assert found["send_body"] == {"goal": "正在打"}, found
+    assert "spool:draft" not in str(found["send_body"]), found
+    assert found["after_send"] is False, found
+    assert found["memory_after_send"] is False, found
+    assert found["storage_threw"] is False, found
+    assert found["quota_value"] == "还能打", found
+    assert found["quota_draft"] == "还能打", found
+
+
+def test_复制失败时改走文本框再提示手动复制(dom: dict) -> None:
+    """剪贴板优先。它不可用就用 execCommand。再失败就选中代码。"""
+    found = dom["copy_fallback"]
+    assert found["clip"] == ["print(1)"], found
+    assert found["clip_label"] == "已复制", found
+    assert found["fallback_value"] == "copy:print(1)", found
+    assert found["fallback_gone"] is True, found
+    assert found["fallback_label"] == "已复制", found
+    assert found["manual_label"] == "请手动复制", found
+    assert found["selected_code"] is True, found
+    assert found["copy_threw"] is False, found
+    assert found["throw_label"] == "已复制", found
+
+
 def test_空闲窗口里又开始跑就不起标题(dom: dict) -> None:
     """final/state 后先等一会儿。这段里已经在跑就放弃，下次空闲还能再问。"""
     found = dom["title_idle"]

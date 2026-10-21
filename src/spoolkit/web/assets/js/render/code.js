@@ -110,18 +110,81 @@ function codeBlock(raw) {
   return code;
 }
 
-// 复制走 navigator.clipboard；失败就选中那段代码让人自己按 Ctrl+C——
-// 不弹第二个对话框（本地壳上"复制"点一下就该完事）。
+// 复制：剪贴板优先，失败再用一次性文本框走 execCommand，
+// 还不行就选中代码并提示手动复制。任何一步失败都不往外抛。
+function copyWithCommand(payload) {
+  if (!document.body || typeof document.execCommand !== 'function') { return false; }
+  const area = document.createElement('textarea');
+  area.value = payload;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.left = '-9999px';
+  let ok = false;
+  try {
+    document.body.appendChild(area);
+    if (typeof area.focus === 'function') { area.focus(); }
+    if (typeof area.select === 'function') { area.select(); }
+    if (typeof area.setSelectionRange === 'function') {
+      area.setSelectionRange(0, payload.length);
+    }
+    ok = document.execCommand('copy') !== false;
+  } catch (err) {
+    ok = false;
+  } finally {
+    try {
+      if (area.parentNode && typeof area.parentNode.removeChild === 'function') {
+        area.parentNode.removeChild(area);
+      }
+    } catch (err) { /* 文本框已经不在了 */ }
+  }
+  return ok;
+}
+
+function selectCode(button) {
+  const block = button && button.parentNode && button.parentNode.parentNode;
+  if (!block || typeof block.querySelector !== 'function') { return false; }
+  const code = block.querySelector('code');
+  if (!code) { return false; }
+  const selection = (typeof window !== 'undefined' && typeof window.getSelection === 'function')
+    ? window.getSelection() : null;
+  if (!selection || typeof document.createRange !== 'function') { return false; }
+  const range = document.createRange();
+  if (!range || typeof range.selectNodeContents !== 'function') { return false; }
+  range.selectNodeContents(code);
+  if (typeof selection.removeAllRanges === 'function') { selection.removeAllRanges(); }
+  if (typeof selection.addRange === 'function') { selection.addRange(range); }
+  return true;
+}
+
 function copyText(text, button) {
-  const done = function (ok) { button.textContent = ok ? '已复制' : '复制未成功'; };
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(
-      function () { done(true); },
-      function () { done(false); }
-    );
+  const payload = String(text == null ? '' : text);
+  const mark = function (label) {
+    if (button) { button.textContent = label; }
+  };
+  const manual = function () {
+    try { selectCode(button); } catch (err) { /* 选不中也要留下提示 */ }
+    mark('请手动复制');
+  };
+  const fallback = function () {
+    let copied = false;
+    try { copied = copyWithCommand(payload); } catch (err) { copied = false; }
+    if (copied) { mark('已复制'); return; }
+    manual();
+  };
+  try {
+    const clip = (typeof navigator !== 'undefined' && navigator.clipboard) ? navigator.clipboard : null;
+    if (clip && typeof clip.writeText === 'function') {
+      Promise.resolve().then(function () { return clip.writeText(payload); }).then(
+        function () { mark('已复制'); },
+        function () { fallback(); }
+      ).catch(function () { fallback(); });
+      return;
+    }
+  } catch (err) {
+    fallback();
     return;
   }
-  done(false);
+  fallback();
 }
 
 function appendInline(parent, inline) {

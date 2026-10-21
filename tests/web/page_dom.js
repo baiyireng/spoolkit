@@ -1237,6 +1237,118 @@ async function extras() {
     after_idle: afterIdle,
   };
 
+  const draftGoal = ids.get('goal');
+  const draftMem = {};
+  ctx.sessionStorage = {
+    getItem(key) { return Object.prototype.hasOwnProperty.call(draftMem, key) ? draftMem[key] : null; },
+    setItem(key, value) { draftMem[key] = String(value); },
+    removeItem(key) { delete draftMem[key]; },
+  };
+  const storedKey = 'spool:draft:' + ROOT_A + '|stored';
+  draftMem[storedKey] = '刷新前的草稿';
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'stored', WROWS, SROWS_A, []));
+  const restored = draftGoal.value;
+  draftGoal.value = '正在打';
+  draftGoal.oninput();
+  const wrote = draftMem[storedKey];
+  ctx.__spoolTest.applyState(frame(ROOT_B, 'a1', WROWS, SROWS_B, []));
+  const awayValue = draftGoal.value;
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'stored', WROWS, SROWS_A, []));
+  const backValue = draftGoal.value;
+  const sendPosts = [];
+  ctx.__fetchImpl = (url, opts) => {
+    sendPosts.push({ url: url, body: opts && opts.body ? JSON.parse(opts.body) : null });
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  };
+  await ctx.__spoolTest.say();
+  ctx.__fetchImpl = null;
+  const afterSend = Object.prototype.hasOwnProperty.call(draftMem, storedKey);
+  const memoryAfterSend = Object.prototype.hasOwnProperty.call(
+    ctx.__spoolTest.store.get('drafts') || {}, ROOT_A + '|stored');
+  let storageThrew = false;
+  ctx.sessionStorage.getItem = function () { throw new Error('quota'); };
+  ctx.sessionStorage.setItem = function () { throw new Error('quota'); };
+  ctx.sessionStorage.removeItem = function () { throw new Error('quota'); };
+  try {
+    draftGoal.value = '还能打';
+    draftGoal.oninput();
+  } catch (err) {
+    storageThrew = true;
+  }
+  const quotaDraft = (ctx.__spoolTest.store.get('drafts') || {})[ROOT_A + '|stored'] || '';
+  delete ctx.sessionStorage;
+
+  const copyBubble = document.createElement('div');
+  ctx.__spoolTest.fillRich(copyBubble, '```python\nprint(1)\n```');
+  const copyButton = copyBubble.querySelector('.copy-btn');
+  const copyCode = copyBubble.querySelector('code');
+  const clipWrites = [];
+  ctx.navigator.clipboard = {
+    writeText(text) { clipWrites.push(text); return Promise.resolve(); },
+  };
+  copyButton.onclick();
+  await flushMicrotasks();
+  const clipLabel = copyButton.textContent;
+  let fallbackValue = '';
+  let fallbackGone = false;
+  ctx.navigator.clipboard.writeText = function () { return Promise.reject(new Error('denied')); };
+  ctx.document.execCommand = function (command) {
+    const area = document.body.querySelector('textarea');
+    fallbackValue = command + ':' + (area ? area.value : '');
+    return true;
+  };
+  copyButton.onclick();
+  await flushMicrotasks();
+  fallbackGone = !document.body.querySelector('textarea');
+  const fallbackLabel = copyButton.textContent;
+  const selected = [];
+  ctx.document.execCommand = function () { return false; };
+  ctx.document.createRange = function () {
+    return { selectNodeContents(node) { selected.push(node); } };
+  };
+  ctx.getSelection = function () {
+    return { removeAllRanges() {}, addRange() {} };
+  };
+  copyButton.onclick();
+  await flushMicrotasks();
+  const manualLabel = copyButton.textContent;
+  let copyThrew = false;
+  ctx.navigator.clipboard.writeText = function () { throw new Error('boom'); };
+  ctx.document.execCommand = function () { return true; };
+  try { copyButton.onclick(); } catch (err) { copyThrew = true; }
+  await flushMicrotasks();
+  const throwLabel = copyButton.textContent;
+  ctx.navigator.clipboard = { writeText: () => Promise.resolve() };
+  delete ctx.document.execCommand;
+  delete ctx.document.createRange;
+  delete ctx.getSelection;
+
+  out.draft_store = {
+    restored: restored,
+    wrote: wrote,
+    away: awayValue,
+    back: backValue,
+    stored_key: storedKey,
+    send_body: sendPosts.length ? sendPosts[0].body : null,
+    send_url: sendPosts.length ? sendPosts[0].url : '',
+    after_send: afterSend,
+    memory_after_send: memoryAfterSend,
+    storage_threw: storageThrew,
+    quota_value: draftGoal.value,
+    quota_draft: quotaDraft,
+  };
+  out.copy_fallback = {
+    clip: clipWrites,
+    clip_label: clipLabel,
+    fallback_value: fallbackValue,
+    fallback_gone: fallbackGone,
+    fallback_label: fallbackLabel,
+    manual_label: manualLabel,
+    selected_code: selected.length ? selected[0] === copyCode : false,
+    copy_threw: copyThrew,
+    throw_label: throwLabel,
+  };
+
   await extras2();
 }
 

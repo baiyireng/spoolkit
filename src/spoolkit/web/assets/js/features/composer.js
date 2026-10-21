@@ -72,10 +72,11 @@ function setMeta(steps) {
   meta.textContent = ctx.sessions.sessionTitle() + ' · ' + (steps || 0) + ' 步';
 }
 
-// 草稿按「工作区|会话」分开。只活在内存里。空文本删掉那一格，
-// 免得切回来时用空串盖住还在打的字。
+// 草稿按「工作区|会话」分开。内存是当前页的权威，sessionStorage 只为刷新留一份。
+// 存储不可用或超限时静默退回内存，不把草稿发给服务端。
 let shownKey = '';
 const DRAFT_KEPT = '草稿还在输入框里，可以重试';
+const DRAFT_STORAGE_PREFIX = 'spool:draft:';
 
 function currentKey() {
   const target = (ctx.store.get('lastState') || {}).target || {};
@@ -85,20 +86,66 @@ function currentKey() {
   return keyFor(root, name);
 }
 
+function draftStorageName(key) {
+  return DRAFT_STORAGE_PREFIX + key;
+}
+
+function readStoredDraft(key) {
+  try {
+    if (typeof sessionStorage === 'undefined' || !sessionStorage || typeof sessionStorage.getItem !== 'function') {
+      return null;
+    }
+    const value = sessionStorage.getItem(draftStorageName(key));
+    if (value === null || value === undefined) { return null; }
+    return String(value);
+  } catch (err) {
+    return null;
+  }
+}
+
+function syncStoredDraft(key, text) {
+  try {
+    if (typeof sessionStorage === 'undefined' || !sessionStorage) { return; }
+    const name = draftStorageName(key);
+    if (text) {
+      if (typeof sessionStorage.setItem === 'function') { sessionStorage.setItem(name, text); }
+    } else if (typeof sessionStorage.removeItem === 'function') {
+      sessionStorage.removeItem(name);
+    }
+  } catch (err) {
+    // 配额满或隐私模式：这一份留在内存里，输入不受影响。
+  }
+}
+
+function ensureStoredDraft(key) {
+  const prev = ctx.store.get('drafts') || {};
+  if (Object.prototype.hasOwnProperty.call(prev, key)) { return; }
+  const stored = readStoredDraft(key);
+  if (!stored) { return; }
+  const drafts = Object.assign({}, prev);
+  drafts[key] = stored;
+  ctx.store.set('drafts', drafts);
+}
+
 function writeDraft(key, text) {
   if (!key) { return; }
   const prev = ctx.store.get('drafts') || {};
   const nextText = String(text || '');
   const had = Object.prototype.hasOwnProperty.call(prev, key);
   if (nextText) {
-    if (had && prev[key] === nextText) { return; }
-  } else if (!had) {
+    if (!had || prev[key] !== nextText) {
+      const drafts = Object.assign({}, prev);
+      drafts[key] = nextText;
+      ctx.store.set('drafts', drafts);
+    }
+    syncStoredDraft(key, nextText);
     return;
   }
+  if (!had) { return; }
   const drafts = Object.assign({}, prev);
-  if (nextText) { drafts[key] = nextText; }
-  else { delete drafts[key]; }
+  delete drafts[key];
   ctx.store.set('drafts', drafts);
+  syncStoredDraft(key, '');
 }
 
 function rememberDraft() {
@@ -112,6 +159,7 @@ function restoreDraft() {
   if (shownKey && goalBox.value !== '') { writeDraft(shownKey, goalBox.value); }
   const leaving = shownKey;
   shownKey = key;
+  ensureStoredDraft(key);
   const drafts = ctx.store.get('drafts') || {};
   if (Object.prototype.hasOwnProperty.call(drafts, key)) {
     const next = String(drafts[key] || '');
