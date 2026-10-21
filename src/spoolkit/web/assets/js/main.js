@@ -48,6 +48,7 @@ function applyState(state) {
   // 哪张卡片该被认领。**认领之后再补实时卡片**，它的节点才会落在对话流最后。
   app.thread.drawHistory(state.messages);
   app.thread.restoreLive(state);
+  app.thread.syncLiveTasks(state);
   // ⑤ 可做的动作（问题④）：这一轮有可退的成果时，摆一枚**真能点**的
   // 「撤销这一轮」。刷新 / 切走再切回也照旧——它读的是快照里 `final` 上那个
   // 只增的 `revert_run_id`（服务端在 `final` 事件上给的，见 `run.py`）。

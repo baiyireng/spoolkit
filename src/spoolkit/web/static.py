@@ -47,6 +47,8 @@ JS_ORDER = (
     "js/core/format.js",
     "js/render/markdown.js",
     "js/render/failure.js",
+    "js/render/trace_box.js",
+    "js/render/task_card.js",
     "js/render/diff.js",
     "js/render/code.js",
     "js/features/toasts.js",

@@ -1829,5 +1829,109 @@ async function extras2() {
     },
   }));
   out.where_empty = ids.get('where').textContent;
+
+  // 任务卡：有 tasks 的助手消息画卡、不画旧轨迹；没有 tasks 的旧消息仍画轨迹。
+  function taskEvent(seq, phase, status, summary, extra) {
+    return Object.assign({
+      seq: seq, step: phase === 'observe' ? 1 : 0, phase: phase, source: 'system',
+      status: status, summary: summary, tool: '', tool_call_id: '', intent: '',
+      refs: [], artifacts: [], raw: 'RAW_SECRET',
+    }, extra || {});
+  }
+  function taskGroup(status, events) {
+    return {
+      task_id: 'run:' + status, run_id: 'run', turn_id: status,
+      goal: '写一个文件', status: status, artifacts: [], events: events,
+    };
+  }
+  const story = [
+    taskEvent(1, 'understand', 'running', '写一个文件'),
+    taskEvent(2, 'retrieval', 'ok', '预取目录'),
+    taskEvent(3, 'observe', 'ok', '4 行', { tool: 'read_file', intent: '读源码', tool_call_id: 'tc-1-0', source: 'tool' }),
+    taskEvent(4, 'approval', 'await', 'a.py 待确认', { tool_call_id: 'tc-1-0' }),
+    taskEvent(5, 'verify', 'error', '编译失败'),
+    taskEvent(6, 'final', 'ok', '这是一段很长的最终答复不应该出现在任务卡里'),
+  ];
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.applyState(frame('D:/task-ui', 'a1', WROWS, SROWS_A, [
+    { role: 'user', content: '旧问题', created_at: 1 },
+    { role: 'assistant', content: '旧答复', created_at: 2, trace: [
+      { type: 'step', text: '第 1 步' },
+      { type: 'tool', ok: false, text: 'read_file → 失败', detail: '文件不存在' },
+    ] },
+    { role: 'user', content: '写一个文件', created_at: 3 },
+    { role: 'assistant', content: '写好了', created_at: 4,
+      trace: [{ type: 'step', text: '不该出现的轨迹' }],
+      tasks: [
+        taskGroup('verify_failed', story),
+        taskGroup('failed', [
+          taskEvent(1, 'understand', 'running', '做不完'),
+          taskEvent(2, 'error', 'error', '已达步数上限'),
+        ]),
+        taskGroup('cancelled', [
+          taskEvent(1, 'understand', 'running', '停下来'),
+          taskEvent(2, 'final', 'cancelled', '已取消的长文'),
+        ]),
+      ] },
+  ]));
+  const assistants = ids.get('stream').querySelectorAll('.msg').filter((node) =>
+    String(node._cls || '').indexOf('assistant') >= 0);
+  const oldCard = assistants[0];
+  const newCard = assistants[assistants.length - 1];
+  const oldHead = oldCard ? oldCard.querySelector('.trace-head') : null;
+  if (oldHead) { oldHead.onclick(); }
+  const cards = newCard ? newCard.querySelectorAll('.task-card') : [];
+  const first = cards[0] || null;
+  const firstHead = first ? first.querySelector('.task-head') : null;
+  const collapsed = firstHead ? firstHead.getAttribute('aria-expanded') : '';
+  if (firstHead) { firstHead.onclick(); }
+  const openedAria = firstHead ? firstHead.getAttribute('aria-expanded') : '';
+  const openedBody = first ? first.querySelector('.task-body') : null;
+  const openedText = openedBody ? openedBody.textContent : '';
+  const approvalRows = openedBody ? openedBody.querySelectorAll('.task-approval').length : 0;
+  const observeRows = openedBody ? openedBody.querySelectorAll('.task-observe').length : 0;
+  if (firstHead) { firstHead.onclick(); }
+  out.task_cards = {
+    old_trace: oldCard ? Boolean(oldCard.querySelector('.trace')) : false,
+    old_trace_text: oldCard && oldCard.querySelector('.trace-body')
+      ? oldCard.querySelector('.trace-body').textContent : '',
+    new_trace: newCard ? Boolean(newCard.querySelector('.trace')) : true,
+    count: cards.length,
+    heads: cards.map((node) => node.querySelector('.task-head').textContent),
+    collapsed: collapsed,
+    opened_aria: openedAria,
+    closed_again: firstHead ? firstHead.getAttribute('aria-expanded') : '',
+    opened: openedText,
+    approval_rows: approvalRows,
+    observe_rows: observeRows,
+    raw: newCard ? newCard.textContent.indexOf('RAW_SECRET') >= 0 : true,
+    goal_times: openedText.split('写一个文件').length - 1,
+  };
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.applyState(frame('D:/task-live', 'a1', WROWS, SROWS_A, [
+    { role: 'user', content: '写一个文件', created_at: 1 },
+  ], {
+    running: true,
+    goal: '写一个文件',
+    trace: { open: true, goal: '写一个文件', lines: [{ type: 'step', text: '第 1 步' }] },
+    task_groups: [taskGroup('running', [
+      taskEvent(1, 'understand', 'running', '写一个文件'),
+      taskEvent(2, 'retrieval', 'ok', '预取目录'),
+      taskEvent(3, 'observe', 'ok', '正在读', { tool: 'search_code', step: 0, tool_call_id: 'tc-0-0' }),
+    ])],
+  }));
+  const liveCard = lastCard();
+  const liveTrace = liveCard ? liveCard.querySelector('.trace') : null;
+  const liveTask = liveCard ? liveCard.querySelector('.task-card') : null;
+  out.task_running = {
+    role: liveCard ? liveCard._cls : '',
+    head: liveTask && liveTask.querySelector('.task-head')
+      ? liveTask.querySelector('.task-head').textContent : '',
+    aria: liveTask && liveTask.querySelector('.task-head')
+      ? liveTask.querySelector('.task-head').getAttribute('aria-expanded') : '',
+    trace_hidden: liveTrace ? liveTrace.classList.contains('hidden') : false,
+    trace_visible_text: liveTrace && !liveTrace.classList.contains('hidden')
+      ? liveTrace.textContent : '',
+  };
 }
 

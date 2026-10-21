@@ -453,6 +453,113 @@ def test_三档宽度下浮层不压输入条(server: str, tmp_path: Path) -> No
         assert mobile[name]["w"] >= 44 and mobile[name]["h"] >= 44, (name, mobile[name])
 
 
+def test_390任务卡单列且不溢出(server: str, tmp_path: Path) -> None:
+    """窄屏任务卡保持单列，长摘要不把页面撑出横向滚动。"""
+    browser = _browser()
+    if browser is None:
+        pytest.skip("没有 Chrome/Edge，无法量布局")
+    sys.path.insert(0, str(ROOT / "recon"))
+    from cdp import CDP
+
+    port = 9348
+    profile = tmp_path / "task-card-profile"
+    proc = subprocess.Popen(
+        [
+            browser,
+            "--headless",
+            "--disable-gpu",
+            "--no-first-run",
+            "--disable-extensions",
+            f"--remote-debugging-port={port}",
+            "--user-data-dir=" + str(profile),
+            server + "/",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        page = CDP(port)
+        page.navigate(server + "/")
+        ready = False
+        for _ in range(40):
+            try:
+                if page.eval("!!document.getElementById('stream')"):
+                    ready = True
+                    break
+            except Exception:
+                pass
+            import time
+            time.sleep(0.25)
+        assert ready, "页面没有画出对话区"
+        page.viewport(390, 844, mobile=True)
+        page.eval(
+            "new Promise((resolve) => {"
+            " const start = performance.now();"
+            " const tick = () => {"
+            "  const edge = document.getElementById('sidebar').getBoundingClientRect().right;"
+            "  if (edge <= 1 || performance.now() - start > 1000) resolve(edge);"
+            "  else requestAnimationFrame(tick);"
+            " };"
+            " tick();"
+            "})"
+        )
+        metrics = page.eval(
+            r"""
+            (() => {
+              const col = document.querySelector('#stream .col') || document.getElementById('stream');
+              const list = document.createElement('div');
+              list.className = 'task-list';
+              const card = document.createElement('div');
+              card.className = 'task-card task-card-running';
+              const head = document.createElement('button');
+              head.className = 'task-head';
+              head.type = 'button';
+              head.setAttribute('aria-expanded', 'true');
+              const goal = '写一个文件' + '很长的目标'.repeat(12);
+              head.innerHTML = '<span class="task-mark">进行中</span><span class="task-goal"></span><span class="task-steps">1 步</span><span class="task-verify">未验证</span>';
+              head.querySelector('.task-goal').textContent = goal;
+              const body = document.createElement('div');
+              body.className = 'task-body';
+              const row = document.createElement('div');
+              row.className = 'task-row task-observe';
+              row.textContent = 'read_file · 读源码 · ' + '摘要'.repeat(40);
+              body.appendChild(row);
+              card.appendChild(head);
+              card.appendChild(body);
+              list.appendChild(card);
+              col.appendChild(list);
+              const stream = document.getElementById('stream');
+              const cardBox = card.getBoundingClientRect();
+              const streamBox = stream.getBoundingClientRect();
+              const headStyle = getComputedStyle(head);
+              return {
+                card_right: Math.round(cardBox.right),
+                stream_right: Math.round(streamBox.right),
+                card_left: Math.round(cardBox.left),
+                stream_left: Math.round(streamBox.left),
+                page_overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                card_overflow: card.scrollWidth - card.clientWidth,
+                head_direction: headStyle.flexDirection,
+                head_width: Math.round(cardBox.width),
+              };
+            })()
+            """
+        )
+        shot = tmp_path / "task-card-390.png"
+        page.shot(str(shot))
+        shot_copy = ROOT / ".tmp" / "task-card-390.png"
+        shot_copy.parent.mkdir(parents=True, exist_ok=True)
+        shot_copy.write_bytes(shot.read_bytes())
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+    assert metrics["head_direction"] == "column", metrics
+    assert metrics["card_right"] <= metrics["stream_right"] + 1, metrics
+    assert metrics["card_left"] >= metrics["stream_left"] - 1, metrics
+    assert metrics["page_overflow"] <= 1, metrics
+    assert metrics["card_overflow"] <= 1, metrics
+
+
 def test_浏览器执行打包脚本(server: str, tmp_path: Path) -> None:
     browser = _browser()
     if browser is None:

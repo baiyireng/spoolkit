@@ -8,7 +8,7 @@
 assets/index.html          浏览器首页，只链 /assets
 assets/css/                样式，按原文件的段落拆开
 assets/js/core/            DOM、状态、时间与 diff 摘要、请求
-assets/js/render/          markdown / 代码 / diff / 失败说明
+assets/js/render/          markdown / 代码 / diff / 失败说明 / 思考过程 / 任务卡
 assets/js/features/        侧栏、会话、对话、输入、状态、通知、设置、确认
 assets/js/main.js          启动，并把上面的模块接上
 assets/js/test-entry.js    只进 dist/test-bundle.js

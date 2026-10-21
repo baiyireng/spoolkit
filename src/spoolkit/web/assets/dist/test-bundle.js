@@ -503,6 +503,306 @@ function failIntoBubble(bubble, head, text, extra) {
   bubble.appendChild(failureBox(parts));
 }
 
+// spool web · js/render/trace_box.js
+/* 思考过程那一块：默认收起，收起时正文一个节点都不留。对话流只负责把它挂到卡片上。 */
+// 一个可折叠的轨迹块。收起时**只有标题那一行**（正文块是空的，`hidden`），
+// 点开才把行建出来：这是"默认收起、不占版面"在 DOM 层的判据。
+function makeTrace() {
+  const box = document.createElement('div');
+  box.className = 'trace';
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'trace-head';
+  head.setAttribute('aria-expanded', 'false');
+  const body = document.createElement('div');
+  body.className = 'trace-body hidden';
+  head.onclick = function () { toggleTrace(box); };
+  box.appendChild(head);
+  box.appendChild(body);
+  box._head = head;
+  box._body = body;
+  box._lines = [];
+  drawTraceHead(box);
+  return box;
+}
+
+function traceOpen(box) { return !box._body.classList.contains('hidden'); }
+
+function setTraceOpen(box, open) {
+  box._body.classList.toggle('hidden', !open);
+  box._head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) { drawTraceBody(box); }
+  else { box._body.replaceChildren(); }  // 收起时不占节点（与「默认收起」同口径）
+}
+
+function toggleTrace(box) {
+  setTraceOpen(box, !traceOpen(box));
+}
+
+// 标题那一行：几行 + **有没有失败**。一行都没有时也要说得出"这里现在是空的"，
+// 而失败必须直接可见（藏在收起块里的失败等于没提示）。
+function drawTraceHead(box) {
+  const lines = box._lines || [];
+  let text = '思考过程 · ' + lines.length + ' 行';
+  for (const one of lines) {
+    if (one.ok === false) { text += ' · 有失败'; break; }
+  }
+  box._head.textContent = text;
+  box._head.title = text + '（点开查看本轮步骤、工具调用与失败原因）';
+}
+
+// 正文：**只追加没画过的那几行**（增量追加，重复到达不会叠）。收起时不建节点。
+function drawTraceBody(box) {
+  const lines = box._lines || [];
+  if (box._body.children.length > lines.length) { box._body.replaceChildren(); }
+  for (let index = box._body.children.length; index < lines.length; index += 1) {
+    box._body.appendChild(traceLineNode(lines[index]));
+  }
+}
+
+function traceLineText(line) {
+  const kind = String(line.type || '');
+  const text = String(line.text || '');
+  if (kind === 'final') { return (line.ok ? '完成：' : '失败：') + text; }
+  if (kind === 'error') { return '错误：' + text; }
+  return text;
+}
+
+function traceLineNode(line) {
+  const node = document.createElement('div');
+  const bad = line.ok === false || line.type === 'error';
+  node.className = 'trace-line'
+    + (bad ? ' bad' : (line.type === 'final' ? ' ok' : ''));
+  // 上屏一律先遮蔽密钥（与服务端那份同一口径）。
+  node.textContent = redact(traceLineText(line));
+  if (line.detail) {
+    const detail = document.createElement('div');
+    detail.className = 'trace-detail';
+    detail.textContent = redact(String(line.detail));
+    node.appendChild(detail);
+  }
+  return node;
+}
+
+// 把一份轨迹填进那个块（历史消息与"认领快照"时用）。
+function fillTrace(box, lines) {
+  box._lines = (lines || []).map(function (one) { return one; });
+  drawTraceHead(box);
+  if (traceOpen(box)) { drawTraceBody(box); }
+}
+
+// 一份轨迹里"失败的那一轮"：`final` / `error` 那行（带着服务端只增的结构化线索）。
+// 刷新之后靠它把失败原因与下一步重新画成那一块说明。
+function failedTraceLine(lines) {
+  for (const one of lines || []) {
+    if (one.ok === false && (one.type === 'final' || one.type === 'error')) { return one; }
+  }
+  return null;
+}
+
+// spool web · js/render/task_card.js
+/* 任务卡：挂在助手回复下面。只读 summary，不画 raw。展开与收起和思考过程同一口径。 */
+// 任务卡只读 summary / refs / artifacts。事件上没有 raw，这里也不画。
+const TASK_STATUS_LABEL = {
+  done: '完成',
+  verify_failed: '验证未过',
+  failed: '失败',
+  cancelled: '已取消',
+  running: '进行中',
+};
+
+function taskStatusClass(status) {
+  return Object.prototype.hasOwnProperty.call(TASK_STATUS_LABEL, status) ? status : 'running';
+}
+
+function taskStepCount(task) {
+  let max = -1;
+  for (const event of task.events || []) {
+    const step = Number(event.step);
+    if (!Number.isNaN(step) && step > max) { max = step; }
+  }
+  return max < 0 ? 0 : max + 1;
+}
+
+function taskVerifyText(task) {
+  let found = '';
+  for (const event of task.events || []) {
+    if (event.phase !== 'verify') { continue; }
+    if (event.status === 'error') { found = '验证未过'; }
+    else if (event.status === 'ok') { found = '验证通过'; }
+    else { found = '已验证'; }
+  }
+  if (found) { return found; }
+  if (task.status === 'verify_failed') { return '验证未过'; }
+  return '未验证';
+}
+
+function approvalLabel(status) {
+  if (status === 'confirmed') { return '已确认'; }
+  if (status === 'rejected') { return '已拒绝'; }
+  return '等待';
+}
+
+function observeStatus(status) {
+  if (status === 'ok') { return '完成'; }
+  if (status === 'error') { return '失败'; }
+  if (status === 'running') { return '进行中'; }
+  return String(status || '');
+}
+
+function taskRows(task) {
+  const events = (task.events || []).slice().sort(function (left, right) {
+    return Number(left.seq || 0) - Number(right.seq || 0);
+  });
+  const rows = [];
+  const byCall = {};
+  for (const event of events) {
+    const phase = String(event.phase || '');
+    if (phase === 'understand') { continue; }
+    if (phase === 'approval') {
+      const call = String(event.tool_call_id || '');
+      const label = approvalLabel(event.status);
+      if (call && byCall[call]) {
+        byCall[call].approval = label;
+        continue;
+      }
+      rows.push({kind: 'approval', text: label});
+      continue;
+    }
+    if (phase === 'observe') {
+      const row = {
+        kind: 'observe',
+        tool: String(event.tool || ''),
+        intent: String(event.intent || ''),
+        summary: String(event.summary || ''),
+        status: observeStatus(event.status),
+        bad: event.status === 'error',
+        approval: '',
+      };
+      rows.push(row);
+      if (event.tool_call_id) { byCall[String(event.tool_call_id)] = row; }
+      continue;
+    }
+    if (phase === 'retrieval') {
+      rows.push({kind: 'retrieval', text: String(event.summary || '')});
+    } else if (phase === 'verify') {
+      rows.push({kind: 'verify', text: String(event.summary || ''), bad: event.status === 'error'});
+    } else if (phase === 'error') {
+      rows.push({kind: 'error', text: String(event.summary || ''), bad: true});
+    } else if (phase === 'final') {
+      rows.push({kind: 'final', text: '结论已生成'});
+    }
+  }
+  return rows;
+}
+
+function drawTaskHead(box) {
+  const task = box._task || {};
+  const head = box._head;
+  head.replaceChildren();
+  const mark = h('span', 'task-mark');
+  mark.textContent = TASK_STATUS_LABEL[task.status] || TASK_STATUS_LABEL.running;
+  const goal = h('span', 'task-goal');
+  goal.textContent = redact(String(task.goal || ''));
+  const steps = h('span', 'task-steps');
+  steps.textContent = taskStepCount(task) + ' 步';
+  const verify = h('span', 'task-verify');
+  verify.textContent = taskVerifyText(task);
+  head.appendChild(mark);
+  head.appendChild(document.createTextNode(' · '));
+  head.appendChild(goal);
+  head.appendChild(document.createTextNode(' · '));
+  head.appendChild(steps);
+  head.appendChild(document.createTextNode(' · '));
+  head.appendChild(verify);
+}
+
+function drawTaskBody(box) {
+  box._body.replaceChildren();
+  for (const row of taskRows(box._task || {})) {
+    const line = h('div', 'task-row task-' + row.kind + (row.bad ? ' bad' : ''));
+    if (row.kind === 'observe') {
+      const tool = h('span', 'task-tool');
+      tool.textContent = redact(row.tool);
+      line.appendChild(tool);
+      if (row.intent) {
+        const intent = h('span', 'task-intent');
+        intent.textContent = redact(row.intent);
+        line.appendChild(document.createTextNode(' · '));
+        line.appendChild(intent);
+      }
+      const summary = h('span', 'task-summary');
+      summary.textContent = redact(row.summary);
+      line.appendChild(document.createTextNode(' · '));
+      line.appendChild(summary);
+      const status = h('span', 'task-row-status');
+      status.textContent = row.status;
+      line.appendChild(document.createTextNode(' · '));
+      line.appendChild(status);
+      if (row.approval) {
+        const approval = h('span', 'task-approval');
+        approval.textContent = row.approval;
+        line.appendChild(document.createTextNode(' · '));
+        line.appendChild(approval);
+      }
+    } else {
+      line.textContent = redact(row.text);
+    }
+    box._body.appendChild(line);
+  }
+}
+
+function taskOpen(box) { return !box._body.classList.contains('hidden'); }
+
+function setTaskOpen(box, open) {
+  box._body.classList.toggle('hidden', !open);
+  box._head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) { drawTaskBody(box); }
+  else { box._body.replaceChildren(); }
+}
+
+function makeTaskCard(task) {
+  const box = h('div', 'task-card task-card-' + taskStatusClass(task.status));
+  box.setAttribute('data-task-id', String(task.task_id || ''));
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'task-head';
+  head.setAttribute('aria-expanded', 'false');
+  const body = h('div', 'task-body hidden');
+  head.onclick = function () { setTaskOpen(box, !taskOpen(box)); };
+  box.appendChild(head);
+  box.appendChild(body);
+  box._head = head;
+  box._body = body;
+  box._task = task;
+  drawTaskHead(box);
+  return box;
+}
+
+function syncTaskCards(wrap, tasks) {
+  if (!wrap) { return; }
+  let host = wrap.querySelector('.task-list');
+  if (!host) {
+    host = h('div', 'task-list');
+    wrap.appendChild(host);
+  }
+  for (const task of tasks || []) {
+    const id = String(task.task_id || '');
+    let card = null;
+    for (const node of host.querySelectorAll('.task-card')) {
+      if (node.getAttribute('data-task-id') === id) { card = node; break; }
+    }
+    if (!card) {
+      host.appendChild(makeTaskCard(task));
+      continue;
+    }
+    card._task = task;
+    card.className = 'task-card task-card-' + taskStatusClass(task.status);
+    drawTaskHead(card);
+    if (taskOpen(card)) { drawTaskBody(card); }
+  }
+}
+
 // spool web · js/render/diff.js
 // diff 摘要：几行加、几行减。看正文之前先给一个"改了多少"。
 // `diffSummary` 不碰 DOM，节点测试直接引这个文件。`diffBox` 仍用 document 装节点。
@@ -1632,101 +1932,6 @@ async function newSession() {
    两边文字刻意写得一样（步骤 / 工具成功失败 / 等待心跳的措辞与服务端 `trace_line`
    一致），免得同一轮在跑完前后看到两种写法。 */
 
-// 一个可折叠的轨迹块。收起时**只有标题那一行**（正文块是空的，`hidden`），
-// 点开才把行建出来：这是"默认收起、不占版面"在 DOM 层的判据。
-function makeTrace() {
-  const box = document.createElement('div');
-  box.className = 'trace';
-  const head = document.createElement('button');
-  head.type = 'button';
-  head.className = 'trace-head';
-  head.setAttribute('aria-expanded', 'false');
-  const body = document.createElement('div');
-  body.className = 'trace-body hidden';
-  head.onclick = function () { toggleTrace(box); };
-  box.appendChild(head);
-  box.appendChild(body);
-  box._head = head;
-  box._body = body;
-  box._lines = [];
-  drawTraceHead(box);
-  return box;
-}
-
-function traceOpen(box) { return !box._body.classList.contains('hidden'); }
-
-function setTraceOpen(box, open) {
-  box._body.classList.toggle('hidden', !open);
-  box._head.setAttribute('aria-expanded', open ? 'true' : 'false');
-  if (open) { drawTraceBody(box); }
-  else { box._body.replaceChildren(); }  // 收起时不占节点（与「默认收起」同口径）
-}
-
-function toggleTrace(box) {
-  setTraceOpen(box, !traceOpen(box));
-}
-
-// 标题那一行：几行 + **有没有失败**。一行都没有时也要说得出"这里现在是空的"，
-// 而失败必须直接可见（藏在收起块里的失败等于没提示）。
-function drawTraceHead(box) {
-  const lines = box._lines || [];
-  let text = '思考过程 · ' + lines.length + ' 行';
-  for (const one of lines) {
-    if (one.ok === false) { text += ' · 有失败'; break; }
-  }
-  box._head.textContent = text;
-  box._head.title = text + '（点开查看本轮步骤、工具调用与失败原因）';
-}
-
-// 正文：**只追加没画过的那几行**（增量追加，重复到达不会叠）。收起时不建节点。
-function drawTraceBody(box) {
-  const lines = box._lines || [];
-  if (box._body.children.length > lines.length) { box._body.replaceChildren(); }
-  for (let index = box._body.children.length; index < lines.length; index += 1) {
-    box._body.appendChild(traceLineNode(lines[index]));
-  }
-}
-
-function traceLineText(line) {
-  const kind = String(line.type || '');
-  const text = String(line.text || '');
-  if (kind === 'final') { return (line.ok ? '完成：' : '失败：') + text; }
-  if (kind === 'error') { return '错误：' + text; }
-  return text;
-}
-
-function traceLineNode(line) {
-  const node = document.createElement('div');
-  const bad = line.ok === false || line.type === 'error';
-  node.className = 'trace-line'
-    + (bad ? ' bad' : (line.type === 'final' ? ' ok' : ''));
-  // 上屏一律先遮蔽密钥（与服务端那份同一口径）。
-  node.textContent = redact(traceLineText(line));
-  if (line.detail) {
-    const detail = document.createElement('div');
-    detail.className = 'trace-detail';
-    detail.textContent = redact(String(line.detail));
-    node.appendChild(detail);
-  }
-  return node;
-}
-
-// 把一份轨迹填进那个块（历史消息与"认领快照"时用）。
-function fillTrace(box, lines) {
-  box._lines = (lines || []).map(function (one) { return one; });
-  drawTraceHead(box);
-  if (traceOpen(box)) { drawTraceBody(box); }
-}
-
-// 一份轨迹里"失败的那一轮"：`final` / `error` 那行（带着服务端只增的结构化线索）。
-// 刷新之后靠它把失败原因与下一步重新画成那一块说明。
-function failedTraceLine(lines) {
-  for (const one of lines || []) {
-    if (one.ok === false && (one.type === 'final' || one.type === 'error')) { return one; }
-  }
-  return null;
-}
-
 // 事件 → 轨迹行（措辞与服务端 `runner.trace_line` 一致）。
 function liveTraceLine(data) {
   const kind = String(data.type || '');
@@ -1882,6 +2087,10 @@ function addTraceLine(line) {
 // 运行中自动展开思考过程，让进度轴看得见（设计 interactive-harness §3.4）。
 function pushTraceLine(card, line) {
   if (card === null || card === undefined || line === null || line === undefined) { return; }
+  if (card.wrap && card.wrap.querySelector('.task-card')) {
+    // 这张助手消息已经有任务卡：旧轨迹不再展开，也不再往页面上画。
+    return;
+  }
   const lines = card.trace._lines;
   if (line.type === 'wait' && lines.length) {
     const last = lines[lines.length - 1];
@@ -2003,9 +2212,17 @@ function adoptMessage(item, isLast) {
   if (isLast && live !== null) { card = live; }
   if (card === null) { card = liveCardFor(item); }
   if (card === null) { return false; }
-  if (item.trace && item.trace.length) { fillTrace(card.trace, item.trace); }
+  const tasks = item.tasks || [];
+  if (tasks.length) {
+    syncTaskCards(card.wrap, tasks);
+    concealTrace(card);
+    const parts = splitReport(item.content);
+    fillReply(card, parts.head);
+  } else {
+    if (item.trace && item.trace.length) { fillTrace(card.trace, item.trace); }
+    fillReport(card, item.content);
+  }
   if (!card.done) { card.done = true; }
-  fillReport(card, item.content);
   // 详情行是在 `fillTrace` 之后追加的：**不许**把服务端那份轨迹盖掉
   // （它是这一轮的完整过程，详情只是加在它后面）。
   return true;
@@ -2013,13 +2230,21 @@ function adoptMessage(item, isLast) {
 
 // 画一条快照里的往来。助手那一条如果有轨迹，就多一个**默认收起**的「思考过程」；
 // "失败的那一轮"的失败原因与下一步也在这里重新画出来（刷新之后还看得见）。
+function concealTrace(card) {
+  if (!card || !card.trace) { return; }
+  setTraceOpen(card.trace, false);
+  card.trace.classList.add('hidden');
+}
+
 function historyCard(item) {
   const mine = item.role === 'user';
   const wrap = makeMsg(mine ? 'user' : 'assistant');
   wrap.classList.add('history');
+  const tasks = !mine && item.tasks ? item.tasks : [];
   const lines = item.trace || [];
   let trace = null;
-  if (!mine && lines.length) {
+  // 有任务卡的助手消息不再画旧轨迹。没有任务的旧消息仍走思考过程。
+  if (!mine && !tasks.length && lines.length) {
     trace = makeTrace();
     wrap.appendChild(trace);
     fillTrace(trace, lines);
@@ -2027,9 +2252,13 @@ function historyCard(item) {
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   wrap.appendChild(bubble);
-  const failed = mine ? null : failedTraceLine(lines);
+  const failed = mine || tasks.length ? null : failedTraceLine(lines);
   if (failed) {
     failIntoBubble(bubble, '失败：', failed.text, failed.error || null);
+  } else if (tasks.length) {
+    const parts = splitReport(item.content);
+    fillReply({bubble: bubble}, parts.head);
+    syncTaskCards(wrap, tasks);
   } else {
     // 报告的详情行要有地方落脚：这一条没有轨迹时就地建一个（默认收起）。
     if (!mine && trace === null) {
@@ -2039,6 +2268,39 @@ function historyCard(item) {
     fillReport({bubble: bubble, trace: trace}, item.content);
   }
   return wrap;
+}
+
+function syncLiveTasks(state) {
+  const groups = (state && state.task_groups) || [];
+  const running = [];
+  for (const group of groups) {
+    if (group && group.status === 'running') { running.push(group); }
+  }
+  if (!running.length) { return; }
+  const seen = {};
+  for (const node of stream.querySelectorAll('.task-card')) {
+    seen[node.getAttribute('data-task-id') || ''] = node;
+  }
+  const fresh = [];
+  for (const group of running) {
+    const id = String(group.task_id || '');
+    const card = seen[id];
+    if (!card) { fresh.push(group); continue; }
+    card._task = group;
+    card.className = 'task-card task-card-' + taskStatusClass(group.status);
+    drawTaskHead(card);
+    if (taskOpen(card)) { drawTaskBody(card); }
+  }
+  if (!fresh.length) { return; }
+  const open = state.trace && state.trace.open;
+  if (live === null && !state.running && !open) { return; }
+  const card = ensureLive();
+  if (!card.turnGoal) {
+    const info = state.trace || {};
+    card.turnGoal = String(info.goal || state.goal || '');
+  }
+  syncTaskCards(card.wrap, fresh);
+  concealTrace(card);
 }
 
 // 刷新 / 切回之后，这一轮可能还在跑：把服务端那份轨迹接回来接着画。
@@ -2168,7 +2430,7 @@ function setPendingUser(value) { pendingUser = value; }
 function getPendingUser() { return pendingUser; }
 function getLastDrawn() { return lastDrawn; }
 
-  return { ensureLive: ensureLive, replaceSection: replaceSection, appendDelta: appendDelta, addTraceLine: addTraceLine, pushTraceLine: pushTraceLine, splitReport: splitReport, fillReport: fillReport, lastAssistantCard: lastAssistantCard, fillReply: fillReply, finishLive: finishLive, liveCardFor: liveCardFor, adoptMessage: adoptMessage, historyCard: historyCard, restoreLive: restoreLive, drawHistory: drawHistory, atBottom: atBottom, scrollDown: scrollDown, updateToBottom: updateToBottom, add: add, resetView: resetView, getLive: getLive, setPendingUser: setPendingUser, getPendingUser: getPendingUser, getLastDrawn: getLastDrawn };
+  return { ensureLive: ensureLive, replaceSection: replaceSection, appendDelta: appendDelta, addTraceLine: addTraceLine, pushTraceLine: pushTraceLine, splitReport: splitReport, fillReport: fillReport, lastAssistantCard: lastAssistantCard, fillReply: fillReply, finishLive: finishLive, liveCardFor: liveCardFor, adoptMessage: adoptMessage, historyCard: historyCard, restoreLive: restoreLive, drawHistory: drawHistory, syncLiveTasks: syncLiveTasks, atBottom: atBottom, scrollDown: scrollDown, updateToBottom: updateToBottom, add: add, resetView: resetView, getLive: getLive, setPendingUser: setPendingUser, getPendingUser: getPendingUser, getLastDrawn: getLastDrawn };
 }
 
 // spool web · js/features/confirm.js
@@ -3440,6 +3702,7 @@ function applyState(state) {
   // 哪张卡片该被认领。**认领之后再补实时卡片**，它的节点才会落在对话流最后。
   app.thread.drawHistory(state.messages);
   app.thread.restoreLive(state);
+  app.thread.syncLiveTasks(state);
   // ⑤ 可做的动作（问题④）：这一轮有可退的成果时，摆一枚**真能点**的
   // 「撤销这一轮」。刷新 / 切走再切回也照旧——它读的是快照里 `final` 上那个
   // 只增的 `revert_run_id`（服务端在 `final` 事件上给的，见 `run.py`）。

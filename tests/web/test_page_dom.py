@@ -213,6 +213,44 @@ def test_常驻提示出现展开收起都不挤对话区(dom: dict) -> None:
     assert squeeze["restored"]["composer_nodes"] == 0
 
 
+def test_任务卡默认折叠且有卡时不画旧轨迹(dom: dict) -> None:
+    """有 tasks 的助手消息画任务卡；没有 tasks 的旧消息仍画思考过程。"""
+    cards = dom["task_cards"]
+    assert cards["old_trace"] is True
+    assert "第 1 步" in cards["old_trace_text"]
+    assert "read_file → 失败" in cards["old_trace_text"]
+    assert cards["new_trace"] is False
+    assert cards["count"] == 3
+    assert cards["collapsed"] == "false"
+    assert cards["opened_aria"] == "true"
+    assert cards["closed_again"] == "false"
+    assert "验证未过" in cards["heads"][0]
+    assert "写一个文件" in cards["heads"][0]
+    assert "2 步" in cards["heads"][0]
+    assert "失败" in cards["heads"][1]
+    assert "已达步数上限" not in cards["heads"][1]
+    assert "已取消" in cards["heads"][2]
+    assert "read_file" in cards["opened"]
+    assert "读源码" in cards["opened"]
+    assert "4 行" in cards["opened"]
+    assert "编译失败" in cards["opened"]
+    assert "等待" in cards["opened"]
+    assert cards["observe_rows"] == 1
+    assert cards["approval_rows"] == 1
+    assert "结论已生成" in cards["opened"]
+    assert "不应该出现在任务卡里" not in cards["opened"]
+    assert cards["goal_times"] == 0
+    assert cards["raw"] is False
+    running = dom["task_running"]
+    assert "assistant" in running["role"]
+    assert running["head"].startswith("进行中")
+    assert "写一个文件" in running["head"]
+    assert "未验证" in running["head"]
+    assert running["aria"] == "false"
+    assert running["trace_hidden"] is True
+    assert running["trace_visible_text"] == ""
+
+
 # --- ② AI 回复后消息卡自动更新；思考过程可折叠、事后还能回看 ---
 
 
