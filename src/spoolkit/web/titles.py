@@ -26,7 +26,8 @@ from spoolkit.llm.types import ChatRequest, Message
 from spoolkit.net import system_proxy
 
 TITLE_MAX_TOKENS = 48
-TITLE_TIMEOUT_SECONDS = 12.0
+# 标题要尽快放手。llama.cpp 只有一个槽，十几秒的命名请求会挡住下一轮。
+TITLE_TIMEOUT_SECONDS = 5.0
 
 SYSTEM = (
     "你是一个会话命名器。你只输出一个简短标题，"

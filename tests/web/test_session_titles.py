@@ -16,7 +16,7 @@ from spoolkit.kernel import sessions
 from spoolkit.kernel.target import Target
 from spoolkit.llm.types import ChatResponse
 from spoolkit.web.server import WRITE_PATHS, WebState, build_server
-from spoolkit.web.titles import TitleNamer
+from spoolkit.web.titles import TITLE_TIMEOUT_SECONDS, TitleNamer
 
 
 @pytest.fixture
@@ -150,6 +150,74 @@ def test_模型失败时保留种子标题(tmp_path: Path) -> None:
     assert status == 200, body
     assert body["title"] == "修好登录页"
     assert body["generated"] is False
+    meta = sessions.read_meta(root, made)
+    assert meta["title"] == "修好登录页"
+    assert meta["title_source"] == sessions.TITLE_SEED
+
+
+def test_进锁后发现正在跑就不调模型(tmp_path: Path) -> None:
+    """锁外还空闲，排队期间用户开了下一轮：409，不调模型，也不写 meta。"""
+    root = tmp_path
+    made = sessions.create_session(root)
+    sessions.ensure_title(root, made, "请帮我修好登录页")
+    called = []
+
+    def namer(goal: str, reply: str) -> str:
+        called.append((goal, reply))
+        return "不该写下的标题"
+
+    runner = _Runner(root, made, "请帮我修好登录页", "修好了")
+    state = WebState(
+        _Registry(runner),
+        Target(
+            root=root,
+            session=made,
+            workspace_source="explicit",
+            session_source="explicit",
+        ),
+        pinned=True,
+        title_namer=namer,
+    )
+
+    class _Flip:
+        def __enter__(self):
+            runner.running = True
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    state._title_lock = _Flip()
+    version = state.current()[0]
+    status, body = state.generate_title()
+    assert status == 409, body
+    assert body["error"] == "这一轮还没跑完：等它收尾后自动起标题。"
+    assert called == []
+    assert state.current()[0] == version
+    meta = sessions.read_meta(root, made)
+    assert meta["title"] == "修好登录页"
+    assert meta["title_source"] == sessions.TITLE_SEED
+
+
+def test_超时保留种子标题(tmp_path: Path) -> None:
+    """命名请求超时就当没起成：种子标题留着，不冒成 500。"""
+    assert 4 <= TITLE_TIMEOUT_SECONDS <= 5
+    root = tmp_path
+    made = sessions.create_session(root)
+    sessions.ensure_title(root, made, "请帮我修好登录页")
+
+    class _Gateway:
+        def chat(self, request: object) -> object:
+            raise TimeoutError("title timed out")
+
+    state = _state(
+        root, session=made, goal="请帮我修好登录页", reply="修好了", namer=None,
+    )
+    state._title_namers[str(root)] = TitleNamer(root, gateway=_Gateway())
+    status, body = state.generate_title()
+    assert status == 200, body
+    assert body["generated"] is False
+    assert body["title"] == "修好登录页"
     meta = sessions.read_meta(root, made)
     assert meta["title"] == "修好登录页"
     assert meta["title_source"] == sessions.TITLE_SEED

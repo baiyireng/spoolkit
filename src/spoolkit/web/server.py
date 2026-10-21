@@ -583,6 +583,11 @@ class WebState:
                     "generated": False,
                     "source": source,
                 }
+            # 锁外看过一次 running。用户可以在我们排队时发出下一轮，
+            # 单槽模型不能再被标题请求占住。
+            _version, runner = self.current()
+            if runner is not None and runner.running:
+                return 409, {"error": "这一轮还没跑完：等它收尾后自动起标题。"}
             generated = ""
             try:
                 if self._title_namer is not None:

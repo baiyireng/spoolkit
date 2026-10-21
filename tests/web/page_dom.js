@@ -211,6 +211,25 @@ function fireTimers() {
   return fired;
 }
 
+function timersSince(mark) {
+  const added = [];
+  for (let index = mark; index < timers.length; index += 1) {
+    if (!timers[index].cancelled) { added.push(timers[index]); }
+  }
+  return added;
+}
+
+function runTimers(list) {
+  for (const item of list) {
+    item.cancelled = true;
+    item.fn();
+  }
+}
+
+async function flushMicrotasks() {
+  for (let step = 0; step < 6; step += 1) { await Promise.resolve(); }
+}
+
 const document = {
   body,
   activeElement: null,
@@ -1168,13 +1187,54 @@ async function extras() {
     return Promise.resolve({ ok: true, status: 200, json: async () =>
       ({ ok: true, title: '模型起的标题', generated: true, source: 'agent' }) });
   };
-  await ctx.__spoolTest.maybeAgentTitle(true);
+  const titleMark = timers.length;
+  ctx.__spoolTest.maybeAgentTitle(true);
+  runTimers(timersSince(titleMark));
+  await flushMicrotasks();
   ctx.__fetchImpl = null;
   const namedRow = rowByName('sessions', '模型起的标题');
   out.agent_title = {
     title: namedRow ? namedRow.querySelector('.nm').textContent : '',
     sub: namedRow ? namedRow.querySelector('.src').textContent : '',
     fetched: ctx.fetchCalls.slice(-1),
+  };
+
+  // 空闲窗口里用户又开了一轮：这次不起标题，也不把会话记成已经问过。
+  ctx.__spoolTest.store.set('running', false);
+  const idleBefore = ctx.fetchCalls.length;
+  ctx.__fetchImpl = () => Promise.resolve({
+    ok: true, status: 200,
+    json: async () => ({ ok: true, title: '不该出现', generated: true, source: 'agent' }),
+  });
+  const idleMark = timers.length;
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'idle', WROWS, [
+    { id: 'idle', title: '种子标题', title_source: 'seed', archived: false,
+      last_active: 1, current: true },
+  ], [{ role: 'user', content: '下一轮目标' }], {
+    target: { root: ROOT_A, session: 'idle', session_title: '种子标题',
+      session_title_source: 'seed', pinned: false,
+      workspace_source: 'explicit', session_source: 'explicit', note: '' },
+  }));
+  const idleTimers = timersSince(idleMark);
+  const duringWait = ctx.fetchCalls.slice(idleBefore).filter((url) => url === '/session/title').length;
+  ctx.__spoolTest.store.set('running', true);
+  runTimers(idleTimers);
+  await flushMicrotasks();
+  const afterRunning = ctx.fetchCalls.slice(idleBefore).filter((url) => url === '/session/title').length;
+  const kept = rowByName('sessions', '种子标题');
+  ctx.__spoolTest.store.set('running', false);
+  const retryMark = timers.length;
+  ctx.__spoolTest.maybeAgentTitle(false);
+  runTimers(timersSince(retryMark));
+  await flushMicrotasks();
+  const afterIdle = ctx.fetchCalls.slice(idleBefore).filter((url) => url === '/session/title').length;
+  ctx.__fetchImpl = null;
+  out.title_idle = {
+    wait_ms: idleTimers.length ? idleTimers[0].ms : 0,
+    during_wait: duringWait,
+    after_running: afterRunning,
+    kept: Boolean(kept),
+    after_idle: afterIdle,
   };
 
   await extras2();

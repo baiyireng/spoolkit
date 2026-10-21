@@ -107,6 +107,16 @@ def test_种子标题在Agent起名后被替换(dom: dict) -> None:
     assert title["fetched"] == ["/session/title"]
 
 
+def test_空闲窗口里又开始跑就不起标题(dom: dict) -> None:
+    """final/state 后先等一会儿。这段里已经在跑就放弃，下次空闲还能再问。"""
+    found = dom["title_idle"]
+    assert 1200 <= found["wait_ms"] <= 1500, found
+    assert found["during_wait"] == 0, found
+    assert found["after_running"] == 0, found
+    assert found["kept"] is True, found
+    assert found["after_idle"] == 1, found
+
+
 def test_点击一行立刻亮起来而不是等回帧(dom: dict) -> None:
     """回帧那一趟里服务端会顺带探活模型，模型不通时要好几秒。
 

@@ -1903,30 +1903,40 @@ function sessionRowTitle(one) {
   return String((one && one.title) || "").trim() || "未命名会话";
 }
 
-// 一轮结束后请 Agent 给当前会话起个名。只在标题为空或仍是种子标题时做；
-// 同一条会话每页只请求一次；失败就保留种子标题，不弹错、不阻塞对话。
-async function maybeAgentTitle(force) {
-  if (ctx.store.get('readonly') || ctx.store.get('running') || !ctx.store.get('lastState')) { return; }
-  // 没有可命名的内容时别去打扰服务端（尤其是还没有跑过第一轮的新会话）。
+// 一轮结束后请 Agent 给当前会话起个名。只在标题为空或仍是种子标题时做。
+// final / state 之后先空出一小段：用户往往马上发下一轮，这段里如果已经在跑
+// 就放弃本次，也不把这条会话记成"已经问过"。失败保留种子标题，不弹错、不挡输入。
+const TITLE_IDLE_MS = 1300;
+const titleTimers = {};
+
+function titleSnapshot(force) {
+  if (ctx.store.get('readonly') || !ctx.store.get('lastState')) { return null; }
   const hasContent = (ctx.store.get('lastState').messages || []).length > 0
     || (ctx.store.get('lastState').final && ctx.store.get('lastState').final.text);
-  if (!force && !hasContent) { return; }
-  const t = ctx.store.get('lastState').target || {};
-  if (!t.root || !t.session) { return; }
-  const key = t.root + "|" + t.session;
-  if (titleAsked[key]) { return; }
+  if (!force && !hasContent) { return null; }
+  const target = ctx.store.get('lastState').target || {};
+  if (!target.root || !target.session) { return null; }
+  const key = target.root + "|" + target.session;
+  if (titleAsked[key]) { return null; }
   const rows = ctx.store.get('lastState').sessions || [];
   let row = null;
-  for (const one of rows) { if (one.id === t.session) { row = one; break; } }
-  const title = String((row && row.title) || t.session_title || "").trim();
-  const source = String((row && row.title_source) || t.session_title_source || "");
-  if (title && source !== "seed") { return; }
+  for (const one of rows) { if (one.id === target.session) { row = one; break; } }
+  const title = String((row && row.title) || target.session_title || "").trim();
+  const source = String((row && row.title_source) || target.session_title_source || "");
+  if (title && source !== "seed") { return null; }
+  return {key: key, session: target.session};
+}
+
+async function requestTitle(key, session, force) {
+  if (ctx.store.get('running') || ctx.store.get('readonly')) { return; }
+  const ready = titleSnapshot(force);
+  if (!ready || ready.key !== key) { return; }
   titleAsked[key] = true;
   try {
     const response = await fetch("/session/title", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({session: t.session}),
+      body: JSON.stringify({session: session}),
     });
     if (response.status === 409) {
       delete titleAsked[key];
@@ -1940,12 +1950,22 @@ async function maybeAgentTitle(force) {
     titleTries[key] = 0;
     const detail = await response.json().catch(function () { return {}; });
     if (detail && detail.title) {
-      applySessionTitle(t.session, detail.title,
+      applySessionTitle(session, detail.title,
         detail.source || (detail.generated ? "agent" : "seed"));
     }
   } catch (err) {
     // 标题是锦上添花：网络失败保留种子标题，不打扰用户。
   }
+}
+
+function maybeAgentTitle(force) {
+  if (ctx.store.get('running')) { return; }
+  const ready = titleSnapshot(force);
+  if (!ready || titleTimers[ready.key]) { return; }
+  titleTimers[ready.key] = setTimeout(function () {
+    delete titleTimers[ready.key];
+    requestTitle(ready.key, ready.session, force);
+  }, TITLE_IDLE_MS);
 }
 
 function applySessionTitle(id, title, source) {
