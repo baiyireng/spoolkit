@@ -85,27 +85,35 @@ def test_一轮工具事件序号相位和预取(tmp_path: Path) -> None:
     assert tools[0]["name"] == "look" and tools[0]["ok"] is True
     assert tools[1]["ok"] is False
 
-    assert [item["seq"] for item in task_events] == [1, 2, 3]
-    assert task_events[0]["phase"] == "retrieval"
-    assert task_events[0]["source"] == "prefetch"
-    assert task_events[0]["status"] == "ok"
-    assert "预取" in task_events[0]["summary"]
+    assert [item["seq"] for item in task_events] == list(range(1, len(task_events) + 1))
+    assert task_events[0]["phase"] == "understand"
+    started = task_events[0]
+    retrieved = next(item for item in task_events if item["phase"] == "retrieval")
+    observed = next(item for item in task_events if item["phase"] == "observe")
+    failed = next(item for item in task_events if item["phase"] == "error" and item["source"] == "tool")
+    assert retrieved["source"] == "prefetch"
+    assert retrieved["status"] == "ok"
+    assert "预取" in retrieved["summary"]
+    assert retrieved["seq"] > started["seq"]
 
-    assert task_events[1]["phase"] == "observe"
-    assert task_events[1]["source"] == "tool"
-    assert task_events[1]["status"] == "ok"
-    assert task_events[1]["tool_call_id"] == "tc-0-0"
-    assert task_events[1]["summary"] == "看过了"
-    assert task_events[1]["step"] == 0
+    assert observed["source"] == "tool"
+    assert observed["status"] == "ok"
+    assert observed["tool_call_id"] == "tc-0-0"
+    assert observed["summary"] == "看过了"
+    assert observed["step"] == 0
 
-    assert task_events[2]["phase"] == "error"
-    assert task_events[2]["source"] == "tool"
-    assert task_events[2]["status"] == "error"
-    assert task_events[2]["tool_call_id"] == "tc-0-1"
-    assert task_events[2]["summary"] == "没找到"
+    assert failed["status"] == "error"
+    assert failed["tool_call_id"] == "tc-0-1"
+    assert failed["summary"] == "没找到"
+    assert task_events[-1]["phase"] == "final"
+    assert task_events[-1]["status"] == "ok"
 
+    identity = task_events[0]["task_id"]
+    assert identity != "task"
+    assert identity != "job-42"
+    assert result.state.task_id == "job-42"
     for item in task_events:
-        assert item["task_id"] == "job-42"
+        assert item["task_id"] == identity
         assert item["run_id"] == pending.run_id
         assert item["turn_id"] not in ("", "-", "task")
         assert "thought" not in item

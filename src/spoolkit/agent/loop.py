@@ -188,6 +188,7 @@ from spoolkit.tools.registry import ToolRegistry
 from spoolkit.tools import types as _types
 from spoolkit.agent.contract import (
     SUMMARY_MAX_CHARS,
+    TaskEvent,
     error_from_exception,
     error_from_final,
     error_from_tool,
@@ -1666,6 +1667,21 @@ def _requested_span(call: ToolCall, total: int) -> tuple[bool, str, int]:
     return True, f"{first}-{last}", max(0, last - first + 1)
 
 
+def event_task_id(run_id: str, turn_id: str) -> str:
+    """这一次 `run()` 的任务身份。
+
+    `run_id` 是待确认批次（同一份 `PendingChanges`，用来回滚）。
+    `turn_id` 是这一次 `run()` 绑定的轮次。两者拼在一起：同一次运行稳定，
+    下一次 `run()` 即使还用着同一份待确认清单，身份也不同。
+    检查点上的 `TaskState.task_id` 不走这里，默认仍可以是 `"task"`。
+    """
+    turn = turn_id if turn_id and turn_id != "-" else ""
+    run = run_id or ""
+    if run and turn:
+        return f"{run}:{turn}"
+    return turn or run
+
+
 def project_search_result(result: ToolResult) -> str:
     """模型看带前几条命中的 summary。raw 里的完整结果不进提示。
 
@@ -2158,8 +2174,8 @@ class AgentLoop:
         started = time.perf_counter()
         result: LoopResult | None = None
         self._event_seq = 0
-        self._event_task_id = task_id
         self._event_run_id = str(getattr(self.pending, "run_id", "") or "")
+        self._event_task_id = event_task_id(self._event_run_id, current_turn_id())
         self._event_step = 0
         previous_sigint = self._install_stop_signal()
         try:
@@ -2177,10 +2193,12 @@ class AgentLoop:
             )
             raise
         else:
-            if result is not None and not result.finished:
+            if result is not None and self._user_stopped:
+                self._emit_outcome("cancelled", result.final or "已取消", result.state.step)
+            elif result is not None and not result.finished:
                 self._emit_task(
                     error_from_final(
-                        task_id=result.state.task_id,
+                        task_id=self._event_task_id,
                         run_id=self._event_run_id,
                         turn_id=current_turn_id(),
                         seq=self._next_event_seq(),
@@ -2188,6 +2206,8 @@ class AgentLoop:
                         summary=result.failed_reason or result.final or "未完成",
                     )
                 )
+            elif result is not None:
+                self._emit_outcome("ok", result.final or "", result.state.step)
             return result
         finally:
             if previous_sigint is not None:
@@ -2247,7 +2267,6 @@ class AgentLoop:
         resumed = state is not None
         if state is None:
             state = TaskState(task_id=task_id, goal=goal)
-        self._event_task_id = state.task_id
         self._event_step = state.step
         goal = state.goal
         # 「上次建议 + 它的表态」是**本次会话内**的对照，不是任务状态：
@@ -2389,11 +2408,24 @@ class AgentLoop:
         verify_seconds = 0.0
         state_seconds = 0.0
         supervisor_seconds = 0.0
+        self._emit_task(
+            TaskEvent(
+                task_id=self._event_task_id,
+                run_id=self._event_run_id,
+                turn_id=current_turn_id(),
+                seq=self._next_event_seq(),
+                step=0,
+                phase="understand",
+                source="system",
+                status="running",
+                summary=goal,
+            )
+        )
         prefetched = self.prefetch(goal) if self.prefetch is not None else ""
         if prefetched.strip():
             self._emit_task(
                 retrieval_event(
-                    task_id=state.task_id,
+                    task_id=self._event_task_id,
                     run_id=self._event_run_id,
                     turn_id=current_turn_id(),
                     seq=self._next_event_seq(),
@@ -2469,7 +2501,6 @@ class AgentLoop:
             ))
 
         while True:
-            self._event_task_id = state.task_id
             self._event_step = state.step
             self._guard_trace_step = state.step
             if state.step >= limit and not self.config.supervise:
@@ -4300,6 +4331,7 @@ class AgentLoop:
                 payload["kind"] = NO_CHECKER_KIND
             self._emit_final_verify(payload)
             self._final_verify = (passed, body)
+            self._emit_verify_event(state, passed, body)
             self._note_verification(passed, body)
             if gate and changed:
                 self._apply_completion_gate(changed, announce=announce_block)
@@ -4342,6 +4374,7 @@ class AgentLoop:
                 payload["kind"] = NO_CHECKER_KIND
             self._emit_final_verify(payload)
             self._final_verify = (passed, report)
+            self._emit_verify_event(state, passed, body)
             self._note_verification(passed, report)
         else:
             outcome = "最终验证：本次运行没有挂验证器，未跑。"
@@ -7499,6 +7532,38 @@ class AgentLoop:
         self._event_seq += 1
         return self._event_seq
 
+    def _emit_outcome(self, status: str, summary: str, step: int) -> None:
+        """本轮收尾。未完成和异常走 error，不从这里再发一条 final。"""
+        self._emit_task(
+            TaskEvent(
+                task_id=self._event_task_id,
+                run_id=self._event_run_id,
+                turn_id=current_turn_id(),
+                seq=self._next_event_seq(),
+                step=step,
+                phase="final",
+                source="system",
+                status=status,
+                summary=summary,
+            )
+        )
+
+    def _emit_verify_event(self, state: TaskState, passed: bool, summary: str) -> None:
+        """自动验证的结论。只放摘要，不放 raw。"""
+        self._emit_task(
+            TaskEvent(
+                task_id=self._event_task_id,
+                run_id=self._event_run_id,
+                turn_id=current_turn_id(),
+                seq=self._next_event_seq(),
+                step=state.step,
+                phase="verify",
+                source="system",
+                status="ok" if passed else "error",
+                summary=summary,
+            )
+        )
+
     def _emit_task(self, event: object) -> None:
         """新通道。载荷里没有 thought，也没有工具 raw。"""
         payload = event.to_dict()  # type: ignore[attr-defined]
@@ -7510,7 +7575,7 @@ class AgentLoop:
         """成功走 observe，失败走 error。摘要只用 summary，没有就用截断后的正文。"""
         summary = result.summary or result.content
         common = dict(
-            task_id=state.task_id,
+            task_id=self._event_task_id,
             run_id=self._event_run_id,
             turn_id=current_turn_id(),
             seq=self._next_event_seq(),
