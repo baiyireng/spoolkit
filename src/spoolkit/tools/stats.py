@@ -36,7 +36,12 @@ def _size_text(value: int) -> str:
 
 
 def _collect(root: Path, seconds: float) -> dict:
-    """走一遍。返回聚合结果；被预算截断时 truncated 为真。"""
+    """走一遍。返回聚合结果；被预算截断时 truncated 为真。
+
+    **读不了的路径要跳过并如实记下来**（`skipped`）：静默跳过会让「这个目录
+    有多少东西」这个数字看起来是完整的，而它其实少了一块。本机沙箱里
+    `mkdir(mode=0o700)` 建出来的目录就是这样（一 scandir 就 PermissionError）。
+    """
     started = time.time()
     total_files = 0
     total_bytes = 0
@@ -46,6 +51,7 @@ def _collect(root: Path, seconds: float) -> dict:
     largest: list[tuple[int, str]] = []
     oldest: list[tuple[float, str]] = []
     truncated = False
+    skipped: list[str] = []
 
     stack = [root]
     while stack:
@@ -53,6 +59,7 @@ def _collect(root: Path, seconds: float) -> dict:
         try:
             iterator = os.scandir(current)
         except OSError:
+            skipped.append(str(current))
             continue
         # os.scandir 的目录项自带类型缓存，比 iterdir + 多次 stat 快得多。
         with iterator:
@@ -69,6 +76,7 @@ def _collect(root: Path, seconds: float) -> dict:
                         continue
                     stat = entry.stat()
                 except (OSError, PermissionError):
+                    skipped.append(entry.path)
                     continue
 
                 total_files += 1
@@ -104,6 +112,8 @@ def _collect(root: Path, seconds: float) -> dict:
         "largest": largest,
         "oldest": oldest,
         "truncated": truncated,
+        # 跳过的东西必须可见：统计少了一块却报成完整，比不报更糟。
+        "skipped": skipped,
     }
 
 
@@ -111,6 +121,15 @@ def _render(root: Path, data: dict, top: int) -> str:
     lines = [f"{root}", f"合计：{data['files']} 个文件，{_size_text(data['bytes'])}"]
     if data["truncated"]:
         lines.append("⚠ 这次统计**不完整**（撞到时间或条目上限），下面的排序只是已扫到的部分。")
+    skipped = list(data.get("skipped") or [])
+    if skipped:
+        shown = skipped[:5]
+        more = len(skipped) - len(shown)
+        lines.append(
+            f"⚠ 有 {len(skipped)} 个路径读不了，已跳过（合计里没有它们）："
+            + "、".join(shown)
+            + (f"，还有 {more} 个" if more else "")
+        )
 
     children = sorted(
         data["by_child"].items(), key=lambda item: item[1][1], reverse=True

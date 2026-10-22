@@ -5,26 +5,49 @@
 - **工作区级**（`.agent/limits.json`、`.agent/policy.json`）：属于这个项目，
   跟着项目走，已经齐了；
 - **命令行**：一次一给，用于临时覆盖；
-- **用户级**（本模块）：属于这台机器上的你。缺了它，同一件事每天都要重打一遍
-  `--provider llamacpp --base-url http://127.0.0.1:8080`——而这类重复输入最后
-  的下场是被人做成一个 .bat，然后没人知道真正的配置在哪。
+- **用户级**（本模块 + 同目录的 `.env`）：属于这台机器上的用户。缺了它，同一件事
+  每天都要重打一遍 `--provider llamacpp --base-url http://127.0.0.1:8080`——
+  而这类重复输入通常会被做成一个 .bat，于是没人知道真正的配置在哪。
+  **密钥只放 `.env`**（`%APPDATA%\\spoolkit\\.env`，见 `env_path()`），本文件只放
+  非密钥默认值：TOML 有键白名单，写错一个字母的症状是"设置了却没生效"，
+  而密钥需要能逐行追加。
 
 优先级：**命令行 > 环境变量 > 用户配置 > 内置默认**。顺序不能反：命令行是
 本次运行的意图，环境变量是这次 shell 的意图，配置文件是长期默认。
 
 文件位置：`SPOOLKIT_CONFIG` 指到哪就用哪；否则 Windows 用
 `%APPDATA%\\spoolkit\\config.toml`，其它平台用 `~/.config/spoolkit/config.toml`。
-**不放在工作区里**：工作区是要提交、要分享的东西，不该承载某台机器的默认值。
+**不放在工作区里**：工作区是要提交、要分享的目录，不该承载某台机器的默认值。
 
 本机外接也写在这份文件的 `[[service]]` 里（不进仓库）。常见两段、名字可改：
 
 - **llama**：本机语言模型进程。hub / serve 按 `provider` / `base_url` 探活；
-  配方只方便 `spool service start/stop`，已经通了不重复拉起。
+  配方只方便 `spool service start/stop`，**判据是本命令记下的 pid**：有活着的就
+  不重复拉起，探针只报状态（端口被别的进程占着时不许当成"本命令在跑"）。
 - **tunnel**：给聊天通道出网的本机 SOCKS（通常是 `ssh -D`）。QQ 等平台有
   IP 白名单时，借跳板把出口固定成那台主机；`spool hub --bridge-proxy
   socks5://127.0.0.1:1080` 去连它。这和 `--proxy`（模型供应商）不是一回事。
 
 hub **只探活、不启**这些进程。没写这张表时，隧道不探、不拉。
+
+通道的默认值写在 `[channel.<名字>]` 子表里（`proxy` / `policy` / `scope` /
+`timeout` / `web` / `root`），给 `spool qq` 这类短命令当默认值用：
+
+```toml
+[channel.qqbot]
+proxy   = "socks5://127.0.0.1:1080"   # 等价于 --bridge-proxy
+policy  = "ask"
+scope   = "**"
+timeout = 240                          # 秒，与 spool bridge --timeout 同一个单位
+web     = true
+```
+
+它是**子表而不是扁平键**：通道是按名字来的，插件还能注册新通道，扁平键会把
+"有哪些通道"写死在白名单里（`[[mcp]]` / `[[service]]` 是同一条理由）。优先级
+仍是**命令行 > 环境变量 > 用户配置 > 内置默认**，环境变量名是
+`SPOOLKIT_CHANNEL_<通道名>_<键>`。认不出的键名**要说出口**，取值写错的
+（`policy = "AUTO"`、`timeout = -5`）**同样要说出口**——写错一个字母的症状是
+"设置了却没生效"，而那种问题只靠复现查不出来。
 
 改名（`agents-dev` → `spoolkit`）时留了一层兼容：**新位置没有文件而旧位置有，
 就继续读旧的那份**。所以已经配好的人一个字都不用改；等他下次 `config --set`，
@@ -34,8 +57,12 @@ hub **只探活、不启**这些进程。没写这张表时，隧道不探、不
 import os
 import sys
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from spoolkit.envfile import load_env_file
+from spoolkit.policy import POLICIES
 
 # 能配置的键。写成一个白名单而不是"想存什么存什么"：
 # 配置文件的键写错一个字母，症状是"设置了但没生效"，而那种问题最难查。
@@ -52,7 +79,7 @@ KEYS: tuple[str, ...] = (
 # 对应的环境变量名：SPOOLKIT_<KEY 大写>。
 ENV_PREFIX = "SPOOLKIT_"
 # 改名前的旧前缀。**故意继续认**：别人 .bat / 快捷方式里写好的
-# `AGENTS_DEV_PROVIDER` 不该因为我们改了个名字就失效。新前缀优先。
+# `AGENTS_DEV_PROVIDER` 不该因为改了个名字就失效。新前缀优先。
 LEGACY_ENV_PREFIX = "AGENTS_DEV_"
 
 
@@ -82,11 +109,128 @@ def _default_dir() -> Path:
     return root / "spoolkit"
 
 
+# 用户级 `.env` 的位置覆盖。测试与"多套配置"靠它隔离——**不许写死 `%APPDATA%`**。
+ENV_FILE_VAR = "SPOOLKIT_ENV_FILE"
+LEGACY_ENV_FILE_VAR = "AGENTS_DEV_ENV_FILE"
+
+
+def env_path() -> Path:
+    """用户级 `.env` 的位置：**密钥放这里，非密钥默认值放 `config.toml`**。
+
+    为什么和 `config.toml` 同目录：它们是同一层（"这台机器上的你"），分两处只会
+    让人记不住哪个在哪。为什么密钥不进 TOML：`config.toml` 有键白名单，写错一个
+    字母的症状是"设置了却没生效"；而密钥得能随手加一行、能被 `.gitignore`
+    一句话排除。
+    """
+    override = os.environ.get(ENV_FILE_VAR) or os.environ.get(LEGACY_ENV_FILE_VAR)
+    if override:
+        return Path(override)
+    return _default_dir() / ".env"
+
+
+def secret_paths(workspace: Path | None = None) -> list[tuple[str, Path]]:
+    """解析密钥时按顺序看的位置：**工作区级在前，用户级在后**。
+
+    "更具体的赢"——项目里写的那份盖住个人默认那份。`workspace=None`（机器级
+    服务：桥 / 网页壳 / MCP）就只剩用户级那一份。
+    """
+    paths: list[tuple[str, Path]] = []
+    if workspace is not None:
+        paths.append(("workspace", Path(workspace) / ".env"))
+    paths.append(("user", env_path()))
+    return paths
+
+
+def resolve_secret(
+    names: Sequence[str],
+    workspace: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Return (value, source). Order: env → workspace `.env` → user `.env`.
+
+    `workspace` is the bound workspace for this run, not cwd. Machine-level
+    entrypoints must not pick credentials from a random cwd.
+    `names` are aliases; first match wins. Always re-read files (long-lived
+    bridge/web processes; credentials change).
+    """
+    environment = os.environ if env is None else env
+    for name in names:
+        value = (environment.get(name) or "").strip()
+        if value:
+            return value, f"env {name}"
+    for label, path in secret_paths(workspace):
+        table = load_env_file(path)
+        for name in names:
+            value = (table.get(name) or "").strip()
+            if value:
+                return value, f"{label} {path} ({name})"
+    return "", "not found (env, workspace .env, user .env)"
+
+
+def describe_secret_search(names: Sequence[str], workspace: Path | None = None) -> str:
+    """把"找过哪些位置、结果如何"写出来——**只印键名，绝不印值**。
+
+    为什么值得单独写一段：密钥类问题里最常见的一句是"我明明填了"，而只靠复现是
+    猜不出它到底看了哪儿的（`describe_missing` 就是这么来的）。
+
+    四种情况要分开说，因为它们指向完全不同的下一步：**不存在**（去建）、
+    **不是文件**（路径指到目录了）、**存在但一行都没解析出来**（多半是编码，
+    例如记事本存的 UTF-16 或非文本文件）、**没有要找的键**（那就把文件里
+    有哪些键列出来，拼写差在哪即可比对）。
+    """
+    lines = ["searched:"]
+    set_names = [name for name in names if (os.environ.get(name) or "").strip()]
+    if set_names:
+        lines.append(f"  env — set: {', '.join(set_names)}")
+    else:
+        lines.append(f"  env — none set (aliases: {', '.join(names)})")
+    for label, path in secret_paths(workspace):
+        if not path.exists():
+            lines.append(f"  [{label}] {path} — missing")
+            continue
+        if not path.is_file():
+            lines.append(f"  [{label}] {path} — not a file (path points at a directory?)")
+            continue
+        table = load_env_file(path)
+        if not table:
+            lines.append(
+                f"  [{label}] {path} — exists ({_size_hint(path)}), "
+                "but no KEY=VALUE lines parsed (encoding?)"
+            )
+            continue
+        present = [name for name in names if (table.get(name) or "").strip()]
+        blank = [
+            name for name in names if name in table and not (table.get(name) or "").strip()
+        ]
+        if present:
+            lines.append(f"  [{label}] {path} — has: {', '.join(present)}")
+        elif blank:
+            # `QQ_AppID=` (key present, empty value) looks configured but is not.
+            lines.append(
+                f"  [{label}] {path} — keys present but empty (unset): "
+                f"{', '.join(blank)}"
+            )
+        else:
+            lines.append(
+                f"  [{label}] {path} — missing keys (has: {', '.join(sorted(table))})"
+            )
+    return "\n".join(lines)
+
+
+def _size_hint(path: Path) -> str:
+    """给"存在但解析不出"那句配个大小：0 字节就是空文件，否则是"有内容但读不懂"。"""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "读不出大小"
+    return "空文件，0 字节" if size == 0 else f"{size} 字节"
+
+
 def effective_config_path() -> Path:
     """**实际会读到**的那一份。改名兼容就发生在这里（见模块开头）。
 
     显式指定过位置（`SPOOLKIT_CONFIG` / 旧名）时不猜：**指定就是指定**。
-    否则"把配置指到一个空文件"会被旧位置那份真实配置悄悄盖住——测试里
+    否则"把配置指到一个空文件"会被旧位置那份真实配置静默盖住——测试里
     正是这么栽的（开发机上的 provider 泄漏进了断言）。
     """
     target = config_path()
@@ -103,7 +247,7 @@ def describe_missing() -> str:
 
     为什么值得单独写一段：改名之后配置有两个可能的位置（新的 `spoolkit`、旧的
     `agents-dev`），"它又问了我一遍"这件事本来就容易让人怀疑代码。真发生过一次
-    用户机器上弹出向导，而**当时那份旧配置明明还在**——问题是我们没有留下任何
+    用户机器上弹出向导，而**当时那份旧配置明明还在**——问题在于没有留下任何
     "它到底看了哪儿"的痕迹，于是只能靠复现去猜。这一行输出就是那条痕迹。
     """
     lines = ["没找到供应商配置，找过这些位置："]
@@ -137,7 +281,7 @@ def read_config(path: Path | None = None) -> tuple[dict, str]:
     """读整个配置文件，返回（内容, 错误说明）。
 
     **错误要能说出口**。原先解析失败一律返回空，症状是"我明明配了却没生效"
-    ——而人只会怀疑代码。TOML 里最常踩的坑正是 Windows 路径：
+    ——而人只会怀疑代码。TOML 里最常见的失败是 Windows 路径：
     `command = "D:\\tools\\x.exe"` 少一个反斜杠就整份读不出来。
     """
     target = path or effective_config_path()
@@ -146,14 +290,14 @@ def read_config(path: Path | None = None) -> tuple[dict, str]:
     try:
         text = target.read_text(encoding="utf-8")
     except OSError as exc:
-        return {}, f"读不了 {target}：{exc}"
+        return {}, f"cannot read {target}: {exc}"
     try:
         return tomllib.loads(text), ""
     except tomllib.TOMLDecodeError as exc:
         return {}, (
-            f"{target} 解析失败：{exc}\n"
-            "提示：Windows 路径里的反斜杠要写成双反斜杠（D:\\\\tools\\\\x.exe）"
-            "或者用单引号字符串（'D:\\tools\\x.exe'）。"
+            f"{target} parse error: {exc}\n"
+            "hint: escape backslashes in Windows paths (D:\\\\tools\\\\x.exe) "
+            "or use a single-quoted string ('D:\\tools\\x.exe')."
         )
 
 
@@ -164,11 +308,13 @@ def _quote(value: str) -> str:
 
 
 def save(values: dict[str, str], path: Path | None = None) -> Path:
-    """写白名单里的键，并保留 `[[mcp]]` / `[[service]]` 以及白名单以外的
-    顶层标量（例如人手写的 `tavily_api_key`）。
+    """写白名单里的键，并保留 `[channel.*]` / `[[mcp]]` / `[[service]]` 以及
+    白名单以外的顶层标量（例如人手写的 `tavily_api_key`）。
 
-    数组表不在 KEYS 里；以前整文件重写会把它们抹掉——
-    `spool config --set` 一次，外挂工具、本机配方和搜索 key 就丢了。
+    数组表与子表都不在 KEYS 里；以前整文件重写会把它们抹掉——
+    `spool config --set` 一次，外挂工具、本机配方、通道默认值和搜索 key 就丢了。
+    通道那一节尤其亏：它是人手写进去的（`--set` 管不到子表），丢了之后
+    `spool qq` 只是"参数回到了默认值"，不会报任何错。
     """
     target = path or config_path()
     existing, error = read_config(target)
@@ -184,7 +330,7 @@ def save(values: dict[str, str], path: Path | None = None) -> Path:
         if key in values and values[key] != "":
             lines.append(f"{key} = {_quote(values[key])}")
     for key, raw in existing.items():
-        if key in KEYS or key in ("mcp", "service"):
+        if key in KEYS or key in ("mcp", "service", "channel"):
             continue
         if isinstance(raw, (str, int, float, bool)):
             lines.append(f"{key} = {_toml_value(raw)}")
@@ -195,6 +341,23 @@ def save(values: dict[str, str], path: Path | None = None) -> Path:
             lines.append("")
             lines.append(f"[[{table}]]")
             lines.extend(_dump_table_item(item))
+    # 通道小节放在最后：它们是子表，混在顶层标量中间会让 TOML 的归属变难读
+    # （顶层键写进 `[channel.x]` 之后会变成那个子表的键——这是真会改语义的一种）。
+    channels = existing.get("channel")
+    if isinstance(channels, dict):
+        for name in sorted(str(item) for item in channels):
+            section = channels.get(name)
+            if not isinstance(section, dict):
+                continue
+            lines.append("")
+            lines.append(f"[channel.{name}]")
+            lines.extend(
+                f"{key} = {_toml_value(value)}"
+                for key, value in section.items()
+                # None 不是 TOML 值（`tomllib` 也解析不出来），原样写回去会写出一份
+                # **读不回来**的配置——那比丢一节更坏。
+                if value is not None
+            )
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
 
@@ -223,21 +386,296 @@ def _dump_table_item(item: dict) -> list[str]:
     return [f"{key} = {_toml_value(item[key])}" for key in keys]
 
 
+# --- 通道的默认值：`[channel.<名字>]` --------------------------------------
+#
+# 为什么单独开一节而不是往 `KEYS` 里再塞几个键：这些值**不属于某一个工作区**，
+# 而是"这台机器上这条通道怎么起"——QQ 出网走哪条 SOCKS、默认什么授权策略、
+# 一轮等多久。原先起一条通道要敲六个参数（`--channel qqbot --bridge-proxy … --policy
+# ask --scope "**" --timeout 240 --web`），而这六个没有一个属于"这一次"。
+#
+# 为什么不用扁平键（`channel_qqbot_proxy` 之类）：通道是按名字来的，**可能有插件
+# 注册的新通道**，扁平键会把"有哪些通道"写死在白名单里；子表 `[channel.<名字>]`
+# 谁都能加一节，核心不认识它也能读出来。
+
+# 每个通道能配的键（值 = 内置默认）。`timeout` 的单位是**秒**，与
+# `spool bridge --timeout`（默认 900 秒）同一个口径——单位不一致是"配了却没生效"
+# 里最难查的一种。
+#
+# ⚠️ 这六项**不是都被短命令读**：`shortcuts._CHANNEL_OPTION_KEYS` 只认五个，
+# `root` 不在里面（工作区在 `main()` 那一步就解析完了，短命令不许回头拿配置补它）。
+# 配在文件里却不生效的键必须**看起来就与别人不一样**，所以 `spool config` 会把它
+# 标出来（`commands/config.py` 的 `_NOT_READ_BY_SHORTCUTS`，另有测试钉住两处一致）。
+CHANNEL_KEYS: dict[str, object] = {
+    "proxy": "",  # 通道自己出网走的代理，等价于 --bridge-proxy
+    "policy": "",  # 子进程的授权策略（ask / auto / deny）
+    "scope": "",  # 允许自动落盘的范围
+    "timeout": 900.0,
+    "web": True,
+    "root": "",  # 钉住的工作区；留空 = 服务整台机器
+}
+
+# 通道键 → 环境变量名的中段。`SPOOLKIT_CHANNEL_QQBOT_PROXY`、旧前缀同形。
+CHANNEL_ENV_PREFIX = "CHANNEL_"
+
+# 环境变量里要按数字读的键（配置文件里 `timeout = 240` 是 TOML 整数，
+# 而环境变量永远是字符串）。
+_CHANNEL_NUMERIC = ("timeout",)
+_CHANNEL_BOOL = ("web",)
+
+# 认得的取值**只有这几个**的键：它们是**枚举**，不是自由文本。
+# 命令行那条路上 argparse 的 `choices` 已经把拼错的挡在门外，而配置文件
+# 原先谁都不看——`policy = "AUTO"` 会静默通过，然后在 `cli/settle.py` 里
+# 落到"问"那一条路上。那正是本任务反复要消灭的形状："我明明配了自动，它还在问我"。
+# **空串是合法取值**（等于没表态：`resolve_policy` 见到假值就去读已保存的策略）。
+# 取值表借 `policy.POLICIES`，不另抄一份——抄一份的下场是两处慢慢走散。
+_CHANNEL_ENUM: dict[str, tuple[str, ...]] = {"policy": POLICIES}
+
+
+def _channel_env_key(name: str, key: str) -> str:
+    """`qqbot` + `proxy` → `QQBOT_PROXY`。连字符按环境变量的习惯写成下划线。"""
+    return f"{name}_{key}".upper().replace("-", "_")
+
+
+def load_channels(path: Path | None = None) -> dict[str, dict]:
+    """用户配置里的 `[channel.<名字>]` 各小节，**原样**返回（不做类型转换）。
+
+    读不到、读坏了都返回空——通道默认值是增强，不该挡住启动（与 `[[mcp]]` /
+    `[[service]]` 同一条契约）。非字典的那些（例如人手写了个
+    `channel = "qqbot"`）跳过：它们连"键值对"都不是，说不成是配置。
+    """
+    payload, _ = read_config(path)
+    raw = payload.get("channel")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(name): dict(item)
+        for name, item in raw.items()
+        if isinstance(item, dict)
+    }
+
+
+def _coerce_channel_value(key: str, value):
+    """从配置文件/环境变量读来的值 → 该有的类型。认不出返回 `None`。
+
+    `None` 表示"这个值用不了"，由调用方**说出来**（`ChannelValues.issues`）并
+    退回下一层——静默跳过正是"设置了却没生效"的来源。
+
+    三条判定，都只做这一层该做的事（"这个值读不读得懂"）：
+
+    - 开关（`web`）：认 `true/false`、`1/0`、`yes/no`、`on/off`（大小写不论）。
+      宽容是故意的：环境变量那一层永远是字符串，`SPOOLKIT_CHANNEL_QQBOT_WEB=no`
+      是自然的写法，而且这两种写法**都不会改变"配了什么"**——`yes` 就是"开"；
+    - 数字（`timeout`）：要能当秒数，而且要**大于 0**（判定依据见
+      `_channel_value_problem`）；
+    - 枚举（`policy`）：取值表里没有就说不出口（`policy.POLICIES`）。
+    """
+    if key in _CHANNEL_BOOL:
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return None
+    if key in _CHANNEL_NUMERIC:
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return None
+        return seconds if seconds > 0 else None
+    if key in _CHANNEL_ENUM:
+        text = str(value).strip()
+        return text if text == "" or text in _CHANNEL_ENUM[key] else None
+    return str(value)
+
+
+def _channel_value_problem(key: str, raw) -> str:
+    """`_coerce_channel_value` 认不出这个值时，**具体是哪一种认不出**。
+
+    为什么要分开说：`timeout = "很久"` 与 `timeout = -5` 都落在同一句"这个值用不了"
+    上，但下一步要改的地方完全不同——一个是类型写错了，另一个是没写正数。只说
+    "读不成该有的类型"，第二种人会被指到错的方向去（诊断说假话比不说更坏）。
+
+    `timeout` 的下界定在 **> 0** 的依据：它是"一轮最多等多少秒"，消费方是
+    `bridge/agent_runner.py` 的 `deadline = now + timeout`——0 与负数意味着
+    **每一轮当场就到点**，症状是"它说超过 -5 秒还没结束，先不等了"。同一仓里
+    `tools/exec.py` 对命令超时的写法就是拒绝（"timeout 必须在 1 到 N 秒之间"），
+    这里沿用同一条口径：认不出来就退回下一层，而不是把 -5 原样递给桥。
+    """
+    if key in _CHANNEL_NUMERIC:
+        try:
+            seconds = float(raw)
+        except (TypeError, ValueError):
+            return f"not a number (got {raw!r})"
+        return f"must be > 0 seconds (got {seconds:g})"
+    if key in _CHANNEL_BOOL:
+        return f"not a bool (got {raw!r}; use true/false)"
+    if key in _CHANNEL_ENUM:
+        return (
+            f"not in allowed set (got {raw!r}; "
+            f"allowed: {', '.join(_CHANNEL_ENUM[key])})"
+        )
+    return f"wrong type (got {raw!r})"
+
+
+def display_channel_value(value) -> str:
+    """把一个通道值转成展示字面。`spool qq` 的起手行与 `spool config` 共用。
+
+    两条规矩，都是"印出来的字必须与生效值对得上"：
+
+    - **只有"没给"（`None` / 空串）才印「（空）」**。原先起手行写的是
+      `value or '（空）'`，那是按**真假**判空：`web = false` 印成「web=（空）」、
+      `--timeout 0` 印成「timeout=（空）」，与"根本没给"在字面上不可区分——
+      而这一行的全部意义就是"它到底读了哪一份"。文档写得对（`docs/bridge.md` 的
+      样例是 `web=false(用户配置 …)`），错的是代码这边；
+    - 真假值印 `true` / `false`：它照 TOML 的写法，与配置文件里能对得上号。
+    """
+    if value is None or value == "":
+        return "(empty)"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+@dataclass(frozen=True)
+class ChannelValues:
+    """一个通道算出来的默认值：**值、来源、以及说不出口的那些**。
+
+    为什么把"来源"也带回来：这些值生效在别的进程里（桥、网页壳），出问题时
+    唯一能回答"它到底用了哪一份"的就是这几个字。命令行那一层由调用方给，
+    所以这里只说环境变量 / 用户配置 / 内置默认这三层。
+    """
+
+    name: str
+    options: dict[str, object] = field(default_factory=dict)
+    sources: dict[str, str] = field(default_factory=dict)
+    #: 这一节里认不出的键名。**必须说出来**：写错一个字母的症状是
+    #: "设置了却没生效"，而那种问题只靠复现是查不出来的。
+    unknown: tuple[str, ...] = ()
+    #: 值存在但**用不了**：读不成该有的类型（`timeout = "很久"`）、不在认得的
+    #: 取值里（`policy = "AUTO"`）、或者不是正数（`timeout = -5`）。
+    #: 用不了就退回下一层，并且**说出来**——静默跳过正是"设置了却没生效"。
+    issues: tuple[str, ...] = ()
+
+    def source(self, key: str) -> str:
+        return self.sources.get(key, "unset")
+
+    def notes(self) -> str:
+        """One or two lines about problems in this section; empty if none."""
+        lines = []
+        if self.unknown:
+            lines.append(
+                f"[channel.{self.name}] unknown keys (ignored): "
+                f"{', '.join(self.unknown)}\n"
+                f"    allowed: {', '.join(CHANNEL_KEYS)}"
+            )
+        for problem in self.issues:
+            lines.append(f"[channel.{self.name}] {problem}")
+        return "\n".join(lines)
+
+
+def resolve_channel_options(
+    name: str,
+    overrides: dict[str, object] | None = None,
+    env: dict[str, str] | None = None,
+    path: Path | None = None,
+) -> ChannelValues:
+    """一个通道的默认值，按**命令行 > 环境变量 > 用户配置 > 内置默认**算出来。
+
+    `overrides` 是命令行那一层：**给了的键（哪怕给的是空串）就到此为止**——
+    命令行是"这一次的意图"，它压得住其余三层。"给没给"由调用方判定：
+    短命令的 argparse 默认值是 `None`（空串在这里是合法取值，例如
+    `--scope ""` 表示"不许自动落盘"）。
+
+    环境变量的名字是 `SPOOLKIT_CHANNEL_<通道名>_<键>`（旧前缀
+    `AGENTS_DEV_CHANNEL_<通道名>_<键>` 也认，新前缀优先），例如
+    `SPOOLKIT_CHANNEL_QQBOT_PROXY`。新前缀优先这条与 `settings.resolve` 一致。
+
+    每次调用都重读文件，不缓存：桥与网页壳是长驻进程，配置是会被改的。
+    """
+    override = dict(overrides or {})
+    environment = os.environ if env is None else env
+    section = load_channels(path).get(name) or {}
+    unknown = tuple(sorted(str(key) for key in section if str(key) not in CHANNEL_KEYS))
+    issues: list[str] = []
+
+    values: dict[str, object] = {}
+    sources: dict[str, str] = {}
+    for key, builtin in CHANNEL_KEYS.items():
+        if key in override:
+            values[key] = override[key]
+            sources[key] = "CLI"
+            continue
+        from_env = ""
+        for prefix in (ENV_PREFIX, LEGACY_ENV_PREFIX):
+            variable = prefix + CHANNEL_ENV_PREFIX + _channel_env_key(name, key)
+            raw = (environment.get(variable) or "").strip()
+            if raw:
+                # 来源要报**实际用上的那个名字**：报了新前缀而人设的是旧前缀，
+                # 他会去改一个本来就没设的变量。
+                from_env, from_env_source = raw, f"env {variable}"
+                break
+        if from_env:
+            converted = _coerce_channel_value(key, from_env)
+            if converted is None:
+                issues.append(
+                    f"{key} env {from_env_source.removeprefix('env ')} "
+                    f"{_channel_value_problem(key, from_env)}; layer skipped"
+                )
+            else:
+                values[key] = converted
+                sources[key] = from_env_source
+                continue
+        if key in section:
+            converted = _coerce_channel_value(key, section[key])
+            if converted is None:
+                issues.append(
+                    f"{key} value {_channel_value_problem(key, section[key])}; layer skipped"
+                )
+            else:
+                values[key] = converted
+                sources[key] = f"config [channel.{name}] {effective_config_path()}"
+                continue
+        values[key] = builtin
+        sources[key] = "default"
+    return ChannelValues(
+        name=name,
+        options=values,
+        sources=sources,
+        unknown=unknown,
+        issues=tuple(issues),
+    )
+
+
+def channel_options(name: str, path: Path | None = None) -> ChannelValues:
+    """`[channel.<name>]` 这一段**本身**的默认值（不含命令行那一层）。
+
+    `spool config` 与 `spool bridge --check` 用它回答"我配了没"；
+    短命令用 `resolve_channel_options`（多一层命令行）。
+    """
+    return resolve_channel_options(name, path=path)
+
+
+def known_channels(path: Path | None = None) -> list[str]:
+    """用户配置里写了哪些通道小节（排序后）。没写就是空。"""
+    return sorted(load_channels(path))
+
+
 def resolve(key: str, flag: str = "", env: dict[str, str] | None = None) -> tuple[str, str]:
-    """返回（值, 来源）。来源要能说出来——不然"我明明设了"就成了口头禅。"""
+    """Return (value, source). Source must be printable for troubleshooting."""
     if flag:
-        return flag, "命令行"
+        return flag, "CLI"
     table = load()
     environment = os.environ if env is None else env
     for prefix in (ENV_PREFIX, LEGACY_ENV_PREFIX):
         from_env = environment.get(prefix + key.upper())
         if from_env:
-            # 来源要报**实际用上的那个名字**：报了新前缀而人设的是旧前缀，
-            # 他会去改一个本来就没设的变量。
-            return from_env, f"环境变量 {prefix}{key.upper()}"
+            # Report the name that actually won (new vs legacy prefix).
+            return from_env, f"env {prefix}{key.upper()}"
     if table.get(key):
-        return table[key], f"配置文件 {effective_config_path()}"
-    return "", "未设置"
+        return table[key], f"config {effective_config_path()}"
+    return "", "unset"
 
 
 def flag_enabled(key: str, flag: bool = False) -> bool:
@@ -291,7 +729,7 @@ def load_mcp_servers(path: Path | None = None) -> list[McpServer]:
 class ExternalService:
     """本机外接配方。写在用户配置的 `[[service]]` 里，不进仓库。
 
-    `command` 可空：空就只探测、不替你启动。地址、gguf 路径、ssh 主机
+    `command` 可空：空则只探测、不启动。地址、gguf 路径、ssh 主机
     都由这台机器的人自己写，产品不绑死。常见名字的用途：`llama` 是本机
     语言模型；`tunnel` 是通道出网的 SOCKS（配合 `--bridge-proxy`），不是
     模型的 `--proxy`。

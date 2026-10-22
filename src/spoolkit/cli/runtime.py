@@ -6,16 +6,26 @@
 
 import atexit
 import json
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from spoolkit.cli.events import EventWriter
+from spoolkit.cli.term import WaitDisplay
+from spoolkit.llm.llamacpp import DEFAULT_TEMPERATURE
 from spoolkit.llm.providers import ProviderConfig, ProviderError, load_gateway
 from spoolkit.net import system_proxy
 from spoolkit import settings
 from spoolkit.agent.loop import AgentLoop
 from spoolkit.config import Config
+from spoolkit.llm.gateway import (
+    ModelGateway,
+    WaitingGateway,
+    attach_wait_listener,
+    current_wait_phase,
+    wait_line,
+)
+from spoolkit.web.protocol import WAIT
 from spoolkit.index.indexer import index_project, iter_source_files
 from spoolkit import limits
 from spoolkit.index.rank import prefetch as prefetch_text
@@ -23,13 +33,17 @@ from spoolkit.index.rank import prefetch_contents
 from spoolkit.index.rank import prefetch_scope
 from spoolkit.index.tools import file_symbols_spec, find_callers_spec, find_symbol_spec
 from spoolkit.llm.fake import FakeModel
-from spoolkit.llm.gateway import ModelGateway
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.lessons import match_lessons, prune_lessons, record_outcome
 from spoolkit.memory.session import MemorySession
 from spoolkit.memory.store import check_binding, init_memory_schema, record_session
-from spoolkit.memory.tools import recall_spec
-from spoolkit.memory.transcript import conversational_prompt, recent_messages, render_transcript
+from spoolkit.memory.tools import recall_spec, remember_spec, search_history_spec
+from spoolkit.memory.transcript import (
+    conversational_prompt,
+    deictic_reminder,
+    recent_messages,
+    render_transcript,
+)
 from spoolkit.memory.distill import distill
 from spoolkit.store.db import init_schema, open_db
 from spoolkit.tools.edit import PendingChanges, register_edit_tools
@@ -43,13 +57,12 @@ from spoolkit.tools.fs import list_dir_spec, read_file_spec
 from spoolkit.tools.webfetch import web_fetch_spec, web_read_spec
 from spoolkit.fetch.client import WebPolicy
 from spoolkit.fetch.search import TavilySearch, UnconfiguredSearch
-from spoolkit.llm.gemini import load_env_file
 from spoolkit.tools.webfetch import WebAccess
 from spoolkit.tools.websearch import web_search_spec
 from spoolkit.tools.grant import Grants
 from spoolkit.tools.help import tool_help_spec
 from spoolkit.tools.registry import ToolRegistry
-from spoolkit.tools.verify import make_verifier
+from spoolkit.tools.verify import make_verifier, verify_file_spec
 from spoolkit.tools.search import search_code_spec
 from spoolkit.tools.stats import dir_stats_spec
 from spoolkit.tools.survey import survey_spec
@@ -62,8 +75,8 @@ from spoolkit.tools.sources import SourceLog, check_numbers_spec
 # 只有符号表时，模型会一直查、始终不下手（实测本地 7B 的整条轨迹里
 # 连一次 read_file 都没有）。
 # 这两个数搬进了登记表（limits.KNOBS），这里只留名字给外部导入。
-PREFETCH_BUDGET = int(limits.knob("prefetch_budget").default)
-PREFETCH_CONTENT_BUDGET = int(limits.knob("prefetch_content_budget").default)
+PREFETCH_BUDGET = int(limits.require_knob("prefetch_budget").default)
+PREFETCH_CONTENT_BUDGET = int(limits.require_knob("prefetch_content_budget").default)
 
 
 def counter_for(gateway: ModelGateway) -> object:
@@ -122,6 +135,16 @@ class LoopWiring:
     search: object | None = None
     # 远程聊天通道：默认只碰当前工作区；已关联目录仍会写进工作方式。
     from_channel: bool = False
+    # 风险分级放行的批复通道（§3.2.3）。签名：
+    #   (request, 五件渲染文本) -> (批复词, 通道名)
+    # **不给就是无人值守**：不弹问题、把动作挂起为待批、成果照落盘、可续跑。
+    # 三条通道（终端 / 网页壳 / 聊天）各注入自己那一份；MCP 复用
+    # `status.awaiting` 那个既有信号，不新增通道（§3.2.3）。
+    escalation_review: object | None = None
+    # 「最终验证」那一条阶段行的**推迟出口**：给了列表就由调用方在结算之后发
+    # （`--events` 那条路：用户点过「应用」之后这一轮才算落地，阶段行排在它前面
+    # 就是阶段跑在自己前面）。不给就当场发（终端那条路）。
+    defer_final_verify: list | None = None
 
 
 def resolve_provider_args(args) -> dict[str, str]:
@@ -151,7 +174,7 @@ def provider_gateway(args, project_root):
     """按命令行参数装载网关。失败时打印原因并返回 None。
 
     集中在一处：三条执行路径都要用它，各写一遍的结果是某一条上
-    悄悄漏掉代理或密钥来源，而那种问题只会表现为「连不上」。
+    漏掉代理或密钥来源而不报错，而那种问题只会表现为「连不上」。
     """
     values = resolve_provider_args(args)
     provider = values["provider"]
@@ -162,11 +185,11 @@ def provider_gateway(args, project_root):
             # 第一次用最容易撞这里：默认供应商是假模型，而报错原先只说
             # "需要 --script"，一个字都没提"你大概想接本地模型"。
             print(
-                "假模型只回放 --script，不能生成代码。"
-                "没有 LLM 时不要用 --provider fake 当兜底。\n"
-                "测试回放才需要 --script；真实任务请接本地或云端模型：\n"
+                "假模型只回放 --script，不能生成代码；"
+                "缺少 LLM 时不应以 --provider fake 作为兜底。\n"
+                "仅测试回放需要 --script；真实任务请接本地或云端模型：\n"
                 "  --provider llamacpp --base-url http://127.0.0.1:8080\n"
-                "想把它固定成默认（以后不用每次打）："
+                "固定为默认值（无需每次输入）："
                 " spool config --set provider=llamacpp "
                 "--set base_url=http://127.0.0.1:8080",
                 file=sys.stderr,
@@ -174,7 +197,7 @@ def provider_gateway(args, project_root):
             return None
         script_path = Path(raw_path)
         if not script_path.exists():
-            print(f"脚本文件不存在: {script_path}", file=sys.stderr)
+            print(f"脚本文件不存在：{script_path}", file=sys.stderr)
             return None
         raw = json.loads(script_path.read_text(encoding="utf-8"))
         script = tuple(
@@ -189,11 +212,18 @@ def provider_gateway(args, project_root):
         proxy=values["proxy"] or system_proxy(),
         script=script,
         env=dict(__import__("os").environ),
+        # 采样参数**不走 settings 解析**：它们不是用户配置项，而是「这一次跑分
+        # 用什么设置」的一次性输入（探针跑分器按设置逐次给）。不给就是温度 0、
+        # 种子由服务端取——与历史读数完全一致。
+        temperature=DEFAULT_TEMPERATURE
+        if getattr(args, "temperature", None) is None
+        else float(args.temperature),
+        seed=None if getattr(args, "seed", None) is None else int(args.seed),
     )
     try:
         gateway = load_gateway(provider, config)
     except ProviderError as exc:
-        print(f"无法装载供应商 {provider}: {exc}", file=sys.stderr)
+        print(f"无法装载供应商 {provider}：{exc}", file=sys.stderr)
         return None
 
     # 本地服务的失败要在**开工之前**说清楚：连不上时后面的每一步都会以
@@ -202,9 +232,9 @@ def provider_gateway(args, project_root):
     if provider == "llamacpp" and gateway.context_window() is None:
         address = values["base_url"] or "(供应商默认地址)"
         print(
-            f"连不上 llama.cpp 服务：{address}\n"
-            f"（地址来自：{values.get('base_url_source') or '未设置'}）\n"
-            "先确认服务起着，例如：\n"
+            f"无法连接 llama.cpp 服务：{address}\n"
+            f"（地址来源：{values.get('base_url_source') or '未设置'}）\n"
+            "先确认服务已启动，例如：\n"
             "  llama-server.exe -m <模型.gguf> --host 127.0.0.1 --port 8080 "
             "-c 8192 -ngl 99 --reasoning off\n"
             "地址不对就用 --base-url 指定，或固定下来："
@@ -212,7 +242,33 @@ def provider_gateway(args, project_root):
             file=sys.stderr,
         )
         return None
-    return gateway
+    return WaitingGateway(gateway)
+
+
+def bind_model_wait(gateway, args, writer=None) -> None:
+    """按本次命令的输出模式绑心跳。漏绑等于今天（静默），不崩溃。"""
+    events = bool(getattr(args, "events", False))
+    display = None if events else WaitDisplay()
+
+    def on_wait(elapsed: int, limit: float | None) -> None:
+        phase = current_wait_phase()
+        if events:
+            payload = {"elapsed": elapsed}
+            if limit is not None:
+                payload["limit"] = int(limit)
+            if phase:
+                payload["phase"] = phase
+            stream = writer if writer is not None else EventWriter()
+            stream.emit(WAIT, **payload)
+            return
+        assert display is not None
+        display.update(wait_line(elapsed, limit, phase))
+
+    def on_wait_end() -> None:
+        if display is not None:
+            display.stop()
+
+    attach_wait_listener(gateway, on_wait, on_wait_end=None if events else on_wait_end)
 
 
 def attach_index(
@@ -237,7 +293,7 @@ def attach_index(
         # 而建索引是按文件数花钱的。项目明显太大时直接不做，
         # 别先花十几秒再把它丢掉。
         #
-        # 顺序很重要：**必须在开库之前判断**。开库会顺手建出 .agent 目录，
+        # 顺序很重要：**必须在开库之前判断**。开库会一并建出 .agent 目录，
         # 于是「跳过了索引」反而在用户的项目里留下一个空壳。
         # 上限是能力/机器标定值：本机 27B 上建索引的收益与代价在 2000 文件
         # 附近平衡，换个模型或换台机器就不是这个数了。
@@ -321,7 +377,7 @@ _MCP_CLIENTS: list = []
 def attach_mcp(registry: ToolRegistry, announce=None) -> list:
     """把用户配置里的 MCP 服务挂成工具。没配就是空操作。
 
-    连不上的服务**跳过并说出来**：悄悄降级的结果是模型找不到工具、
+    连不上的服务**跳过并说出来**：不声不响地降级，结果是模型找不到工具、
     开始自己造轮子，而人以为配好了。
     """
     from spoolkit import settings
@@ -357,11 +413,16 @@ def assemble_loop(
     gateway: ModelGateway,
     config: Config | None = None,
     wiring: LoopWiring | None = None,
+    compaction: bool = True,
 ) -> AgentLoop:
     """用给定网关装配完整循环：注册全部工具、建索引、接上预取。
 
     预算（窗口、步数）走 Config，可选的协作者走 LoopWiring。
     两者分开是因为性质不同：前者是「这次跑多大」，后者是「挂上哪些能力」。
+
+    `compaction` 默认开：素材压缩（预算阶梯第一级）用**同一个网关**另起一次
+    干净上下文的调用。脚本化假模型驱动的路径要传 False——假模型没有判断力，
+    它被压缩提示顶掉的那一步，本来是要走脚本的。
     """
     settings = config or Config(project_root=project_root)
     parts = wiring or LoopWiring()
@@ -421,10 +482,44 @@ def assemble_loop(
     )
     if parts.pending is not None:
         register_edit_tools(registry, project_root, parts.pending)
+    # 按产出类型验一个文件。放在 run_command 后面：它是「改完怎么确认」这条
+    # 线上的另一把工具，而在此之前模型手里没有任何「验一个文件」的入口——
+    # 写 HTML 时只能自己拼 node --check，撞的是 node 的原始报错。
+    registry.register(
+        verify_file_spec(
+            project_root,
+            parts.pending,
+            parts.read_roots,
+            timeout=int(limits.resolve("command_timeout", settings.overrides)[0]),
+        )
+    )
     if parts.memory is not None:
         # 主循环用的注册表在这里构造，所以 recall 也必须在这里注册，
         # 否则提示词会提到一个只有派发路径才有的工具。
         registry.register(recall_spec(parts.memory))
+        # 反方向的入口：任务**中途**记下一条跨任务仍有用的事实（设计稿 §5.2）。
+        # 与 recall 同一处注册（都在这个 `if` 里），否则提示词会提到一个只有派发
+        # 路径才有的工具。它走的是同一套门禁（`semantic.write_memory`），被拒时
+        # 把写入口的理由交回给模型——工具层没有第二份判据。
+        registry.register(remember_spec(parts.memory, overrides=settings.overrides))
+        # 历史消息的检索入口。历史本身不进上下文，这条路是模型**主动**去取
+        # 「这个问题是从哪来的」。三个数字都从标定表来：它们直接决定回灌多少
+        # 字，写死在工具里就等于绕过了「预算可调、来源可查」这条规矩。
+        registry.register(
+            search_history_spec(
+                parts.memory,
+                project_root,
+                default_limit=int(
+                    limits.resolve("history_search_limit", settings.overrides)[0]
+                ),
+                max_limit=int(
+                    limits.resolve("history_search_max", settings.overrides)[0]
+                ),
+                snippet_chars=int(
+                    limits.resolve("history_snippet_chars", settings.overrides)[0]
+                ),
+            )
+        )
 
     # 供应商能给出真实分词时就用真实的：预算建立在估算上，中文/代码混排时
     # 偏差足以让本地判定放行、服务端拒绝（实测提示词 9772 > 上限 8192）。
@@ -451,7 +546,7 @@ def assemble_loop(
     mcp_clients = attach_mcp(registry, announce=print) if parts.mcp else []
     # 「收齐这一处该看的」是一个**动作**，不是一个必经阶段：模型自己决定
     # 何时用、看哪一处。它省的是步数——原先要「列目录 → 猜文件名 → 读 →
-    # 猜错了再换」，实测模型猜错过文件名，那一步就白花了。
+    # 猜错了再换」，实测模型猜错过文件名，那一步就浪费了。
     registry.register(
         survey_spec(
             project_root,
@@ -488,6 +583,15 @@ def assemble_loop(
         read_roots=parts.read_roots,
         sources=sources,
         from_channel=parts.from_channel,
+        # 重复调用护栏要判断「这个文件现在长什么样」，而那必须与 read_file
+        # 看到的是同一个视图（叠加待确认改动）。不传的话，护栏会拿磁盘内容
+        # 去比，把「文件已经改过」判成没变——该放行的刷新读取被拦死。
+        pending=parts.pending,
+        escalation_review=parts.escalation_review,
+        defer_final_verify=parts.defer_final_verify,
+        # 素材压缩跟着装配走来（生产默认开）：真正跑起来时预算见底的不是
+        # 「步数」而是素材体积，压一遍比整个丢掉历史更省上下文。
+        compaction=compaction,
     )
 
 
@@ -500,6 +604,9 @@ def build_loop(project_root: Path, script: list[str], window: int = 4096) -> Age
         # 假模型没有判断力：它的「续期」只是把脚本里下一条当成结论。
         # 这条路是离线演示与测试用的，督导在这里只会有害。
         config=Config(project_root=project_root, context_window=window, supervise=False),
+        # 同理：素材压缩要另起一次模型调用，假模型给不出可用的压缩稿，
+        # 只会把脚本里下一步顶掉。离线路径整级关掉（阶梯另有独立用例）。
+        compaction=False,
     )
 
 
@@ -525,8 +632,9 @@ def web_search_backend(args, project_root: Path | None = None):
     """网页搜索后端。现在只接 Tavily；没有 key 就不装。
 
     名字：`--web-search-api` / 配置 `web_search_api`。空着且有 Tavily key
-    就当 tavily。key 来源：环境变量 `TAVILY_API_KEY`（或
-    `SPOOLKIT_TAVILY_API_KEY`）、工作区 `.env`、用户配置里的 `tavily_api_key`。
+    就当 tavily。key 来源与其它密钥同一条链：环境变量 `TAVILY_API_KEY`
+    （或 `SPOOLKIT_TAVILY_API_KEY`）、工作区 `.env`、用户级 `.env`，
+    最后还认旧位置——用户配置里的 `tavily_api_key`。
     没配时研究会话里的 web_search 会说「没配搜索，只能直接给 URL」。
     """
     wanted = str(getattr(args, "web_search_api", "") or "").strip()
@@ -542,14 +650,17 @@ def web_search_backend(args, project_root: Path | None = None):
 
 
 def _tavily_api_key(project_root: Path | None) -> str:
-    for name in ("TAVILY_API_KEY", "SPOOLKIT_TAVILY_API_KEY"):
-        value = (os.environ.get(name) or "").strip()
-        if value:
-            return value
-    if project_root is not None:
-        value = load_env_file(Path(project_root) / ".env").get("TAVILY_API_KEY", "").strip()
-        if value:
-            return value
+    """Tavily 的 key：环境变量 → 工作区 `.env` → 用户级 `.env` → 用户配置。
+
+    两个环境变量名的**先后不动**（原来是 `TAVILY_API_KEY` 在前），免得同一个
+    key 在两处都设过的人，行为在升级后变了而没有提示。最后那条是旧位置：
+    写进 `config.toml` 的人不用搬家。
+    """
+    value, _ = settings.resolve_secret(
+        ("TAVILY_API_KEY", "SPOOLKIT_TAVILY_API_KEY"), workspace=project_root
+    )
+    if value:
+        return value
     payload, _ = settings.read_config()
     raw = payload.get("tavily_api_key")
     if isinstance(raw, str) and raw.strip():
@@ -589,7 +700,11 @@ def open_memory(
     memory = build_memory(project_root, window, session_id, overrides=overrides)
     warning = check_binding(memory._conn, session_id, str(project_root))
     if warning:
-        print(f"提示：{warning}")
+        # **提示走 stderr**（与 `bind_model_wait` 的心跳同一档）：`--events` 时
+        # stdout 上只能有 JSON 行，而这条提示与「哪一步 / 哪个工具」无关，
+        # 它是诊断，不是命令的输出。产物通道（`spool plan` 的计划正文之类）
+        # 仍然走 stdout。
+        print(f"提示：{warning}", file=sys.stderr)
     record_session(memory._conn, session_id, str(project_root), model, window)
     return memory
 
@@ -604,13 +719,32 @@ def distiller_for(args, gateway, memory):
 
 
 def prompt_for_turn(memory, session_id: str, goal: str, overrides=None) -> str:
-    """通道/网页：把最近几轮（截断）拼进本轮提示。没有上一轮就只给当前目标。"""
+    """通道/网页：把最近几轮（截断）+ 更早那一段的摘要拼进本轮提示。
+
+    指代词那**一行**提醒也挂在这里，而不是各个入口各写一遍：
+    `conversational_prompt` 自己会加同一句（它拿到的是同一个 goal），
+    两边拼出来的字符串一样，所以 `_with_reminder` 之外不需要去重；
+    没有记忆（`memory is None`）时退化成「那一行 + 当前这句话」，
+    免得一条指令把原话挤掉。
+
+    两段大小都来自标定表（`recent_chat_*` / `history_digest_*`）：
+    写死在这里就等于绕过了「预算可调、来源可查」这条规矩。
+    """
+    reminder = deictic_reminder(goal)
     if memory is None:
-        return goal
+        return f"{reminder}\n\n当前：{goal}" if reminder else goal
     turns = int(limits.resolve("recent_chat_turns", overrides)[0])
     chars = int(limits.resolve("recent_chat_chars", overrides)[0])
+    digest_turns = int(limits.resolve("history_digest_turns", overrides)[0])
+    digest_chars = int(limits.resolve("history_digest_chars", overrides)[0])
     return conversational_prompt(
-        memory._conn, session_id, goal, turns=turns, max_chars=chars
+        memory._conn,
+        session_id,
+        goal,
+        turns=turns,
+        max_chars=chars,
+        digest_turns=digest_turns,
+        digest_chars=digest_chars,
     )
 
 
@@ -646,7 +780,11 @@ def settle_lessons(memory: MemorySession, pushed, succeeded: bool) -> None:
     record_outcome(memory._conn, list(pushed), succeeded=succeeded)
     pruned = prune_lessons(memory._conn)
     if pruned:
-        print(f"已把 {len(pruned)} 条长期无效的教训移出推送池（仍保留可检索）。")
+        # 同上：这是诊断（教训库的清理读数），走 stderr，别混进事件通道。
+        print(
+            f"已把 {len(pruned)} 条长期无效的教训移出推送池（仍保留可检索）。",
+            file=sys.stderr,
+        )
 
 
 def build_approver(project_root: Path):

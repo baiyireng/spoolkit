@@ -15,6 +15,7 @@ from pathlib import Path
 from spoolkit import __version__
 from spoolkit import onboarding
 from spoolkit import settings
+from spoolkit import status as status_report
 from spoolkit import workspace
 from spoolkit.bench import DEFAULT_BENCH_ROOT
 from spoolkit.cli.commands.bench import bench
@@ -24,15 +25,21 @@ from spoolkit.cli.commands.revert import revert_command
 from spoolkit.cli.commands.run import run
 from spoolkit.cli.commands.serve import serve_command
 from spoolkit.cli.commands.hub import hub_command
+from spoolkit.cli.commands.shortcuts import qq_command, web_command
 from spoolkit.cli.commands.diagnose import diagnose_command
 from spoolkit.cli.commands.session import session_command
+from spoolkit.cli.commands.ws import ws_command
 from spoolkit.cli.commands.limits import limits_command
+from spoolkit.cli.commands.memory import migrate as memory_command
 from spoolkit.cli.commands.config import config_command
+from spoolkit.cli.commands.env import env_command
 from spoolkit.cli.commands.chat import chat_command
 from spoolkit.cli.commands.bridge import approve_entry, bridge_command
 from spoolkit.cli.commands.init import init_command
 from spoolkit.cli.commands.extra import extra_command
 from spoolkit.cli.commands.service import service_command
+from spoolkit.cli.commands.status import status_command
+from spoolkit.cli.commands.help import help_command
 from spoolkit.cli.commands.mcp import mcp_command
 from spoolkit.cli.commands.mcp_servers import mcp_servers_command
 from spoolkit.cli.options import (
@@ -100,6 +107,24 @@ def _add_provider_args(parser: argparse.ArgumentParser, default: str) -> None:
     parser.add_argument("--model", default="", help="留空则用供应商默认模型")
     parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
     parser.add_argument("--proxy", default="", help="留空则使用系统代理")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help=(
+            "采样温度（当前只对 llamacpp 生效）。不给=网关默认 0，即确定性采样；"
+            "抬起来才测得到波动——温度 0 下连跑 N 次只能证明「可复现」"
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "采样种子（当前只对 llamacpp 生效）。温度 > 0 时不给种子，"
+            "每次采样都不同，两次读数没法对着比"
+        ),
+    )
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.add_argument(
         "--no-setup",
@@ -148,6 +173,15 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         help="超过几件就提醒「审查会吃力」（0 表示用默认值 5）",
     )
     parser.add_argument(
+        "--review",
+        action="store_true",
+        help=(
+            "显式要求跑一次语义审查（L3，设计稿 §5 的第 5 条触发条件）。"
+            "默认关：语义审查是一次模型调用，其余四条触发条件（L1/L2 有发现、"
+            "L2 回归、改动规模越线、有没有证据的完成声明）本来就会按需触发"
+        ),
+    )
+    parser.add_argument(
         "--subagent-steps",
         type=int,
         default=20,
@@ -179,8 +213,8 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         type=int,
         default=0,
         help=(
-            "分批推进：每批排几步。给了它就变成「先做一批 → 回头看一眼 → "
-            "再排下一批」，后续步骤能吃到前面的实际结果。0 表示一次排完"
+            "分批推进：每批排定步数。启用后按「先做一批 → 回顾结果 → "
+            "再排下一批」推进，后续步骤可用前面的实际结果。0 表示一次排完"
         ),
     )
     parser.add_argument(
@@ -192,13 +226,15 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         "--cover",
         default="",
         help=(
-            "拆解后要检查覆盖的清单（逗号分隔）。目标明说「把这 N 件事都做完」"
-            "时才给；不给就不检查——什么算「必须覆盖」是关于目标的判断，"
-            "不该由 harness 猜"
+            "拆解后要检查覆盖的清单（逗号分隔）。仅当目标明确要求「把这 N 件事"
+            "都做完」时给出；不给即不检查；是否「必须覆盖」是对目标的判断，"
+            "不应由 harness 推断"
         ),
     )
     parser.add_argument(
-        "--session", default="cli", help="会话名。不同时段/目的的活分开记"
+        "--session",
+        default="",
+        help="会话名。留空 = 用指针里那条，没有就用老默认名 cli",
     )
     parser.add_argument(
         "--history", type=int, default=6, help="启动时显示最近几轮会话记录"
@@ -236,17 +272,22 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=run)
 
 
-def _add_web_args(parser: argparse.ArgumentParser) -> None:
+def _add_web_args(parser: argparse.ArgumentParser, default: bool | None = True) -> None:
     """联网取用（research / web_fetch / web_read）。
 
     **默认开**：QQ、网页壳、CLI 同一套能力。网页内容仍按不可信资料处理
     （里面的「指令」不是用户指令；内网地址硬拦）。不要就 `--no-web`。
     白名单/黑名单/上限一律由调用方给，这里不写死。
+
+    `default=None` 是给**短命令**（`web` / `qq`）用的第三个取值：
+    "用户没表态"。它们的默认值来自用户配置 `[channel.<名字>]`，而 argparse
+    只要写了 `default=True`，解析完就成了一次"显式给的"，配置里那个
+    `web = false` 永远盖不过它——这正是"设置了却没生效"的形状。
     """
     parser.add_argument(
         "--web",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=default,
         help="联网取用（默认开）：research 查资料；--no-web 关掉",
     )
     parser.add_argument(
@@ -275,8 +316,9 @@ def _add_plan_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("plan", help="把目标拆成可验收的步骤序列")
     parser.add_argument("--goal", required=True)
     # 计划是会话级的（见 session_state.py）：这里的默认值必须与 `run` 一致，
-    # 否则 `spool plan` 排的计划，`spool run --plan` 找不到。
-    parser.add_argument("--session", default="cli", help="会话名，默认与 run 一致")
+    # 否则 `spool plan` 排的计划，`spool run --plan` 找不到。现在两者都是空串，
+    # 由内核按"显式 > 指针 > cli"定，仍然是同一条。
+    parser.add_argument("--session", default="", help="会话名，默认与 run 同一个会话")
     _add_provider_args(parser, default="gemini")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument(
@@ -295,8 +337,27 @@ def _add_policy_command(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_revert_command(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("revert", help="回滚上一次写入的改动")
+    parser = sub.add_parser(
+        "revert", help="回滚上一次写入的改动，或整轮（--run / --last-run）"
+    )
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
+    parser.add_argument(
+        "--run",
+        default="",
+        help="回滚**整轮**：运行 id（.agent/runs/<id>），见收尾报告里那一行撤销命令",
+    )
+    parser.add_argument(
+        "--last-run",
+        dest="last_run",
+        action="store_true",
+        help="回滚最近一轮落成过改动的运行",
+    )
+    parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="只报这一轮会退哪些、哪些退不动（冲突），磁盘一个字不动",
+    )
     parser.set_defaults(func=revert_command)
 
 
@@ -331,16 +392,118 @@ def _add_bench_command(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_session_command(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("session", help="列出这个工作区里的会话")
+    parser = sub.add_parser("session", help="会话管理：列 / 建 / 切 / 改名 / 归档 / 查历史")
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "new", "use", "rename", "archive", "search"],
+    )
+    parser.add_argument(
+        "name", nargs="?", default="", help="会话 id / 序号 / latest；`search` 时是关键词"
+    )
+    parser.add_argument("title", nargs="?", default="", help="`new` 或 `rename` 时的标题")
+    parser.add_argument("--all", action="store_true", help="连归档的一起列")
+    parser.add_argument(
+        "--all-sessions",
+        dest="all_sessions",
+        action="store_true",
+        help="`search` 跨会话：查本工作区的全部会话（不给就只查当前会话）",
+    )
+    parser.add_argument(
+        "--from-session",
+        dest="from_session",
+        default="",
+        help="`search` 只看这一条会话（不给 = 当前会话；`--all-sessions` 优先）",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="`search` 最多几条（`0` = 按标定值 history_search_limit）",
+    )
+    parser.add_argument(
+        "--since", default="", help="`search` 只看这个时间起（2026-09-27 或 2026-09-27 14:03）"
+    )
+    parser.add_argument(
+        "--until", default="", help="`search` 只看这个时间止；只给日期按当天 00:00 算"
+    )
     parser.set_defaults(func=session_command)
 
 
-def _add_serve_command(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("serve", help="启动 Web UI 壳")
-    parser.add_argument("--host", default="127.0.0.1")
+def _add_env_command(sub: argparse._SubParsersAction) -> None:
+    """`spool env`：用户级 `.env`（密钥那一层）。
+
+    **不带 `--root`**：这条命令管的是"这台机器上的你"，与在哪个工作区无关。
+    """
+    parser = sub.add_parser(
+        "env", help="用户级 .env：看位置与键名 / 写入 / 从工作区搬"
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "path", "set", "import"],
+    )
+    parser.add_argument(
+        "items", nargs="*", default=[], help="`set` 时给 KEY=VALUE，可给多个"
+    )
+    parser.add_argument(
+        "--from", dest="source", default="", help="`import` 时的来源 .env"
+    )
+    parser.add_argument(
+        "--only", action="append", default=[], help="`import` 时只搬这些键，可给多次"
+    )
+    parser.set_defaults(func=env_command)
+
+
+def _add_ws_command(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser(
+        "ws", aliases=["workspace"], help="工作区管理：列 / 切 / 加 / 忘 / 别名"
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "use", "add", "forget", "alias"],
+    )
+    parser.add_argument("name", nargs="?", default="", help="名字、序号、路径或别名")
+    parser.add_argument("value", nargs="?", default="", help="`alias` 时给别名")
+    parser.set_defaults(func=ws_command)
+    # 注意：`ws` 自己**不带** --root，它是用来选工作区的，不是被解析的对象。
+
+
+def _add_serve_parser(
+    sub: argparse._SubParsersAction,
+    name: str,
+    help_text: str,
+    *,
+    func,
+    web_default: bool | None = True,
+    description: str = "",
+) -> argparse.ArgumentParser:
+    """`serve` / `hub` / `web` 共用的那组参数（三者的参数面本来就一样）。
+
+    放在一处是因为**参数面分叉的症状是"这条命令能设、那条不能"**：短命令
+    `spool web` 的契约就是"等价于 `spool hub` 不带通道"，它多一个少一个参数
+    都算说话不算数。`qq` 不在这里——它的参数面是 `bridge` 那一套。
+
+    `description` 与 `help_text` 是两处地方：`help_text` 只在 `spool --help`
+    那张命令表里出现，`description` 才是 `spool web --help` 自己的第一屏。
+    短命令要靠后者说清"我是机器级的、任意目录可用"，否则人得先读设计文档。
+    """
+    parser = sub.add_parser(name, help=help_text, description=description or None)
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="监听地址（默认只绑本机）。绑非回环地址（如 0.0.0.0）时是**只读**壳："
+        "能看页面与事件，/run 与 /confirm 返回 403（本批不实现远程可写）",
+    )
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--session", default="cli")
+    parser.add_argument(
+        "--session", default="", help="会话名。留空 = 用网页壳的指针，没有就 cli"
+    )
     parser.add_argument("--provider", default="")
     parser.add_argument("--model", default="")
     parser.add_argument(
@@ -359,40 +522,50 @@ def _add_serve_command(sub: argparse._SubParsersAction) -> None:
         metavar="目录",
         help="授权额外可读目录（可重复），转发给子进程",
     )
-    _add_web_args(parser)
+    _add_web_args(parser, default=web_default)
     parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
-    parser.set_defaults(func=serve_command)
+    # `--root` 不给时不要替它自动找一个：留给内核按"当前目录 → 网页壳指针 →
+    # 登记表"退。少了这一条，从任何工作区目录敲 `spool serve` 都会被填成
+    # `explicit`，`client="web"` 那层指向永远读不到（Task 6 评审的 Important-1）。
+    # `web_default` 只用来给 `--web` 定默认值，不进 Namespace：留一个没人读的
+    # 属性在 `args` 上，下一个读它的人会以为它管着什么。
+    parser.set_defaults(func=func, optional_root=True)
+    return parser
+
+
+def _add_serve_command(sub: argparse._SubParsersAction) -> None:
+    _add_serve_parser(sub, "serve", "启动 Web UI 壳", func=serve_command)
+
+
+def _add_web_command(sub: argparse._SubParsersAction) -> None:
+    """`spool web`：机器级网页壳的短命令（= `hub` 不带通道）。
+
+    为什么值得一个短命令：网页壳是**机器级**的（不给 `--root` 就不认 cwd，
+    进去再选工作区），可它的名字却叫 `hub`——而"在任意目录敲一下就能起手"
+    这件事，短本身就有一半功劳。`hub` 原样保留、语义不变。
+    """
+    _add_serve_parser(
+        sub,
+        "web",
+        "起机器级网页壳（= hub 不带通道；任意目录可用，进去再选工作区）",
+        func=web_command,
+        web_default=None,
+        description=(
+            "机器级网页壳：任意目录都能起（不认 cwd）；不给 --root 即不固定工作区，"
+            "进入后在页面选工作区与会话。等价于 `spool hub` 不带 `--channel`；"
+            "参数与 hub 一致。要连聊天通道用 `spool hub --channel …` 或 `spool qq`。"
+        ),
+    )
 
 
 def _add_hub_command(sub: argparse._SubParsersAction) -> None:
     """产品内核：网页壳 + 可选 bridge。不启 llama / 隧道。"""
-    parser = sub.add_parser(
+    parser = _add_serve_parser(
+        sub,
         "hub",
-        help="起网页壳；声明了通道才再拉 bridge（不启 llama-server / 隧道）",
+        "起网页壳；声明了通道才再拉 bridge（不启 llama-server / 隧道）",
+        func=hub_command,
     )
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--session", default="cli")
-    parser.add_argument("--provider", default="")
-    parser.add_argument("--model", default="")
-    parser.add_argument(
-        "--script",
-        default="",
-        help="仅测试回放：fake 的应答脚本。fake 不能写代码，真实任务不要走这条",
-    )
-    parser.add_argument("--base-url", default="", help="llama.cpp 服务地址")
-    parser.add_argument("--proxy", default="")
-    parser.add_argument("--policy", default="")
-    parser.add_argument("--scope", default="")
-    parser.add_argument(
-        "--allow-read",
-        action="append",
-        default=[],
-        metavar="目录",
-        help="授权额外可读目录（可重复），转发给子进程",
-    )
-    _add_web_args(parser)
-    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
     parser.add_argument(
         "--channel",
         default="",
@@ -432,7 +605,99 @@ def _add_hub_command(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="模型/外接服务从通变断时，给最近聊天发一句（默认关，避免刷屏）",
     )
-    parser.set_defaults(func=hub_command)
+    # `optional_root` 与 func 已由 `_add_serve_parser` 设好，这里不再重复。
+
+
+def _add_qq_command(sub: argparse._SubParsersAction) -> None:
+    """`spool qq`：按用户配置起 QQ 官方机器人通道。
+
+    **长参数全部有默认值**（`[channel.qqbot]` + 三层配置），命令行仍可覆盖；
+    凭据走用户级 `.env`（机器级入口不认 cwd）。它就是"在 `C:\\Users\\32615`
+    直接敲一下就能起来"的那条命令——用户真这么报过一次，而当时要敲六个参数。
+    """
+    parser = sub.add_parser(
+        "qq",
+        help="起 QQ 官方机器人通道（= bridge --channel qqbot；默认值来自用户配置 [channel.qqbot]）",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="一轮任务最多等多少秒；不给则用 [channel.qqbot] 里的 timeout，再不然 900",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="只看凭据与连通性，不起通道（等价于 bridge --check）",
+    )
+    parser.add_argument(
+        "--bridge-proxy",
+        default=None,
+        metavar="地址",
+        help="通道自己出网走哪个代理；不给则用 [channel.qqbot] 的 proxy",
+    )
+    parser.add_argument("--token", default="", help="（QQ 用不到；留给通道插件）")
+    parser.add_argument("--appid", default="", help="QQ 机器人的 AppID（或用用户级 .env）")
+    parser.add_argument("--secret", default="", help="QQ 机器人的 AppSecret（或用用户级 .env）")
+    parser.add_argument(
+        "--sandbox", action="store_true", help="QQ 机器人用沙箱环境（sandbox.api.sgroup.qq.com）"
+    )
+    parser.add_argument(
+        "--access",
+        choices=("pairing", "allowlist", "open"),
+        default="pairing",
+        help="通道准入：pairing（默认）/ allowlist（只放行 --allow-user）/ open（谁都行）",
+    )
+    parser.add_argument(
+        "--allow-user",
+        action="append",
+        default=[],
+        metavar="用户",
+        help="白名单（可重复，按 openid）；给了就切到名单模式",
+    )
+    parser.add_argument("--user", default="local", help="假通道里模拟的用户名（QQ 用不到）")
+    parser.add_argument("--max-chars", type=int, default=4000, help="单条消息长度上限")
+    parser.add_argument(
+        "--approve", default="", metavar="配对码", help="批准一个配对码然后退出"
+    )
+    parser.add_argument(
+        "--policy",
+        choices=POLICIES,
+        default=None,
+        help="子进程的授权策略；不给则用 [channel.qqbot] 的 policy（再不然空=按已保存的设置）",
+    )
+    parser.add_argument(
+        "--scope",
+        default=None,
+        help="允许自动落盘的范围；不给则用 [channel.qqbot] 的 scope（`--scope \"\"` 是不许落盘）",
+    )
+    parser.add_argument(
+        "--session", default="", help="会话名。留空 = 用这条聊天的指向，没有就 bridge"
+    )
+    parser.add_argument(
+        "--notify-disconnect",
+        action="store_true",
+        help="模型/外接服务从通变断时，给最近聊天发一句（默认关）",
+    )
+    _add_provider_args(parser, default="")
+    # `default=None`：这三个的默认值来自 `[channel.qqbot]`，而 argparse 只要写了
+    # 一个非 None 的默认值，解析完就成了一次"显式给的"——配置永远盖不过它。
+    _add_web_args(parser, default=None)
+    parser.add_argument(
+        "--script",
+        default="",
+        help="仅测试回放：fake 的应答脚本 JSON。真实任务不要走这条",
+    )
+    parser.add_argument(
+        "--allow-read",
+        action="append",
+        default=[],
+        metavar="目录",
+        help="授权额外可读目录（可重复，一次性，不写进配置）",
+    )
+    # `--root` 不给仍是**有意义的取值**：服务整台机器，落到哪由"这条聊天的
+    # 指针"决定。所以默认空串 + optional_root，main() 不会拿 cwd 顶数。
+    parser.set_defaults(func=qq_command, optional_root=True, channel="qqbot", root="")
 
 
 def _add_diagnose_command(sub: argparse._SubParsersAction) -> None:
@@ -509,7 +774,11 @@ def _add_chat_command(sub: argparse._SubParsersAction) -> None:
         help="本次会话的授权策略；留空则用已保存的设置",
     )
     parser.add_argument("--scope", default="", help="auto 策略下允许自动落盘的路径")
-    parser.add_argument("--session", default="chat", help="会话名。不同时段/目的的活分开记")
+    parser.add_argument(
+        "--session",
+        default="",
+        help="会话名。留空 = 用指针里那条，没有就用老默认名 chat",
+    )
     _add_web_args(parser)
     parser.add_argument("--history", type=int, default=6)
     parser.add_argument(
@@ -544,7 +813,23 @@ def _add_mcp_command(sub: argparse._SubParsersAction) -> None:
         default="",
         help="允许自动落盘的范围。外部 agent 的确认等于用户确认，边界靠它收窄",
     )
-    parser.add_argument("--session", default="mcp", help="会话名")
+    parser.add_argument(
+        "--session",
+        default="",
+        help="会话名。留空 = 用 mcp 的指向，没有就 mcp；单次调用还能用 session 覆盖",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="每个任务的步数预算（留空 = 内置 10）。复杂任务经 MCP 派发时要给足",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="自主编排（mode=autonomous）最多拆几步（留空 = 内置 10）",
+    )
     _add_web_args(parser)
     parser.add_argument(
         "--allow-read",
@@ -553,7 +838,8 @@ def _add_mcp_command(sub: argparse._SubParsersAction) -> None:
         metavar="目录",
         help="授权额外可读目录（可重复）",
     )
-    parser.set_defaults(func=mcp_command)
+    # `--root` 不给 = 服务整台机器（每次调用点名，或按 mcp 的指向）。
+    parser.set_defaults(func=mcp_command, root="", optional_root=True)
 
 
 def _add_mcp_servers_command(sub: argparse._SubParsersAction) -> None:
@@ -566,7 +852,7 @@ def _add_mcp_servers_command(sub: argparse._SubParsersAction) -> None:
 def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
     """把工作区接到一条聊天通道上（消息驱动的 agent）。"""
     parser = sub.add_parser(
-        "bridge", help="把工作区接到聊天通道上（fake / telegram / wecom）"
+        "bridge", help="把工作区接到聊天通道上（fake / telegram / wecom / qqbot）"
     )
     parser.add_argument(
         "--channel",
@@ -647,7 +933,10 @@ def _add_bridge_command(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="模型/外接服务从通变断时，给最近聊天发一句（默认关，避免刷屏）",
     )
-    parser.set_defaults(func=bridge_command)
+    # `--root` 不给是**有意义的取值**：服务整台机器，具体落到哪由"这条聊天的
+    # 指针"决定。所以这里既把默认值定成空串，也打上 optional_root 让 main()
+    # 别替它自动找一个工作区。
+    parser.set_defaults(func=bridge_command, root="", optional_root=True)
 
 
 def _add_extra_command(sub: argparse._SubParsersAction) -> None:
@@ -669,25 +958,88 @@ def _add_extra_command(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_service_command(sub: argparse._SubParsersAction) -> None:
-    """本机外接配方：快捷拉起 / 停掉。hub 不替你启 llama / 隧道。"""
+    """Local [[service]] recipes: start / stop / list. Hub does not start them."""
     parser = sub.add_parser(
         "service",
-        help="本机外接配方（llama 模型进程、tunnel 通道 SOCKS 等：start / stop / list）",
+        help="local recipes (llama / tunnel SOCKS): start | stop | list",
     )
     parser.add_argument(
         "action",
         nargs="?",
         default="list",
         choices=["list", "start", "stop"],
-        help="list 查看，start 拉起，stop 停掉（默认 list）",
+        help="list (default), start, or stop",
     )
     parser.add_argument(
         "name",
         nargs="?",
         default="",
-        help="配方名；start/stop 不给则对全部（start 只动有 command 的）",
+        help="recipe name; omit = all (start only recipes with command)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="with stop: kill whoever listens on the recipe health port (not only our pid)",
     )
     parser.set_defaults(func=service_command)
+
+
+def _add_status_command(sub: argparse._SubParsersAction) -> None:
+    """Machine-wide spoolkit status table (loopback probes only)."""
+    parser = sub.add_parser(
+        "status",
+        help="local status table: model / web / bridge / MCP / workspace / secrets",
+        description=(
+            "Loopback-only status table with start/stop hints. "
+            "Critical (exit 1 when down): provider unset/fake; "
+            "local model if provider=llamacpp; [[service]] recipes with command."
+        ),
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="JSON output (stable field names)"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=status_report.DEFAULT_TIMEOUT,
+        help="per-probe timeout seconds (default 0.5; raise while model loads)",
+    )
+    parser.add_argument(
+        "--web-port",
+        action="append",
+        type=int,
+        default=[],
+        metavar="PORT",
+        help="extra web-shell port to probe (repeatable; default 8765)",
+    )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="actually connect MCP servers (spawns their processes)",
+    )
+    parser.add_argument(
+        "--mcp-timeout",
+        type=float,
+        default=status_report.DEFAULT_MCP_TIMEOUT,
+        help="`--probe` MCP timeout seconds (default 5)",
+    )
+    parser.set_defaults(func=status_command)
+
+
+def _add_help_command(sub: argparse._SubParsersAction) -> None:
+    """`spool help [子命令]`：等价于 `spool --help` / `spool <子命令> --help`。
+
+    用户敲过 `spool help`，当时得到的是一句 `invalid choice: 'help'`。这条命令
+    只是把它转发成一次带 `--help` 的重新解析（见 `commands/help.py`），
+    帮助文本与 `spool <子命令> --help` 逐字相同。
+    """
+    parser = sub.add_parser(
+        "help", help="看帮助（= `spool --help`）：spool help [子命令]"
+    )
+    parser.add_argument(
+        "topic", nargs="?", default="", metavar="子命令", help="留空看总帮助"
+    )
+    parser.set_defaults(func=help_command)
 
 
 def _add_init_command(sub: argparse._SubParsersAction) -> None:
@@ -716,7 +1068,59 @@ def _add_approve_command(sub: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--forget", default="", metavar="配对码", help="丢掉一个还没批准的码"
     )
-    parser.set_defaults(func=approve_entry)
+    parser.add_argument(
+        "--ws",
+        default="",
+        metavar="名字",
+        help=(
+            "批准时点名工作区（旧配对文件里的码没有工作区维度；"
+            "登记表里有多个工作区时**必须**点名）"
+        ),
+    )
+    # `--root` 不给是正常的：机器级的码自带工作区，旧式的码按
+    # "当前目录 → 登记表" 退。所以别在这里替它自动找一个工作区。
+    parser.set_defaults(func=approve_entry, optional_root=True)
+
+
+def _add_memory_command(sub: argparse._SubParsersAction) -> None:
+    """`spool memory`：记忆的迁移与体检。**P0 只有 `migrate` 一条。**
+
+    两个刻意的口子：
+
+    1. **只有 `--root`，没有 `provider`/`model`/`--no-setup`**：`main()` 里
+       "缺供应商就弹向导 + `settings.describe_missing()` + 读 `.env` 密钥"
+       那一整段（`app.py` 的 `hasattr(args, "provider")`）因此整段跳过——
+       迁移旧 `memory.md` 与模型供应商无关，而"顺手读一下 `.env`"是这条
+       离线路径唯一可能踩到的真实密钥。用例
+       `test_migrate_不解析工作区env` 用真实调用路径钉住这一点。
+    2. **`--dry-run` 是默认行为**：不给 `--yes` 就是预演；`--yes` 才动文件。
+    """
+    parser = sub.add_parser(
+        "memory",
+        help="记忆管理：migrate 把旧 memory.md 迁到判据下（默认 --dry-run）",
+    )
+    parser.add_argument("--root", default=None, help="工作区路径（默认自动找）")
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="migrate",
+        choices=["migrate"],
+        help="P0 只有 migrate",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="只解析并打印报告，不写文件、不改库（**默认**）",
+    )
+    group.add_argument(
+        "--yes",
+        dest="yes",
+        action="store_true",
+        help="真的执行：先把 memory.md 改名为 memory.md.bak-<日期>，再写新文件",
+    )
+    parser.set_defaults(func=memory_command)
 
 
 def configure_stdio() -> None:
@@ -754,7 +1158,11 @@ def _start_here(parser: argparse.ArgumentParser) -> int:
         if not onboarding.interactive():
             parser.print_help()
             return 2
-        answer = input("当前目录还不是工作区，在这里初始化吗？[Y/n] ").strip().lower()
+        try:
+            answer = input("当前目录不是工作区，是否在此初始化？[Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 130
         if answer not in ("", "y", "yes"):
             parser.print_help()
             return 1
@@ -766,7 +1174,16 @@ def _start_here(parser: argparse.ArgumentParser) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI 入口。交互提示处 Ctrl-C / EOF → 安静退 130（不甩 traceback）。"""
     configure_stdio()
+    try:
+        return _run(argv)
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return 130
+
+
+def _run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="spool")
     parser.add_argument(
         # 两个名字都报出来：命令叫 `spool`，装的那个包叫 `spoolkit`，
@@ -775,6 +1192,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=False)
     _add_init_command(sub)
+    _add_ws_command(sub)
     _add_run_command(sub)
     _add_plan_command(sub)
     _add_policy_command(sub)
@@ -783,9 +1201,13 @@ def main(argv: list[str] | None = None) -> int:
     _add_session_command(sub)
     _add_serve_command(sub)
     _add_hub_command(sub)
+    _add_web_command(sub)
+    _add_qq_command(sub)
     _add_diagnose_command(sub)
     _add_limits_command(sub)
+    _add_memory_command(sub)
     _add_config_command(sub)
+    _add_env_command(sub)
     _add_chat_command(sub)
     _add_mcp_command(sub)
     _add_mcp_servers_command(sub)
@@ -793,6 +1215,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_approve_command(sub)
     _add_extra_command(sub)
     _add_service_command(sub)
+    _add_status_command(sub)
+    _add_help_command(sub)
 
     args = parser.parse_args(argv)
     if args.command is None:
@@ -802,10 +1226,27 @@ def main(argv: list[str] | None = None) -> int:
     # "某个命令的记忆跟别的命令不是同一份"，那种问题最难查。
     if hasattr(args, "root"):
         try:
-            args.root = str(workspace.resolve_root(args.root))
+            if getattr(args, "optional_root", False):
+                # `bridge` / `serve` / `hub`：**不给 `--root` 是一个有意义的取值**
+                # （服务整台机器 / 由指针决定），所以不能在这里替它自动找一个
+                # 工作区。给了才解析。
+                args.root = (
+                    str(workspace.resolve_root_interactive(args.root))
+                    if str(getattr(args, "root", "") or "").strip()
+                    else ""
+                )
+            else:
+                # 走 `resolve_root_interactive`：登记表里有多个工作区、而当前目录不是
+                # 工作区时，终端里要能问一句（内核自己不认识终端，chooser 由 CLI 注入）。
+                args.root = str(workspace.resolve_root_interactive(args.root))
         except workspace.WorkspaceError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+    if hasattr(args, "session"):
+        # `--session` 留空表示"交给内核定"（显式 > 指针 > 该入口的老默认名）。
+        # 各命令的 argparse 默认值必须是空串：只要默认值还在，它就永远是"显式给的"，
+        # 指针永远轮不到——这条正是写计划时才发现的那个坑。
+        args.session = str(getattr(args, "session", "") or "")
     # 第一次用（没配过供应商）且人在终端前：先向导，再干活。
     # 非交互环境绝不弹问题——那会挂住别人的脚本；那种场景由 provider_gateway
     # 给一句明确的指路。
@@ -817,7 +1258,14 @@ def main(argv: list[str] | None = None) -> int:
     ):
         # 先交代"找过哪儿"：不然人只会看到"又问了我一遍"。
         print(settings.describe_missing())
-        onboarding.run_wizard(Path(getattr(args, "root", ".")).resolve())
+        # 向导要往 `.env` 写模型密钥，所以**它必须知道写到哪个工作区**。
+        # `optional_root` 的入口（web / hub / bridge / mcp）没给 `--root` 时
+        # `args.root` 是空串，而 `Path("")` 恰好是 cwd——照那样写，密钥会落进
+        # "你碰巧站在哪个目录"，而向导还会这么说。机器级入口没有工作区就
+        # **不给工作区**：密钥写用户级那份 `.env`（那才是"这台机器上的你"
+        # 该放密钥的地方，见 settings.env_path）。
+        wizard_root = str(getattr(args, "root", "") or "").strip()
+        onboarding.run_wizard(Path(wizard_root).resolve() if wizard_root else None)
     # 供应商相关的取值统一在这里落地一次（命令行 > 环境变量 > 用户配置），
     # 好让每条子命令看到的都是**生效值**——否则 bench 自己拼网关、
     # serve 转发参数、记忆里记的模型名，各拿各的默认，症状是"我设了但没用"。

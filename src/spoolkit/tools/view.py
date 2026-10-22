@@ -72,18 +72,48 @@ class WorkspaceView:
     def overridden(self) -> tuple[str, ...]:
         return tuple(self._overlay())
 
+    def _deleted(self) -> set[Path]:
+        """待确认改动里那几处**删除**：它们已不存在，但磁盘上还在。"""
+        if self._pending is None:
+            return set()
+        disk = getattr(self._pending, "disk_path", None)
+        return {
+            (disk(change.path) if callable(disk) else (self.root / change.path)).resolve()
+            for change in self._pending.items()
+            if getattr(change, "deleted", False)
+        }
+
+    def deleted_paths(self) -> set[Path]:
+        """哪几个绝对路径在待确认改动里被删了（读工具据此不再给人看）。"""
+        return self._deleted()
+
     def exists(self, target: Path) -> bool:
-        return target.resolve() in self._abs_overlay() or target.exists()
+        """这个路径「现在」存在吗——叠加待确认改动之后的事实。
+
+        删除先判：磁盘上它还在（改动没落盘），但在模型该看到的世界里
+        它已经不在了。
+        """
+        resolved = target.resolve()
+        if resolved in self._deleted():
+            return False
+        return resolved in self._abs_overlay() or target.exists()
 
     def is_dir(self, target: Path) -> bool:
         # 待确认的改动只可能是文件，不会凭空造出目录。
         return target.is_dir()
 
     def read_text(self, target: Path) -> str:
-        """读文件内容。改过的文件给改之后的内容。"""
+        """读文件内容。改过的文件给改之后的内容。
+
+        删除不在这条路径上给内容：调用方必须能分清「读到一个文件」与
+        「这个文件已经被删掉了」，否则 `read_file` 会把旧内容端给模型，
+        而模型据此以为自己没删掉。
+        """
         overlay = self._abs_overlay()
         resolved = target.resolve()
         if resolved in overlay:
+            if resolved in self._deleted():
+                raise FileNotFoundError(f"{target} 已在待确认改动里被删除")
             return overlay[resolved]
         return target.read_text(encoding="utf-8")
 

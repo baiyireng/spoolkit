@@ -65,7 +65,10 @@ def test_解绑不在名单里的人要报清楚(tmp_path, capsys) -> None:
     root = tmp_path / "ws"
     _pairings(root)
     assert revoke_command(root, "openid-x") == 2
-    assert "本来就不在" in capsys.readouterr().err
+    # 要点：说清"不在放行名单"，并点名是谁——不钉整句字面。
+    err = capsys.readouterr().err
+    assert "不在放行名单" in err
+    assert "openid-x" in err
 
 
 def test_LIST_看得见放行了谁和谁在等(tmp_path, capsys) -> None:

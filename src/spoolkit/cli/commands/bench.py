@@ -7,7 +7,11 @@ import time
 from pathlib import Path
 
 from spoolkit.bench import (
+    EXIT_ENVIRONMENT_BLOCKED,
     TOGETHER_GOAL,
+    WorkspaceUnavailableError,
+    check_acceptance_environment,
+    describe_environment_problem,
     load_tasks,
     prepare_together,
     render_report,
@@ -17,11 +21,23 @@ from spoolkit.bench import (
 )
 from spoolkit.config import Config
 from spoolkit.cli.runtime import LoopWiring, assemble_loop
+from spoolkit.cli.term import print_err, print_out
 from spoolkit.cli.settle import settle
 from spoolkit.llm.providers import ProviderConfig, load_gateway
 from spoolkit.net import system_proxy
 from spoolkit.policy import AUTO
 from spoolkit.tools.edit import PendingChanges
+
+
+def _print(*args, file=None, sep=" ", end="\n", flush=False):
+    """Human CLI print → Rich consoles (stdout/stderr)."""
+    text = sep.join(str(a) for a in args)
+    if end not in ("\n", ""):
+        text = f"{text}{end}"
+    if file is sys.stderr:
+        print_err(text, markup=False)
+    else:
+        print_out(text, markup=False)
 
 
 def bench(args: argparse.Namespace) -> int:
@@ -35,10 +51,27 @@ def bench(args: argparse.Namespace) -> int:
         # 而且和整批跑的前 N 道结果可以直接比（题集顺序是稳定的）。
         tasks = tasks[: args.limit]
     if not tasks:
-        print("没有匹配的任务。", file=sys.stderr)
+        _print("没有匹配的任务。", file=sys.stderr)
         return 2
 
-    print(f"共 {len(tasks)} 个任务，供应商 {args.provider}")
+    _print(f"共 {len(tasks)} 个任务，供应商 {args.provider}")
+
+    # 开跑前先确认验收环境跑得起来。这一步是**省钱**的：模型压根没启动，
+    # 报告里也不会出现「验收 0/N」这种会被读成「模型不行」的东西。
+    environment = check_acceptance_environment(tasks)
+    if environment.blocked:
+        _print(describe_environment_problem(environment), file=sys.stderr)
+        return EXIT_ENVIRONMENT_BLOCKED
+    if environment.missing_pytest:
+        # 这批任务的验收只用到 python，所以不拦；但要说一声——否则以后有人往
+        # 题集里加一道 pytest 题，会以为是模型突然变差了。
+        _print(
+            "注意：选中的解释器里没有 pytest"
+            f"（{environment.interpreter}）；这批任务的验收命令用不到它，照跑。"
+            "要跑 pytest 类任务就得换解释器（见 docs/benchmarking.md）。",
+            file=sys.stderr,
+        )
+
     if args.together:
         return _together(args, project_root, tasks)
 
@@ -82,13 +115,23 @@ def bench(args: argparse.Namespace) -> int:
                 return
             settle(pending, AUTO, task.scope or ("**",), non_interactive=True)
 
-        print(f"  → {task.name}")
-        results.append(
-            run_task(task, build, settle_changes=settle_now, verbose=args.verbose)
-        )
+        _print(f"  → {task.name}")
+        try:
+            results.append(
+                run_task(task, build, settle_changes=settle_now, verbose=args.verbose)
+            )
+        except WorkspaceUnavailableError as exc:
+            # 环境把目录权限锁死了。这是环境的问题，不是题目也不是模型的问题——
+            # 所以给一句人话（含路径与原因），别把原始 traceback 扔出来。
+            _print(str(exc), file=sys.stderr)
+            return 2
 
-    print()
-    print(render_report(results))
+    _print()
+    _print(render_report(results))
+    if any(item.blocked for item in results):
+        # 有任务的验收根本没跑起来（环境问题）。这时候「整体失败」是错的结论，
+        # 所以用一个与「有任务没过」不同的退出码，脚本也能分辨。
+        return EXIT_ENVIRONMENT_BLOCKED
     return 0 if all(item.passed for item in results) else 1
 
 
@@ -105,8 +148,13 @@ def _together(args, project_root: Path, tasks) -> int:
         / "bench-together"
         / time.strftime("%Y%m%d-%H%M%S")
     )
-    prepare_together(tasks, workspace)
-    print(f"整批一条会话：{len(tasks)} 道题铺在 {workspace}")
+    try:
+        prepare_together(tasks, workspace)
+    except WorkspaceUnavailableError as exc:
+        # 同上：环境限制目录权限时给人话，不抛裸 traceback。
+        _print(str(exc), file=sys.stderr)
+        return 2
+    _print(f"整批单会话：{len(tasks)} 道题布置在 {workspace}")
 
     pending = PendingChanges(workspace)
     gateway = load_gateway(
@@ -137,14 +185,14 @@ def _together(args, project_root: Path, tasks) -> int:
     settle(pending, AUTO, ("**",), non_interactive=True)
 
     if args.verbose:
-        print("轨迹：")
+        _print("轨迹：")
         for line in result.trace:
-            print(f"  {line}")
-        print(f"它自己的收尾报告：\n{result.final}")
+            _print(f"  {line}")
+        _print(f"其收尾报告：\n{result.final}")
 
     results = verify_together(tasks, workspace)
-    print()
-    print(
+    _print()
+    _print(
         render_together(
             results,
             {
@@ -157,4 +205,6 @@ def _together(args, project_root: Path, tasks) -> int:
             },
         )
     )
+    if any(item.blocked for item in results):
+        return EXIT_ENVIRONMENT_BLOCKED
     return 0 if all(item.passed for item in results) else 1

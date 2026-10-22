@@ -1,0 +1,1081 @@
+"""探针跑分器的单测。
+
+**这里一次模型都不调。** 需要 spool 子进程的地方一律用假 runner（只写一份预设的
+事件流、顺手在沙箱里改个文件），因为单测要测的是跑分器自己的三条不变式：
+
+1. 清单格式合法、五种任务形状齐全；
+2. 沙箱复制不污染种子，授权文件无 BOM；
+3. 记录字段齐全、下限判定真的会红。
+
+外加一条**赛道上最重要**的：每个探针的判据在未修改的种子上是红的、在人工修好的
+版本上是绿的——做不到这一点的探针不许进清单，所以它必须有测试钉着。
+"""
+
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+import probe as probe_runner  # noqa: E402
+
+MANIFEST = probe_runner.load_manifest()
+PROBES_DIR = probe_runner.PROBES_DIR
+
+
+# --------------------------------------------------------------------------
+# 夹具
+# --------------------------------------------------------------------------
+
+
+def probe_by_id(identifier):
+    return probe_runner.find_probe(MANIFEST, identifier)
+
+
+def copy_onto(src, dst):
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+    return dst
+
+
+def run_check(script, sandbox, timeout=300):
+    done = subprocess.run(
+        [sys.executable, str(script), "--root", str(sandbox)],
+        cwd=str(sandbox),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+    return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
+CANNED_EVENTS = "\n".join(
+    [
+        json.dumps(
+            {
+                "type": "start",
+                "session": "probe",
+                "goal": "g",
+                "policy": "auto",
+                "window": 8192,
+            },
+            ensure_ascii=False,
+        ),
+        json.dumps({"type": "step", "n": 1}, ensure_ascii=False),
+        # 一次原样重试被硬拦
+        json.dumps(
+            {
+                "type": "tool",
+                "name": "write_file",
+                "ok": False,
+                "detail": "⛔ 未执行：这个调用与上一次**完全相同**（工具 write_file，参数一字未改）",
+            },
+            ensure_ascii=False,
+        ),
+        # 一次读取被拦（死锁的形状）
+        json.dumps(
+            {
+                "type": "tool",
+                "name": "read_file",
+                "ok": False,
+                "detail": "⛔ 未执行：这个调用在最近几步里已经做过 2 次，结果不会改变",
+            },
+            ensure_ascii=False,
+        ),
+        # 一次整文件重写被拒（砍半护栏）
+        json.dumps(
+            {
+                "type": "tool",
+                "name": "write_file",
+                "ok": False,
+                "detail": "⚠ 拒绝整文件重写：index.html 从 40 行变成 180 行，改动幅度超过阈值",
+            },
+            ensure_ascii=False,
+        ),
+        # 护栏放行了一次刷新读取
+        json.dumps(
+            {"type": "note", "text": "⟳ 刷新读取：文件已经变了", "ok": True, "kind": "guard_refresh"},
+            ensure_ascii=False,
+        ),
+        # 「被拦下、没有执行」的一步退还了步数预算：退还有上限，这件事必须
+        # 在事件流里看得见（不然「这一步为什么没吃预算」只能猜）。
+        json.dumps(
+            {
+                "type": "note",
+                "text": "step2: 这一步的调用全部被硬拦（没有执行），不占步数预算（已退还 3/3）",
+                "ok": True,
+                "kind": "blocked_refund",
+                "count": 3,
+                "limit": 3,
+            },
+            ensure_ascii=False,
+        ),
+        # 同一个（工具 + 参数）被拦到阈值之后**停用**：量的是「拦截换路了没有」。
+        json.dumps(
+            {
+                "type": "note",
+                "text": "组合停用：search_code（第 2 次被拦）",
+                "ok": False,
+                "kind": "combo_disabled",
+                "tool": "search_code",
+                "count": 2,
+            },
+            ensure_ascii=False,
+        ),
+        # 督导介入，而且被核出事实不符
+        json.dumps({"type": "note", "text": "督导：续 6 步——还有活没干", "ok": True}, ensure_ascii=False),
+        json.dumps(
+            {
+                "type": "note",
+                "text": "督导的断言与记录不符，已按记录改写：0 处改动 → 3 处改动",
+                "ok": False,
+                "kind": "supervisor_fact_conflict",
+            },
+            ensure_ascii=False,
+        ),
+        # 自动验证跑了两次，一红一绿
+        json.dumps({"type": "tool", "name": "自动验证", "ok": False, "detail": "FAILED"}, ensure_ascii=False),
+        json.dumps({"type": "tool", "name": "自动验证", "ok": True, "detail": "通过"}, ensure_ascii=False),
+        json.dumps(
+            {
+                "type": "usage",
+                "steps": 5,
+                "calls": 7,
+                "prompt_tokens": 1234,
+                "completion_tokens": 567,
+            },
+            ensure_ascii=False,
+        ),
+        json.dumps(
+            {"type": "final", "ok": True, "text": "做完了", "settled": "auto"},
+            ensure_ascii=False,
+        ),
+        "这是一行散文，混进了 stdout",
+    ]
+)
+
+
+def fake_runner_factory(captured):
+    """假 runner：写预设事件流、在沙箱里改一个文件、顺手记下命令行。"""
+
+    def fake_runner(command, *, cwd, timeout, stdout_path, stderr_path, env):
+        captured.append(
+            {
+                "command": [str(item) for item in command],
+                "cwd": str(cwd),
+                "timeout": timeout,
+                "env": env,
+            }
+        )
+        Path(stdout_path).write_text(CANNED_EVENTS + "\n", encoding="utf-8", newline="\n")
+        Path(stderr_path).write_text("", encoding="utf-8")
+        # 制造一处改动，让 file_changed 有东西可读
+        target = Path(cwd) / "README.md"
+        if target.is_file():
+            target.write_text(
+                target.read_text(encoding="utf-8") + "\n（探针假 runner 改过）\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+        return {
+            "exit_code": 1,
+            "timed_out": False,
+            "spawn_error": "",
+            "wall_seconds": 0.5,
+        }
+
+    return fake_runner
+
+
+# --------------------------------------------------------------------------
+# 清单
+# --------------------------------------------------------------------------
+
+
+def test_清单合法且五种形状齐全():
+    ids = [item["id"] for item in MANIFEST["probes"]]
+    assert len(ids) == len(set(ids)), f"探针 id 有重复：{ids}"
+    shapes = {item["shape"] for item in MANIFEST["probes"]}
+    assert set(probe_runner.REQUIRED_SHAPES) <= shapes, (
+        f"缺任务形状：{set(probe_runner.REQUIRED_SHAPES) - shapes}"
+    )
+    assert len(MANIFEST["probes"]) >= 5
+    for item in MANIFEST["probes"]:
+        # 用户原话不许被改清楚：它必须是一句像个用户会说的话，不是一份规格书
+        assert len(item["goal"]) >= 12, item["id"]
+        assert (PROBES_DIR / item["seed"]).is_dir()
+        assert (PROBES_DIR / item["expected"]).is_dir()
+        assert item["lower_bounds"], f"{item['id']} 没写预期下限"
+
+
+def test_清单缺字段要报错(tmp_path):
+    bad = {
+        "version": 1,
+        "probes": [
+            {"id": "x", "shape": "add-feature", "title": "t", "seed": "seeds/add-feature"}
+        ],
+    }
+    path = tmp_path / "probes.json"
+    path.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(probe_runner.ManifestError):
+        probe_runner.load_manifest(path)
+
+
+def test_清单里的guard_hash与种子逐字相符():
+    """guard_hashes 是手抄进来的哈希，抄错一位不会报错、只会让每次都判「被改过」。
+
+    手抄真的错过一次（少了一位，长度 63 而不是 64），症状是 fix-bug 永远红。
+    所以这条测试直接拿种子重算一遍。
+    """
+    import hashlib
+
+    checked = 0
+    for item in MANIFEST["probes"]:
+        for rel, want in (item.get("guard_hashes") or {}).items():
+            target = PROBES_DIR / item["seed"] / rel
+            assert target.is_file(), f"{item['id']} 钉住的文件不在种子里：{rel}"
+            got = hashlib.sha256(target.read_bytes()).hexdigest()
+            assert got == want, f"{item['id']} 的 {rel} 哈希对不上：{got} != {want}"
+            checked += 1
+    assert checked >= 1, "至少要有探针用 guard_hashes 钉住不该改的文件"
+
+
+def test_种子与期望版本里没有字节码缓存():
+    """种子目录是**只读的原料**，不该有 `.pyc`。
+
+    有的话只有一种解释：有人直接在种子目录里跑过 python / pytest。那既污染了
+    种子，也让 `file_changed` 一上来就带着噪声（第一版真的这样：我手工冒烟时
+    在种子目录里跑了 unittest，于是五个种子里都长出了 `__pycache__`）。
+    """
+    dirty = []
+    for kind in ("seeds", "expected"):
+        for path in sorted((PROBES_DIR / kind).rglob("*")):
+            if not path.is_file():
+                continue
+            parts = path.relative_to(PROBES_DIR / kind).parts
+            if any(part in probe_runner.CACHE_DIRS for part in parts) or path.suffix == ".pyc":
+                dirty.append(str(path.relative_to(PROBES_DIR)))
+    assert not dirty, f"种子/期望版本里有缓存痕迹：{dirty}"
+
+
+def test_指纹跳过缓存目录(tmp_path):
+    root = tmp_path / "t"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "pkg" / "__pycache__").mkdir()
+    (root / "pkg" / "__pycache__" / "a.cpython-314.pyc").write_bytes(b"\x00")
+    (root / "orphan.pyc").write_bytes(b"\x00")
+    # 依赖目录同理：它是可重建的缓存，不是产物。前端任务的沙箱里
+    # `node_modules` 一动就是几万个文件，不跳的话读数当场失去意义。
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "vue.js").write_text("export default {}\n", encoding="utf-8")
+    files = probe_runner.fingerprint_tree(root)
+    assert list(files) == ["pkg/a.py"]
+
+
+def test_清单里不存在的种子要报错(tmp_path):
+    bad = {
+        "version": 1,
+        "probes": [
+            {
+                "id": "x",
+                "shape": "add-feature",
+                "title": "t",
+                "seed": "seeds/根本没有这个",
+                "expected": "expected/add-feature",
+                "goal": "随便一句话当作目标",
+                "check": {"script": "checks/add_feature.py"},
+            }
+        ],
+    }
+    path = tmp_path / "probes.json"
+    path.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(probe_runner.ManifestError):
+        probe_runner.load_manifest(path)
+
+
+# --------------------------------------------------------------------------
+# 判据必须能证伪：种子红 / 修好绿
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("identifier", [item["id"] for item in MANIFEST["probes"]])
+def test_判据在种子上是红的(identifier, tmp_path):
+    probe = probe_by_id(identifier)
+    sandbox = copy_onto(PROBES_DIR / probe["seed"], tmp_path / identifier)
+    script = PROBES_DIR / probe["check"]["script"]
+    code, output = run_check(script, sandbox)
+    assert code != 0, f"{identifier} 的判据在未修改的种子上居然是绿的：\n{output[-1500:]}"
+
+
+@pytest.mark.parametrize("identifier", [item["id"] for item in MANIFEST["probes"]])
+def test_判据在人工修好的版本上是绿的(identifier, tmp_path):
+    probe = probe_by_id(identifier)
+    sandbox = copy_onto(PROBES_DIR / probe["expected"], tmp_path / identifier)
+    script = PROBES_DIR / probe["check"]["script"]
+    code, output = run_check(script, sandbox)
+    assert code == 0, f"{identifier} 的判据在修好的版本上仍然是红的：\n{output[-2000:]}"
+
+
+# --------------------------------------------------------------------------
+# 沙箱与授权
+# --------------------------------------------------------------------------
+
+
+def test_沙箱复制不污染种子(tmp_path):
+    probe = probe_by_id("rename-cross-file")
+    seed = PROBES_DIR / probe["seed"]
+    before = probe_runner.fingerprint_tree(seed)
+
+    root = tmp_path / "runs"
+    sandbox = probe_runner.materialize(seed, root / probe["id"], root)
+    assert (sandbox / "pipeline" / "fetch.py").is_file()
+
+    # 在副本里乱改一通，种子必须一个字节都不动
+    (sandbox / "pipeline" / "fetch.py").write_text("彻底改掉\n", encoding="utf-8")
+    (sandbox / "新文件.txt").write_text("新增\n", encoding="utf-8")
+    shutil.rmtree(sandbox / "docs")
+
+    after = probe_runner.fingerprint_tree(seed)
+    assert before == after, "种子目录被沙箱里的改动污染了"
+
+
+def test_授权文件无BOM且读得出auto(tmp_path):
+    root = tmp_path / "runs"
+    root.mkdir()
+    sandbox = root / "x"
+    sandbox.mkdir()
+    path = probe_runner.write_policy(sandbox)
+
+    raw = path.read_bytes()
+    assert raw[:3] != b"\xef\xbb\xbf", "授权文件被写成了带 BOM 的 UTF-8"
+    assert json.loads(raw.decode("utf-8"))["policy"] == "auto"
+    assert path.parent.name == ".agent"
+
+    # 说明这条不变式为什么重要：BOM 会让 `load_policy` 那条读法直接失败，
+    # 而它只 catch JSONDecodeError 然后**静默退回 ask** —— 探针就会每步都要确认。
+    # 注意要按 `load_policy` 的读法复现（先 utf-8 解码成 str 再 json.loads）：
+    # 直接把 bytes 交给 json.loads，它会自动识别 utf-8-sig，看不出问题。
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(b"\xef\xbb\xbf".decode("utf-8") + raw.decode("utf-8"))
+
+
+def test_沙箱必须落在root的直接子目录(tmp_path):
+    probe = probe_by_id("fix-bug")
+    seed = PROBES_DIR / probe["seed"]
+    root = tmp_path / "runs"
+    root.mkdir()
+    with pytest.raises(ValueError):
+        probe_runner.materialize(seed, root / "a" / "b", root)
+    with pytest.raises(ValueError):
+        probe_runner.materialize(seed, REPO_ROOT / "benchmarks" / "probes" / "tmp-x", root)
+
+
+# --------------------------------------------------------------------------
+# 事件解析
+# --------------------------------------------------------------------------
+
+
+def test_事件解析数得清各类拦截与督导():
+    counters = probe_runner.parse_events(CANNED_EVENTS)
+    assert counters["policy"] == "auto"
+    assert counters["steps"] == 5
+    assert counters["model_calls"] == 7
+    assert counters["prompt_tokens"] == 1234
+    assert counters["completion_tokens"] == 567
+    assert counters["final_ok"] is True
+    assert counters["blocked_total"] == 3
+    assert counters["repeat_blocks"] == 2, "原样重试与重复护栏都算「原样重试被拦」"
+    assert counters["read_blocks"] == 1
+    assert counters["rewrite_refusals"] == 1
+    assert counters["guard_refreshes"] == 1
+    # 两条**可见性**读数：因被拦而退还了几步（上限内）、同参被拦到阈值后停用了几次。
+    assert counters["blocked_refunds"] == 3
+    assert counters["combo_disabled"] == 1
+    assert counters["supervisor_interventions"] == 1
+    assert counters["supervisor_false_claims"] == 1
+    assert counters["verifier_ran"] == 2
+    assert counters["verifier_passed"] == 1
+    assert counters["verifier_failed"] == 1
+    assert counters["verifier_ok"] is True, "verifier_ok 取最后一次判定"
+    assert counters["plain_lines"] == 1, "散文行要单独数出来"
+
+
+# --------------------------------------------------------------------------
+# 记录与下限
+# --------------------------------------------------------------------------
+
+
+def test_记录字段齐全且不改种子(tmp_path):
+    probe = probe_by_id("merge-html")
+    seed = PROBES_DIR / probe["seed"]
+    seed_before = probe_runner.fingerprint_tree(seed)
+
+    captured = []
+    options = probe_runner.resolve_options(
+        MANIFEST,
+        probe_runner.build_parser().parse_args(
+            ["--probe", "merge-html", "--root", str(tmp_path)]
+        ),
+    )
+    record = probe_runner.run_one(
+        probe,
+        MANIFEST,
+        options,
+        tmp_path,
+        runner=fake_runner_factory(captured),
+        python=sys.executable,
+    )
+
+    for key in probe_runner.REQUIRED_RECORD_KEYS:
+        assert key in record, f"记录缺字段 {key}"
+    assert record["id"] == "merge-html"
+    assert record["goal"] == probe["goal"]
+    assert record["started_at"]
+    assert record["wall_seconds"] == 0.5
+    assert record["exit_code"] == 1
+    assert record["final_ok"] is True
+    assert record["steps"] == 5
+    assert record["model_calls"] == 7
+    assert record["prompt_tokens"] == 1234
+    assert record["completion_tokens"] == 567
+    assert record["verifier_ran"] == 2
+    assert record["verifier_ok"] is True, "verifier_ok 取最后一次判定"
+    assert record["repeat_blocks"] == 2
+    assert record["read_blocks"] == 1
+    assert record["blocked_refunds"] == 3
+    assert record["combo_disabled"] == 1
+    assert record["supervisor_interventions"] == 1
+    assert record["supervisor_false_claims"] == 1
+    assert record["notes"]
+
+    changed = record["file_changed"]
+    assert changed["changed"] is True
+    assert "README.md" in changed["modified"]
+    assert changed["seed_digest"] != changed["result_digest"]
+
+    assert record["seed_unchanged"] is True
+    assert probe_runner.fingerprint_tree(seed) == seed_before
+    assert record["policy_file_ok"] is True
+    assert record["policy_in_run"] == "auto"
+    # 假 runner 什么都没修好，验收必须是红的，下限也必须是「未过」——这次红的
+    # 理由是督导说错事实（下面是另一条线）。
+    assert record["check_ok"] is False
+    assert record["bounds_ok"] is False
+    assert any("督导说错事实" in item for item in record["bounds_failed"])
+    # 而**被护栏硬拦下来的重复不再算失分**（口径见 probes.json 的 `_limits_note`）：
+    # 那两次原样重试与那次读取都被拦在门外、一步都没执行，落在 blocked 里；
+    # 未被拦的重复是 0，所以这两条下限都不再报红。
+    assert record["repeat_blocks"] == 2 and record["repeat_blocks_blocked"] == 2
+    assert record["repeat_blocks_unblocked"] == 0
+    assert record["read_blocks"] == 1 and record["read_blocks_blocked"] == 1
+    assert record["read_blocks_unblocked"] == 0
+    assert not any("原样重试" in item for item in record["bounds_failed"])
+    assert not any("读取被拦" in item for item in record["bounds_failed"])
+
+
+def test_命令行不传policy且真的走events(tmp_path):
+    captured = []
+    code = probe_runner.main(
+        ["--probe", "merge-html", "--root", str(tmp_path), "--no-save"],
+        runner=fake_runner_factory(captured),
+    )
+    assert code == 1, "假 runner 什么都没修好，退出码应当是 1"
+    assert len(captured) == 1
+    command = captured[0]["command"]
+    assert "--events" in command
+    assert "--policy" not in command, "授权必须走工作区 policy.json，不能从命令行给"
+    assert command[command.index("--scope") + 1] == "**"
+    assert command[command.index("--goal") + 1] == probe_by_id("merge-html")["goal"]
+    assert "--no-setup" in command
+    # 探针的环境必须与开发机隔离
+    env = captured[0]["env"]
+    assert Path(env["SPOOLKIT_STATE"]).is_relative_to(tmp_path)
+    assert Path(env["SPOOLKIT_CONFIG"]).is_relative_to(tmp_path)
+    assert Path(env["SPOOLKIT_ENV_FILE"]).is_relative_to(tmp_path)
+    assert captured[0]["timeout"] > 0
+
+
+def test_环境补上rg与node(tmp_path):
+    env = probe_runner.probe_env(tmp_path)
+    import shutil as _shutil
+
+    # 说明：这条不是断言一定找得到，而是断言「找不到时探针不会假装找得到」——
+    # 补 PATH 的结果写在 _PROBE_PATH_ADDED 里，由 probe_env 弹出去进记录。
+    assert "PATH" in env
+    if _shutil.which("rg", path=env["PATH"]) is None:
+        assert "rg" in env["_PROBE_PATH_ADDED"] or env["_PROBE_PATH_ADDED"] == ""
+
+
+def test_下限判定会红():
+    probe = probe_by_id("fix-bug")
+    base = {
+        "repeat_blocks": 0,
+        "read_blocks": 0,
+        "supervisor_false_claims": 0,
+        "timed_out": False,
+        "spawn_error": "",
+        "seed_unchanged": True,
+        "policy_file_ok": True,
+        "guards_ok": True,
+        "guard_failures": [],
+        "policy_in_run": "auto",
+    }
+    assert probe_runner.evaluate_bounds(probe, dict(base)) == []
+
+    dirty = dict(base, read_blocks=1)
+    failed = probe_runner.evaluate_bounds(probe, dirty)
+    assert any("读取被拦" in item for item in failed)
+
+    timed = dict(base, timed_out=True, timeout_seconds=900)
+    assert any("超时" in item for item in probe_runner.evaluate_bounds(probe, timed))
+
+    guarded = dict(base, guards_ok=False, guard_failures=["tests/test_merge.py 被改过"])
+    assert any("被改过" in item for item in probe_runner.evaluate_bounds(probe, guarded))
+
+    wrong_policy = dict(base, policy_in_run="ask")
+    assert any("auto" in item for item in probe_runner.evaluate_bounds(probe, wrong_policy))
+
+
+# --------------------------------------------------------------------------
+# 重复拦截的拆分：**被拦的**与**未被拦的**不是一个东西
+#
+# 口径与理由写在 `benchmarks/probes/probes.json` 的 `_limits_note` 里：
+# 护栏自己就是拦截者之后，`⛔ 未执行：...完全相同` 意味着那一次调用根本没跑，
+# 把它算成失分等于自己人扣自己人的分；真正的空转是「护栏只提醒、没有拦，
+# 那一次真的又跑了一遍」。
+# --------------------------------------------------------------------------
+
+
+def _event(payload):
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _blocked_repeat_events(repeats=3, reads=2):
+    """护栏**拦下、没有执行**的重复：N 次原样重试 + M 次读取重复。"""
+    lines = [
+        _event(
+            {
+                "type": "start",
+                "session": "probe",
+                "goal": "g",
+                "policy": "auto",
+                "window": 8192,
+            }
+        )
+    ]
+    for index in range(repeats):
+        lines.append(
+            _event(
+                {
+                    "type": "tool",
+                    "name": "write_file",
+                    "ok": False,
+                    "detail": (
+                        "⛔ 未执行：这个调用与上一次**完全相同**"
+                        f"（工具 write_file，参数一字未改）（第 {index + 1} 次）"
+                    ),
+                }
+            )
+        )
+    for index in range(reads):
+        lines.append(
+            _event(
+                {
+                    "type": "tool",
+                    "name": "read_file",
+                    "ok": False,
+                    "detail": (
+                        "⛔ 未执行：这个调用在最近几步里已经做过 2 次，结果不会改变"
+                        f"（第 {index + 1} 次）"
+                    ),
+                }
+            )
+        )
+    lines.append(
+        _event(
+            {
+                "type": "note",
+                "text": "step2: 这一步的调用全部被硬拦（没有执行），不占步数预算（已退还 3/3）",
+                "ok": True,
+                "kind": "blocked_refund",
+                "count": 3,
+                "limit": 3,
+            }
+        )
+    )
+    lines.append(
+        _event({"type": "usage", "steps": 4, "calls": 4, "prompt_tokens": 100, "completion_tokens": 20})
+    )
+    lines.append(_event({"type": "final", "ok": True, "text": "做完了", "settled": "auto"}))
+    return "\n".join(lines)
+
+
+def _executed_repeat_events():
+    """护栏**只提醒、没有拦**的重复：这一次真的又跑了一遍 = 真空转。"""
+    return "\n".join(
+        [
+            _event(
+                {
+                    "type": "start",
+                    "session": "probe",
+                    "goal": "g",
+                    "policy": "auto",
+                    "window": 8192,
+                }
+            ),
+            _event(
+                {
+                    "type": "tool",
+                    "name": "read_file",
+                    "ok": True,
+                    "detail": (
+                        "注意：这一步与上一步完全相同，该调用已经执行过一次，结果不会改变。"
+                        "如果它没有帮你推进，就换一种做法。\n（文件内容）"
+                    ),
+                }
+            ),
+            _event(
+                {
+                    "type": "tool",
+                    "name": "write_file",
+                    "ok": True,
+                    "detail": (
+                        "注意：这个调用在最近几步里已经执行过，结果不会改变。"
+                        "如果它没有帮你推进，就换一种做法。\n（写入结果）"
+                    ),
+                }
+            ),
+            _event({"type": "usage", "steps": 3, "calls": 3, "prompt_tokens": 80, "completion_tokens": 10}),
+            _event({"type": "final", "ok": True, "text": "做完了", "settled": "auto"}),
+        ]
+    )
+
+
+def _runner_writing(events, edits=True):
+    """假 runner：把这串事件流写进 `--events` 的落点。"""
+
+    def runner(command, *, cwd, timeout, stdout_path, stderr_path, env):
+        Path(stdout_path).write_text(events + "\n", encoding="utf-8", newline="\n")
+        Path(stderr_path).write_text("", encoding="utf-8")
+        if edits:
+            target = Path(cwd) / "README.md"
+            if target.is_file():
+                target.write_text(
+                    target.read_text(encoding="utf-8") + "\n（探针假 runner 改过）\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+        return {"exit_code": 0, "timed_out": False, "spawn_error": "", "wall_seconds": 0.5}
+
+    return runner
+
+
+def _run_probe(tmp_path, probe_id, events):
+    probe = probe_by_id(probe_id)
+    options = probe_runner.resolve_options(
+        MANIFEST,
+        probe_runner.build_parser().parse_args(
+            ["--probe", probe_id, "--root", str(tmp_path)]
+        ),
+    )
+    return probe_runner.run_one(
+        probe,
+        MANIFEST,
+        options,
+        tmp_path,
+        runner=_runner_writing(events),
+        python=sys.executable,
+    )
+
+
+def test_被拦的重复_记录分开两个量且下限通过(tmp_path):
+    """护栏拦下 N 次：blocked>0，而**未被拦**的重复是 0 → 下限必须过。
+
+    这条就是「我们扣的分」与「真病态」的分界线：被拦的那 5 次一步都没执行，
+    下限不再对它设 0 线（它由护栏自己的 `blocked_refund_limit` /
+    `reroute_block_at` 约束），但仍要逐条记下来。
+    """
+    counters = probe_runner.parse_events(_blocked_repeat_events(3, 2))
+    # `repeat_blocks` 是**总数**（原义，含读取类；读取类另有一个子计数）。
+    assert counters["repeat_blocks"] == 5, "总数（原义）"
+    assert counters["repeat_blocks_blocked"] == 5, "其中被硬拦未执行的"
+    assert counters["read_blocks"] == 2
+    assert counters["read_blocks_blocked"] == 2
+
+    record = _run_probe(tmp_path, "merge-html", _blocked_repeat_events(3, 2))
+    assert record["repeat_blocks"] == 5
+    assert record["repeat_blocks_blocked"] == 5
+    assert record["repeat_blocks_unblocked"] == 0
+    assert record["read_blocks"] == 2
+    assert record["read_blocks_blocked"] == 2
+    assert record["read_blocks_unblocked"] == 0
+    assert record["bounds_ok"] is True, record["bounds_failed"]
+    assert not any("原样重试" in item for item in record["bounds_failed"])
+    assert not any("读取被拦" in item for item in record["bounds_failed"])
+    # 被拦的这件事仍然看得见：记录里有，notes 里也念出来。
+    assert "被护栏拦下未执行 5 次" in record["notes"]
+    assert "未被拦 0 次" in record["notes"]
+
+
+def test_未被拦的重复_下限仍然判红(tmp_path):
+    """护栏只提醒、没有拦：那一次真的又跑了一遍 —— 下限必须红。
+
+    这是「空转」的原始语义，也是这次拆分**唯一**允许放宽的那条线之外的
+    东西：放宽的是「被拦」，不是「打转」。
+    """
+    counters = probe_runner.parse_events(_executed_repeat_events())
+    assert counters["repeat_blocks"] == 2
+    assert counters["repeat_blocks_blocked"] == 0
+    assert counters["read_blocks"] == 1 and counters["read_blocks_blocked"] == 0
+
+    record = _run_probe(tmp_path, "merge-html", _executed_repeat_events())
+    assert record["repeat_blocks_unblocked"] == 2
+    assert record["read_blocks_unblocked"] == 1
+    assert record["bounds_ok"] is False
+    assert any("未被拦的原样重试" in item for item in record["bounds_failed"])
+
+
+def test_旧下限键保留且口径同一个():
+    """旧键（`max_repeat_blocks` / `max_read_blocks`）仍然认，且同样只看未被拦的。
+
+    保留它的理由是「读旧清单、旧记录的工具不必改」；口径必须与新键一致，
+    否则改名就变成了偷偷放宽或偷偷收紧。
+    """
+    probe = dict(
+        probe_by_id("fix-bug"),
+        expect={"max_repeat_blocks": 0, "max_read_blocks": 0},
+    )
+    base = {
+        "supervisor_false_claims": 0,
+        "timed_out": False,
+        "spawn_error": "",
+        "seed_unchanged": True,
+        "policy_file_ok": True,
+        "guards_ok": True,
+        "guard_failures": [],
+        "policy_in_run": "auto",
+    }
+    # 老记录的形状：只有裸计数与 blocked；全被拦 → 不报。
+    blocked = dict(base, repeat_blocks=4, repeat_blocks_blocked=4, read_blocks=2, read_blocks_blocked=2)
+    assert probe_runner.evaluate_bounds(probe, blocked) == []
+    # 同一份记录里漏了一次没被拦的 → 旧键照样报红，而且报的是「未被拦」。
+    leaked = dict(blocked, repeat_blocks=5)
+    failed = probe_runner.evaluate_bounds(probe, leaked)
+    assert any("未被拦的原样重试" in item for item in failed), failed
+    # 缺 blocked 字段的老记录按「全都没被拦」读（最严那一边），不许当 0。
+    legacy = dict(base, repeat_blocks=1, read_blocks=1, supervisor_false_claims=0)
+    legacy_failed = probe_runner.evaluate_bounds(probe, legacy)
+    assert any("未被拦的原样重试" in item for item in legacy_failed)
+    assert any("未被拦的读取被拦" in item for item in legacy_failed)
+
+
+def test_汇总表把一条跳过也画得出来():
+    record = {
+        "id": "x",
+        "shape": "fix-bug",
+        "skipped": True,
+        "wall_seconds": 0.0,
+        "notes": "预算不够",
+    }
+    table = probe_runner.render_table([record])
+    assert "跳过" in table
+    assert "x" in table
+
+
+# --------------------------------------------------------------------------
+# 自动审查层 P0 的五个读数（设计稿 §6 字段表）
+# --------------------------------------------------------------------------
+
+
+def test_审查读数从事件流里数得出来():
+    """五个字段全部按 note 的 kind 数，不看模型的总结文字。"""
+    text = "\n".join(
+        [
+            json.dumps({"type": "note", "text": "中间态", "kind": "audit"}, ensure_ascii=False),
+            json.dumps({"type": "note", "text": "残留 1", "kind": "stale_references"}, ensure_ascii=False),
+            json.dumps({"type": "note", "text": "残留 2", "kind": "stale_references"}, ensure_ascii=False),
+            json.dumps({"type": "note", "text": "删了用例", "kind": "tests_weakened"}, ensure_ascii=False),
+            json.dumps({"type": "note", "text": "导入不存在", "kind": "broken_import"}, ensure_ascii=False),
+            json.dumps(
+                {"type": "note", "text": "账本：整轮无证据", "kind": "evidence_gaps", "count": 1},
+                ensure_ascii=False,
+            ),
+            json.dumps({"type": "final", "ok": True, "text": "做完了", "settled": "auto"}, ensure_ascii=False),
+        ]
+    )
+
+    counters = probe_runner.parse_events(text)
+
+    assert counters["stale_references"] == 2
+    assert counters["tests_weakened"] == 1
+    assert counters["broken_imports"] == 1
+    assert counters["evidence_gaps"] == 1
+    # 审查发现 = audit + 残留 + 改弱 + 导入闭合四类 note（账本是读数，不算发现）。
+    assert counters["review_findings"] == 5
+    assert counters["review_findings_by_kind"]["stale_references"] == 2
+
+
+def test_路径触发披露不算审查发现():
+    """T2/T3/T4 只是披露路径命中。真发现为 0 时 review_findings 必须是 0。"""
+    text = "\n".join(
+        [
+            json.dumps(
+                {"type": "note", "text": "命中 T2", "kind": "path_trigger"},
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"type": "note", "text": "命中 T3", "kind": "path_trigger"},
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"type": "note", "text": "命中 T4", "kind": "path_trigger"},
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+    counters = probe_runner.parse_events(text)
+
+    assert counters["review_findings"] == 0
+    assert "path_trigger" not in counters["review_findings_by_kind"]
+
+
+def test_升级读数是具名触发比例不是高严重度精度():
+    """有升级、触发名都以 T 开头、输入里没有高严重度发现时，读数仍是 1.0。
+
+    1.0 只表示触发名以 T 开头。字段名因此是 trigger_named_rate。
+    """
+    fields = probe_runner.named_trigger_field(
+        {
+            "escalations": 3,
+            "escalation_triggers": {"T2": 1, "T4": 1, "T6": 1},
+        }
+    )
+
+    assert "escalation_precision" not in fields
+    assert fields["trigger_named_rate"] == 1.0
+    assert probe_runner.trigger_named_rate(1, {"mystery": 1}) == 0.0
+    assert probe_runner.trigger_named_rate(0, {}) == 1.0
+
+
+def test_没改弱没残留时读数为零():
+    """零误报的反例：没有这些事的运行必须读成 0。"""
+    counters = probe_runner.parse_events(CANNED_EVENTS)
+
+    assert counters["stale_references"] == 0
+    assert counters["tests_weakened"] == 0
+    assert counters["broken_imports"] == 0
+    assert counters["evidence_gaps"] == 0
+
+
+def test_记录里五个审查字段齐全且假完成由两个结局派生(tmp_path):
+    probe = probe_by_id("merge-html")
+    captured = []
+    options = probe_runner.resolve_options(
+        MANIFEST,
+        probe_runner.build_parser().parse_args(
+            ["--probe", "merge-html", "--root", str(tmp_path)]
+        ),
+    )
+    record = probe_runner.run_one(
+        probe,
+        MANIFEST,
+        options,
+        tmp_path,
+        runner=fake_runner_factory(captured),
+        python=sys.executable,
+    )
+
+    for key in (
+        "stale_references",
+        "tests_weakened",
+        "review_findings",
+        "false_completion",
+        "evidence_gaps",
+    ):
+        assert key in probe_runner.REQUIRED_RECORD_KEYS, f"{key} 必须是必填字段"
+        assert key in record, f"记录缺字段 {key}"
+    # 假 runner：自认完成（final_ok=True）而验收红（check_ok=False）→ 假完成。
+    assert record["final_ok"] is True and record["check_ok"] is False
+    assert record["false_completion"] is True
+    # P0 的纪律：这几个字段是**读数**，不许反过来改结局。
+    assert record["stale_references"] == 0
+    assert record["tests_weakened"] == 0
+
+
+def test_审查读数的上限旋钮接上了():
+    probe = probe_by_id("fix-bug")
+    base = {
+        "repeat_blocks": 0,
+        "read_blocks": 0,
+        "supervisor_false_claims": 0,
+        "stale_references": 2,
+        "tests_weakened": 1,
+        "evidence_gaps": 1,
+        "review_findings": 3,
+        "timed_out": False,
+        "spawn_error": "",
+        "seed_unchanged": True,
+        "policy_file_ok": True,
+        "guards_ok": True,
+        "guard_failures": [],
+        "policy_in_run": "auto",
+    }
+    limited = dict(
+        probe,
+        expect={
+            "max_stale_references": 1,
+            "max_tests_weakened": 0,
+            "max_evidence_gaps": 0,
+            "max_review_findings": 2,
+        },
+    )
+
+    failed = probe_runner.evaluate_bounds(limited, base)
+
+    assert len(failed) == 4, failed
+    assert all("超上限" in item for item in failed)
+    # 清单里没写这几条时它们只是被记录，不参与判定。
+    assert probe_runner.evaluate_bounds(probe, dict(base)) == []
+
+
+# ---- L3 语义审查（P2 后半）的读数 -------------------------------------------
+
+
+def _l3_events() -> str:
+    return "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "note",
+                    "text": "本次运行的 L3 语义审查读数…",
+                    "kind": "l3_readings",
+                    "ran": True,
+                    "trigger": "F1 L1/L2 有发现（2 条）",
+                    "unverified": 1,
+                    "conflicts": {"no_edit": 1},
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "type": "note",
+                    "text": "L3 语义审查发现（结构化）",
+                    "kind": "l3_detail",
+                    "findings": [
+                        {"file": "a.py", "line": 1, "severity": "high", "verified": True}
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"type": "note", "text": "高危", "kind": "semantic_finding"},
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"type": "note", "text": "拦下", "kind": "l3_blocked"},
+                ensure_ascii=False,
+            ),
+            # 触发条件不满足时也发一条读数，但 `ran=False`：**不许数成一次审查**。
+            json.dumps(
+                {
+                    "type": "note",
+                    "text": "没跑",
+                    "kind": "l3_readings",
+                    "ran": False,
+                    "trigger": "没有命中任何触发条件",
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+
+def test_L3读数按kind分开数():
+    counters = probe_runner.parse_events(_l3_events())
+
+    # `review_l3_ran` 只数**真的调用了模型**的那一次（第二条读数 ran=False）。
+    assert counters["review_l3_ran"] == 1
+    assert counters["l3_findings"] == 1
+    assert counters["l3_unverified"] == 1
+    assert counters["l3_blocked"] == 1
+    assert counters["l3_findings_by_severity"] == {"high": 1}
+    assert counters["l3_conflicts"] == {"no_edit": 1}
+    # L3 的发现也算**审查发现**（与 L1/L2 同一本账），但读数与结构化那两条不算。
+    assert counters["review_findings"] == 1
+    assert counters["review_findings_by_kind"] == {"semantic_finding": 1}
+
+
+def test_没有L3事件时三个读数都是零():
+    counters = probe_runner.parse_events(CANNED_EVENTS)
+
+    assert counters["review_l3_ran"] == 0
+    assert counters["l3_findings"] == 0
+    assert counters["l3_blocked"] == 0
+
+
+def test_记录里三个L3字段齐全且跳过记录也齐(tmp_path):
+    """三个 L3 字段是**必填**：缺了它，记录与以后对比时就少一层读数。
+
+    L3 的**值**由事件流解析（上面那两条用例），这里钉的是「字段在不在」：
+    `REQUIRED_RECORD_KEYS` 里有、组装点给了、跳过记录也带齐（`run_one` 那
+    一条与 P0/P1 的同类断言各自管自己那批字段；这里只钉 L3 这三个）。
+    """
+    for key in ("review_l3_ran", "l3_findings", "l3_blocked"):
+        assert key in probe_runner.REQUIRED_RECORD_KEYS, f"{key} 必须是必填字段"
+    probe = probe_by_id("merge-html")
+    options = probe_runner.resolve_options(
+        MANIFEST,
+        probe_runner.build_parser().parse_args(
+            ["--probe", "merge-html", "--root", str(tmp_path)]
+        ),
+    )
+
+    skipped = probe_runner.skipped_record(probe, options, 0, 1, 0, 0.0)
+    for key in ("review_l3_ran", "l3_findings", "l3_blocked"):
+        assert key in skipped, f"跳过记录缺字段 {key}"
+    # 跳过的那一次什么都没跑 → 读数是 0（不是缺失、也不是「没这回事」）。
+    assert skipped["review_l3_ran"] == 0
+    assert skipped["l3_findings"] == 0
+    assert skipped["l3_blocked"] == 0
+
+
+def test_L3的发现条数走上限旋钮():
+    probe = probe_by_id("fix-bug")
+    base = {
+        "repeat_blocks": 0,
+        "read_blocks": 0,
+        "supervisor_false_claims": 0,
+        "stale_references": 0,
+        "tests_weakened": 0,
+        "evidence_gaps": 0,
+        "review_findings": 0,
+        "l3_findings": 5,
+        "l3_unverified": 3,
+        "timed_out": False,
+        "spawn_error": "",
+        "seed_unchanged": True,
+        "policy_file_ok": True,
+        "guards_ok": True,
+        "guard_failures": [],
+        "policy_in_run": "auto",
+    }
+    limited = dict(
+        probe, expect={"max_l3_findings": 2, "max_l3_unverified": 1}
+    )
+
+    failed = probe_runner.evaluate_bounds(limited, base)
+
+    assert len(failed) == 2, failed
+    assert all("L3" in item for item in failed)
+    # 清单里没写这两条时它们只是被记录（先记录、后标定，§4 D8）。
+    assert probe_runner.evaluate_bounds(probe, dict(base)) == []

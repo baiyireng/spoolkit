@@ -21,19 +21,105 @@ agent 改测试让测试通过就能拿分，那是作弊，而且很难发现�
 判定只看验收命令的退出码。不看 agent 自己说做完了没有，也不看它写得漂不漂亮。
 """
 
+import contextlib
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from spoolkit import sandbox_dirs
 from spoolkit.config import Config
+from spoolkit.interpreter import (
+    choose_interpreter,
+    resolve_python_argv,
+    spoolkit_checkout_root,
+    venv_python,
+)
 
 DEFAULT_BENCH_ROOT = "benchmarks/tasks"
 DEFAULT_TIMEOUT = 300
+
+
+class WorkspaceUnavailableError(RuntimeError):
+    """任务工作区在当前环境里用不了。
+
+    与「任务失败」分开：这是**环境**的问题（目录权限被限制），不是题目、
+    也不是模型的问题。混在一起的话，报告上只会多一个「失败」，而人会开始
+    怀疑模型——所以它一路抛到 CLI，由那边给一句人话。
+    """
+
+
+def describe_workspace_error(exc: PermissionError, path: Path) -> str:
+    """把「环境不让用这个目录」翻成人话：指出路径，并说清不是题目/模型的错。"""
+    lines = [
+        f"任务工作区不可用：{path}",
+        "当前运行环境限制了目录权限：受限沙箱里，目录建出来就无法遍历或写入，"
+        "而且事后再抬权限也会被拒。",
+        "任务工作区必须能遍历、能读写；被限制时 bench 准备不了题目。",
+    ]
+    failing = getattr(exc, "filename", None)
+    if failing and str(failing) != str(path):
+        lines.append(f"系统报错位置：{failing}")
+    lines.append(f"系统报错：{exc}")
+    lines.append("换个不受限的位置，或退出文件沙箱后再跑。")
+    return "\n".join(lines)
+
+
+def _failing_path(exc: PermissionError, fallback: Path) -> Path:
+    """异常里自带的那条路径优先——它比我们猜的准。"""
+    failing = getattr(exc, "filename", None)
+    return Path(failing) if failing else fallback
+
+
+@contextlib.contextmanager
+def temporary_workspace(prefix: str = "spool-bench-") -> Iterator[Path]:
+    """建任务工作区用的临时根目录，保证**建出来就能用**。
+
+    这里踩过一个真实的坑：`tempfile` 建目录时写死 0o700，而在带文件沙箱的
+    Windows 上，用 0o700 建出来的目录**当场**就不可访问——`os.scandir` 都是
+    WinError 5，连事后 `os.chmod` 也一起被拒，只能**创建那一刻**抬 mode。
+    `shutil.copytree` 的 `os.makedirs` 正是撞在这上面崩的。
+
+    所以这里不裸用 `TemporaryDirectory`，而是走 `spoolkit.sandbox_dirs`：
+    与 `scripts/pytest_sandbox_compat.py`（pytest tmpdir 的同一个坑）
+    **同一招、同一份实现**，不给这个仓库留第二份补丁。
+
+    清理也**不能用 `TemporaryDirectory`**：工作区里跑过 pytest 之后会留下它自己
+    用 0o700 建的 `pytest-cache-files-*`，而 `ignore_cleanup_errors=True` 在本沙箱里
+    挡不住——它的处理器会去 `chmod` 那个目录，`chmod` 同样被拒，于是任务全跑完了
+    却在收尾时抛出来（实测）。`shutil.rmtree(..., ignore_errors=True)` 才是真的
+    「忽略清理错误」：索引数据库的连接在整个进程里都开着（SQLite 在 Windows 上
+    会锁住文件），硬要在退出时删掉只会把结果一起吞掉。删不掉的留给系统回收。
+
+    这一层的 `except PermissionError` **刻意包住整段任务**，不只是建目录那一下：
+    受限环境里权限拒绝可能发生在 prepare、工作区遍历、验收等任何一步，而它们
+    都是同一件事——环境不让用这个工作区。要求是**人话**，不是裸 traceback，
+    所以兜底放在最外面；真正的位置由异常自带的路径（`exc.filename`）指出。
+    """
+    try:
+        root = sandbox_dirs.make_accessible_temp_dir(prefix)
+    except PermissionError as exc:
+        # 连目录都没建出来：只能报「打算建在哪儿」。
+        raise WorkspaceUnavailableError(
+            describe_workspace_error(
+                exc, _failing_path(exc, Path(tempfile.gettempdir()) / f"{prefix}*")
+            )
+        ) from None
+    try:
+        yield root
+    except PermissionError as exc:
+        # 建出来之后才撞上权限：同一类问题，同一句人话。
+        raise WorkspaceUnavailableError(
+            describe_workspace_error(exc, _failing_path(exc, root))
+        ) from None
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @dataclass(frozen=True)
@@ -60,6 +146,9 @@ class TaskResult:
     model_calls: int
     seconds: float
     detail: str = ""
+    # 环境阻塞：验收环境根本用不了（缺 pytest）。与「模型没做到」是两回事，
+    # 混在一起统计就会得出「模型不行」这个相反结论——所以要单独计数。
+    blocked: bool = False
 
 
 def load_tasks(bench_root: Path) -> list[Task]:
@@ -89,16 +178,254 @@ def load_tasks(bench_root: Path) -> list[Task]:
 def prepare(task: Task, workdir: Path) -> None:
     """把起始代码与验收测试一起复制进工作区。"""
     source = task.home / "project"
-    if not source.exists():
-        workdir.mkdir(parents=True, exist_ok=True)
-    else:
-        shutil.copytree(source, workdir)
-    _copy_acceptance(task, workdir)
+    try:
+        if not source.exists():
+            workdir.mkdir(parents=True, exist_ok=True)
+        else:
+            shutil.copytree(source, workdir)
+        _copy_acceptance(task, workdir)
+    except PermissionError as exc:
+        # 工作区用不了是环境问题，别让它以裸 traceback 的形式糊到人脸上。
+        raise WorkspaceUnavailableError(
+            describe_workspace_error(exc, workdir)
+        ) from None
 
 
 def _copy_acceptance(task: Task, workdir: Path) -> None:
     for name in task.acceptance_files:
         shutil.copy(task.home / "acceptance" / name, workdir / name)
+
+
+# --- 验收环境：整批开跑前先确认选中的解释器跑得起来 -------------------------
+#
+# 一次真实的误判：spool 装在 uv tool 里时，`sys.executable` 是**那个环境**的
+# 解释器，而它没有 pytest。原先验收一律拿 sys.executable 跑，于是每一道题的
+# 验收都死于 `No module named pytest`，报告上呈现为「验收 0/50」——看起来像
+# 模型不行，其实是验收环境不行。那一整轮 50 题回归就这么白烧了。
+#
+# 所以这里做两件事，缺一不可：
+# 1. 解释器按「能用」的顺序选（任务工作区 .venv → 检出目录 .venv → 当前解释器）；
+# 2. 整批开跑**之前**探一次 pytest 在不在，不在就别开跑，给一句人话加一个
+#    确定的退出码。跑完再解释是次优的：模型那一轮的 token 已经花掉了。
+
+EXIT_ENVIRONMENT_BLOCKED = 3
+
+# 只认「pytest 本身缺失」这一种。**刻意不把任意 ImportError 都算成环境问题**：
+# 被测代码 import 不到东西完全可能是模型改坏的，那种必须留在「验收失败」里——
+# 放宽这条会把真失败洗成环境阻塞，比原来的误判更难发现。
+MISSING_PYTEST_MARKERS = (
+    "No module named pytest",
+    "No module named 'pytest'",
+    'No module named "pytest"',
+    "验收环境缺 pytest",
+)
+
+
+@dataclass(frozen=True)
+class AcceptanceEnvironment:
+    """这批任务验收会用到的解释器，以及它们跑不跑得起来 pytest。
+
+    `pytest_tasks` 是**任务**的属性（验收命令里写没写 pytest），
+    `missing_pytest` 是**环境**的属性（那个解释器跑不跑得起来）。
+    两者同时成立才叫阻塞：有些题只用 python，那种题不该被缺 pytest 拦住。
+    """
+
+    interpreters: tuple[str, ...]
+    pytest_tasks: tuple[str, ...]
+    missing_pytest: tuple[str, ...] = ()
+    probe_output: str = ""
+
+    @property
+    def needs_pytest(self) -> bool:
+        return bool(self.pytest_tasks)
+
+    @property
+    def blocked(self) -> bool:
+        return self.needs_pytest and bool(self.missing_pytest)
+
+    @property
+    def interpreter(self) -> str:
+        """写进说明里的那一个：缺 pytest 的优先——它才是问题所在。"""
+        if self.missing_pytest:
+            return self.missing_pytest[0]
+        if self.interpreters:
+            return self.interpreters[0]
+        return sys.executable
+
+
+def task_needs_pytest(task: Task) -> bool:
+    """这道题要不要 pytest。
+
+    命令是数据，判据只能看它写了什么：整条命令里出现 `pytest` 就算。两种写法
+    （`["pytest", …]` 与 `["python", "-m", "pytest", …]`）都覆盖。
+    """
+    return any("pytest" in part for part in task.command)
+
+
+def probe_pytest(interpreter: str) -> tuple[bool, str]:
+    """这个解释器跑不跑得起来 pytest。返回（能跑吗，原始输出）。
+
+    判据刻意选成**将要执行的那条形状**（`<解释器> -m pytest --version`），而不是
+    `import pytest`：验收命令走的就是 `-m pytest`，用它探到的问题才是真正会遇到的
+    那个问题（比如 pytest 装上了、自己 import 就崩）。
+    """
+    try:
+        proc = subprocess.run(
+            [interpreter, "-m", "pytest", "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return proc.returncode == 0, output[-600:]
+
+
+def acceptance_roots(workdir: Path) -> list[Path]:
+    """验收解释器的候选根，按优先级排：任务工作区 → spoolkit 检出目录。
+
+    第一条是「题目自带的环境」，第二条是「跑 bench 的这个包的检出目录」——
+    后者是 uv tool / pipx / 系统 Python 装出来的 spool 唯一的救兵：
+    那种安装自带的解释器里通常没有测试依赖，而检出目录里通常有。
+    """
+    return [workdir, spoolkit_checkout_root()]
+
+
+def acceptance_interpreter(workdir: Path) -> str:
+    """这道题的验收该用哪个解释器。"""
+    return choose_interpreter(acceptance_roots(workdir))
+
+
+def check_acceptance_environment(tasks: list[Task]) -> AcceptanceEnvironment:
+    """整批开跑前的自检：选中的解释器跑不跑得起来 pytest。
+
+    探的是**每道题自己的候选根**（题目自带 `.venv` 时，那才是它验收要用的
+    解释器），同一个解释器只探一次。
+    """
+    interpreters: list[str] = []
+    for task in tasks:
+        candidate = choose_interpreter(acceptance_roots(task.home / "project"))
+        if candidate not in interpreters:
+            interpreters.append(candidate)
+
+    missing: list[str] = []
+    probe_output = ""
+    for interpreter in interpreters:
+        ok, output = probe_pytest(interpreter)
+        if not ok:
+            missing.append(interpreter)
+            probe_output = probe_output or output
+
+    return AcceptanceEnvironment(
+        interpreters=tuple(interpreters),
+        pytest_tasks=tuple(task.name for task in tasks if task_needs_pytest(task)),
+        missing_pytest=tuple(missing),
+        probe_output=probe_output,
+    )
+
+
+def _launch_hint() -> str:
+    """「用仓库自己的 .venv 启动」的具体写法：能算出路径就给路径。"""
+    checkout = spoolkit_checkout_root()
+    python = venv_python(checkout)
+    if python is None:
+        return f"{checkout} 里的 `.venv`（spoolkit 检出目录）"
+    script = python.parent / ("spool.exe" if os.name == "nt" else "spool")
+    return f'"{script}" bench …（{checkout} 下的 .venv）'
+
+
+def describe_environment_problem(environment: AcceptanceEnvironment) -> str:
+    """把「验收解释器跑不了 pytest」翻成人话。
+
+    要点三样（措辞以后可以改，这三样不能说没就没）：**解释器路径**、**pytest**、
+    以及**这不是模型的问题**。最后一句最要紧——原先报告长成「验收 0/50」，
+    读的人第一个念头必然是「模型不行」。
+    """
+    interpreter = environment.interpreter
+    example = "、".join(environment.pytest_tasks[:3]) or "（没有）"
+    lines = [
+        "验收环境缺 pytest：选中的解释器跑不了 pytest，验收命令起不来，"
+        "整批没有开跑。",
+        f"  解释器：{interpreter}",
+        f"  依据：这批任务里有 {len(environment.pytest_tasks)} 道的验收命令要用 "
+        f"pytest（{example}）；探测方式 `{interpreter} -m pytest --version` "
+        "返回非零。",
+    ]
+    if environment.probe_output:
+        lines.append(f"  探测输出：{environment.probe_output.splitlines()[-1]}")
+    lines += [
+        "这不是模型的问题，也不是任务集的问题——没有跑，也就没有「验收失败 N 道」"
+        "这回事；换成能跑 pytest 的解释器就能继续。",
+        "怎么办（任选一条）：",
+        f"  1. 用仓库自己的 .venv 启动：{_launch_hint()}",
+        f'  2. 给上面那个环境装 dev 依赖："{interpreter}" -m pip install '
+        '-e ".[dev]"（或直接装 pytest）。',
+    ]
+    return "\n".join(lines)
+
+
+def looks_like_missing_pytest(text: str) -> bool:
+    """这段输出是「环境里没有 pytest」，不是「测试没过」。
+
+    两个地方用它：`verify` 把原始输出翻成人话，`run_task` / `verify_together`
+    据此把这道题标成**环境阻塞**。不这么分，它就会混进「验收失败」明细里，
+    而那正是误判的来源。
+    """
+    return any(marker in text for marker in MISSING_PYTEST_MARKERS)
+
+
+def describe_missing_pytest(interpreter: str, output: str) -> str:
+    """验收输出里出现 `No module named pytest` 时给人的那句话。"""
+    return (
+        "验收环境缺 pytest：验收命令用的解释器里没有它，测试根本没跑起来。\n"
+        f"  解释器：{interpreter}\n"
+        "这不是模型的问题，也不是这道题的问题——把它算进「验收失败」会得出"
+        "相反的结论（spool 装在 uv tool / pipx / 系统 Python 里时最容易这样）。\n"
+        "  出路：用仓库自己的 .venv 启动 spool（见 docs/benchmarking.md），"
+        '或给上面那个解释器装 dev 依赖（`-m pip install -e ".[dev]"`）。\n'
+        f"原始输出：\n{output[-600:]}"
+    )
+
+
+#: 验收环境里必须带上的 pytest 参数：关掉缓存插件。
+#:
+#: 为什么是**环境**而不是改验收命令：验收命令是**题库数据**（`task.json` 里
+#: 写死的），改它等于改题目——题面、TASK.md、50 道题的对照表全跟着变。
+#: 而这条要修的东西跟题目毫无关系：`pytest-cache-files-*` 是 pytest 自己建的
+#: 临时目录。受限环境里 `.pytest_cache` 建不出来（0o700 目录，见
+#: `pytest_sandbox_compat`），它就改用同样 0o700 的临时目录，**第二次在同一个
+#: 工作区跑验收**时收集阶段直接 `PermissionError`：
+#:
+#:     第一次：1 passed, 1 warning          退出码 0
+#:     第二次：Interrupted: 1 error during collection   退出码 2
+#:
+#: 于是"题做对了"在第二次验收里变成"验收失败"——这正是 bench 最不能有的那种
+#: 误判。关掉 cacheprovider 是 pytest 官方开关，对被测代码零影响。
+ACCEPTANCE_PYTEST_ADDOPTS = "-p no:cacheprovider"
+
+
+def acceptance_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """验收命令要用的环境变量：UTF-8 输出 + 关掉 pytest 缓存插件。
+
+    `PYTEST_ADDOPTS` 是**合并**，不是覆盖：用户自己那一条必须留着。两个具体的
+    理由：① 它可能带着 repo 的 `-p pytest_sandbox_compat`——那个插件是 bench
+    派生的 pytest 子进程唯一能拿到它的途径（`scripts/pytest_sandbox_compat.py`
+    的说明里写了），顶掉它整批验收子进程会全红；② 用户自己的调参（`-x`、
+    `-n auto` 之类）被顶掉，验收就跑在与他的设定不同的规则下，而报告上看不出来。
+
+    已经有 `no:cacheprovider` 时不重复加：命令行越叠越长，排查时更难读。
+    """
+    environment = dict(os.environ if base is None else base)
+    environment["PYTHONIOENCODING"] = "utf-8"
+    existing = str(environment.get("PYTEST_ADDOPTS") or "").strip()
+    if "no:cacheprovider" not in existing:
+        environment["PYTEST_ADDOPTS"] = (
+            f"{existing} {ACCEPTANCE_PYTEST_ADDOPTS}".strip()
+        )
+    return environment
 
 
 def verify(task: Task, workdir: Path) -> tuple[bool, str]:
@@ -112,16 +439,16 @@ def verify(task: Task, workdir: Path) -> tuple[bool, str]:
     if not task.command:
         return False, "任务没有声明验收命令"
 
-    # 命令里的 python / pytest 指向当前解释器。任务文件是数据，
-    # 不该要求写它的人知道这台机器上解释器在哪。
-    command = list(task.command)
-    if command and command[0] in ("python", "python3"):
-        command = [sys.executable, *command[1:]]
-    elif command and command[0] == "pytest":
-        command = [sys.executable, "-m", "pytest", *command[1:]]
+    # 命令里的 python / pytest 指向**能用的**那个解释器，而不是「跑 spool 的那个」：
+    # 后者在 uv tool / pipx / 系统 Python 里通常没有 pytest。顺序见本段开头。
+    roots = acceptance_roots(workdir)
+    interpreter = choose_interpreter(roots)
+    command = resolve_python_argv(list(task.command), roots)
 
-    environment = dict(**__import__("os").environ)
-    environment["PYTHONIOENCODING"] = "utf-8"
+    # 环境走 `acceptance_env`：UTF-8 输出 + 关掉 pytest 缓存插件（第二次跑同一个
+    # 工作区时，那个插件建的 0o700 临时目录会让收集阶段直接失败）。用户自己的
+    # `PYTEST_ADDOPTS` 在里面被**合并**保留，见那里的说明。
+    environment = acceptance_env()
     try:
         proc = subprocess.run(
             command,
@@ -139,6 +466,9 @@ def verify(task: Task, workdir: Path) -> tuple[bool, str]:
         return False, f"验收命令无法执行: {exc}"
 
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 0 and looks_like_missing_pytest(output):
+        # 这不是「这道题没过」。原样塞进失败明细，读的人只会去怀疑模型。
+        return False, describe_missing_pytest(interpreter, output)
     return proc.returncode == 0, output[-600:]
 
 
@@ -155,12 +485,9 @@ def run_task(
     这样回归测试本身不绑定任何具体模型。
     """
     started = time.time()
-    # 忽略清理错误：索引数据库的连接在整个进程里都开着（SQLite 在 Windows 上
-    # 会锁住文件），硬要在退出时删掉只会把结果一起吞掉。临时目录留给系统回收。
-    with tempfile.TemporaryDirectory(
-        prefix="spool-bench-", ignore_cleanup_errors=True
-    ) as temp:
-        workspace = workdir or Path(temp) / "project"
+    # 工作区根目录必须是「建出来就能用」的那种，见 temporary_workspace。
+    with temporary_workspace() as temp:
+        workspace = workdir or temp / "project"
         if workdir is None:
             prepare(task, workspace)
 
@@ -196,6 +523,8 @@ def run_task(
             model_calls=result.model_calls,
             seconds=round(time.time() - started, 1),
             detail=detail,
+            # 验收环境用不了 ≠ 模型没做到。分类在这里做一次，报告那边才好分开计数。
+            blocked=(not passed) and looks_like_missing_pytest(detail),
         )
 
 
@@ -209,8 +538,10 @@ def render_report(results: list[TaskResult]) -> str:
         f"{'调用':>6}{'输入token':>11}{'耗时':>7}"
     ]
     for item in results:
+        # 环境阻塞单列一档：它不是「失败」，写「失败」等于把环境问题记在模型头上。
+        outcome = "阻塞" if item.blocked else ("通过" if item.passed else "失败")
         lines.append(
-            f"{item.name:<24}{'通过' if item.passed else '失败':<6}"
+            f"{item.name:<24}{outcome:<6}"
             f"{'是' if item.agent_finished else '否':<10}"
             f"{item.steps:>5}{item.model_calls:>6}{item.prompt_tokens:>11}"
             f"{item.seconds:>6}s"
@@ -224,13 +555,24 @@ def render_report(results: list[TaskResult]) -> str:
 
     lines.append("")
     lines.append(f"验收通过 {passed}/{total}（{passed / total:.0%}）")
+    # 阻塞的那些没有真的被验收过，所以必须在分母旁边点名，否则这个百分比会被
+    # 当成「模型能力」。整批开跑前的自检能挡住绝大多数这种情况，这是第二道闸门。
+    blocked = [item for item in results if item.blocked]
+    if blocked:
+        lines.append(
+            f"环境阻塞 {len(blocked)} 个（验收环境缺 pytest 之类，"
+            "不是模型的问题）：" + "、".join(item.name for item in blocked)
+        )
     lines.append(f"自称完成 {claimed}/{total}")
     lines.append(f"平均步数 {average_steps:.1f}，平均输入 {average_tokens:.0f} token")
 
     # 「自称完成但验收失败」是最值得盯的一类：模型以为自己做到了，
     # 而客观信号说没有。这个数字高，说明验证机制没起作用。
+    # 阻塞的不算：它的验收根本没跑起来，凭这个说模型「虚假完成」是冤枉。
     overconfident = [
-        item for item in results if item.agent_finished and not item.passed
+        item
+        for item in results
+        if item.agent_finished and not item.passed and not item.blocked
     ]
     if overconfident:
         lines.append(
@@ -340,6 +682,7 @@ def verify_together(tasks: list[Task], workspace: Path) -> list[TaskResult]:
                 model_calls=0,
                 seconds=0.0,
                 detail=detail,
+                blocked=(not passed) and looks_like_missing_pytest(detail),
             )
         )
     return results
@@ -347,7 +690,8 @@ def verify_together(tasks: list[Task], workspace: Path) -> list[TaskResult]:
 
 def render_together(results: list[TaskResult], meta: dict) -> str:
     passed = [item for item in results if item.passed]
-    failed = [item for item in results if not item.passed]
+    failed = [item for item in results if not item.passed and not item.blocked]
+    blocked = [item for item in results if item.blocked]
     lines = [
         f"整批一条会话：验收通过 {len(passed)}/{len(results)}",
         f"这条会话：{meta['steps']} 步 / {meta['calls']} 次调用 / "
@@ -357,6 +701,12 @@ def render_together(results: list[TaskResult], meta: dict) -> str:
         f"{meta['seconds']}s",
         f"工作区留在 {meta['workspace']}（可以进去看它实际改成了什么样）",
     ]
+    if blocked:
+        # 与「没过的」分开说：这一类没有真的被验收过，写在一起就会被读成模型不行。
+        lines.append(
+            f"环境阻塞 {len(blocked)} 个（验收环境缺 pytest 之类，"
+            "不是模型的问题）：" + "、".join(item.name for item in blocked)
+        )
     if failed:
         lines.append("没过的：" + "、".join(item.name for item in failed))
     return "\n".join(lines)

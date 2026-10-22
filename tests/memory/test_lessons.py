@@ -11,7 +11,7 @@ from spoolkit.memory.lessons import (
     record_outcome,
     recompute_confidence,
 )
-from spoolkit.memory.store import init_memory_schema
+from spoolkit.memory.store import init_memory_schema, search_memories
 from spoolkit.store.db import open_db
 
 
@@ -30,6 +30,38 @@ def test_写入并读回教训(tmp_path: Path) -> None:
     item = record_lesson(conn, "解析自定义格式先上语法约束", "解析,正则,格式", "ep#1")
     assert item.id > 0
     assert item.confidence == INITIAL_CONFIDENCE
+    conn.close()
+
+
+def test_教训写库即进检索索引(tmp_path: Path) -> None:
+    """教训写主表的同时写 FTS（设计稿 §3 缺陷 4：旧代码只写主表）。"""
+    conn = _conn(tmp_path)
+    record_lesson(conn, "解析自定义格式先上语法约束", "解析,正则,格式", "ep#12")
+    # trigger 可检索
+    assert [item.text for item in search_memories(conn, "正则")] == [
+        "解析自定义格式先上语法约束"
+    ]
+    # source 可检索
+    assert [item.text for item in search_memories(conn, "ep#12")] == [
+        "解析自定义格式先上语法约束"
+    ]
+    # kind 可检索
+    assert [item.text for item in search_memories(conn, "lesson")] == [
+        "解析自定义格式先上语法约束"
+    ]
+    # 正文照旧可检索
+    assert len(search_memories(conn, "语法约束")) == 1
+    conn.close()
+
+
+def test_删除教训时索引行数跟着对得上(tmp_path: Path) -> None:
+    """写入即索引：主表与 `memory_fts` 不会一条有一条第没有。"""
+    conn = _conn(tmp_path)
+    record_lesson(conn, "规则一", "解析")
+    record_lesson(conn, "规则二", "格式")
+    rows = conn.execute("SELECT count(*) FROM memory").fetchone()[0]
+    indexed = conn.execute("SELECT count(*) FROM memory_fts").fetchone()[0]
+    assert (rows, indexed) == (2, 2)
     conn.close()
 
 

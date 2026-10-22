@@ -1,160 +1,147 @@
 # spoolkit
 
-**面向本地小模型的编程特化 Agent**，命令叫 `spool`。
+面向本地小模型的编程特化 Agent，命令为 `spool`。目标用户：持有 7B–27B 本地模型、
+需要在真实小中型编程任务上使用它的人。安装与第一条任务在下面的「最短路径」。
+排错、各入口怎么认工作区、模型服务见
+[`docs/getting-started.md`](docs/getting-started.md)。
 
-在 4K–8K 的有效上下文预算下，用 7B–27B 级本地模型完成真实的中小型编程任务。
-小模型做 Agent 的瓶颈不是"不够聪明"，而是三件事：上下文一塞满质量就断崖式下跌、
-多步规划能力弱、以及爱编造。所以整套架构只有一个目标——**让模型每一步面对的
-上下文都尽可能小、精确、可承载**。
+现状 **可用，但仍是实验阶段**（0.0.1）。回归集的数字与测量方法见
+[`docs/benchmarking.md`](docs/benchmarking.md)：README 不复述，因为数字随改动变化。
 
-手段是把状态外置（计划、进度、记忆都在文件与 SQLite 里，历史可以随时丢），
-再用代码索引保证"精确取用"而不是"整份塞入"。
-
-现状：**可用但仍是实验品**（0.0.1）。同一批 50 道题（本机 Qwen3.8-27B IQ2_S、
-8K 窗口、冷启动服务）：自主编排（自己拆解、自己执行、自己验收）**50/50，
-12.7 分钟、263k 输入 token**（第三到六轮：15.6 → 13.8 → 12.5 → 12.7 分钟）；
-同协议下"一题一会话"的对照是 50/50、6.5 分钟、141k token。逐轮数字与测量方法在
-[`docs/benchmarking.md`](docs/benchmarking.md)——README 不复述，因为**数会随改动变**。
-
-## 为什么用它
-
-- **把本地模型的潜力榨出来**：整套脚手架就是为"小模型 + 小上下文"设计的。
-  索引负责精确取用、记忆负责跨任务积累、子智能体负责分开上下文、验收负责兜住
-  编造——7B–27B 的本地模型因此能干成真实的中小型任务。不必等更大的模型，
-  先把喂给它的上下文弄准。
-- **省下付费 Agent 的额度**：边界清楚的活（改一个函数、补一组测试、整理一个
-  目录、跑一遍回归）交它在本机做，不占 Cursor / Claude Code 那类按量计费的调用；
-  真正需要大模型判断力的活再交给它们。
-- **国内通讯软件直接驱动**：内置消息通道，**官方 QQ 机器人**、企业微信、
-  Telegram 都能接——手机上发一句话，它在工作区里干完把结果发回来。默认**配对**
-  （陌生发送者拿码，你放行才生效），越界改动照样退回确认。
-- **和别的 Agent 协同**：两个方向都通。它**能被** Cursor / Codex / Claude Code
-  通过 MCP 调用（对方扮演用户下发编排任务，它负责实施与验收）；也**能调用**
-  外面现成的 MCP 工具（挂进来长这样 `mcp__服务名__工具名`）。
-
-## 30 秒上手
+## 最短路径
 
 ```powershell
-# 装成全局命令（推荐）：装完在任何目录都能敲 spool
-uv tool install --editable .
-# 想固定一份不改动的：去掉 --editable（升级用 uv tool upgrade spoolkit）
-
+uv tool install --editable .              # 装为全局命令；任意目录可执行 spool
 spool init                                # 把当前目录做成工作区（幂等）
 spool config --set provider=llamacpp --set base_url=http://127.0.0.1:8080
-spool                                     # 什么都不带就进对话；不是工作区会先问一句
-```
+spool                                     # 不带子命令即进对话；不是工作区先询问初始化
 
-只想在虚拟环境里跑（开发用）：`uv venv --python 3.12 && uv pip install -e ".[dev]"`，
-那样得先激活虚拟环境才有 `spool`。
-
-也可以直接给一件事：
-
-```powershell
 spool run --goal "修好 calc.py 里 sum_to 少算一个的问题，不要改测试"
 ```
 
-改动默认只产出 diff；`--policy auto` 才在授权范围内自动落盘。详细走法见
-[`docs/getting-started.md`](docs/getting-started.md)。
+改动默认只产出 diff；`--policy auto` 才在 `--scope` 内自动落盘。要求 Python ≥ 3.12；
+开发用 `uv venv --python 3.12 && uv pip install -e ".[dev]"`（需先激活虚拟环境）。
 
-## 它能做什么
+## 能做什么
 
-- **本地小模型驱动**：真实任务用 llama.cpp 或 Gemini。上下文窗口与分词都向服务端问，不写死。`--provider fake` **只回放 `--script`，不能生成代码**，没有 LLM 时不要拿它当兜底。
-- **长任务自主编排**：把大目标拆成带验收标准的步骤（排不完就分批续排），
-  逐步执行、逐步验收、可断点续跑（`plan.json` + `progress.md`）。
-- **子智能体**：一步可以派给独立上下文的实现者，再由另一个独立上下文审查。
-- **代码索引（多语言）**：Python 走 AST，JS/TS/Go/Rust/Java/C/C++/C#/Ruby/
-  PHP/Lua/Shell/PowerShell 等走声明扫描；符号表 + 引用图 + 邻域检索，
-  用来做"精确取用"；预取按步骤声明的范围锚定。
-- **分级授权**：写操作默认只产出 diff，按 `ask / auto / deny` 三档处理；
-  越界自动退回确认，白名单外的命令可以申请（无人值守时不会静默放行）。
-- **自我验证**：改完自动跑验收并把结果顶回给模型；它报"做完了"不算数，
-  验收命令的退出码才算数。没有 pytest 但改了 HTML 时，会抽出内联 JS 做语法检查。
-- **常驻入口**：`spool hub` 起网页壳，加 `--channel` 才再拉聊天桥；本机
-  llama-server / SOCKS 隧道用 `spool service` 按配方启停，hub 只探活、不替你启动。
-- **能被别的 agent 调用**：挂成 MCP 服务，Codex / Claude Code / Cursor 可以
-  扮演用户下发编排任务（[`docs/mcp.md`](docs/mcp.md)）。
-- **能被聊天驱动**：手机发一条消息 → 在工作区里跑一轮 → 结果发回来
-  （[`docs/bridge.md`](docs/bridge.md)）。
+| 能力 | 说明 |
+|---|---|
+| 本地小模型驱动 | 真实任务用 llamacpp 或 gemini。上下文窗口与分词均向服务端查询 |
+| 长任务自主编排 | 大目标拆成带验收标准的步骤（排不完则分批续排），逐步执行、验收，可断点续跑 |
+| 子智能体 | 一步可派给独立上下文的实现者，再由另一个独立上下文审查 |
+| 代码索引 | Python 用 AST，其它语言用行首声明扫描；符号表 + 引用图 + 邻域检索 |
+| 分级授权 | 写操作默认只产出 diff，按 `ask / auto / deny` 三档处理；越界退回确认，白名单外的命令需申请 |
+| 自我验证 | 改完自动跑验收；模型自述不足以判定完成，验收命令的退出码才是判据 |
+| 常驻入口 | 网页壳（`spool web` / `hub` / `serve`）、聊天通道（`spool qq` / `bridge`）、MCP（`spool mcp`） |
+| 和别的 agent 互通 | 可被 Codex / Claude Code / Cursor 通过 MCP 调用，也可调用外部现成的 MCP 工具 |
 
 ## 常用命令
 
 | 命令 | 做什么 |
 |---|---|
-| `spool` | 进对话；当前目录不是工作区就先问一句要不要初始化 |
+| `spool` | 进对话；不是工作区先询问是否初始化 |
 | `spool init [路径]` | 把目录做成工作区（建 `.agent/` 并登记，幂等） |
-| `spool approve <码>` | 批准聊天通道的配对码（**任意目录都能敲**） |
-| `spool extra add <目录>` | 本机关联工作区外的目录（读放开，写要确认） |
+| `spool ws` | 工作区管理：`use <名字\|序号>` 切换、`add` 新建、`forget` 移除、`alias` 设短名 |
 | `spool run --goal …` | 跑一次任务 |
 | `spool run --autonomous --scope … --goal …` | 自主拆解并逐步做完（未指定 `--policy` 时提权为 auto） |
-| `spool run --plan` / `--resume` | 推进已有计划的下一步 / 接着检查点继续 |
-| `spool plan --goal …` | 只拆解、落盘计划，不执行 |
-| `spool chat` | 对话式使用：多轮、共用同一个会话 |
-| `spool hub` | 常驻：网页壳；加 `--channel` 才再拉聊天桥 |
-| `spool serve` | 只起 Web UI（不拉通道） |
-| `spool service` | 按本机配方启停 llama / 隧道（不写进仓库） |
-| `spool bridge --channel fake` | 只用聊天通道（telegram / qqbot / wecom 见文档） |
-| `spool mcp` / `spool mcp-servers --check` | 被别的 agent 调用 / 看自己配的外挂 MCP |
-| `spool config` `limits` `policy` `session` `revert` | 默认值 / 标定值 / 授权 / 会话 / 回滚 |
-| `spool extra` `diagnose` `bench` | 关联目录 / 环境诊断 / 回归任务集 |
+| `spool run --plan` / `--resume` | 推进已有计划的下一步 / 从检查点继续 |
+| `spool plan --goal …` | 只拆解并落盘计划，不执行 |
+| `spool chat` | 对话式使用：多轮，共用同一个会话 |
+| `spool session` | 会话：`list`（默认）/ `new [标题]` / `use` / `rename` / `archive`；`--all` 连同归档的一起列出 |
+| `spool web` | 机器级网页壳（= `hub` 不带通道；任意目录可起，进入后选工作区）|
+| `spool hub` | 网页壳；加了 `--channel` 才再拉一条聊天桥（任意目录可起）|
+| `spool serve` | 只起 Web UI，不拉通道（任意目录可起）|
+| `spool qq` | 起 QQ 通道（= `bridge --channel qqbot`；默认值来自用户配置 `[channel.qqbot]`）|
+| `spool bridge --channel …` | 只用聊天通道（`fake` / `telegram` / `wecom` / `qqbot`）|
+| `spool mcp` / `mcp-servers --check` | 被别的 agent 调用 / 查看自配的外挂 MCP |
+| `spool approve <码>` | 批准聊天通道的配对码（**可在任意目录执行**）|
+| `spool extra add <目录>` | 关联工作区外的目录（读放开，写要确认）|
+| `spool service` | 按本机配方启停 llama / 隧道（配方不进仓库）|
+| `spool config` / `limits` / `policy` / `env` | 用户级默认值 / 能力标定值 / 授权策略 / 用户级 `.env` |
+| `spool revert` / `diagnose` / `bench` | 回滚上一次写入 / 环境诊断 / 跑回归集 |
 
-逐条参数见 [`docs/cli.md`](docs/cli.md)。
+逐条参数见 [`docs/cli.md`](docs/cli.md)。"在哪个工作区、哪条会话中运行"属**运行时状态**
+（`spool ws use`；聊天里 `/ws use`；网页壳换目标），不是启动参数：`--root` / `--session`
+是"这一次覆盖"，`--session` 留空沿用上次那条，**换工作区不需重启，也不需重新配对**。
 
 ## 配置
 
 | 配什么 | 在哪 | 怎么用 |
 |---|---|---|
 | 供应商 / 模型 / 服务地址 | 用户级默认 | `spool config --set provider=llamacpp --set base_url=<地址>`；`spool config` 看现值与来源 |
-| 同上，临时改一次 | 命令行 | `--provider llamacpp --model <名> --base-url <地址>`（优先于配置文件）|
-| 同上，只在这个 shell 生效 | 环境变量 | `SPOOLKIT_PROVIDER` / `SPOOLKIT_BASE_URL` / `SPOOLKIT_MODEL` / `SPOOLKIT_PROXY` |
-| Gemini 密钥 | 项目根 `.env` | `GEMINI_API_KEY=...`（本地模型不需要任何密钥）|
-| 通道凭据 | 项目根 `.env` | `QQ_AppID` / `QQ_AppSecret` / `SPOOLKIT_TELEGRAM_TOKEN`… |
+| 同上，临时改一次 | 命令行 | `--provider llamacpp --model <名> --base-url <地址>` |
+| 同上，只在当前 shell 生效 | 环境变量 | `SPOOLKIT_PROVIDER` / `SPOOLKIT_BASE_URL` / `SPOOLKIT_MODEL` / `SPOOLKIT_PROXY` |
+| Gemini / Tavily 密钥、通道凭据 | 工作区 `.env` 或用户级 `.env` | `spool env set KEY=VALUE`；`spool bridge --channel <通道> --check` 看是否认到 |
 | 能力标定值（预算、超时、上限） | `.agent/limits.json` | `spool limits --set 名字=值`，`spool limits` 看现值与来源 |
 | 授权策略 | `.agent/policy.json` | `spool policy --set auto`（三档：ask/auto/deny）|
-| 额外关联目录 | 本机指令 | `spool extra add D:\别的地方`（读放开，写要确认；聊天里加不了）。一次性：`--allow-read` |
+| 额外关联目录 | 本机指令 | `spool extra add D:\其它目录`；一次性用 `--allow-read` |
 
-能力标定值全部可覆盖、可回退：默认值是按本机 27B + 8K 窗口实测出来的，
-换模型或换机器就该改，`spool limits` 会告诉你每个值"现在是多少、从哪来"。
+三层，具体者优先：**命令行 > 环境变量（`SPOOLKIT_*`）> 用户配置
+`%APPDATA%\spoolkit\config.toml` > 内置默认**（内置默认为 `fake` 假模型，不生成代码）。
+两条分工不混用——**密钥只放 `.env`**（解析顺序：环境变量 → 工作区 `.env` → 用户级 `.env`，
+Windows `%APPDATA%\spoolkit\.env`），**非密钥默认值只放 `config.toml`**。
 
-> **改名说明**：本项目原先叫 `agents-dev`。旧名字仍然可用——命令 `agents-dev`、
-> 环境变量 `AGENTS_DEV_*`、用户配置 `%APPDATA%\agents-dev\config.toml` 都继续认，
-> 已经配好的人一个字都不用改。
-
-## 文档
-
-| 文档 | 讲什么 |
-|---|---|
-| [`docs/getting-started.md`](docs/getting-started.md) | 装、配、第一个任务、常见故障 |
-| [`docs/cli.md`](docs/cli.md) | 每条命令与参数 |
-| [`docs/manual.md`](docs/manual.md) | 使用手册：工作区／权限／记忆／长任务／通道／排错 |
-| [`docs/benchmarking.md`](docs/benchmarking.md) | 怎么量、量到什么 |
-| [`docs/dogfooding.md`](docs/dogfooding.md) | 每次改动的原因与结果 |
-| [`docs/mcp.md`](docs/mcp.md) · [`docs/bridge.md`](docs/bridge.md) | 两个方向的外部接口 |
-| [`docs/superpowers/specs/`](docs/superpowers/specs/) | 设计文档 |
+用户级那份无需记路径：`spool env` 查看、`spool env set KEY=VALUE` 写入、`spool env import --from <工作区的 .env>` 搬移。旧名仍可用：命令 `agents-dev`、环境变量 `AGENTS_DEV_*`、用户配置 `%APPDATA%\agents-dev\config.toml` 仍识别；分层理由见 [`docs/rationale.md`](docs/rationale.md#配置三层)。
 
 ## 已知限制
 
-- **索引的口径要分清**：Python 用 AST，准确；其它语言是**行首声明扫描**
-  （认得 `function/class/struct/enum/fn/func/def` 等常见形态，行号是保守估计），
-  够回答"这个文件里有什么、大概在第几行"，不够回答"改这里安全吗"。
-  **引用图与 `find_callers` 只对 Python 成立**——别的语言上工具会明说
-  "没查 ≠ 没有"。认不出的后缀会以通用扫描进索引。
-- **多模态未接**：供应商抽象里留了位置，还没有可用的图文输入路径。
-- **本地超长文件仍整份读**：网页有切块通道（`web_fetch` / `web_read`）；工作区里的大手册还是 `read_file`。
-- **llama.cpp 等待期可能长时间无输出**：生成是非流式的，终端在模型返回前可能几分钟没有新行。假模型缺脚本会立刻退出，不会替你写代码。
-- **单机单人**：单 GPU、串行执行，没有并发与多用户设计。
-- **模型越弱，越依赖这套脚手架**：能力标定值就是为弱模型准备的；强模型上它们
-  是上限而不是保护，该往大调。
+- **索引口径需区分**：Python 用 AST，准确；其它语言用行首声明扫描，仅够回答"这个文件
+  里有什么、大概在第几行"，不够回答"改这里安全吗"。**引用图与 `find_callers` 只对 Python
+  成立**；其它语言上工具会明说"「没有调用方」等于「没查」，不等于「没有」"。
+- **多模态未接**：供应商抽象里留了位置，暂无图文输入路径。
+- **本地超长文件仍整份读**：网页有切块通道（`web_fetch` / `web_read`），工作区的大手册仍用 `read_file`。
+- **llama.cpp 等待期会报心跳**：生成仍是非流式的；满 15 秒打一行「模型生成中，已等待 <秒>s」
+  （CLI stderr / 网页）。总超时公式不变。
+- **单机单人**：单 GPU、串行执行，无并发与多用户设计。
+- **模型越弱，越依赖这套脚手架**：能力标定值为弱模型准备；强模型上它们是上限
+  而非保护，需调大。
 
-## 开发
+## 文档
 
-```powershell
-uv venv --python 3.12
-uv pip install -e ".[dev]"
-# basetemp 放仓库外，避免被当成工作区根
-$env:PYTHONIOENCODING='utf-8'
-uv run pytest -q -p no:cacheprovider --basetemp="$env:TEMP\agents-dev-pytest"
+索引与写法：[`docs/README.md`](docs/README.md)。
+
+| 文档 | 内容 |
+|---|---|
+| [getting-started](docs/getting-started.md) | 故障表 · 工作区入口 · 模型服务 |
+| [cli](docs/cli.md) | 命令参数 |
+| [manual](docs/manual.md) | 运行机制契约 |
+| [agent-loop-flow](docs/agent-loop-flow.md) | 主循环控制流 |
+| [bridge](docs/bridge.md) · [mcp](docs/mcp.md) | 通道 / MCP |
+| [rationale](docs/rationale.md) | 设计取舍（结论+指针） |
+| [benchmarking](docs/benchmarking.md) · [dogfooding](docs/dogfooding.md) | 基准 · 实测日志 |
+| [superpowers/specs](docs/superpowers/specs/) | 历史设计档 |
+
+## 开发与许可
+
+关口只有一条命令，两个平台都一样（`scripts/gate.py` 是唯一的实现；
+`scripts\gate.ps1` / `scripts\pytest.ps1` 是 Windows 习惯用的薄壳）：
+
+```bash
+uv sync --extra dev          # 装开发依赖（含 mypy，版本在 uv.lock 里锁死）
+python scripts/gate.py             # 全套：环境体检 + 测试 + 类型检查
+python scripts/gate.py --only doctor   # 只做环境体检（受限环境下先看它）
+python scripts/gate.py --only tests    # 只跑测试
+python scripts/gate.py --only types    # 只跑类型检查
 ```
 
-## License
+**环境问题与代码回归要分得开**（这是关口最重要的性质）：
 
-MIT
+- 环境准备只有一处实现：`scripts/dev_env.py`（能力体检 + 环境变量 + 临时目录
+  补丁），`pytest.ps1` / `gate.ps1` / 探针都调它，不再各写一份；
+- 用例自己声明宿主依赖：`@pytest.mark.needs("process_kill")` → 缺能力就**跳过
+  并说明缺什么**（受限沙箱里杀进程被拒就是这种情况）；能力在时照常跑，
+  红了就是真回归；
+- 兜底清单 `tools/known-env-failures.json`：每条带 `requires` / `evidence` /
+  `expires`；**能力回来即失效**、**非受限环境整体失效**、**过期直接让关口红**。
+
+**类型检查带基线棘轮**：存量的 161 条发现记在 `tools/mypy-baseline.json` 里，
+关口**只对新增报红**；修掉的条目下次刷新基线时收账。刷新基线
+（`--update-baseline`）等于承认这一批债务，必须是一次显式提交——换 mypy
+版本同理（基线里记着版本号，对不上会提示）。
+
+为什么是 mypy 而不是 pyright：pyright 在 Node 生态里（PyPI 的包装包也要
+Node，除非再拉 40MB 的 nodejs 轮子），而本仓是纯 Python——`uv sync` 一条命令
+就能在任何只有 Python 的机器上跑起来。这是"同一份代码在多数开发者手里都能
+便利开发"的一部分。
+
+basetemp 放仓库外，避免被当成工作区根。License：MIT。

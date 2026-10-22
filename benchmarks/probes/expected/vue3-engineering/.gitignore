@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+*.local
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.log
+.env
+.env.*
+!.env.example

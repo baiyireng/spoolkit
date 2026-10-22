@@ -35,6 +35,14 @@ class TaskState:
     excluded: list[str] = field(default_factory=list)
     hypothesis: str = ""
     step: int = 0
+    # 它对上一次督导建议的表态（接受 / 不接受 + 理由），以及那次建议本身。
+    #
+    # 放在状态里而不是只放进对话历史，是因为督导的证据包里**刻意没有**
+    # 主循环的推理过程（读到推理它就会附和，见 supervisor.Evidence）。表态
+    # 是它该看见的那一小块：没有它，督导只能看到「我又建议了一次」，
+    # 看不到「它上次为什么不照做」——同一个建议于是会被提第三遍。
+    assessment: str = ""
+    suggestion: str = ""
 
     # 状态块里「已完成」只列最近几条：它**每轮都要注入一次**，每一条都是
     # 每个请求的税——和工具清单是同一笔账。完整记录留在状态里（也就落在
@@ -42,7 +50,7 @@ class TaskState:
     #
     # 默认值来自登记表（limits.KNOBS 的 done_inline），这里留名字给外部导入；
     # 实际列几条由渲染方按本次运行的覆盖决定。
-    DONE_INLINE = int(_limits.knob("done_inline").default)
+    DONE_INLINE = int(_limits.require_knob("done_inline").default)
 
     def render(self, done_inline: int | None = None, progress_hint: str = "") -> str:
         """渲染成紧凑文本供注入。刻意省略空字段以节省 token。

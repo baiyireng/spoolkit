@@ -21,11 +21,49 @@ __pycache__/
 scratch_lab/
 .tmp/
 
+# 误放在仓库根的包缓存。不忽略时 git status 会扫上万个文件。
+.pnpm-store/
+
+# 网页壳的开发期检查器用。运行时读 assets/dist，不需要 Node。
+web/node_modules/
+
+# pytest / 探针跑出来的临时目录与调试输出
+.pytest_tmp/
+.pytest-*/
+.t8probe_tmp/
+pytest-tmp-*/
+pytest-bt*/
+probe-*/
+obs_debug.txt
+
+# 互动面探针的沙箱副本与快照（scripts/interact_probe.py 的产物，不进仓库）
+.probe_runs/
+
+# 真机探针每跑的产物（real_probe.py：读数/日志逐跑覆盖，不进仓库）
+benchmarks/probes/orchestration/real-probe-readings.json
+benchmarks/probes/orchestration/real-probe-done.json
+benchmarks/probes/orchestration/real-probe-log.txt
+benchmarks/probes/orchestration/real-sandbox-whole.txt
+# 注意：`real-sandbox-pytest.txt` 与 `.real-state.json` 也是每跑覆盖，但它们是**已入库的
+# 冻结证据**，gitignore 对已跟踪文件无效——跑完按老规矩用 `git checkout --` 还原，别改名。
+
 # 本地交接备忘（开发机用，不进仓库）
 docs/roadmap.md
+docs/long-answer-handoff.md
+docs/long-answer-next.md
+docs/integration-notes.md
+docs/local-agent-long-answer-plan.md
+docs/plan-changes-v1.1.md
+docs/memory-audit.md
+docs/p3-1-review.md
+docs/p3.5-guard-diagnosis.md
+docs/metrics/
 
 # 设计讨论时的可视化伴侣产物
 .superpowers/
+
+# 本地 git worktree
+.worktrees/
 
 # 编辑器
 .vscode/

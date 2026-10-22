@@ -1,6 +1,10 @@
+import os
 import sys
 from pathlib import Path
 
+import pytest
+
+from spoolkit.tools import exec as exec_module
 from spoolkit.tools.exec import (
     MAX_OUTPUT_CHARS,
     resolve_argv,
@@ -154,6 +158,22 @@ def test_node_check只允许js文件() -> None:
     assert ".js" in validate_command(["node", "--check", "index.html"])
 
 
+def test_node_check的拒绝要指路到verify_file() -> None:
+    """只说不行的拒绝会被撞穿：实测它换个文件名再撞。
+
+    拒绝必须同时给出「那该用什么」，而那个工具必须真的存在——所以这里
+    连工具表一起钉：文案里点名的工具不能在注册表里查不到。
+    """
+    message = validate_command(["node", "--check", "index.html"])
+    assert "verify_file" in message
+    from spoolkit.tools.registry import ToolRegistry
+    from spoolkit.tools.verify import verify_file_spec
+
+    registry = ToolRegistry()
+    registry.register(verify_file_spec(Path(".")))
+    assert registry.get("verify_file") is not None
+
+
 def test_node不带check被拒绝() -> None:
     assert validate_command(["node", "script.js"]) is not None
     assert validate_command(["node"]) is not None
@@ -194,6 +214,34 @@ def test_超长输出被截断并标注(tmp_path: Path) -> None:
     assert result.ok is True
     assert "输出过长" in result.content
     assert len(result.content) < MAX_OUTPUT_CHARS + 500
+
+
+def test_截断时要点名被丢掉的失败行(tmp_path: Path) -> None:
+    """实测（2026-10-07，B 靶现场）：25455 字符的输出里，唯一那条 FAILED 落在
+    中间被省掉的部分，标记只说「省略 N 字符」——模型照着头部的 `tests/cli/...` 回答。
+    省掉的东西里有判据行就必须点名。"""
+    script = tmp_path / "noisy.py"
+    script.write_text(
+        "print('a' * 3000)\n"
+        "print('FAILED tests/services/test_service_ledger.py::test_x - AssertionError: 少了 stopped')\n"
+        "print('ERROR tests/cli/test_y.py - ImportError: cannot import name render_status')\n"
+        "print('b' * 3000)\n",
+        encoding="utf-8",
+    )
+    result = _run(tmp_path, command=[sys.executable, str(script)])
+    assert result.ok is True
+    assert "输出过长" in result.content
+    assert "这一段里有 2 条失败/错误记录" in result.content
+    assert "test_service_ledger" in result.content
+    assert len(result.content) < MAX_OUTPUT_CHARS + 500
+
+
+def test_截断时没有失败行就不硬凑(tmp_path: Path) -> None:
+    script = _script(tmp_path, "plain.py", "print('z' * 20000)\n")
+    result = _run(tmp_path, command=[sys.executable, script])
+    assert result.ok is True
+    assert "输出过长" in result.content
+    assert "失败/错误记录" not in result.content
 
 
 def test_可以跑真实的pytest(tmp_path: Path) -> None:
@@ -242,6 +290,87 @@ def test_优先使用项目虚拟环境(tmp_path: Path) -> None:
     fake = venv_dir / "python.exe"
     fake.write_text("", encoding="utf-8")
     assert resolve_argv(["python"], tmp_path)[0] == str(fake)
+
+
+# --- 命令解释器：候选根 [工作区, spoolkit 检出根] ---------------------------
+#
+# 与 `tests/test_bench.py` 的验收解释器是同一个问题、同一份实现，只是第一个
+# 候选根是工作区。真实的翻车：spool 装在 uv tool / pipx / 系统 Python 里时，
+# agent 自测的 `pytest` 落到 `sys.executable`——那个环境没有 pytest，于是每次
+# 自测都撞 `No module named pytest`，模型转而去「修」一个它修不了的环境问题。
+
+
+def _fake_venv(root: Path) -> Path:
+    """造一个假虚拟环境解释器（只要求文件在；选择逻辑不看它能不能跑）。"""
+    venv_dir = root / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    venv_dir.mkdir(parents=True)
+    fake = venv_dir / ("python.exe" if os.name == "nt" else "python")
+    fake.write_text("", encoding="utf-8")
+    return fake
+
+
+def _isolated_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """把「检出目录」指到 tmp 里，免得测试结果取决于这台机器上的真实 .venv。"""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setattr(exec_module, "spoolkit_checkout_root", lambda: checkout)
+    return checkout
+
+
+def test_命令解释器优先用工作区虚拟环境(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """① 工作区自带 `.venv` 时用它——那才是这个项目的环境。
+
+    证伪：把候选顺序改成「检出目录优先」或「永远 sys.executable」，这条就红。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    checkout = _isolated_checkout(tmp_path, monkeypatch)
+    mine = _fake_venv(workspace)
+    _fake_venv(checkout)
+
+    assert resolve_argv(["python", "x.py"], workspace)[0] == str(mine)
+    assert resolve_argv(["pytest", "-q"], workspace)[0] == str(mine)
+
+
+def test_工作区没有虚拟环境时用检出目录的(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """② 工作区没有 `.venv` 时用检出目录的——uv tool / pipx / 系统 Python 那条路靠它。
+
+    证伪：把候选根改回「只有工作区」（即 `[root]`），这条就红——那时选中的是
+    `sys.executable`，而不是这里的检出目录解释器。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    checkout = _isolated_checkout(tmp_path, monkeypatch)
+    theirs = _fake_venv(checkout)
+    assert str(theirs) != sys.executable
+
+    assert resolve_argv(["python", "x.py"], workspace)[0] == str(theirs)
+    assert resolve_argv(["pytest", "-q"], workspace)[:1] == [str(theirs)]
+    assert resolve_argv(["pytest", "-q"], workspace)[1:] == ["-m", "pytest", "-q"]
+
+
+def test_两处都没有虚拟环境时退回当前解释器(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """③ 一个都没有就退回当前解释器：旧行为，任何环境下都还能用。
+
+    证伪：把兜底改成「没有 .venv 就抛异常/返回固定路径」，这条就红。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _isolated_checkout(tmp_path, monkeypatch)
+
+    assert resolve_argv(["python", "x.py"], workspace)[0] == sys.executable
+    assert resolve_argv(["pytest", "-q"], workspace) == [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+    ]
 
 
 def test_非python命令不做换算(tmp_path: Path) -> None:

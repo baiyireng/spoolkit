@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from spoolkit.agent.signals import Audience, NoteKind, NOTE_SIGNALS
 from spoolkit.agent.state import StateDelta, TaskState, load_state, save_state
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 
@@ -58,6 +59,13 @@ def test_保存后可原样读回(tmp_path: Path) -> None:
 
 def test_读取不存在的检查点返回空(tmp_path: Path) -> None:
     assert load_state(tmp_path / "nope.json") is None
+
+
+def test_待验证写进模型提示并登记为模型读者() -> None:
+    assert "待验证:" in _state().render()
+    signal = NOTE_SIGNALS[NoteKind.STATE_VERIFY]
+    assert signal.audience is Audience.MODEL
+    assert "待验证" in signal.meaning
 
 
 def test_步数可递增() -> None:

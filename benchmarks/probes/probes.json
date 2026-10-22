@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "description": "真实任务能力探针集：用用户会真的说的话 + 真的产物去跑 spool，把「能力有没有涨」变成可重复测量的数字。清单格式由 scripts/probe.py 校验，tests/test_probe_runner.py 逐条钉住。",
+  "_limits_note": [
+    "下限口径变更（原地重试护栏落地之后）：`max_repeat_blocks` / `max_read_blocks` 这两条线**只对「未被拦的重复」生效**，新键 `max_repeat_blocks_unblocked` / `max_read_blocks_unblocked` 是同一个口径的正式名字（旧键保留，读旧清单的工具不必改；两个都写时按新键判）。",
+    "理由：护栏**自己就是拦截者**——事件流里写着「未执行：…与上一次完全相同/最近几步已经做过」的那些调用根本没有执行，是护栏在干活，不是「空转」。把被拦的次数算成失分，等于「自己人扣自己人的分」：实测 26/35 那一轮里有 4 条尝试任务验收是绿的，只输在这一条线上（merge-html 被拦 2 次、merge-html 被拦 3/3 次、rename 被拦 1 次、rename 被拦 3/3 次）。",
+    "真正的空转是「护栏只提醒、没有拦，那一次真的又跑了一遍」：`repeat_blocks_unblocked = repeat_blocks - repeat_blocks_blocked`，它仍然必须为 0。",
+    "被拦的次数**不套 0 线，但仍逐条记录**（记录字段 `repeat_blocks_blocked` / `read_blocks_blocked`），由护栏自己的上限（`blocked_refund_limit` / `reroute_block_at`）约束——探针不再重复判一遍。",
+    "判据本体一个字没动：`seeds/**`、`expected/**`、`checks/**` 与 `guard_hashes` 都不因这次改动而变。"
+  ],
+  "defaults": {
+    "provider": "llamacpp",
+    "base_url": "http://127.0.0.1:8080",
+    "session": "probe",
+    "scope": "**",
+    "timeout_seconds": 900,
+    "check_timeout_seconds": 300,
+    "max_steps": 8,
+    "step_ceiling": 24,
+    "total_budget_seconds": 5400,
+    "temperature": 0.0,
+    "extra_args": [
+      "--no-setup",
+      "--no-history",
+      "--no-mcp"
+    ]
+  },
+  "probes": [
+    {
+      "id": "merge-html",
+      "shape": "merge-html",
+      "title": "把两份静态页面并成一份",
+      "seed": "seeds/merge-html",
+      "expected": "expected/merge-html",
+      "goal": "index.html 和 pricing.html 的导航栏和页脚一模一样，我改个链接要改两遍，烦死了。把 pricing 里那些内容并到 index.html 去吧，以后我就看一个文件。",
+      "goal_variants": [
+        "pricing.html 里的内容直接合进 index.html 吧，两页的导航和页脚本来就是同一份，我以后只想维护一个文件。",
+        "index 和 pricing 这两个页面合成一份算了，公共那块我改一次要改两处；以后我只看一个文件。"
+      ],
+      "check": {
+        "script": "checks/merge_html.py",
+        "timeout_seconds": 120
+      },
+      "guard_hashes": {},
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_repeat_blocks_unblocked": 0,
+        "max_read_blocks_unblocked": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（**未被拦的**重复必须为 0；被护栏拦下、没有执行的重复单独记录，不套 0 线）",
+        "不许出现拦读死锁（**未被拦的**读取类重复必须为 0；被拦的读取次数单独记录）",
+        "合并是整文件大重写，不许被「拒绝整文件重写」挡在门外（rewrite_refusals 记为 0 是目标，非零要如实报）",
+        "验收：index.html 同时含两页内容、仍是一份文档、本地引用都存在"
+      ]
+    },
+    {
+      "id": "vague-optimize",
+      "shape": "vague-optimize",
+      "title": "含糊目标：跑得太慢，弄快点别改坏结果",
+      "seed": "seeds/vague-optimize",
+      "expected": "expected/vague-optimize",
+      "goal": "这个 logstat 跑得太慢了，线上几万行日志要等好久才出结果，你帮我看看能不能弄快点，结果别给我改坏了啊。",
+      "goal_variants": [
+        "logstat 处理几万行日志慢得让人等不下去，帮我把速度弄快点，算出来的东西一点都不能变。",
+        "线上日志一多 logstat 就卡半天，能不能优化一下？结果必须跟现在一模一样。"
+      ],
+      "check": {
+        "script": "checks/vague_optimize.py",
+        "timeout_seconds": 300
+      },
+      "guard_hashes": {},
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_repeat_blocks_unblocked": 0,
+        "max_read_blocks_unblocked": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（**未被拦的**重复必须为 0；被护栏拦下、没有执行的重复单独记录，不套 0 线）",
+        "不许出现拦读死锁（**未被拦的**读取类重复必须为 0；被拦的读取次数单独记录）",
+        "验收：40000 行输入下摘要与独立参考逐字相同，且耗时 < 4.0s（种子约 9s）"
+      ]
+    },
+    {
+      "id": "add-feature",
+      "shape": "add-feature",
+      "title": "加一条按月份汇总的命令行",
+      "seed": "seeds/add-feature",
+      "expected": "expected/add-feature",
+      "goal": "还想要一个按月看的功能：python -m expenses.cli summary --month 2025-03，把这个月一共花了多少、每个分类多少都打出来。",
+      "goal_variants": [
+        "再加个按月的入口吧，像 python -m expenses.cli summary --month 2025-03 这样，能看出这个月总共花了多少、各分类各多少。",
+        "我想按月查账：python -m expenses.cli summary --month 2025-03 跑出来要给出当月合计和每个分类的金额。"
+      ],
+      "check": {
+        "script": "checks/add_feature.py",
+        "timeout_seconds": 300
+      },
+      "guard_hashes": {
+        "data/expenses.csv": "11eb1529d7026479fb574c773f8e7bc996c75633ec7051d9a2ead39f63486863"
+      },
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_repeat_blocks_unblocked": 0,
+        "max_read_blocks_unblocked": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（**未被拦的**重复必须为 0；被护栏拦下、没有执行的重复单独记录，不套 0 线）",
+        "不许出现拦读死锁（**未被拦的**读取类重复必须为 0；被拦的读取次数单独记录）",
+        "不许改账本数据来凑数字（guard_hashes 钉住 data/expenses.csv）",
+        "验收：summary --month 2025-03 打出 512.40 与三个分类金额，别的月份的金额不许混进来；既有的 total / by-category 与项目测试都不许坏"
+      ]
+    },
+    {
+      "id": "fix-bug",
+      "shape": "fix-bug",
+      "title": "修首尾相接的时段没被合并",
+      "seed": "seeds/fix-bug",
+      "expected": "expected/fix-bug",
+      "goal": "订会议室的时段合并有问题，明明是连着占的两段，前台看还是两条。你跑一下 tests 就知道了，帮我修掉。",
+      "goal_variants": [
+        "会议室时段合并这块不对：明明接得上的两段，前台还是显示成两条。跑一下 tests 就能看到，帮我修了。",
+        "连着订的两段时间没有被并成一条，前台看着是两条记录。你跑 tests 复现一下，然后修掉。"
+      ],
+      "check": {
+        "script": "checks/fix_bug.py",
+        "timeout_seconds": 300
+      },
+      "guard_hashes": {
+        "tests/test_merge.py": "60ee83ee1d1d28a99d9159bed2ae5f2417aaf697d51a5b7d75055325c99fbc86"
+      },
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_repeat_blocks_unblocked": 0,
+        "max_read_blocks_unblocked": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（**未被拦的**重复必须为 0；被护栏拦下、没有执行的重复单独记录，不套 0 线）",
+        "不许出现拦读死锁（**未被拦的**读取类重复必须为 0；被拦的读取次数单独记录）",
+        "不许改测试来凑绿（guard_hashes 钉住 tests/test_merge.py）",
+        "验收：项目测试全过 + 判据自己 import 模块跑行为断言"
+      ]
+    },
+    {
+      "id": "rename-cross-file",
+      "shape": "rename-cross-file",
+      "title": "跨文件重命名一个函数",
+      "seed": "seeds/rename-cross-file",
+      "expected": "expected/rename-cross-file",
+      "goal": "pipeline 里 get_rows 这名字太含糊了，改成 load_rows 吧，整个项目里都统一一下。",
+      "goal_variants": [
+        "get_rows 这个名字在 pipeline 里不够清楚，换成 load_rows，项目里所有地方都跟着改过来。",
+        "把 pipeline 里的 get_rows 统一改名成 load_rows，整个项目都别再留旧名字。"
+      ],
+      "check": {
+        "script": "checks/rename_cross_file.py",
+        "timeout_seconds": 300
+      },
+      "guard_hashes": {},
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_repeat_blocks_unblocked": 0,
+        "max_read_blocks_unblocked": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（**未被拦的**重复必须为 0；被护栏拦下、没有执行的重复单独记录，不套 0 线）",
+        "不许出现拦读死锁（**未被拦的**读取类重复必须为 0；被拦的读取次数单独记录）",
+        "验收：沙箱里任何文本文件都不再有旧名字、新名字在抓取层被定义、项目测试至少跑 4 条且全过、命令行端到端数字不变"
+      ]
+    },
+    {
+      "id": "vue3-engineering",
+      "shape": "create-project",
+      "title": "从零搭一个 Vue3 后台前端（重点工程化结构）",
+      "seed": "seeds/vue3-engineering",
+      "expected": "expected/vue3-engineering",
+      "goal": "我们要新起一个后台管理的前端项目，Vue3 + TypeScript + Vite。这轮不用写业务，先把工程骨架立起来——重点在工程化那一层要齐：目录分层、路由、状态、请求层、环境变量、lint/格式化、单测、CI。页面用示例的就行。依赖先别装，我这边网络不方便，你把文件和配置写对就好。",
+      "goal_variants": [
+        "新起个后台管理前端，技术栈固定 Vue3 + TS + Vite。先别管业务，把现代前端该有的工程化结构搭出来：分层目录、路由、Pinia、请求层、环境变量、代码检查和格式化、单测、CI 都要有，页面放示例内容。依赖不用装，我回头自己装。",
+        "帮我起一个 Vue3 的后台前端工程骨架（TS + Vite）。重点是工程化：目录别堆在一起，路由/状态/接口/组合式函数/工具各自分层，tsconfig 严格模式、路径别名、环境变量、eslint+prettier、vitest、CI 一个都别少。业务先不写，页面用示例的。别装依赖。"
+      ],
+      "check": {
+        "script": "checks/vue3_engineering.py",
+        "timeout_seconds": 120
+      },
+      "guard_hashes": {},
+      "expect": {
+        "max_repeat_blocks": 0,
+        "max_read_blocks": 0,
+        "max_repeat_blocks_unblocked": 0,
+        "max_read_blocks_unblocked": 0,
+        "max_supervisor_false_claims": 0
+      },
+      "lower_bounds": [
+        "不许出现原样重试（**未被拦的**重复必须为 0；被护栏拦下、没有执行的重复单独记录，不套 0 线）",
+        "不许出现拦读死锁（**未被拦的**读取类重复必须为 0；被拦的读取次数单独记录）",
+        "验收（入口链）：index.html 有 #app 并引到 /src/main.ts；main.ts createApp + 接 Pinia/路由 + mount；App.vue 是 `<script setup lang=\"ts\">` 且含 RouterView",
+        "验收（分层）：views ≥2、components ≥1、router（createRouter + history + ≥2 条路由）、stores（defineStore）、请求层（src/api|services 有导出封装）、composables、utils、全局样式并被引入——每一层都要非空且非占位",
+        "验收（配置）：tsconfig strict + `@`→src 的 paths；vite 配置用 @vitejs/plugin-vue 且别名与 tsconfig 一致；.env.example 有 VITE_ 变量且 src 下有 ImportMetaEnv 类型；eslint/prettier/.editorconfig/.gitignore 齐；Vitest 单测 ≥1；CI 里 install 之后至少跑两件（lint/test/build/typecheck）",
+        "验收（一致性）：src 里 import 的 vue / vue-router / pinia 都在 package.json 声明；README 提到的脚本必须真实存在；package.json 与 tsconfig 不许带 BOM",
+        "工具链复验由人工在能出网的环境跑 `--with-toolchain`（装依赖 + `vue-tsc --noEmit`）：本机受限沙箱里 esbuild 的服务进程 `spawn EPERM`，所以 `vite build` / `vitest run` **不在**判据里，也不假装验过"
+      ]
+    }
+  ]
+}

@@ -15,6 +15,7 @@ from spoolkit.agents.plan import (
     save_plan,
     uncovered,
 )
+from spoolkit.agents.runtime import IMPLEMENTER
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.llm.types import ChatResponse
@@ -355,7 +356,25 @@ def test_步骤提示带上整体位置() -> None:
     assert "总目标" in text
     assert "已完成：第一步" in text
     assert "本次只做这一步：第二步" in text
-    assert "不要顺手做后面步骤的事" in text
+    # 越界那条**不逐字钉措辞**：它是由 `spoolkit/agents/plan.py` 渲染的，
+    # 与 `spoolkit/agents/runtime.py` 的实现者角色提示共用同一句式
+    # （只做…要求的事：改动范围以…为界，范围之外的改动一律不做），
+    # 所以这里钉的是两者共有的那半句要点，措辞改一致不该把用例改红。
+    assert "只做本步要求的事" in text
+    assert "范围之外的改动一律不做" in text
+
+
+def test_越界约束在两处提示里逐字同句() -> None:
+    """同一条约束写在两处时，改一处就会与另一处走散——上一轮就留下了这种残留。
+
+    所以钉的不是某一处的措辞，而是**两处共有的那半句**：实现者角色提示
+    （`agents/runtime.py`）与步骤提示词（`agents/plan.py`）必须逐字相同。
+    这条红了说明两处又各自演化成了不同说法。
+    """
+    shared = "范围之外的改动一律不做"
+    assert shared in IMPLEMENTER.system_prompt
+    plan = parse_plan(_payload(("第一步", "a")), "总目标")
+    assert shared in render_step_prompt(plan, plan.steps[0])
 
 
 def test_已完成清单不会随进度无限膨胀() -> None:

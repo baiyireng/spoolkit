@@ -1,8 +1,8 @@
 """通道插件装载：核心不认识任何一家通道。
 
-这是从 OpenClaw 那套里抄来的**唯一一件真正重要的东西**：它的核心仓库一行
+这是从 OpenClaw 那套里移植的**唯一一条关键机制**：它的核心仓库一行
 微信代码都没有，通道是外部插件（npm 包 + manifest），由 Gateway 装载。
-好处很实在——接一家新通道不必改核心，也不必把它的依赖塞进主包。
+好处很具体——接一家新通道不必改核心，也不必把它的依赖塞进主包。
 
 两条装载途径，覆盖两种情形：
 
@@ -69,7 +69,7 @@ def _from_env(raw: str) -> dict[str, Callable[[dict], object]]:
             continue
         factory = _as_factory(target)
         # 名字取**模块名最后一段**：`my_wechat:build` → `my_wechat`。
-        # 用函数名当通道名是错的——`--channel build` 没人看得懂；
+        # 用函数名当通道名是错的——`--channel build` 无法辨认；
         # 一个模块要提供多个通道时，用 entry point 那条路显式命名。
         name = module_name.rsplit(".", 1)[-1]
         found[name] = factory
@@ -82,7 +82,7 @@ def _as_factory(target) -> Callable[[dict], object]:
     - 模块或类里有 `build`：直接用；
     - 类本身：用 `类(spec)` 不行，就 `类()`；
     - 函数：直接用。
-    插件作者只需要给一个能造出 Channel 的东西，形态不挑。
+    插件作者只需要给一个能造出 Channel 的对象，形态不挑。
     """
     if hasattr(target, "build") and callable(getattr(target, "build")):
         return target.build

@@ -45,7 +45,8 @@ class Role:
 IMPLEMENTER = Role(
     name="implementer",
     system_prompt=(
-        "你负责实现一处具体改动。只做任务说明里要求的事，不要顺手重构其它代码。"
+        "你负责实现一处具体改动。只做任务说明要求的事：改动范围以任务说明声明的文件与"
+        "符号为界，范围之外的改动一律不做。"
         "改动前先确认目标符号的引用方，避免改坏调用者。"
         # 开工前先估规模：这是「任务太大就早说」那条通道的入口。实测不写
         # 这句，它会硬做到底——烧光预算、撞上重复保护，回来只剩一句主循环
@@ -69,6 +70,9 @@ IMPLEMENTER = Role(
         "run_command",
         "write_file",
         "replace_lines",
+        # 确认入口跟着写工具：声明式大重写会把正文先暂存，少了这一把，
+        # 实现者就永远确认不了自己刚交出去的那份正文（暂存等于白存）。
+        "confirm_rewrite",
     ),
     can_write=True,
 )
@@ -235,6 +239,13 @@ def run_role(
         # 它会拿主循环的预算来估自己的活。
         persona=role.system_prompt.replace("{limit}", str(limit)),
         verify=verify,
+        # 出网（T3 的联网那一面）**只在主循环拦一次**：子会话的入口动作
+        # （主循环调 `research`）已经过了那道闸门，进来之后抓页是这个动作的
+        # 内部机制。子会话里再拦一次的结果是研究会话连一次 `web_fetch` 都执行
+        # 不了——`research` 永远只能交回「没抓到」，而它是主循环唯一的出网口
+        # （实测：`tests/tools/test_research.py` 那条用例就是这么红的）。
+        # 子会话的工具表是只读的（`restrict` 按角色裁剪），其余判据一条不少。
+        gate_network=False,
     )
     # 检查点用**角色自己的 id**：主循环和子智能体跑在同一个工作区里，
     # 共用 task.json 会让子智能体的状态盖掉主循环的进度——实测长任务里

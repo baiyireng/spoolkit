@@ -132,3 +132,106 @@ def test_没有在等确认时_y_就是普通目标(monkeypatch):
 
     assert runner("y") == "好"
     assert stub.started == ["y"]
+
+
+# --- 一条通道服务整台机器：按 (工作区, 会话) 各复用一个 Runner ---
+
+
+class _StubProcess:
+    def __init__(self, root, session="", extra_args=()) -> None:
+        self.root, self.session = str(root), session
+        self.started: list[str] = []
+        self.awaiting = 0
+
+    def start(self, message: str) -> bool:
+        self.started.append(message)
+        return True
+
+    def snapshot(self) -> dict:
+        return {
+            "awaiting": self.awaiting,
+            "finished": self.awaiting == 0,
+            "final": {"text": f"{self.session}看过"},
+        }
+
+    def confirm(self, apply: bool) -> bool:
+        self.awaiting = 0
+        return True
+
+
+def _target(root: Path, session: str):
+    from spoolkit.kernel.target import Target
+
+    return Target(
+        root=root, session=session, workspace_source="pointer", session_source="pointer"
+    )
+
+
+def test_每条聊天各复用一个runner(tmp_path: Path, monkeypatch) -> None:
+    """`start()` 的"已有运行就拒绝"是按实例算的——共用一个实例会让两个聊天
+    互相挡住，所以一个 (工作区, 会话) 一个 Runner。"""
+    import spoolkit.bridge.agent_runner as module
+
+    made: list[tuple[str, str]] = []
+
+    def _make(root, session="", extra_args=()):
+        made.append((str(root), session))
+        return _StubProcess(root, session)
+
+    monkeypatch.setattr(module, "Runner", _make)
+    a, b = tmp_path / "a", tmp_path / "b"
+    targets = {
+        "chat:fake:u1": _target(a, "s1"),
+        "chat:fake:u2": _target(b, "s2"),
+    }
+    runner = AgentRunner(targets.__getitem__, sleep=lambda _: None)
+
+    assert runner.for_client("chat:fake:u1")("一") == "s1看过"
+    assert runner.for_client("chat:fake:u2")("二") == "s2看过"
+    assert runner.for_client("chat:fake:u1")("三") == "s1看过"
+
+    assert made == [(str(a), "s1"), (str(b), "s2")]  # 每个目标只建一次
+
+
+def test_y_找正在等的那个runner而不是最近那个(tmp_path: Path, monkeypatch) -> None:
+    """两个聊天同时在跑时，`y` 不能答到"最近说话的那条"上去。"""
+    import spoolkit.bridge.agent_runner as module
+
+    stubs: list[_StubProcess] = []
+
+    def _make(root, session="", extra_args=()):
+        stub = _StubProcess(root, session)
+        stubs.append(stub)
+        return stub
+
+    monkeypatch.setattr(module, "Runner", _make)
+    a, b = tmp_path / "a", tmp_path / "b"
+    targets = {
+        "chat:fake:u1": _target(a, "s1"),
+        "chat:fake:u2": _target(b, "s2"),
+    }
+    runner = AgentRunner(targets.__getitem__, sleep=lambda _: None)
+    runner.for_client("chat:fake:u1")("一")  # 二者都跑完
+    runner.for_client("chat:fake:u2")("二")
+    stubs[0].awaiting = 3  # u1 那条在等确认
+    stubs[1].awaiting = 0
+
+    assert runner.for_client("chat:fake:u2")("y") == "已应用。"
+
+
+def test_老形状给路径仍然可用(tmp_path: Path, monkeypatch) -> None:
+    """`AgentRunner(路径)` 这条老用法不能被新协议弄坏。"""
+    import spoolkit.bridge.agent_runner as module
+
+    seen: list[tuple[str, str]] = []
+
+    def _make(root, session="", extra_args=()):
+        seen.append((str(root), session))
+        return _StubProcess(root, session)
+
+    monkeypatch.setattr(module, "Runner", _make)
+    runner = AgentRunner(tmp_path, session="bridge-test", sleep=lambda _: None)
+
+    assert runner("做事") == "bridge-test看过"
+    assert runner.project_root == tmp_path
+    assert seen == [(str(tmp_path), "bridge-test")]

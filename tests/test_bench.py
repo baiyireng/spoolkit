@@ -1,12 +1,20 @@
+import argparse
 import json
+import os
+import shutil
+import sys
 from pathlib import Path
 
+import pytest
+
+from spoolkit import bench
 from spoolkit.bench import (
     Task,
     TaskResult,
     load_tasks,
     prepare,
     render_report,
+    render_together,
     run_task,
     verify,
 )
@@ -175,3 +183,498 @@ def test_任务描述与验收命令来自文件(tmp_path: Path) -> None:
     assert task.command == ("python", "-m", "pytest")
     assert task.acceptance_files == ("t.py",)
     assert task.scope == ("src",)
+
+
+def test_任务工作区建出来就能用(raw_dir_creation) -> None:
+    """建出来的工作区必须当场可遍历、可写、可往下 copytree。
+
+    受限环境（Windows + 文件沙箱）里，`mode=0o700` 建出来的目录连
+    `os.scandir` 都 WinError 5，事后 `chmod` 也救不回来——所以只能创建那一刻抬。
+    改回 `tempfile.TemporaryDirectory(...)` 裸用，这里的 `os.listdir` 就是红的。
+
+    `raw_dir_creation` 先把测试插件那层抬 mode 的补丁摘掉：真实 CLI 里没有它，
+    bench 得自己抬（不摘的话，改回旧写法也照样绿）。
+    """
+    with bench.temporary_workspace() as root:
+        assert os.listdir(root) == []
+
+        source = root / "source"
+        (source / "sub" / "deep").mkdir(parents=True)
+        (source / "a.txt").write_text("a", encoding="utf-8")
+        (source / "sub" / "deep" / "b.txt").write_text("b", encoding="utf-8")
+
+        workdir = root / "project"
+        shutil.copytree(source, workdir)
+        (workdir / "新文件.txt").write_text("写进去了", encoding="utf-8")
+
+        assert sorted(os.listdir(workdir)) == ["a.txt", "sub", "新文件.txt"]
+        assert (workdir / "sub" / "deep" / "b.txt").read_text(encoding="utf-8") == "b"
+
+
+def test_工作区里碰不得的子目录不影响收尾(raw_dir_creation) -> None:
+    """验收跑过 pytest 之后，工作区里会留下它自己用 0o700 建的垃圾目录。
+
+    收尾必须真的「忽略清理错误」——否则任务全跑完了、结果却在收尾时抛掉，
+    人看到的是一场空。实测 `TemporaryDirectory(ignore_cleanup_errors=True)`
+    在本沙箱里**照样抛**（它的处理器会去 `chmod` 那个目录，而 `chmod` 也被拒），
+    所以这里必须是 `shutil.rmtree(..., ignore_errors=True)`。
+    """
+    with bench.temporary_workspace() as root:
+        poisoned = root / "poisoned"
+        os.mkdir(poisoned, 0o700)  # 走未被抬 mode 的那一份
+        try:
+            os.listdir(poisoned)
+        except PermissionError:
+            # 本沙箱：0o700 的目录确实碰不得，收尾时正好会踩到它。
+            pass
+    # 能走到这里 = 退出 with 时没抛，这正是要钉的那条。
+
+
+def test_权限被环境限制时给人话(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """抬不起权限时的兜底：说清是**环境**限制了**目录权限**、并指出**路径**。
+
+    钉的是要点，不是整句——原话以后可以改，但这三样不能说没就没
+    （现在的表现是裸 traceback 糊到人脸上，正是这条要挡住的）。
+    """
+    home = tmp_path / "task"
+    (home / "project").mkdir(parents=True)
+    (home / "project" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    task = Task(name="t", goal="g", command=("python", "-c", "pass"), home=home)
+
+    def _denied(*args, **kwargs):
+        raise PermissionError(5, "拒绝访问。")
+
+    monkeypatch.setattr(bench.shutil, "copytree", _denied)
+    workdir = tmp_path / "w"
+    with pytest.raises(bench.WorkspaceUnavailableError) as caught:
+        bench.prepare(task, workdir)
+
+    message = str(caught.value)
+    assert "环境" in message
+    assert "权限" in message
+    assert str(workdir) in message
+
+
+# --- 验收解释器：选错一次，整批结论全反 -------------------------------------
+#
+# 真实的翻车：`spool` 装在 uv tool 里时，验收一律拿 `sys.executable`（那个环境的
+# 解释器）跑，于是每道题都死于 `No module named pytest`，报告长成「验收 0/50」；
+# 同一个任务用仓库 `.venv` 跑是 50/50。选择顺序、开跑前自检、输出转换三条，
+# 缺一条这种误判就能回来。
+
+
+def _fake_venv(root: Path) -> Path:
+    """造一个假虚拟环境解释器（只要求文件在；选择逻辑不看它能不能跑）。"""
+    venv_dir = root / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    venv_dir.mkdir(parents=True)
+    fake = venv_dir / ("python.exe" if os.name == "nt" else "python")
+    fake.write_text("", encoding="utf-8")
+    return fake
+
+
+def _isolated_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """把「检出目录」指到 tmp 里，免得测试结果取决于这台机器上的真实 .venv。"""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setattr(bench, "spoolkit_checkout_root", lambda: checkout)
+    return checkout
+
+
+def test_验收解释器优先用任务工作区的虚拟环境(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """① 题目自带 `.venv` 时用它——那才是这道题的环境。
+
+    证伪：把候选顺序改成「检出目录优先」或「永远 sys.executable」，这条就红。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    checkout = _isolated_checkout(tmp_path, monkeypatch)
+    mine = _fake_venv(workspace)
+    _fake_venv(checkout)
+
+    assert bench.acceptance_interpreter(workspace) == str(mine)
+
+
+def test_工作区没有虚拟环境时用检出目录的(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """② 题目不带 `.venv` 时用 spoolkit 检出目录的——uv tool 装的那条路靠它。
+
+    证伪：改回「永远 sys.executable」就红（这里选的必须是检出目录那个路径）。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    checkout = _isolated_checkout(tmp_path, monkeypatch)
+    theirs = _fake_venv(checkout)
+    assert str(theirs) != sys.executable
+
+    assert bench.acceptance_interpreter(workspace) == str(theirs)
+
+
+def test_两处都没有虚拟环境时退回当前解释器(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """③ 一个都没有就退回当前解释器：旧行为，任何环境下都还能用。
+
+    证伪：把兜底改成「没有 .venv 就抛异常/返回固定路径」，这条就红。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _isolated_checkout(tmp_path, monkeypatch)
+
+    assert bench.acceptance_interpreter(workspace) == sys.executable
+
+
+def test_验收命令按选中的解释器换算(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """映射本身不变，只换解释器：`pytest` → `<解释器> -m pytest`，`python` → 解释器。
+
+    这一条同时钉住「verify 真的用了选中的解释器」——只改选择函数不改 verify，
+    这里照样红。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _isolated_checkout(tmp_path, monkeypatch)
+    mine = _fake_venv(workspace)
+
+    seen: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _run(command, **kwargs):
+        seen.append(list(command))
+        return _Done()
+
+    monkeypatch.setattr(bench.subprocess, "run", _run)
+
+    passed, _ = verify(Task(name="t", goal="g", command=("pytest", "-q")), workspace)
+    assert passed is True
+    passed, _ = verify(
+        Task(name="t", goal="g", command=("python", "-m", "pytest", "-q")), workspace
+    )
+    assert passed is True
+
+    assert seen == [
+        [str(mine), "-m", "pytest", "-q"],
+        [str(mine), "-m", "pytest", "-q"],
+    ]
+
+
+def test_缺pytest时的说明含解释器路径与出路(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """自检的判据与说明：任务要 pytest + 解释器跑不了 → 阻塞，且说清是谁的问题。
+
+    钉要点（不钉整句）：解释器路径、pytest、不是模型。
+    """
+    workspace = tmp_path / "task" / "project"
+    workspace.mkdir(parents=True)
+    _isolated_checkout(tmp_path, monkeypatch)
+    mine = _fake_venv(workspace)
+
+    monkeypatch.setattr(
+        bench, "probe_pytest", lambda interpreter: (False, "No module named pytest")
+    )
+    task = Task(
+        name="a",
+        goal="g",
+        command=("python", "-m", "pytest", "-q"),
+        home=workspace.parent,
+    )
+    environment = bench.check_acceptance_environment([task])
+
+    assert environment.needs_pytest is True
+    assert environment.blocked is True
+    assert environment.missing_pytest == (str(mine),)
+
+    message = bench.describe_environment_problem(environment)
+    assert str(mine) in message
+    assert "pytest" in message
+    assert "不是模型" in message
+
+
+def test_只用python的任务不被缺pytest拦住(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """容错那一半：任务只用 python 时，解释器里没有 pytest 不该拦整批。"""
+    _isolated_checkout(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        bench, "probe_pytest", lambda interpreter: (False, "No module named pytest")
+    )
+    task = Task(name="a", goal="g", command=("python", "run.py"), home=tmp_path)
+
+    environment = bench.check_acceptance_environment([task])
+
+    assert environment.needs_pytest is False
+    assert environment.blocked is False
+    assert environment.missing_pytest  # 但缺 pytest 这件事本身是记下来的
+
+
+def test_探不到pytest时整批在开跑前就停(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """开跑前停下：模型压根不启动，报告里也不会出现「验收 0/N」。
+
+    证伪：把 CLI 里的自检拿掉，这条会真的去跑第一道题（fake 供应商，不联网），
+    于是「没有验收报告」这条断言红。
+    """
+    from spoolkit.cli.commands.bench import bench as bench_command
+
+    _isolated_checkout(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        bench, "probe_pytest", lambda interpreter: (False, "No module named pytest")
+    )
+    args = argparse.Namespace(
+        root=str(REPO_ROOT),
+        tasks=DEFAULT_BENCH_ROOT,
+        filter="",
+        limit=1,
+        provider="fake",
+        together=False,
+        verbose=False,
+        model="",
+        base_url="",
+        proxy="",
+        window=0,
+        max_steps=1,
+        step_ceiling=0,
+        no_setup=True,
+    )
+
+    code = bench_command(args)
+    captured = capsys.readouterr()
+
+    assert code == bench.EXIT_ENVIRONMENT_BLOCKED
+    assert "pytest" in captured.err
+    assert "不是模型" in captured.err
+    # 没有开跑：没有验收表，也没有「失败」
+    assert "验收通过" not in captured.out
+    assert "失败" not in captured.out
+
+
+def test_验收输出缺pytest时翻成人话(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """验收输出里出现 `No module named pytest` 时不许原样当成「验收失败」。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _isolated_checkout(tmp_path, monkeypatch)
+    mine = _fake_venv(workspace)
+
+    class _Done:
+        returncode = 1
+        stdout = ""
+        stderr = f"{mine}: No module named pytest\n"
+
+    monkeypatch.setattr(bench.subprocess, "run", lambda *a, **k: _Done())
+
+    passed, detail = verify(
+        Task(name="t", goal="g", command=("python", "-m", "pytest", "-q")), workspace
+    )
+
+    assert passed is False
+    assert str(mine) in detail
+    assert "pytest" in detail
+    assert "不是模型" in detail
+    assert bench.looks_like_missing_pytest(detail) is True
+
+
+def test_跑任务时缺pytest标成环境阻塞(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一题一会话那条路也要分类：结果里带着 blocked，报告才好单独计数。"""
+    task = load_tasks(BENCH_ROOT)[0]
+
+    class _Done:
+        returncode = 1
+        stdout = ""
+        stderr = "No module named pytest"
+
+    monkeypatch.setattr(bench.subprocess, "run", lambda *a, **k: _Done())
+
+    result = run_task(task, _fake_loop_builder)
+
+    assert result.passed is False
+    assert result.blocked is True
+    assert "不是模型" in result.detail
+
+
+def test_报告把环境阻塞与模型失败分开() -> None:
+    """阻塞单列一档：它没被真的验收过，写「失败」就是把环境问题记在模型头上。"""
+    blocked = TaskResult("a", False, True, 3, 1000, 3, 1.0, blocked=True)
+    failed = TaskResult("b", False, True, 3, 1000, 3, 1.0)
+
+    text = render_report([blocked, failed])
+
+    assert "环境阻塞 1 个" in text
+    assert "不是模型" in text
+    # 表里那一行显示「阻塞」，不是「失败」
+    assert "a" in text
+    # 「自称完成但验收失败」只点 b：a 的验收根本没跑起来，不能算它虚假完成
+    overconfident = [line for line in text.splitlines() if "自称完成但验收失败" in line]
+    assert overconfident, text
+    assert "b" in overconfident[0]
+    assert "a" not in overconfident[0]
+
+
+def test_整批单会话那条路也把环境阻塞单列(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第二条仪器（`--together`）验收走的是同一个 verify，分类也要一致。"""
+    home = tmp_path / "01_x"
+    (home / "project").mkdir(parents=True)
+    (home / "acceptance").mkdir()
+    (home / "acceptance" / "t.py").write_text("", encoding="utf-8")
+    task = Task(
+        name="01_x",
+        goal="g",
+        command=("python", "-m", "pytest", "-q"),
+        acceptance_files=("t.py",),
+        home=home,
+    )
+    workspace = tmp_path / "ws"
+    (workspace / "01_x").mkdir(parents=True)
+
+    class _Done:
+        returncode = 1
+        stdout = ""
+        stderr = "No module named pytest"
+
+    monkeypatch.setattr(bench.subprocess, "run", lambda *a, **k: _Done())
+
+    results = bench.verify_together([task], workspace)
+    assert results[0].blocked is True
+
+    text = render_together(
+        results,
+        {
+            "steps": 0,
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "seconds": 0.0,
+            "workspace": workspace,
+        },
+    )
+    assert "环境阻塞 1 个" in text
+    assert "不是模型" in text
+    # 阻塞的不进「没过的」
+    assert "没过的" not in text
+
+
+# --- 第二次跑同一个工作区：验收环境里的 PYTEST_ADDOPTS ------------------------
+#
+# 真实翻车（本沙箱实测）：验收命令 `python -m pytest -q` 会建 `pytest-cache-files-*`
+# （`.pytest_cache` 在受限环境里建不出来时 pytest 改用 0o700 临时目录），而那个
+# 目录下一次**收集**时就是 PermissionError——第一次「1 passed」，第二次
+# 「Interrupted: 1 error during collection」，退出码 2。题做对了却在第二次验收里
+# 变成"失败"，这种误判比真的失败更难查。
+#
+# 修法刻意**不改验收命令**（那是题库数据）：环境里补 `-p no:cacheprovider`，
+# 并且是**合并**进用户已有的 `PYTEST_ADDOPTS`，不是覆盖。
+
+
+def test_验收环境合并pytest_addopts而不是覆盖() -> None:
+    """用户那一条必须留着——其中可能就是 repo 的 `-p pytest_sandbox_compat`。
+
+    证伪：把合并改成 `environment["PYTEST_ADDOPTS"] = ACCEPTANCE_...`（覆盖），
+    前两条断言红。
+    """
+    merged = bench.acceptance_env({"PYTEST_ADDOPTS": "-p pytest_sandbox_compat -x"})
+    assert merged["PYTHONIOENCODING"] == "utf-8"
+    assert "-p pytest_sandbox_compat" in merged["PYTEST_ADDOPTS"]
+    assert "-x" in merged["PYTEST_ADDOPTS"]
+    assert bench.ACCEPTANCE_PYTEST_ADDOPTS in merged["PYTEST_ADDOPTS"]
+
+    # 已经有就不重复加
+    assert bench.acceptance_env(
+        {"PYTEST_ADDOPTS": "-p no:cacheprovider"}
+    )["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+
+    # 用户没设过也要带上
+    assert bench.acceptance_env({})["PYTEST_ADDOPTS"] == bench.ACCEPTANCE_PYTEST_ADDOPTS
+
+
+def test_验收命令真的带上了合并后的环境(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """光有 `acceptance_env` 不算数：`verify` 得真的用它（这条钉住接线）。
+
+    证伪：把 verify 里那行改回 `dict(os.environ)`，这条红。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p pytest_sandbox_compat")
+
+    seen: dict = {}
+
+    class _Done:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _run(command, **kwargs):
+        seen.update(kwargs)
+        return _Done()
+
+    monkeypatch.setattr(bench.subprocess, "run", _run)
+
+    passed, _ = verify(Task(name="t", goal="g", command=("pytest", "-q")), workspace)
+
+    assert passed is True
+    assert seen["env"]["PYTEST_ADDOPTS"] == (
+        "-p pytest_sandbox_compat -p no:cacheprovider"
+    )
+    assert seen["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_同一个工作区连续两次验收都成功(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**真跑**两次：第一次留下的 0o700 临时目录不许让第二次收集失败。
+
+    证伪（实测）：去掉 `acceptance_env` 那行（改回 `dict(os.environ)`），
+    第一次 `1 passed`、磁盘上留下 `pytest-cache-files-*`，第二次
+    `PermissionError ... Interrupted: 1 error during collection`，这条红。
+
+    `PYTEST_ADDOPTS` 先清掉是**故意的**：跑测试的这套环境里它带着
+    `-p pytest_sandbox_compat`（那个插件把临时目录的 mode 抬成 0o777），
+    不清就等于把要复现的那个坑填平了——真实用户那里没有这个插件，
+    而 bench 要修的正是他那条路。清掉之后这里测的是"验收子进程只用
+    `acceptance_env` 给的环境"。
+    """
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    home = tmp_path / "task"
+    (home / "project").mkdir(parents=True)
+    (home / "acceptance").mkdir()
+    (home / "project" / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"
+    )
+    (home / "acceptance" / "test_acceptance.py").write_text(
+        "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+        encoding="utf-8",
+    )
+    task = Task(
+        name="t",
+        goal="g",
+        command=("python", "-m", "pytest", "-q"),
+        acceptance_files=("test_acceptance.py",),
+        home=home,
+    )
+    workspace = tmp_path / "ws"
+    prepare(task, workspace)
+
+    first, detail_first = verify(task, workspace)
+    second, detail_second = verify(task, workspace)
+
+    assert first is True, detail_first
+    assert second is True, detail_second
+    # 根因也钉住：那个会毒化下一次收集的目录压根不该被建出来
+    assert list(workspace.glob("pytest-cache-files-*")) == []
+
+

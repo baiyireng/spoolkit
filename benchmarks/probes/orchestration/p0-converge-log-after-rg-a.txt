@@ -1,0 +1,88 @@
+
+===== P0 真机小样本 @ 2026-10-06 23:38:16 =====
+版本 : HEAD 1f065720f08f PROMPT_VERSION 2026-10-06.1 工具 18 件 system 2557 token （有效预算 6964）
+预算 : 4500s；任务 ['A-todo', 'B-failing-test']；臂 ['converge', 'base']；每格 2 次；max_steps 8
+本机回环隔离代理：NO_PROXY=127.0.0.1,localhost,::1；HTTP_PROXY=（已清空）
+沙箱 : C:\Users\32615\AppData\Local\Temp\dsh-2c82ri\spool-p0-converge-i7ef4rbu\project（失败测试 exit=1）
+A-todo|converge|r0: 开跑（已用 0s / 4500s）…
+  步 8 输入 23816 输出 3475 墙钟 516.5s 工具调用 68 重置 1 收束=是 结论=无 终止=步数上限 可用 0/3
+A-todo|converge|r1: 开跑（已用 571s / 4500s）…
+  步 8 输入 33676 输出 1444 墙钟 89.7s 工具调用 14 重置 0 收束=是 结论=有 终止=模型完成 可用 2/3
+B-failing-test|converge|r0: 开跑（已用 674s / 4500s）…
+  步 7 输入 24135 输出 1489 墙钟 97.9s 工具调用 12 重置 1 收束=是 结论=有 终止=模型完成 可用 1/1
+    step4: 目标产出规模要 62 行，请求把步数预算放到 9 步，硬上限 8 步——实际 8 步（放大被夹住）
+B-failing-test|converge|r1: 开跑（已用 781s / 4500s）…
+  步 7 输入 24167 输出 1500 墙钟 97.9s 工具调用 12 重置 1 收束=是 结论=有 终止=模型完成 可用 1/1
+    step4: 目标产出规模要 62 行，请求把步数预算放到 9 步，硬上限 8 步——实际 8 步（放大被夹住）
+A-todo|base|r0: 开跑（已用 947s / 4500s）…
+  步 8 输入 36270 输出 5877 墙钟 344.5s 工具调用 13 重置 0 收束=否 结论=无 终止=步数上限 可用 0/3
+A-todo|base|r1: 开跑（已用 1364s / 4500s）…
+  步 8 输入 36270 输出 5877 墙钟 346.3s 工具调用 13 重置 0 收束=否 结论=无 终止=步数上限 可用 0/3
+B-failing-test|base|r0: 开跑（已用 1781s / 4500s）…
+  步 8 输入 33800 输出 1571 墙钟 137.3s 工具调用 22 重置 1 收束=否 结论=无 终止=步数上限 可用 0/1
+    step4: 目标产出规模要 62 行，请求把步数预算放到 9 步，硬上限 8 步——实际 8 步（放大被夹住）
+B-failing-test|base|r1: 开跑（已用 1989s / 4500s）…
+  步 8 输入 27591 输出 1417 墙钟 127.8s 工具调用 21 重置 1 收束=否 结论=无 终止=步数上限 可用 0/1
+===== 跑完（跳过 0 次）=====
+沙箱 : C:\Users\32615\AppData\Local\Temp\dsh-mtGIvq\spool-p0-converge-sirts9j2\project
+配方 : 预置 6/6 条待办
+失败测试：exit=1
+E        +  where False = <spoolkit.services.Service object at 0x000001A0732B5160>.stopped
+
+tests\services\test_services.py:39: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/services/test_services.py::test_停下之后状态与pid记录都要对上 - ...
+1 failed in 0.09s
+
+===== P0 真机小样本 @ 2026-10-07 01:52:46 =====
+版本 : HEAD 8d2eb3d24993 PROMPT_VERSION 2026-10-06.1 工具 18 件 system 2557 token （有效预算 6964）
+预算 : 5400s；任务 ['A-todo', 'B-failing-test']；臂 ['base', 'converge']；每格 2 次；max_steps 8
+本机回环隔离代理：NO_PROXY=127.0.0.1,localhost,::1；HTTP_PROXY=（已清空）
+沙箱 : C:\Users\32615\AppData\Local\Temp\dsh-mtGIvq\spool-p0-converge-sirts9j2\project（失败测试 exit=1）
+A-todo|base|r0: 开跑（已用 0s / 5400s）…
+  步 8 输入 31220 输出 1367 墙钟 92.5s 工具调用 22 重置 1 收束=否 结论=无 终止=步数上限 可用 0/3
+A-todo|base|r1: 开跑（已用 111s / 5400s）…
+  步 8 输入 31220 输出 1367 墙钟 95.5s 工具调用 22 重置 1 收束=否 结论=无 终止=步数上限 可用 0/3
+B-failing-test|base|r0: 开跑（已用 216s / 5400s）…
+  步 8 输入 26203 输出 2124 墙钟 128.0s 工具调用 16 重置 1 收束=否 结论=无 终止=步数上限 可用 0/1
+    step4: 目标产出规模要 62 行，请求把步数预算放到 9 步，硬上限 8 步——实际 8 步（放大被夹住）
+B-failing-test|base|r1: 开跑（已用 355s / 5400s）…
+  步 8 输入 29202 输出 742 墙钟 42.7s 工具调用 11 重置 1 收束=否 结论=无 终止=步数上限 可用 0/1
+    step4: 目标产出规模要 177 行，请求把步数预算放到 10 步，硬上限 8 步——实际 8 步（放大被夹住）
+A-todo|converge|r0: 开跑（已用 408s / 5400s）…
+  步 8 输入 36392 输出 966 墙钟 53.4s 工具调用 13 重置 0 收束=是 结论=有 终止=模型完成 可用 1/3
+    step4: 目标产出规模要 5972 行，请求把步数预算放到 20 步，硬上限 8 步——实际 8 步（放大被夹住）
+A-todo|converge|r1: 开跑（已用 472s / 5400s）…
+  步 8 输入 36392 输出 966 墙钟 53.6s 工具调用 13 重置 0 收束=是 结论=有 终止=模型完成 可用 1/3
+    step4: 目标产出规模要 5972 行，请求把步数预算放到 20 步，硬上限 8 步——实际 8 步（放大被夹住）
+B-failing-test|converge|r0: 开跑（已用 535s / 5400s）…
+  步 8 输入 29713 输出 2676 墙钟 161.7s 工具调用 15 重置 1 收束=是 结论=有 终止=模型完成 可用 1/1
+    step4: 目标产出规模要 62 行，请求把步数预算放到 9 步，硬上限 8 步——实际 8 步（放大被夹住）
+B-failing-test|converge|r1: 开跑（已用 707s / 5400s）…
+  步 8 输入 25020 输出 1008 墙钟 49.6s 工具调用 11 重置 1 收束=是 结论=有 终止=模型完成 可用 1/1
+    step4: 目标产出规模要 613 行，请求把步数预算放到 18 步，硬上限 8 步——实际 8 步（放大被夹住）
+===== 跑完（跳过 0 次）=====
+沙箱 : C:\Users\32615\AppData\Local\Temp\dsh-mtGIvq\spool-p0-converge-a2jsegsc\project
+配方 : 预置 6/6 条待办
+失败测试：exit=1
+E        +  where False = <spoolkit.services.Service object at 0x000001D8927F1160>.stopped
+
+tests\services\test_services.py:39: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/services/test_services.py::test_停下之后状态与pid记录都要对上 - ...
+1 failed in 0.07s
+
+===== P0 真机小样本 @ 2026-10-07 02:06:30 =====
+版本 : HEAD 8d2eb3d24993 PROMPT_VERSION 2026-10-06.1 工具 18 件 system 2557 token （有效预算 6964）
+预算 : 2400s；任务 ['A-todo']；臂 ['base', 'converge']；每格 2 次；max_steps 8
+本机回环隔离代理：NO_PROXY=127.0.0.1,localhost,::1；HTTP_PROXY=（已清空）
+沙箱 : C:\Users\32615\AppData\Local\Temp\dsh-mtGIvq\spool-p0-converge-a2jsegsc\project（失败测试 exit=1）
+A-todo|base|r0: 开跑（已用 0s / 2400s）…
+  步 3 输入 8249 输出 980 墙钟 34.2s 工具调用 8 重置 0 收束=否 结论=有 终止=模型完成 可用 3/3
+A-todo|base|r1: 开跑（已用 48s / 2400s）…
+  步 3 输入 7977 输出 879 墙钟 30.6s 工具调用 8 重置 0 收束=否 结论=有 终止=模型完成 可用 3/3
+A-todo|converge|r0: 开跑（已用 89s / 2400s）…
+  步 3 输入 8219 输出 1028 墙钟 35.8s 工具调用 8 重置 0 收束=否 结论=有 终止=模型完成 可用 3/3
+A-todo|converge|r1: 开跑（已用 134s / 2400s）…
+  步 3 输入 8249 输出 980 墙钟 33.6s 工具调用 8 重置 0 收束=否 结论=有 终止=模型完成 可用 3/3
+===== 跑完（跳过 0 次）=====

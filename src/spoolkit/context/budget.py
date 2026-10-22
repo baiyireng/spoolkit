@@ -10,6 +10,7 @@
 实测出来的，不是普适真理。
 """
 
+from dataclasses import dataclass
 from typing import Mapping
 
 from spoolkit import limits
@@ -133,10 +134,152 @@ class Budget:
         return {name: self.quota(name) for name in names}
 
     def soft_limit(self) -> int:
-        """软触发线：达到后整理上下文，不中断任务。"""
+        """软触发线：达到后整理上下文，不中断任务。
+
+        **按窗口算**（不是按有效预算）：它管的是「该整理了」，整理一次很便宜，
+        早一点没有代价。硬触发那条不一样，见下。
+        """
         return int(self.window * self._knob("soft_trigger_ratio"))
 
     def hard_limit(self) -> int:
-        """硬触发线：达到后重置上下文，保留状态。"""
-        return int(self.window * self._knob("hard_trigger_ratio"))
+        """硬触发线：达到后重置上下文（丢掉历史、保留状态）。
+
+        **按有效预算算，而且不得高于它**——这一条由 P0 取证改过来，原因是
+        「重置」在这套装配里错得比看上去更早：
+
+        - 装配器对**非必留区段**每个都按配额裁剪（system 900 + hot_memory 1044
+          + task_state 348 + retrieval 1044 + code 2437 + lessons 696 ≈ 6469
+          token，8K 窗口下），必留的 system 另有 2557——所以「需求体积」在
+          **第一步就接近 9000**，而那时模型还什么都没读过；
+        - 旧口径是 `window × 0.90 = 7372`。于是历史还没装多少，重置就先触发了：
+          真机对照 36 次里 **17 次**至少重置过一次，而重置把已读到的工具输出
+          **整段丢掉**（`p0-turns.json` 逐回合可查：第 4 步已读到失败原文与
+          `services.py`，第 5 步重置之后全部作废，第 6-8 步在重新列目录）。
+          这正是「素材够了却写不出结论」的主要成因。
+
+        为什么上界是 `effective()`：装配器**最多只能装到有效预算**，需求超过它
+        本来就要裁剪。所以「真装不下了」这件事在 `demand > effective()` 时才算
+        成立，拿一个比它低得多的数当重置线，只会更早地把素材丢掉。
+        保留 `hard_trigger_ratio` 这个旋钮（默认 0.98）的理由：它仍然要能
+        **提前**一点触发，好让裁剪发生在装配之前而不是让模型读到半截内容。
+        """
+        return min(
+            int(self.effective() * self._knob("hard_trigger_ratio")),
+            self.effective(),
+        )
+
+
+@dataclass(frozen=True)
+class CompactDecision:
+    """「这一轮的素材值不值得压一遍」的判定结果。
+
+    它是一个**纯计算**的结果：只回答两个问题——现在压不压、压完允许留多少。
+    真正去改上下文的动作在压缩器里（`agent/material_compactor.py`），这里不做
+    任何 I/O，也不调用模型。这样「什么时候压」这件事可以脱离模型单独算、单独量、
+    单独被变异打红。
+    """
+
+    should: bool
+    reason: str
+    used: int
+    material: int
+    effective: int
+    threshold: int
+    free: int
+    reserve_target: int
+    keep_tokens: int
+    expected_saving: int
+
+
+def compact_trigger(budget: Budget, *, used: int, material: int) -> CompactDecision:
+    """素材压缩的动态阈值。**两个数都是 token，不是字符**。
+
+    `used` 与预算守卫同口径：**裁剪前**的需求量（`assembled.demand_tokens`）。
+    `material` 是其中「可以由压缩器改写」的那一部分（工具输出/读进来的正文），
+    不是整个需求——系统提示、任务状态、检索结果都不是压缩器的地盘。
+
+    为什么必须动态：写死的阈值会随窗口一起错。同一个「3000」在 8K 窗口下正好
+    半屏，在 2K 窗口下就是全部——而这两个窗口在这套系统里都会出现（探针用
+    4096/8192，`--window` 可改）。所以触发线从 `Budget.effective()` 与当前需求
+    算出来，四个标定值全部走登记表（`material_compact_*`）。
+
+    触发条件（三条，缺一不可）：
+
+    1. **余量已经低于目标**：目标余量 = `max(有效预算 × (1 − ratio), min_free)`，
+       两个下限取大。比例那一条负责「快到线了就腾地方」，绝对量那一条负责小窗口
+       ——窗口 2048 时 28% 只有 487 token，而一条工具输出就可能上千，比例线保不住
+       它（`material_compact_min_free_tokens` 的 note 里有这笔账）。
+    2. **素材本身够长**（≥ `floor_tokens`）：一次压缩要花一次模型调用，素材太短
+       时省下的还不如调用本身贵。
+    3. **素材占当前需求的一半以上**（`share`）：需求大但大在系统提示与检索上时，
+       压素材腾不出多少地方，那是「为压缩而压缩」。
+
+    `keep_tokens` 是**给压缩器的预算**，不是硬砍：要求它至少砍掉缺口
+    （`reserve_target − free`），但不得低于 `floor_tokens`——「一条都不要留」
+    不是这里能决定的事，判据保护的那部分素材由压缩器逐字保留。
+    缺口比素材还大时如实报：`free + expected_saving` 会小于 `reserve_target`，
+    「压完也回不到目标」这件事在 reason 里说不清，但数字上是可查的。
+    """
+    # 同一个模块内取标定值：`_knob` 是私有的，但它要的就是「含本次运行覆盖的值」
+    # 这一件事，而公开一个 `knob()` 只会多一个绕路。
+    effective = budget.effective()
+    ratio = budget._knob("material_compact_ratio")
+    share = budget._knob("material_compact_share")
+    floor = int(budget._knob("material_compact_floor_tokens"))
+    min_free = int(budget._knob("material_compact_min_free_tokens"))
+
+    used = max(int(used), 0)
+    material = max(int(material), 0)
+    free = max(effective - used, 0)
+    reserve_target = max(int(effective * (1.0 - ratio)), min_free)
+    threshold = max(effective - reserve_target, 0)
+    deficit = reserve_target - free
+
+    def no(reason: str) -> CompactDecision:
+        return CompactDecision(
+            should=False,
+            reason=reason,
+            used=used,
+            material=material,
+            effective=effective,
+            threshold=threshold,
+            free=free,
+            reserve_target=reserve_target,
+            keep_tokens=material,
+            expected_saving=0,
+        )
+
+    if deficit <= 0:
+        return no(
+            f"还没到整理线：现用 {used}，余量 {free} ≥ 目标 {reserve_target}"
+            f"（有效预算 {effective}，整理线 {threshold}）"
+        )
+    if material < floor:
+        return no(
+            f"素材只有 {material} token（< 下限 {floor}），不值得为它花一次整理"
+        )
+    if material < share * used:
+        percent = int(round(100.0 * material / max(used, 1)))
+        return no(
+            f"素材 {material} token 只占当前需求 {percent}%"
+            f"（< {int(round(share * 100))}%），压它腾不出多少地方"
+        )
+
+    keep = max(floor, material - deficit)
+    return CompactDecision(
+        should=True,
+        reason=(
+            f"素材该整理了：现用 {used} 已过整理线 {threshold}"
+            f"（有效预算 {effective}，目标余量 {reserve_target}，现在只剩 {free}）；"
+            f"素材 {material} token，压完最多留 {keep}"
+        ),
+        used=used,
+        material=material,
+        effective=effective,
+        threshold=threshold,
+        free=free,
+        reserve_target=reserve_target,
+        keep_tokens=keep,
+        expected_saving=material - keep,
+    )
 

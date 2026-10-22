@@ -1,49 +1,48 @@
-"""通道凭据从哪来：**环境变量 → 项目 `.env`**，并且要把来源说出来。
+r"""通道凭据从哪来：**环境变量 → 工作区 `.env` → 用户级 `.env`**，并且把来源说出来。
 
-为什么要有这一层：用户把 QQ 的 AppID/AppSecret 写进了项目根的 `.env`
-（那里本来就是放密钥的地方，也已经被 .gitignore 排除），而通道适配器原先只认
-进程环境变量——于是"我明明填了"变成一句没有办法排查的抱怨。
+为什么要有这一层：用户把 QQ 的 AppID/AppSecret 写进了 `.env`（那里本来就是放密钥
+的地方），而通道适配器原先只认进程环境变量——于是"我明明填了"变成一句没有办法
+排查的抱怨。
 
-三条规矩：
+为什么现在多一层用户级（2026-09-27）：**通道是机器级的服务**。一条
+`spool bridge`（不给 `--root`）服务整台机器，"你站在哪个目录"不该决定它读哪份
+密钥。真实事故是这个样子的：在 `C:\Users\32615` 敲 `spool bridge --channel qqbot …`，
+报"缺少 AppID 与 AppSecret"、并建议写进 `C:\Users\32615\.env`——而凭据好好地在
+`D:\workSpace\agentWorkSpace\.env` 里。根因是 `root` 缺省取了 cwd。
 
-1. **来源要说出来**：查到了要说清是从环境变量还是从哪个文件来的。
+四条规矩：
+
+1. **来源要说出来**：查到了要说清是从环境变量、还是从哪个文件来的。
 2. **容错大小写与别名**：`QQ_AppID` / `QQ_APPID` / `AGENTS_DEV_QQ_APPID`
    都认——用户已经按自己的习惯写下了，让人去改拼写是最没必要的摩擦。
 3. **值不回显**：日志与报错只给前几位 + `***`，密钥不进日志。
+4. **不缓存**：桥是长驻进程，凭什么拿"启动那一刻的快照"回答所有后续问题。
+
+解析顺序本身由 `spoolkit.settings.resolve_secret` 统一决定：三个入口
+（通道、模型供应商、网页搜索）共用同一条链，不再各写一套。
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-from spoolkit.llm.gemini import load_env_file
+from spoolkit import settings
 
 
 def find(root: Path | None, *names: str) -> tuple[str, str]:
     """按顺序找第一个有值的名字。返回（值, 来源说明）。
 
-    顺序是**环境变量优先于 .env**：环境变量是"这次 shell 的意图"，
-    文件是长期设置——和 provider 配置的优先级一致。
+    `root` 是**这次运行绑定的工作区**（不是当前目录）：给了就看 `<root>/.env`，
+    没给（机器级通道）就只剩用户级那一份。环境变量始终优先——它是"这次 shell
+    的意图"，文件是长期设置。
     """
-    for name in names:
-        value = os.environ.get(name, "").strip()
-        if value:
-            return value, f"环境变量 {name}"
-    if root is not None:
-        env_file = root / ".env"
-        table = load_env_file(env_file)
-        for name in names:
-            value = (table.get(name) or "").strip()
-            if value:
-                return value, f"{env_file} 里的 {name}"
-    return "", "没找到（环境变量或 .env 都没有）"
+    return settings.resolve_secret(names, workspace=root)
 
 
 def mask(value: str) -> str:
     """给日志看的形状：够认出是哪一份，又不至于泄露。"""
     if not value:
-        return "（空）"
+        return "(empty)"
     if len(value) <= 6:
         return "*" * len(value)
     return f"{value[:3]}***{value[-2:]}"
