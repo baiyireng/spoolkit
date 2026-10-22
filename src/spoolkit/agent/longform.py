@@ -58,7 +58,7 @@ _STATE_PHASE = {
 
 
 class LongFormError(Exception):
-    """runner 缺少当前节或当前节正文。"""
+    """没有可写的节，或当前节缺少正文。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,18 +171,23 @@ class LongFormRunner:
 
     def __init__(self, state: DocumentState, gateway: ModelGateway, bodies: InMemoryBodyStore) -> None:
         if state.current_section is None:
-            raise LongFormError("需要当前节")
-        if not bodies.exists(section_ref(state.current_section.index)):
-            raise LongFormError("当前节没有正文")
+            if not state.pending_sections:
+                raise LongFormError("没有可写的节")
+            origin = state.pending_sections[0]
+        else:
+            if not bodies.exists(section_ref(state.current_section.index)):
+                raise LongFormError("当前节没有正文")
+            origin = state.current_section.index
         self.state = state
         self.bodies = bodies
         self._gateway = gateway
-        self._origin = state.current_section.index
+        self._origin = origin
         self._steps: list[PhaseStep] = []
         self._failures: dict[int, str] = {}
         self._anchor_unresolved = False
 
     def run(self) -> LongFormResult:
+        self._open_from_outline()
         self._drive_current()
         while self.state.pending_sections:
             self._drive_pending()
@@ -206,6 +211,23 @@ class LongFormRunner:
             ending=ending,
             failures=tuple(sorted(self._failures.items())),
         )
+
+    def _open_from_outline(self) -> None:
+        if self.state.current_section is not None:
+            return
+        if not self.state.pending_sections:
+            raise LongFormError("没有可写的节")
+        index = self.state.pending_sections[0]
+        entry = self.state.outline[index]
+        self.bodies.put(index, "")
+        phase = "write" if self.state.phase == "plan" else self.state.phase
+        self.state = replace(
+            self.state,
+            current_section=CurrentSection(index, entry.title, "", "", 0, "open"),
+            pending_sections=self.state.pending_sections[1:],
+            phase=phase,
+        )
+        self._origin = index
 
     def _drive_current(self) -> None:
         current = self.state.current_section

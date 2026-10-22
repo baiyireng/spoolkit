@@ -1,5 +1,7 @@
 """显式 LongFormRunner。假网关按脚本回答，正文留在 BodyStore。"""
 
+import pytest
+
 from spoolkit.agent.document_bodies import InMemoryBodyStore, section_ref
 from spoolkit.agent.document_state import (
     TAIL_CAP,
@@ -13,6 +15,7 @@ from spoolkit.agent.longform import (
     GUARD_RETRY,
     NOVELTY_RETRY,
     SCAFFOLD_RETRY,
+    LongFormError,
     LongFormRunner,
     finish_messages,
     finalize_messages,
@@ -321,6 +324,62 @@ def test_think_scaffold_and_repetition_stay_out_of_bodies() -> None:
         assert scaffold_hits(body) == ()
     assert ENDING not in runner.bodies.get(section_ref(0))
     assert runner.bodies.get(section_ref(2)).count(ENDING) == 1
+
+
+def test_outline_start_finishes_first_section_then_writes_pending() -> None:
+    titles = ("窗口", "估算", "余量")
+    outline = tuple(
+        OutlineEntry(index=index, title=title, points=f"{title}的要点", target_chars=500)
+        for index, title in enumerate(titles)
+    )
+    state = DocumentState(
+        goal="写一份估算说明",
+        outline=outline,
+        deliverable="chat",
+        phase="plan",
+        pending_sections=(0, 1, 2),
+    )
+    gateway = ScriptedGateway([_piece(title, 1000) for title in titles] + ["完"])
+    store = InMemoryBodyStore()
+    runner = LongFormRunner(state, gateway, store)
+    seen: list[str] = []
+    chat = gateway.chat
+
+    def record(request: ChatRequest) -> ChatResponse:
+        seen.append(runner.state.phase)
+        return chat(request)
+
+    gateway.chat = record  # type: ignore[method-assign]
+    snapshot = state.to_json()
+    result = runner.run()
+    assert state.to_json() == snapshot
+    assert state.current_section is None
+    assert seen[0] == "write"
+    assert result.steps[0].phase == "finish_current"
+    assert result.steps[0].index == 0
+    assert [(step.phase, step.index) for step in result.steps if step.phase == "write_pending"] == [
+        ("write_pending", 1),
+        ("write_pending", 2),
+    ]
+    assert result.done
+    assert result.ending == "完"
+    assert result.state.phase == "finalize"
+    assert runner.bodies.get(section_ref(0)).startswith("窗口写完。")
+
+
+def test_missing_section_errors_are_clear() -> None:
+    outline = (OutlineEntry(0, "窗口", "窗口的要点", 500),)
+    empty = DocumentState(goal="写一份估算说明", outline=outline, phase="plan")
+    with pytest.raises(LongFormError, match="没有可写的节"):
+        LongFormRunner(empty, ScriptedGateway([]), InMemoryBodyStore())
+    current = DocumentState(
+        goal="写一份估算说明",
+        outline=outline,
+        phase="write",
+        current_section=CurrentSection(0, "窗口", "", "", 0, "open"),
+    )
+    with pytest.raises(LongFormError, match="当前节没有正文"):
+        LongFormRunner(current, ScriptedGateway([]), InMemoryBodyStore())
 
 
 def test_transitions_replay() -> None:
