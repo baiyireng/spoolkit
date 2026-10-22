@@ -21,7 +21,10 @@ class ChatSink(Protocol):
         """开始写这一节。此时还没有可提交的正文。"""
 
     def section_commit(self, index: int, body: str) -> None:
-        """这一节的最终正文。只在守卫通过并写入 BodyStore 之后调用。"""
+        """这一节首次提交的最终正文。只在守卫通过并写入 BodyStore 之后调用。"""
+
+    def section_replace(self, index: int, body: str) -> None:
+        """这一节已提交过，校验重开后替换成新的最终正文。不要追加。"""
 
     def progress(self, phase: str, index: int) -> None:
         """runner phase 前进一步。index 为 -1 表示还没落在某一节。"""
@@ -47,6 +50,9 @@ class RecorderSink:
 
     def section_commit(self, index: int, body: str) -> None:
         self.events.append(("section_commit", index, body))
+
+    def section_replace(self, index: int, body: str) -> None:
+        self.events.append(("section_replace", index, body))
 
     def progress(self, phase: str, index: int) -> None:
         self.events.append(("progress", phase, index))

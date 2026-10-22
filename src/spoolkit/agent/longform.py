@@ -197,6 +197,9 @@ class LongFormRunner:
         self._failures: dict[int, str] = {}
         self._anchor_unresolved = False
         self._published: set[int] = set()
+        # 已经发给 sink 的节。校验重开后再提交同一节时必须 replace，
+        # 否则聊天层会把同一节追加两遍。
+        self._committed: set[int] = set()
 
     def run(self) -> LongFormResult:
         self._notify("start", self.state)
@@ -557,7 +560,11 @@ class LongFormRunner:
             phase="commit",
         )
         if current.index in self._published and body.strip():
-            self._notify("section_commit", current.index, body)
+            if current.index in self._committed:
+                self._notify("section_replace", current.index, body)
+            else:
+                self._committed.add(current.index)
+                self._notify("section_commit", current.index, body)
 
     def _store(self, index: int, body: str) -> None:
         ref = section_ref(index)

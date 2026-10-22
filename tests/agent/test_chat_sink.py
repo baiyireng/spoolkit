@@ -39,6 +39,10 @@ class RaisingSink:
         self.calls += 1
         raise RuntimeError("section_commit")
 
+    def section_replace(self, index: int, body: str) -> None:
+        self.calls += 1
+        raise RuntimeError("section_replace")
+
     def progress(self, phase: str, index: int) -> None:
         self.calls += 1
         raise RuntimeError("progress")
@@ -229,3 +233,28 @@ def test_sink_errors_do_not_change_the_run() -> None:
     assert result.ending == "完"
     assert sink.calls > 0
     assert store.get(section_ref(0)).startswith("窗口写完。")
+
+
+def test_validate_repair_replaces_the_earlier_commit() -> None:
+    """三节都先提交，全文不足后校验重开最后一节；sink 应 replace 而不是再 commit。"""
+    sink = RecorderSink()
+    first = _piece("窗口", 800)
+    second = _piece("估算", 800)
+    third = _piece("余量", 800)
+    supplement = _piece("余量补充", 700)
+    runner = LongFormRunner(
+        _plan(),
+        ScriptedGateway([first, second, third, supplement, "完"]),
+        InMemoryBodyStore(),
+        sink,
+    )
+    result = runner.run()
+    assert result.done
+    commits = [event for event in sink.events if event[0] == "section_commit"]
+    replaces = [event for event in sink.events if event[0] == "section_replace"]
+    assert [event[1] for event in commits] == [0, 1, 2]
+    assert len(replaces) == 1
+    assert replaces[0][1] == 2
+    assert third in replaces[0][2]
+    assert supplement in replaces[0][2]
+    assert replaces[0][2] == runner.bodies.get(section_ref(2))
