@@ -51,6 +51,8 @@ PHASES = (
 )
 STATUSES = ("running", "paused", "done", "failed", "cancelled")
 SECTION_STATUSES = ("open", "repairing", "rewriting", "closed")
+# 进入这些阶段后，completed / current / pending 必须正好盖住大纲。
+COVERING_PHASES = frozenset({"write", "continue", "repair", "rewrite", "commit", "finalize"})
 
 _OUTLINE_KEYS = frozenset({"index", "title", "points", "target_chars"})
 _COMPLETED_KEYS = frozenset(
@@ -166,7 +168,6 @@ class CompletedSection:
             raise DocumentStateError("已完成节下标为负")
         _nonempty(self.title, "节标题")
         _bounded(self.summary, SUMMARY_CAP, "摘要")
-        _nonempty(self.artifact_id, "artifact_id")
         if self.char_count < 0:
             raise DocumentStateError("字数为负")
 
@@ -187,7 +188,7 @@ class CompletedSection:
             index=_count(payload["index"], "已完成节下标"),
             title=_nonempty(payload["title"], "节标题"),
             summary=_bounded(str(payload.get("summary", "")), SUMMARY_CAP, "摘要"),
-            artifact_id=_nonempty(payload["artifact_id"], "artifact_id"),
+            artifact_id=str(payload.get("artifact_id", "")),
             path=str(payload.get("path", "")),
             char_count=_count(payload["char_count"], "字数"),
         )
@@ -297,6 +298,17 @@ class DocumentState:
                 raise DocumentStateError("当前节不应同时列在未开始节里")
             if self.current_section.index in completed:
                 raise DocumentStateError("当前节不应同时列在已完成节里")
+        if self.deliverable in ("file", "both"):
+            for item in self.completed_sections:
+                if not item.artifact_id.strip() and not item.path.strip():
+                    raise DocumentStateError("file/both 的已完成节需要 artifact_id 或 path")
+        if self.phase in COVERING_PHASES:
+            covered = list(completed)
+            if self.current_section is not None:
+                covered.append(self.current_section.index)
+            covered.extend(self.pending_sections)
+            if sorted(covered) != list(range(len(self.outline))):
+                raise DocumentStateError("completed、current、pending 必须覆盖全部大纲，且每个下标只出现一次")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -376,11 +388,56 @@ class DocumentState:
         return cls.from_dict(payload)
 
     def check(self, bodies: Sequence[str], *, anchor_lost_unresolved: bool = False) -> tuple[str, ...]:
+        """只检查这批正文本身，不看大纲和字数记录。图要调用 check_bodies。"""
         return validate_completion(
             bodies,
             length_floor=self.length_floor,
             anchor_lost_unresolved=anchor_lost_unresolved,
         )
+
+    def check_bodies(
+        self,
+        bodies: Sequence[tuple[int, str]],
+        *,
+        anchor_lost_unresolved: bool = False,
+    ) -> tuple[str, ...]:
+        """图的完成入口。每一项是 (大纲下标, 正文)，下标顺序必须与大纲一致。
+
+        通过线是 length_floor（默认 450），不是 outline.target_chars。
+        target_chars 只是写作时的目标字数。正文达到 length_floor 即算这一节够长。
+        全文按各节 strip 后的长度相加，达到 DOC_FLOOR。
+        下标若落在 completed 或 current，正文长度必须等于该节记录的 char_count。
+        """
+        reasons: list[str] = []
+        indexes = [index for index, _text in bodies]
+        expected = list(range(len(self.outline)))
+        if len(bodies) != len(self.outline):
+            reasons.append("section_count")
+        if len(indexes) != len(set(indexes)):
+            reasons.append("duplicate_section")
+        elif indexes != expected and sorted(indexes) == expected:
+            reasons.append("section_order")
+        elif set(indexes) != set(expected):
+            if "section_count" not in reasons:
+                reasons.append("section_count")
+        recorded = {item.index: item.char_count for item in self.completed_sections}
+        if self.current_section is not None:
+            recorded[self.current_section.index] = self.current_section.char_count
+        for index, text in bodies:
+            if index not in recorded or recorded[index] != len(text.strip()):
+                reasons.append("char_count")
+                break
+        for reason in validate_completion(
+            [text for _index, text in bodies],
+            length_floor=self.length_floor,
+            anchor_lost_unresolved=anchor_lost_unresolved,
+        ):
+            reasons.append(reason)
+        unique: list[str] = []
+        for reason in reasons:
+            if reason not in unique:
+                unique.append(reason)
+        return tuple(unique)
 
 
 def _align_attempts(values: tuple[int, ...], size: int, label: str) -> tuple[int, ...]:
@@ -465,7 +522,7 @@ def validate_completion(
     doc_floor: int = DOC_FLOOR,
     anchor_lost_unresolved: bool = False,
 ) -> tuple[str, ...]:
-    """返回失败原因。空元组表示这批正文通过完成线。正文不写入 state。"""
+    """只看这批正文字符串。空元组表示通过。不对照大纲，正文也不写入 state。图用 check_bodies。"""
     reasons: list[str] = []
     if any(len(body.strip()) < length_floor for body in bodies):
         reasons.append("short_section")

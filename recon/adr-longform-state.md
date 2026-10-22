@@ -33,7 +33,10 @@
 - state 不存整节正文，也不存整篇文档。
 - `completed_sections[]` 只有引用、摘要和字数。`summary` 不超过现有 240 字摘要上限。
 - `current_section.tail` 最多 200 字，只给下一次续写看最后一个字之后的衔接。更早的正文在文件或 artifact 里，用 `path` / `artifact_id` 指回去。L0.6、L0.7 里 280 字窗口会从窗口开头重放，短尾才接得上。
-- `char_count` 是字数，不是正文。
+- `char_count` 是字数，不是正文。图用 `check_bodies` 时，它必须等于对应正文 strip 后的长度。
+- `deliverable=chat` 时，已完成节的 `artifact_id` 和 `path` 可以都空，用 `index` 和 `summary` 定位。`deliverable=file` 或 `both` 时，二者至少有一个非空。
+- `phase` 进入 `write` / `continue` / `repair` / `rewrite` / `commit` / `finalize` 后，`completed_sections`、`current_section`、`pending_sections` 合在一起正好覆盖全部大纲，每个下标只出现一次。`current` 不能同时出现在另外两处。`phase=plan` 可以还未覆盖。
+- 完成线看 `length_floor`（默认 450），不看 `outline.target_chars`。`target_chars` 是写作目标。全文仍是 3000 字。纯文本检查留在 `validate_completion`；图只调用 `check_bodies`。
 - 禁止字段：节全文、整篇文档、聊天记录、工具 raw。
 
 ## State / Update / reducer
@@ -72,7 +75,7 @@
 
 不存：节正文、整篇文档、prompt、模型 raw、`TaskEvent` 列表、工具输出。
 
-原子写 JSON。恢复时跳过已完成节点，从 `next_node` 继续。`schema_version` 与当前代码不一致就拒绝恢复，不猜字段。`current_section.tail` 超过 200 字的文件视为坏 checkpoint，不把多余正文读进 state。正文以 `path` / `artifact_id` 为准。
+原子写 JSON。恢复时跳过已完成节点，从 `next_node` 继续。`schema_version` 与当前代码不一致就拒绝恢复，不猜字段。`current_section.tail` 超过 200 字的文件视为坏 checkpoint，不把多余正文读进 state。文件交付的正文以 `path` / `artifact_id` 为准；聊天交付可以只有 `index` 和 `summary`。
 
 ## Sink 副作用
 
