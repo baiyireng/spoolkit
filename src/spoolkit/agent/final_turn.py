@@ -3,9 +3,11 @@
 第一次终稿的前缀必须与控制回合逐条相同，只在末尾追加一条 user 指令，
 这样 llama.cpp 的 `cache_prompt` 才能复用已经算过的 KV。
 续写仍保留这份前缀，再追加已写正文的尾部（assistant）和一条只要求新增内容的 user 指令。
+尾部长度按剩余窗口收缩，先留最小可用尾部，再扩到上限，并且不挤掉最小输出。
 """
 
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -18,7 +20,13 @@ from spoolkit.agent.continuation import (
     overlap_chars,
 )
 from spoolkit.agent.structure import fences_closed
-from spoolkit.context.phase_budget import Phase, compute_budget
+from spoolkit.context.phase_budget import (
+    CHARS_PER_TOKEN,
+    DEFAULT_MARGIN,
+    MIN_OUTPUT,
+    Phase,
+    compute_budget,
+)
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
 logger = logging.getLogger(__name__)
@@ -32,8 +40,10 @@ CONTINUATION_INSTRUCTION = (
     "接着你已写的结尾继续写。不要重复已写内容，不要重新开头，不要总结，不要加标题。"
 )
 
-# 续写窗口。落在 1500–2500 之间：够接上结尾，又不把整篇正文塞回提示词。
+# 续写窗口上限。落在 1500–2500 之间：够接上结尾，又不把整篇正文塞回提示词。
 PARTIAL_TAIL_CHARS = 2000
+# 长正文至少留这么多，模型和 overlap 才看得到结尾。短于它的正文整段保留。
+PARTIAL_TAIL_MIN_CHARS = 200
 
 CONTINUATION_TAIL_INSTRUCTION = (
     "以上是你已经写出的最后一段。只输出紧接其后的新增内容，不要重复，不要重新开头，不要总结。"
@@ -74,20 +84,120 @@ def partial_tail(text: str, *, limit: int = PARTIAL_TAIL_CHARS) -> str:
     return text[-limit:]
 
 
+def estimate_tokens(text: str) -> int:
+    """续写增量的 token 上界。
+
+    口径与 `phase_budget.CHARS_PER_TOKEN`（1.6 字/token）相同，但向上取整。
+    `resolve_n_past` 在缺 usage 时向下取整；续写要把即将插入的字算进窗口，
+    低估会让 prompt + max_tokens 超过 n_ctx。角色等特殊 token 不单计，
+    留给 `DEFAULT_MARGIN`。
+    """
+    return _tokens_for_chars(len(text))
+
+
+def _tokens_for_chars(chars: int) -> int:
+    if chars <= 0 or CHARS_PER_TOKEN <= 0:
+        return 0
+    return math.ceil(chars / CHARS_PER_TOKEN)
+
+
+def _chars_within(token_budget: int) -> int:
+    """最多能放多少字，才让 `estimate_tokens` 不超过 token_budget。"""
+    if token_budget <= 0 or CHARS_PER_TOKEN <= 0:
+        return 0
+    guess = int(token_budget * CHARS_PER_TOKEN)
+    while guess > 0 and _tokens_for_chars(guess) > token_budget:
+        guess -= 1
+    while _tokens_for_chars(guess + 1) <= token_budget:
+        guess += 1
+    return guess
+
+
 def continuation_messages(
-    prefix: Sequence[Message], partial: str
+    prefix: Sequence[Message],
+    partial: str,
+    *,
+    tail: str | None = None,
 ) -> tuple[Message, ...]:
     """控制前缀不动。非空尾部作为 assistant，后面接续写指令。"""
-    tail = partial_tail(partial)
+    chosen = partial_tail(partial) if tail is None else tail
     extra: tuple[Message, ...]
-    if tail:
+    if chosen:
         extra = (
-            Message(role="assistant", content=tail),
+            Message(role="assistant", content=chosen),
             Message(role="user", content=CONTINUATION_TAIL_INSTRUCTION),
         )
     else:
         extra = (Message(role="user", content=CONTINUATION_TAIL_INSTRUCTION),)
     return tuple(prefix) + extra
+
+
+@dataclass(frozen=True)
+class ContinuationPlan:
+    tail: str
+    follow_prompt: int
+    follow_limit: int
+    send: bool
+
+
+def plan_continuation(
+    partial: str,
+    *,
+    base_prompt: int,
+    n_ctx: int | None,
+    fallback_limit: int,
+) -> ContinuationPlan:
+    """按剩余窗口决定尾部和续写输出预算。放不下最小输出就不发请求。"""
+    instruction_tokens = estimate_tokens(CONTINUATION_TAIL_INSTRUCTION)
+    if n_ctx is None:
+        tail = partial_tail(partial)
+        return ContinuationPlan(
+            tail=tail,
+            follow_prompt=base_prompt + estimate_tokens(tail) + instruction_tokens,
+            follow_limit=fallback_limit,
+            send=fallback_limit > 0,
+        )
+    spare = (
+        n_ctx
+        - DEFAULT_MARGIN
+        - base_prompt
+        - instruction_tokens
+        - MIN_OUTPUT
+    )
+    tail = _fit_tail(partial, spare)
+    if tail is None:
+        return ContinuationPlan(
+            tail="",
+            follow_prompt=base_prompt + instruction_tokens,
+            follow_limit=0,
+            send=False,
+        )
+    follow_prompt = base_prompt + estimate_tokens(tail) + instruction_tokens
+    follow_limit = compute_budget(
+        n_ctx=n_ctx,
+        prompt_tokens=follow_prompt,
+        phase="continuation",
+    ).max_tokens
+    return ContinuationPlan(
+        tail=tail,
+        follow_prompt=follow_prompt,
+        follow_limit=follow_limit,
+        send=follow_limit >= MIN_OUTPUT,
+    )
+
+
+def _fit_tail(partial: str, spare_tokens: int) -> str | None:
+    """None 表示最小可用尾部放不进剩余预算。空 partial 返回空串。"""
+    if not partial:
+        return ""
+    if spare_tokens <= 0:
+        return None
+    budget_chars = _chars_within(spare_tokens)
+    minimum = min(len(partial), PARTIAL_TAIL_MIN_CHARS)
+    if budget_chars < minimum:
+        return None
+    size = min(len(partial), PARTIAL_TAIL_CHARS, budget_chars)
+    return partial[-size:]
 
 
 @dataclass(frozen=True)
@@ -188,21 +298,19 @@ def request_final(
     else:
         logger.warning("终稿被截断，续写一次")
     if response.prompt_tokens:
-        follow_prompt: int | None = response.prompt_tokens
+        base_prompt = response.prompt_tokens
     elif prompt_tokens is not None:
-        follow_prompt = prompt_tokens
+        base_prompt = prompt_tokens
     else:
-        follow_prompt = None
-    follow_limit = _output_limit(
-        max_tokens=limit,
+        base_prompt = n_past
+    plan = plan_continuation(
+        response.text,
+        base_prompt=base_prompt,
         n_ctx=n_ctx,
-        n_past=n_past,
-        prompt_tokens=follow_prompt,
-        phase="continuation",
-        target_tokens=None,
+        fallback_limit=limit,
     )
-    if follow_limit <= 0:
-        logger.warning("终稿续写未完成，改为短答并留下继续入口")
+    if not plan.send:
+        logger.warning("终稿续写预算不足，保留已写正文并留下继续入口")
         return _draft(response, response.text + SHORT_CONTINUE, True)
 
     held: list[str] = []
@@ -216,8 +324,8 @@ def request_final(
         follow = _complete(
             gateway,
             ChatRequest(
-                messages=continuation_messages(prefix, response.text),
-                max_tokens=follow_limit,
+                messages=continuation_messages(prefix, response.text, tail=plan.tail),
+                max_tokens=plan.follow_limit,
                 response_schema=None,
                 cache_prompt=True,
             ),

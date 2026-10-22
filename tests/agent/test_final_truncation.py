@@ -1,9 +1,15 @@
 """终稿截断：续写一次或改成短答，不做整段预算翻倍。"""
 
 import logging
+import math
 
-from spoolkit.agent.final_turn import request_final
-from spoolkit.context.phase_budget import compute_budget
+from spoolkit.agent.final_turn import SHORT_CONTINUE, estimate_tokens, request_final
+from spoolkit.context.phase_budget import (
+    CHARS_PER_TOKEN,
+    DEFAULT_MARGIN,
+    MIN_OUTPUT,
+    compute_budget,
+)
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
 
@@ -109,6 +115,44 @@ def test_续写重复尾部时merge只留一次() -> None:
     assert len(gateway.requests) == 2
     assert draft.text == body + "以及新写的后半段"
     assert draft.text.count(shared) == 1
+
+
+def test_长会话续写把尾部算进上下文(caplog) -> None:
+    caplog.set_level(logging.WARNING)
+    prefix = (Message(role="user", content="写说明"),)
+    partial = "甲" * 2000
+    gateway = _Cuts([_cut(partial, prompt_tokens=7000), _done("紧接的新内容")])
+    draft = request_final(
+        gateway, prefix, n_ctx=8192, prompt_tokens=7000
+    )
+    assert len(gateway.requests) == 2
+    follow = gateway.requests[1]
+    tail = _last_assistant(follow).content
+    assert partial.endswith(tail)
+    assert len(tail) < len(partial)
+    assert estimate_tokens(tail) >= estimate_tokens("甲" * 200)
+    follow_prompt = (
+        7000
+        + estimate_tokens(tail)
+        + estimate_tokens(_TAIL_INSTRUCTION)
+    )
+    assert follow_prompt + follow.max_tokens <= 8192 - DEFAULT_MARGIN
+    assert follow.max_tokens >= MIN_OUTPUT
+    assert draft.text == partial + "紧接的新内容"
+    assert estimate_tokens("甲" * 8) == math.ceil(8 / CHARS_PER_TOKEN)
+
+
+def test_续写预算不足时不发第二次请求(caplog) -> None:
+    caplog.set_level(logging.WARNING)
+    prefix = (Message(role="user", content="写说明"),)
+    partial = "甲" * 400
+    gateway = _Cuts([_cut(partial, prompt_tokens=7900)])
+    draft = request_final(gateway, prefix, n_ctx=8192, n_past=1000)
+    assert len(gateway.requests) == 1
+    assert draft.truncated is True
+    assert draft.text == partial + SHORT_CONTINUE
+    assert "继续" in draft.text
+    assert any("预算不足" in record.message for record in caplog.records)
 
 
 def test_续写仍截断时改短答并不再请求(caplog) -> None:
