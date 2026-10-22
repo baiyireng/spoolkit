@@ -65,14 +65,7 @@ function approvalCount() {
   const groups = ((ctx.store.get('lastState') || {}).task_groups) || [];
   let waiting = 0;
   for (let index = 0; index < groups.length; index += 1) {
-    const events = groups[index].events || [];
-    for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
-      const event = events[eventIndex];
-      if (String(event.phase || '') === 'approval' && approvalWaiting(event.status)) {
-        waiting += 1;
-        break;
-      }
-    }
+    if (taskStillWaiting(groups[index])) { waiting += 1; }
   }
   return waiting;
 }

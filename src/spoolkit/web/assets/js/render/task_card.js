@@ -51,6 +51,28 @@ function approvalWaiting(status) {
   return status !== 'confirmed' && status !== 'rejected';
 }
 
+// 同一条调用先记 await、批准后再记 confirmed。两条都留着。
+// 还在等，只看这条调用最后一次审批，不让前面的 await 把「待确认」留在头上。
+function taskStillWaiting(task) {
+  const events = ((task && task.events) || []).slice().sort(function (left, right) {
+    return Number(left.seq || 0) - Number(right.seq || 0);
+  });
+  const latest = {};
+  const order = [];
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index] || {};
+    if (String(event.phase || '') !== 'approval') { continue; }
+    const call = String(event.tool_call_id || '');
+    const key = call || ('seq:' + String(event.seq || index));
+    if (!Object.prototype.hasOwnProperty.call(latest, key)) { order.push(key); }
+    latest[key] = String(event.status || '');
+  }
+  for (let index = 0; index < order.length; index += 1) {
+    if (approvalWaiting(latest[order[index]])) { return true; }
+  }
+  return false;
+}
+
 function approvalJump(event) {
   const artifacts = event.artifacts || [];
   for (const item of artifacts) {
@@ -193,8 +215,12 @@ function drawTaskBody(box) {
     note.textContent = '该任务属于其他会话';
     box._body.appendChild(note);
   }
-  for (const row of taskRows(task)) {
-    const line = h('div', 'task-row task-' + row.kind + (row.bad ? ' bad' : ''));
+  const rows = taskRows(task);
+  const running = taskStatusClass(task.status) === 'running';
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const line = h('div', 'task-row task-' + row.kind + (row.bad ? ' bad' : '')
+      + (running && index === rows.length - 1 ? ' stream-row' : ''));
     if (row.kind === 'observe') {
       const meta = h('div', 'task-row-line');
       const tool = h('span', 'task-tool');
@@ -235,8 +261,15 @@ function drawTaskBody(box) {
 
 function taskOpen(box) { return !box._body.classList.contains('hidden'); }
 
+// 人点过的开合状态按 task_id 记住。卡片可能在重绑时换掉节点（live 卡重建、
+// 历史卡重画），只把状态挂在节点 `_userSet` 上会在换节点时丢失。
+const TASK_OPEN = Object.create(null);
+
 function setTaskOpen(box, open, fromUser) {
-  if (fromUser) { box._userSet = true; }
+  if (fromUser) {
+    box._userSet = true;
+    TASK_OPEN[String((box._task && box._task.task_id) || '')] = Boolean(open);
+  }
   box._body.classList.toggle('hidden', !open);
   box.classList.toggle('open', open);
   box._head.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -260,8 +293,26 @@ function makeTaskCard(task) {
   box._task = task;
   box._userSet = false;
   drawTaskHead(box);
-  if (taskStatusClass(task.status) === 'running') { setTaskOpen(box, true, false); }
+  const saved = TASK_OPEN[box.getAttribute('data-task-id') || ''];
+  if (typeof saved === 'boolean') {
+    box._userSet = true;
+    setTaskOpen(box, saved, false);
+  } else if (taskStatusClass(task.status) === 'running') {
+    setTaskOpen(box, true, false);
+  }
   return box;
+}
+
+function syncTaskCard(card, task) {
+  card._task = task;
+  card.className = taskCardClass(task.status, taskOpen(card));
+  drawTaskHead(card);
+  // 跑完就收起，和刷新后新画的卡同一姿态。人点过的开合不动。
+  if (!card._userSet && taskStatusClass(task.status) !== 'running' && taskOpen(card)) {
+    setTaskOpen(card, false, false);
+    return;
+  }
+  if (taskOpen(card)) { drawTaskBody(card); }
 }
 
 function syncTaskCards(wrap, tasks) {
@@ -281,9 +332,126 @@ function syncTaskCards(wrap, tasks) {
       host.appendChild(makeTaskCard(task));
       continue;
     }
-    card._task = task;
-    card.className = taskCardClass(task.status, taskOpen(card));
-    drawTaskHead(card);
-    if (taskOpen(card)) { drawTaskBody(card); }
+    syncTaskCard(card, task);
   }
+}
+
+// 快照里同一张任务卡可能挂在历史消息上（不是 live 卡）。按 id 找页面上
+// 已经画出来的节点重绑，不能只在 live 卡上更新——否则刷新/补帧后的
+// 任务标题会一直停在第一帧。
+function syncTaskCardsById(root, tasks) {
+  if (!root) { return; }
+  const byId = {};
+  for (const task of tasks || []) {
+    byId[String(task.task_id || '')] = task;
+  }
+  for (const card of root.querySelectorAll('.task-card')) {
+    const task = byId[card.getAttribute('data-task-id') || ''];
+    if (task) { syncTaskCard(card, task); }
+  }
+}
+
+// 一张卡的状态，口径与服务端 `task_status` 相同。
+function statusFromEvents(events) {
+  let verifyError = false;
+  let finalOk = false;
+  for (const row of events || []) {
+    const phase = String(row.phase || '');
+    const status = String(row.status || '');
+    if (phase === 'final' && status === 'cancelled') { return 'cancelled'; }
+  }
+  for (const row of events || []) {
+    const phase = String(row.phase || '');
+    const status = String(row.status || '');
+    if (phase === 'error' || (phase === 'final' && status === 'error')) { return 'failed'; }
+    if (phase === 'verify' && status === 'error') { verifyError = true; }
+    if (phase === 'final' && status === 'ok') { finalOk = true; }
+  }
+  if (verifyError && finalOk) { return 'verify_failed'; }
+  if (finalOk) { return 'done'; }
+  return 'running';
+}
+
+function withTaskEvent(group, event) {
+  const events = (group.events || []).slice();
+  const seq = Number(event.seq || 0);
+  const phase = String(event.phase || '');
+  let replaced = false;
+  for (let index = 0; index < events.length; index += 1) {
+    if (Number(events[index].seq || 0) === seq && String(events[index].phase || '') === phase) {
+      events[index] = event;
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced) { events.push(event); }
+  let goal = String(group.goal || '');
+  if (phase === 'understand' && event.summary) { goal = String(event.summary); }
+  return {
+    task_id: String(group.task_id || event.task_id || ''),
+    run_id: String(event.run_id || group.run_id || ''),
+    turn_id: String(event.turn_id || group.turn_id || ''),
+    goal: goal,
+    status: statusFromEvents(events),
+    events: events,
+    artifacts: group.artifacts || [],
+  };
+}
+
+// 运行中的 task_event 收进现有分组。刷新后服务端那份分组再整组换上。
+function mergeTaskEvent(groups, event) {
+  const id = String((event && event.task_id) || '');
+  if (!id) { return groups || []; }
+  const next = [];
+  let found = false;
+  for (const group of groups || []) {
+    if (String(group.task_id || '') !== id) { next.push(group); continue; }
+    found = true;
+    next.push(withTaskEvent(group, event));
+  }
+  if (!found) { next.push(withTaskEvent({task_id: id, events: []}, event)); }
+  return next;
+}
+
+// 这一轮对话上该出现的任务卡。
+// 正在跑：快照里 status=running 的组，以及这张卡上已经画过的组（状态会从进行中变成完成）。
+// 已经跑完、页面上还是思维链：用最后一条助手消息上的 tasks，和刷新后同一张卡。
+function liveTaskGroups(state, card) {
+  const listed = (state && state.task_groups) || [];
+  const wrap = card && card.wrap;
+  const painted = {};
+  if (wrap) {
+    for (const node of wrap.querySelectorAll('.task-card')) {
+      painted[node.getAttribute('data-task-id') || ''] = true;
+    }
+  }
+  const out = [];
+  const seen = {};
+  function take(group) {
+    if (!group) { return; }
+    const id = String(group.task_id || '');
+    if (!id || seen[id]) { return; }
+    seen[id] = true;
+    out.push(group);
+  }
+  if (card && card.done) {
+    if (wrap && wrap.querySelector('.task-card')) {
+      for (const group of listed) {
+        if (painted[String(group.task_id || '')]) { take(group); }
+      }
+      return out;
+    }
+    const items = (state && state.messages) || [];
+    const last = items.length ? items[items.length - 1] : null;
+    if (last && last.role !== 'user') {
+      for (const group of last.tasks || []) { take(group); }
+    }
+    return out;
+  }
+  for (const group of listed) {
+    if (group && (group.status === 'running' || painted[String(group.task_id || '')])) {
+      take(group);
+    }
+  }
+  return out;
 }

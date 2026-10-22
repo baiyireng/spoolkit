@@ -272,6 +272,12 @@ async function say() {
     ctx.sessions.applySessionTitle(ctx.store.get('session'), sent.title, sent.title_source || 'seed');
   }
   if (sent) {
+    // 不等 start 事件：事件流断着或子进程还没吐出第一行时，页面上只有自己那条，
+    // 看起来像没人接。请求已经收下，就先摆出「生成中」。
+    const card = ctx.thread.ensureLive();
+    if (card && !card.turnGoal) { card.turnGoal = goal; }
+    setThinking(true);
+    setRunning(true);
     if (currentKey() === key && goalBox.value === '') { writeDraft(key, ''); }
     return;
   }
@@ -315,14 +321,30 @@ function useExample(value) {
   setGoal(value);
 }
 
+// 示例不是草稿：点一下就发出去。只填进输入框的话，人会以为已经问过，然后一直等。
+function sendExample(value) {
+  setGoal(value);
+  return say();
+}
+
 let emptyNode = null;
+
+// 真 DOM 的 children 是 HTMLCollection，没有 indexOf。假 DOM 才是数组。
+function listedChild(parent, node) {
+  const kids = parent && parent.children;
+  if (!kids || typeof kids.length !== 'number') { return false; }
+  for (let index = 0; index < kids.length; index += 1) {
+    if (kids[index] === node) { return true; }
+  }
+  return false;
+}
 
 function stillMounted(node) {
   let cur = node;
   while (cur) {
     if (cur === stream) { return true; }
     const parent = cur.parentNode;
-    if (!parent || (parent.children || []).indexOf(cur) < 0) { return false; }
+    if (!parent || !listedChild(parent, cur)) { return false; }
     cur = parent;
   }
   return false;
@@ -357,7 +379,19 @@ function sessionLabel(state) {
   return target.session || '';
 }
 
+// 没起标题时 sessionLabel 会退回原始 id。空会话中间不摆那串 id。
+function emptyWhere(state) {
+  const target = (state && state.target) || {};
+  const name = workspaceName(state);
+  const label = sessionLabel(state);
+  if (!label || label === String(target.session || '')) { return name; }
+  return name ? (name + ' · ' + label) : label;
+}
+
 function dropEmpty() {
+  if (emptyNode && emptyNode._chips && emptyNode._chips.parentNode) {
+    emptyNode._chips.parentNode.removeChild(emptyNode._chips);
+  }
   if (stillMounted(emptyNode)) { emptyNode.parentNode.removeChild(emptyNode); }
   emptyNode = null;
 }
@@ -385,12 +419,16 @@ function pickEmpty() {
 function readyEmpty(state) {
   const box = document.createElement('div');
   box.className = 'empty-state';
+  const whereText = emptyWhere(state);
+  if (whereText) {
+    const where = document.createElement('p');
+    where.className = 'empty-where';
+    where.textContent = whereText;
+    box.appendChild(where);
+  }
   const title = document.createElement('div');
   title.className = 'empty-title';
   title.textContent = '让 Agent 做点什么';
-  const where = document.createElement('p');
-  where.className = 'empty-where';
-  where.textContent = workspaceName(state) + ' · ' + sessionLabel(state);
   const actions = document.createElement('div');
   actions.className = 'empty-actions';
   const samples = ['解释这个项目结构', '跑测试并修失败', '找我最近改过的文件'];
@@ -400,13 +438,23 @@ function readyEmpty(state) {
     button.type = 'button';
     button.className = 'empty-sample';
     button.textContent = sample;
-    button.onclick = function () { useExample(sample); };
+    button.onclick = function () { return sendExample(sample); };
     actions.appendChild(button);
   }
-  box.appendChild(where);
   box.appendChild(title);
   box.appendChild(actions);
   return box;
+}
+
+// 示例贴在输入条下面，而不是悬在对话区顶上。空态收起时一并摘掉。
+function placeChips(box) {
+  const actions = box.querySelector('.empty-actions');
+  const host = goalBox.parentNode && goalBox.parentNode.parentNode;
+  if (!actions || !host) { return; }
+  const hint = host.querySelector('.st');
+  if (hint) { host.insertBefore(actions, hint); }
+  else { host.appendChild(actions); }
+  box._chips = actions;
 }
 
 function syncEmpty() {
@@ -425,6 +473,7 @@ function syncEmpty() {
   emptyNode.dataset.key = key;
   if (stream.firstChild) { stream.insertBefore(emptyNode, stream.firstChild); }
   else { stream.appendChild(emptyNode); }
+  if (mode === 'ready') { placeChips(emptyNode); }
 }
 
   return { setRunning: setRunning, syncSend: syncSend, onSendClick: onSendClick, requestStop: requestStop, setThinking: setThinking, setMeta: setMeta, say: say, onKeydown: onKeydown, autoGrow: autoGrow, rememberDraft: rememberDraft, restoreDraft: restoreDraft, setGoal: setGoal, useExample: useExample, syncEmpty: syncEmpty };

@@ -6,8 +6,24 @@ function createTransport(ctx) {
   function connect() {
     const source = new EventSource('/events');
     source.onmessage = onEvent;
-    source.onerror = () => { conn.style.display = 'block'; };
-    source.onopen = () => { conn.style.display = 'none'; };
+    // 事件流断了之后，start / delta / final 都到不了，页面就停在自己那句话上。
+    // 浏览器会自己重连；重连之前先按 /state 把已经写进库的回复或失败补上。
+    source.onerror = () => {
+      conn.style.display = 'block';
+      if (source._poll) { return; }
+      const pull = () => {
+        fetch('/state').then((response) => response.json()).then((data) => {
+          if (data && typeof applyState === 'function') { applyState(data); }
+        }).catch(() => {});
+      };
+      pull();
+      source._poll = setInterval(pull, 2000);
+    };
+    source.onopen = () => {
+      conn.style.display = 'none';
+      if (source._poll && typeof clearInterval === 'function') { clearInterval(source._poll); }
+      source._poll = 0;
+    };
   }
 
   // 一个 POST：成功返回响应体（`/target` 的响应体就是新的完整状态），

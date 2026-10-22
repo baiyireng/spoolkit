@@ -1530,7 +1530,8 @@ async function extras2() {
     { role: 'user', content: '看一下 src/a.py', meta: '', created_at: 20 },
     { role: 'assistant', content: '没做成：文件不存在', meta: '1 步，未完成', created_at: 21,
       trace: [
-        { type: 'step', text: '第 1 步' },
+        { type: 'step', text: '第 0 步' },
+        { type: 'note', ok: true, text: '【模型结论】已经看过文件' },
         { type: 'tool', ok: false, text: 'read_file → 失败', detail: '文件不存在：src/a.py' },
         { type: 'final', ok: false, text: '没做成：文件不存在',
           error: { stage: 'model', kind: 'connect', url: 'http://127.0.0.1:9' } },
@@ -1889,24 +1890,49 @@ async function extras2() {
   ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, []));
   const ready = ids.get('stream').querySelector('.empty-state');
   const sample = ready ? ready.querySelector('.empty-sample') : null;
+  const sampleNodes = ready ? ready.querySelectorAll('.empty-sample') : [];
   const beforeSample = ctx.fetchCalls.length;
-  if (sample && sample.onclick) { sample.onclick(); }
+  ctx.__nextBody = { ok: true, title: '' };
+  if (sample && sample.onclick) { await sample.onclick(); }
   out.empty_ready = {
     mode: ready ? ready.dataset.mode : '',
     text: ready ? ready.textContent : '',
-    samples: ready ? ready.querySelectorAll('.empty-sample').map((node) => node.textContent) : [],
+    samples: sampleNodes.map((node) => node.textContent),
     goal: ids.get('goal').value,
     focus: document.activeElement ? document.activeElement._id : '',
     posts: ctx.fetchCalls.length - beforeSample,
     draft: (ctx.__spoolTest.store.get('drafts') || {})[keyOf(ROOT_A, 'a1')] || '',
+    pending: (ctx.__spoolTest.app.thread.getLive() || {}).bubble
+      ? ctx.__spoolTest.app.thread.getLive().bubble.textContent : '',
   };
+  ctx.__spoolTest.app.composer.setRunning(false);
   ids.get('goal').value = '派一个任务';
   ctx.__fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
   await ctx.__spoolTest.say();
   ctx.__fetchImpl = null;
+  const pendingCard = ctx.__spoolTest.app.thread.getLive();
+  const pendingText = pendingCard && pendingCard.bubble ? pendingCard.bubble.textContent : '';
+  // 真浏览器里 children 没有 indexOf。换成只有下标的列表，发送后的空态重算不能抛。
+  const col = ids.get('stream').querySelector('.col');
+  let htmlCollection = false;
+  if (col) {
+    const real = col.children;
+    const list = { length: real.length };
+    for (let index = 0; index < real.length; index += 1) { list[index] = real[index]; }
+    col.children = list;
+    ctx.__spoolTest.app.composer.syncEmpty();
+    htmlCollection = true;
+    col.children = real;
+  }
+  ctx.__spoolTest.applyState(frame(ROOT_A, 'a1', WROWS, SROWS_A, [
+    { role: 'user', content: '派一个任务', meta: '' },
+  ], { running: false, finished: true, final: { ok: false, text: '进程退出，退出码 1' } }));
   out.empty_after_send = {
     shown: ids.get('stream').querySelectorAll('.empty-state').length,
     posts: ctx.fetchCalls.length - postsBeforeEmpty,
+    pending: pendingText,
+    htmlCollection: htmlCollection,
+    failure: (ids.get('stream').textContent || '').indexOf('进程退出，退出码 1') >= 0,
   };
   ctx.__spoolTest.applyState(frame(ROOT_A, 'a2', WROWS, SROWS_A, []));
   const nextEmpty = ids.get('stream').querySelector('.empty-state');
@@ -2228,6 +2254,68 @@ async function extras2() {
     task_apply: cmdCard ? cmdCard.querySelectorAll('.ask-apply').length : 1,
   };
 
+  // 同一轮：对话中的 task_event 和刷新后的 tasks 都是任务卡，不留思维链。
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.onEvent(event('start', { goal: '解释这个项目结构' }));
+  ctx.__spoolTest.onEvent(event('tool', { name: 'list_dir', ok: true }));
+  ctx.__spoolTest.onEvent(event('task_event', {
+    task_id: 't-live', run_id: 'r1', turn_id: 'u1', seq: 1, step: 0,
+    phase: 'understand', source: 'system', status: 'running', summary: '解释这个项目结构',
+  }));
+  ctx.__spoolTest.onEvent(event('task_event', {
+    task_id: 't-live', run_id: 'r1', turn_id: 'u1', seq: 2, step: 0,
+    phase: 'observe', source: 'tool', status: 'ok', tool: 'list_dir',
+    intent: '列出根目录', summary: 'snake.py', tool_call_id: 'tc-0',
+  }));
+  ctx.__spoolTest.onEvent(event('task_event', {
+    task_id: 't-live', run_id: 'r1', turn_id: 'u1', seq: 3, step: 1,
+    phase: 'final', source: 'system', status: 'ok', summary: '结构如下',
+  }));
+  const streamed = lastCard();
+  const streamedTask = streamed ? streamed.querySelector('.task-card') : null;
+  const streamedTrace = streamed ? streamed.querySelector('.trace') : null;
+  const streamedHead = streamedTask ? streamedTask.querySelector('.task-head') : null;
+  const liveAria = streamedHead ? streamedHead.getAttribute('aria-expanded') : '';
+  const liveMark = streamedTask && streamedTask.querySelector('.task-mark')
+    ? streamedTask.querySelector('.task-mark').textContent : '';
+  if (streamedHead && liveAria !== 'true') { streamedHead.onclick(); }
+  ctx.__spoolTest.resetView();
+  ctx.__spoolTest.applyState(frame('D:/task-same', 'a1', WROWS, SROWS_A, [
+    { role: 'user', content: '解释这个项目结构', created_at: 1 },
+    { role: 'assistant', content: '结构如下', created_at: 2, tasks: [
+      taskGroup('done', [
+        taskEvent(1, 'understand', 'running', '解释这个项目结构'),
+        taskEvent(2, 'observe', 'ok', 'snake.py', { tool: 'list_dir', intent: '列出根目录', tool_call_id: 'tc-0' }),
+        taskEvent(3, 'final', 'ok', '结构如下'),
+      ], '解释这个项目结构'),
+    ] },
+  ]));
+  const refreshed = lastCard();
+  const refreshedTask = refreshed ? refreshed.querySelector('.task-card') : null;
+  const refreshedHead = refreshedTask ? refreshedTask.querySelector('.task-head') : null;
+  const freshMark = refreshedTask && refreshedTask.querySelector('.task-mark')
+    ? refreshedTask.querySelector('.task-mark').textContent : '';
+  if (refreshedHead && refreshedHead.getAttribute('aria-expanded') !== 'true') { refreshedHead.onclick(); }
+  out.task_same = {
+    live_cards: streamed ? streamed.querySelectorAll('.task-card').length : 0,
+    live_tool: streamedTask && streamedTask.querySelector('.task-tool')
+      ? streamedTask.querySelector('.task-tool').textContent : '',
+    live_intent: streamedTask && streamedTask.querySelector('.task-intent')
+      ? streamedTask.querySelector('.task-intent').textContent : '',
+    live_mark: liveMark,
+    live_aria: liveAria,
+    live_trace_hidden: streamedTrace ? streamedTrace.classList.contains('hidden') : false,
+    live_trace_text: streamedTrace && !streamedTrace.classList.contains('hidden')
+      ? streamedTrace.textContent : '',
+    fresh_cards: refreshed ? refreshed.querySelectorAll('.task-card').length : 0,
+    fresh_tool: refreshedTask && refreshedTask.querySelector('.task-tool')
+      ? refreshedTask.querySelector('.task-tool').textContent : '',
+    fresh_intent: refreshedTask && refreshedTask.querySelector('.task-intent')
+      ? refreshedTask.querySelector('.task-intent').textContent : '',
+    fresh_mark: freshMark,
+    fresh_trace: refreshed ? Boolean(refreshed.querySelector('.trace')) : true,
+  };
+
   function panelGroup(status, goal, events) {
     return taskGroup(status, events, goal);
   }
@@ -2358,6 +2446,34 @@ async function extras2() {
     esc: taskPanel.classList.contains('hidden'),
     esc_focus: document.activeElement ? document.activeElement._id : '',
   };
+
+  // 批准之后旧的 await 还在事件里。头上的「待确认」只看最后一次审批。
+  ctx.__spoolTest.applyState(frame('D:/task-settled', 'a1', WROWS, SROWS_A, [], {
+    task_groups: [taskGroup('done', [
+      taskEvent(1, 'understand', 'running', '解释这个项目结构'),
+      taskEvent(2, 'observe', 'ok', '找到 1 条', {
+        tool: 'search_history', intent: '确认项目', tool_call_id: 'tc-0-0',
+      }),
+      taskEvent(3, 'approval', 'await', 'date', { tool_call_id: 'tc-0-0' }),
+      taskEvent(4, 'approval', 'confirmed', '已确认', { tool_call_id: 'tc-0-0' }),
+      taskEvent(5, 'final', 'ok', '结构如下'),
+    ], '解释这个项目结构')],
+  }));
+  if (taskBtn) { taskBtn.onclick(); }
+  clickFilter('全部');
+  const settledLine = panelLines()[0];
+  const settledWait = settledLine ? settledLine.querySelector('.task-wait') : null;
+  if (settledLine) { settledLine.onclick(); }
+  const settledDetail = ids.get('tasks-detail').textContent;
+  out.task_settled = {
+    has_wait: Boolean(settledWait),
+    detail_confirmed: settledDetail.indexOf('已确认') >= 0,
+    detail_pending: settledDetail.indexOf('待确认') >= 0,
+    badge: ids.get('tasks-wait').textContent,
+    badge_hidden: ids.get('tasks-wait').classList.contains('hidden'),
+  };
+  // 下一段搜索从「面板关着」开始；这里不关会让 taskBtn.onclick() 反向把它关上。
+  if (ids.get('tasks-close')) { ids.get('tasks-close').onclick(); }
 
   function searchTask(id, status, goal, events, artifacts) {
     const task = taskGroup(status, events, goal);

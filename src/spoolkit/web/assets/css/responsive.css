@@ -10,6 +10,7 @@
                pointer-events:none;
                box-shadow:0 0 40px rgba(0,0,0,.5); }
     body.drawer #sidebar { transform:none; pointer-events:auto; }
+    #thread:has(.empty-state) .empty-title { font-size:22px; }
     #stream { padding:14px var(--space-3) 20px;
               padding-left:max(var(--space-3), env(safe-area-inset-left));
               padding-right:max(var(--space-3), env(safe-area-inset-right)); }
@@ -55,7 +56,7 @@
   }
   @media (prefers-reduced-motion: reduce) {
     #stream { scroll-behavior:auto; }
-    .dot, .thinking-dots i { animation:none; }
+    .dot, .thinking-dots i, .bubble.streaming::after, .stream-row { animation:none; }
     /* 通知与状态详情的入场也关掉：不动画不等于不出现（它只是直接在那里）。 */
     .toast { animation:none; }
     .st-panel { animation:none; }

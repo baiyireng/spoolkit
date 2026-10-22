@@ -35,24 +35,27 @@ function toggleTrace(box) {
   setTraceOpen(box, !traceOpen(box));
 }
 
-// 标题那一行：几行 + **有没有失败**。一行都没有时也要说得出"这里现在是空的"，
-// 而失败必须直接可见（藏在收起块里的失败等于没提示）。
+// 标题那一行：可见的几步 + **有没有失败**。纯步骤号不占这一格。
+// 失败必须直接可见（藏在收起块里的失败等于没提示）。
 function drawTraceHead(box) {
   const lines = box._lines || [];
-  let text = '思考过程 · ' + lines.length + ' 行';
+  const count = chainLines(lines).length;
+  let text = count ? ('思维链 · ' + count) : '思维链';
   for (const one of lines) {
-    if (one.ok === false) { text += ' · 有失败'; break; }
+    if (one && one.type !== 'step' && one.ok === false) { text += ' · 有失败'; break; }
   }
   box._head.textContent = text;
-  box._head.title = text + '（点开查看本轮步骤、工具调用与失败原因）';
+  box._head.title = text + '（点开查看这一轮怎么想的、调了什么、卡在哪）';
+  // 只有步骤号、或这一轮根本没有过程时，不留一块空标题。
+  box.classList.toggle('trace-empty', count === 0);
 }
 
-// 正文：**只追加没画过的那几行**（增量追加，重复到达不会叠）。收起时不建节点。
+// 正文按可见行重画。步骤号会被滤掉，不能再用「子节点数 = 原始行数」往下补。
 function drawTraceBody(box) {
-  const lines = box._lines || [];
-  if (box._body.children.length > lines.length) { box._body.replaceChildren(); }
-  for (let index = box._body.children.length; index < lines.length; index += 1) {
-    box._body.appendChild(traceLineNode(lines[index]));
+  box._body.replaceChildren();
+  const lines = chainLines(box._lines || []);
+  for (let index = 0; index < lines.length; index += 1) {
+    box._body.appendChild(traceLineNode(lines[index], index === lines.length - 1));
   }
 }
 
@@ -64,19 +67,69 @@ function traceLineText(line) {
   return text;
 }
 
-function traceLineNode(line) {
+// 「第 0 步」这种空标记，以及【模型结论】一类内部标签，不属于思维链。
+// 数据仍留在 `_lines` 里，只是不上屏。
+const CHAIN_TAG = /【[^】\n]{1,24}】/g;
+const CHAIN_STEP = /^第\s*\d+\s*步$/;
+
+function chainText(line) {
+  if (!line || line.type === 'step') { return ''; }
+  const text = traceLineText(line).replace(CHAIN_TAG, ' ').replace(/\s+/g, ' ').trim();
+  if (!text || CHAIN_STEP.test(text)) { return ''; }
+  return text;
+}
+
+function chainLines(lines) {
+  const shown = [];
+  for (let index = 0; index < (lines || []).length; index += 1) {
+    if (chainText(lines[index])) { shown.push(lines[index]); }
+  }
+  return shown;
+}
+
+function traceLineNode(line, fresh) {
+  const text = redact(chainText(line));
   const node = document.createElement('div');
   const bad = line.ok === false || line.type === 'error';
-  node.className = 'trace-line'
-    + (bad ? ' bad' : (line.type === 'final' ? ' ok' : ''));
-  // 上屏一律先遮蔽密钥（与服务端那份同一口径）。
-  node.textContent = redact(traceLineText(line));
+  node.className = 'trace-line' + (fresh ? ' stream-row' : '')
+    + (bad ? ' bad' : (line.type === 'final' ? ' ok' : ''))
+    + ' trace-' + String(line.type || 'note');
+  const rail = document.createElement('span');
+  rail.className = 'trace-rail';
+  rail.setAttribute('aria-hidden', 'true');
+  const main = document.createElement('div');
+  main.className = 'trace-main';
+  const tool = line.type === 'tool' ? text.match(/^(.+?)\s*→\s*(.+)$/) : null;
+  if (tool) {
+    const row = document.createElement('div');
+    row.className = 'trace-row';
+    const name = document.createElement('span');
+    name.className = 'trace-name';
+    name.textContent = tool[1];
+    const arrow = document.createElement('span');
+    arrow.className = 'trace-arrow';
+    arrow.textContent = ' → ';
+    const status = document.createElement('span');
+    status.className = 'trace-status';
+    status.textContent = tool[2];
+    row.appendChild(name);
+    row.appendChild(arrow);
+    row.appendChild(status);
+    main.appendChild(row);
+  } else {
+    const body = document.createElement('div');
+    body.className = 'trace-text';
+    body.textContent = text;
+    main.appendChild(body);
+  }
   if (line.detail) {
     const detail = document.createElement('div');
     detail.className = 'trace-detail';
-    detail.textContent = redact(String(line.detail));
-    node.appendChild(detail);
+    detail.textContent = redact(String(line.detail).replace(CHAIN_TAG, ' ').replace(/\s+/g, ' ').trim());
+    main.appendChild(detail);
   }
+  node.appendChild(rail);
+  node.appendChild(main);
   return node;
 }
 

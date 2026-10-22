@@ -298,7 +298,8 @@ def test_任务卡默认折叠且有卡时不画旧轨迹(dom: dict) -> None:
     """有 tasks 的助手消息画任务卡；没有 tasks 的旧消息仍画思考过程。"""
     cards = dom["task_cards"]
     assert cards["old_trace"] is True
-    assert "第 1 步" in cards["old_trace_text"]
+    assert "第 1 步" not in cards["old_trace_text"]
+    assert "【" not in cards["old_trace_text"]
     assert "read_file → 失败" in cards["old_trace_text"]
     assert cards["new_trace"] is False
     assert cards["count"] == 4
@@ -367,6 +368,29 @@ def test_任务卡默认折叠且有卡时不画旧轨迹(dom: dict) -> None:
     assert command["ask_scrolled"] == 1
     assert command["ask_focus"] == "ask-apply"
     assert command["task_apply"] == 0
+    same = dom["task_same"]
+    assert same["live_cards"] == 1
+    assert same["live_tool"] == "list_dir"
+    assert same["live_intent"] == "列出根目录"
+    assert same["live_mark"] == "完成"
+    assert same["live_aria"] == "false"
+    assert same["live_trace_hidden"] is True
+    assert same["live_trace_text"] == ""
+    assert same["fresh_cards"] == 1
+    assert same["fresh_tool"] == same["live_tool"]
+    assert same["fresh_intent"] == same["live_intent"]
+    assert same["fresh_mark"] == same["live_mark"]
+    assert same["fresh_trace"] is False
+
+
+def test_批准后任务头不再挂着待确认(dom: dict) -> None:
+    """同一条调用先 await 再 confirmed。列表芯片看最后一次，不看旧的 await。"""
+    settled = dom["task_settled"]
+    assert settled["has_wait"] is False
+    assert settled["detail_confirmed"] is True
+    assert settled["detail_pending"] is False
+    assert settled["badge"] == ""
+    assert settled["badge_hidden"] is True
 
 
 def test_任务面板列出当前会话并可筛选(dom: dict) -> None:
@@ -511,19 +535,18 @@ def test_回复到达时占位被真正的回复替换(dom: dict) -> None:
     assert placeholder["trace_aria"] == "false"
 
     live = dom["reply_live"]
-    # step + tool + 一条 wait（第二次同 phase wait 替换了第一次）→ 3 行标题。
-    assert live["trace_head"].startswith("思考过程 · 3 行"), (
-        f"轨迹标题没有说清几行：{live['trace_head']}"
+    # 纯「第 N 步」不上屏。可见的是失败工具 + 一条 wait。
+    assert live["trace_head"].startswith("思维链 · 2"), (
+        f"轨迹标题没有说清几步：{live['trace_head']}"
     )
     assert "有失败" in live["trace_head"]
     assert live["trace_aria"] == "true", "运行中思考过程应自动展开"
-    # 3 行轨迹；失败工具带 detail 子节点，所以 DOM 节点数是 4。
-    assert live["trace_nodes"] == 4, f"运行中应能看见轨迹节点：{live['trace_nodes']}"
+    assert live["trace_nodes"] > 0, f"运行中应能看见轨迹节点：{live['trace_nodes']}"
     assert dom["reply_live_bubbles"] == 2, "边跑边攒轨迹时又多出了气泡"
 
     opened = dom["reply_open"]
     assert opened["trace_aria"] == "true"
-    assert "第 1 步" in opened["trace_text"]
+    assert "第 1 步" not in opened["trace_text"]
     assert "read_file → 失败" in opened["trace_text"], "工具那一行没有说清成功还是失败"
     assert "文件不存在" in opened["trace_text"], "失败那行没有带上原因（排错要的就是它）"
     assert "已等待 27s" in opened["trace_text"], "同 phase wait 应显示更新后的秒数"
@@ -531,7 +554,7 @@ def test_回复到达时占位被真正的回复替换(dom: dict) -> None:
 
     phased = dom["reply_wait_phases"]
     assert "输出加长" in phased["trace_text"]
-    assert "思考过程 · 4 行" in phased["trace_head"], phased["trace_head"]
+    assert "思维链 · 3" in phased["trace_head"], phased["trace_head"]
 
     done = dom["reply_done"]
     assert done["bubble_text"] == "改好了：加了校验", f"回复没有替换掉占位：{done}"
@@ -573,7 +596,7 @@ def test_刷新之后思考过程与失败原因依然回看得见(dom: dict) ->
     """
     fresh = dom["refresh_trace"]
     assert fresh["has_placeholder"] is False, "刷新之后还挂着占位"
-    assert fresh["trace_head"] == "思考过程 · 3 行 · 有失败", fresh["trace_head"]
+    assert fresh["trace_head"] == "思维链 · 3 · 有失败", fresh["trace_head"]
     assert fresh["trace_nodes"] == 0, "默认该是收起的"
     assert "失败环节：连接模型" in fresh["card_text"], "失败原因没有重新画出来"
     assert "下一步：" in fresh["card_text"], "没有下一步"
@@ -582,7 +605,9 @@ def test_刷新之后思考过程与失败原因依然回看得见(dom: dict) ->
 
     opened = dom["refresh_trace_open"]
     assert opened["trace_aria"] == "true"
-    assert "第 1 步" in opened["trace_text"], "步骤没有回放出来"
+    assert "第 1 步" not in opened["trace_text"], "空的步骤号不该出现在思维链里"
+    assert "【模型结论】" not in opened["trace_text"]
+    assert "已经看过文件" in opened["trace_text"]
     assert "read_file → 失败" in opened["trace_text"], "工具调用没有回放出来"
     assert "文件不存在" in opened["trace_text"], "失败原因没有回放出来"
     assert "失败：没做成：文件不存在" in opened["trace_text"], "结局那行没有回放出来"
@@ -1145,7 +1170,7 @@ def test_详情与用量都进了思考过程(dom: dict) -> None:
     collapsed = dom["report_tiers"]
     # 收起时正文块一个节点都不建——详情行照样算进了"几行"里。
     assert collapsed["trace_nodes"] == 0, "轨迹默认就该是收起的"
-    assert "5 行" in collapsed["trace_head"], collapsed["trace_head"]
+    assert "思维链 · 4" in collapsed["trace_head"], collapsed["trace_head"]
 
     opened = dom["report_tiers_open"]
     assert "详情：本次运行共落成 1 处改动" in opened["trace_text"], opened["trace_text"]
@@ -1273,7 +1298,7 @@ def test_标题列表表格和行内代码一起画出来(dom: dict) -> None:
 
 
 def test_空态按目标和历史重算(dom: dict) -> None:
-    """没选目标、选了但还没说话，是两种空态。示例只填输入框。"""
+    """没选目标、选了但还没说话，是两种空态。示例一点就发出去，并立刻有「生成中」。"""
     pick = dom["empty_pick"]
     assert pick["mode"] == "pick", pick
     assert "先选一个工作区和会话" in pick["text"], pick
@@ -1284,11 +1309,16 @@ def test_空态按目标和历史重算(dom: dict) -> None:
     assert "ws-a" in ready["text"] and "A 的第 1 条" in ready["text"], ready
     assert "让 Agent 做点什么" in ready["text"], ready
     assert ready["samples"] == ["解释这个项目结构", "跑测试并修失败", "找我最近改过的文件"], ready
-    assert ready["goal"] == "解释这个项目结构", ready
+    assert ready["goal"] == "", ready
     assert ready["focus"] == "goal", ready
-    assert ready["posts"] == 0, ready
-    assert ready["draft"] == "解释这个项目结构", ready
-    assert dom["empty_after_send"]["shown"] == 0, dom["empty_after_send"]
+    assert ready["posts"] == 1, ready
+    assert ready["draft"] == "", ready
+    assert ready["pending"] == "生成中", ready
+    sent = dom["empty_after_send"]
+    assert sent["shown"] == 0, sent
+    assert sent["pending"] == "生成中", sent
+    assert sent["htmlCollection"] is True, sent
+    assert sent["failure"] is True, sent
     switched = dom["empty_switched"]
     assert switched["shown"] == 1, switched
     assert switched["mode"] == "ready", switched

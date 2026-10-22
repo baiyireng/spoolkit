@@ -48,6 +48,7 @@ function applyState(state) {
   // 哪张卡片该被认领。**认领之后再补实时卡片**，它的节点才会落在对话流最后。
   app.thread.drawHistory(state.messages);
   app.thread.restoreLive(state);
+  app.thread.showSnapshotFinal(state);
   app.thread.syncLiveTasks(state);
   app.tasks.sync(state);
   // ⑤ 可做的动作（问题④）：这一轮有可退的成果时，摆一枚**真能点**的
@@ -99,6 +100,11 @@ function onEvent(event) {
     // 正文流式：主气泡增量追加（final 再用完整文本覆盖，防漏片）。
     app.composer.setThinking(true);
     app.thread.appendDelta(String(data.text || ''));
+    return;
+  }
+  if (data.type === 'task_event') {
+    // 工具轮次的过程就是任务卡。刷新后也是这张卡，不再另画一条思维链。
+    app.thread.foldTaskEvent(data);
     return;
   }
   if (data.type === 'step' || data.type === 'tool'

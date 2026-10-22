@@ -93,6 +93,8 @@ const NO_CHECKER_STATE = '跳过（不是失败）';
    思考过程挂在这张卡片上，随事件增量追加。 */
 function createThread(ctx) {
 let live = null;
+// 已经画过的失败结局。快照会反复送来同一句，不记住就会每帧再贴一块。
+let shownFailure = '';
 // 快照里那条回复对应的卡片（已经用事件画过回复、库里的那条刚到）：按正文认领。
 let pendingReplies = [];
 // 刚发出去、`/state` 还没送回来的那条用户消息（乐观画过的那条，不许画第二遍）。
@@ -111,6 +113,7 @@ function ensureLive() {
   wrap.appendChild(bubble);
   // `turnGoal` 是"这张卡片属于哪一轮"：刷新 / 补帧时靠它认出"还是同一轮"，
   // 不会又摆一张占位卡片出来。
+  shownFailure = '';
   live = {wrap: wrap, trace: trace, bubble: bubble, done: false, turnGoal: '',
     streamed: false};
   if (ctx.composer && ctx.composer.syncEmpty) { ctx.composer.syncEmpty(); }
@@ -147,6 +150,7 @@ function appendDelta(piece) {
     card.streamed = true;
   }
   card.bubble.textContent += piece;
+  card.bubble.classList.add('streaming');
   if (stick) { scrollDown(); }
   updateToBottom();
 }
@@ -181,11 +185,7 @@ function pushTraceLine(card, line) {
         && String(last.phase || '') === String(line.phase || '')) {
       lines[lines.length - 1] = line;
       drawTraceHead(card.trace);
-      if (traceOpen(card.trace)) {
-        const body = card.trace._body;
-        if (body.lastChild) { body.removeChild(body.lastChild); }
-        body.appendChild(traceLineNode(line));
-      }
+      if (traceOpen(card.trace)) { drawTraceBody(card.trace); }
       // 仅 live 卡（done === false）自动展开；历史卡无 done 字段，保持默认收起。
       if (card.done === false && !traceOpen(card.trace)) {
         setTraceOpen(card.trace, true);
@@ -233,6 +233,7 @@ function lastAssistantCard() {
 // 不会叠字，也不会留下那句占位。
 function fillReply(card, text) {
   card.bubble.className = 'bubble';
+  card.bubble.classList.remove('streaming');
   card.bubble.textContent = '';
   fillRich(card.bubble, text || '（没有产出）');
 }
@@ -393,37 +394,32 @@ function historyCard(item) {
   return wrap;
 }
 
+function paintTasks(card, groups) {
+  card.taskGroups = groups;
+  syncTaskCards(card.wrap, groups);
+  concealTrace(card);
+}
+
+// 有任务的轮次，对话里只留任务卡。实时 task_event 和刷新后的 tasks 画的是同一张。
 function syncLiveTasks(state) {
-  const groups = (state && state.task_groups) || [];
-  const running = [];
-  for (const group of groups) {
-    if (group && group.status === 'running') { running.push(group); }
-  }
-  if (!running.length) { return; }
-  const seen = {};
-  for (const node of stream.querySelectorAll('.task-card')) {
-    seen[node.getAttribute('data-task-id') || ''] = node;
-  }
-  const fresh = [];
-  for (const group of running) {
-    const id = String(group.task_id || '');
-    const card = seen[id];
-    if (!card) { fresh.push(group); continue; }
-    card._task = group;
-    card.className = taskCardClass(group.status, taskOpen(card));
-    drawTaskHead(card);
-    if (taskOpen(card)) { drawTaskBody(card); }
-  }
-  if (!fresh.length) { return; }
+  const all = (state && state.task_groups) || [];
+  // 历史消息上的任务卡也要跟着快照重绑；它们在 live 卡之外。
+  syncTaskCardsById(stream, all);
+  const groups = liveTaskGroups(state, live);
+  if (!groups.length) { return; }
   const open = state.trace && state.trace.open;
   if (live === null && !state.running && !open) { return; }
-  const card = ensureLive();
+  const card = (live && live.done) ? live : ensureLive();
   if (!card.turnGoal) {
-    const info = state.trace || {};
-    card.turnGoal = String(info.goal || state.goal || '');
+    const info = (state && state.trace) || {};
+    card.turnGoal = String(info.goal || (state && state.goal) || '');
   }
-  syncTaskCards(card.wrap, fresh);
-  concealTrace(card);
+  paintTasks(card, groups);
+}
+
+function foldTaskEvent(data) {
+  const card = ensureLive();
+  paintTasks(card, mergeTaskEvent(card.taskGroups, data));
 }
 
 // 刷新 / 切回之后，这一轮可能还在跑：把服务端那份轨迹接回来接着画。
@@ -432,6 +428,23 @@ function syncLiveTasks(state) {
 // ② 库里那条回复**已经画出来了**（这一帧最后一条是助手那条）也不再摆占位，
 //    否则一屏上会出现两张一模一样的回复卡片；
 // ③ 服务端那份更长才换——本地刚攒下的行不能被一拍轮询吞掉。
+// 子进程没把结局推进事件流（断线、崩在写出之前）时，快照里仍有 final。
+// 历史里已经有助手那条就不再贴；否则把「生成中」换成失败，或另起一块说明。
+function showSnapshotFinal(state) {
+  const final = state && state.final;
+  if (!final || final.ok !== false || state.running) { return; }
+  const text = String(final.text || '');
+  if (!text || shownFailure === text) { return; }
+  const items = state.messages || [];
+  const last = items.length ? items[items.length - 1] : null;
+  if (last && last.role !== 'user') { return; }
+  if (live && live.done) { return; }
+  shownFailure = text;
+  if (!finishLive(false, text, final.error || null, Boolean(state.stopped))) {
+    ctx.failure.showFailure('失败：', text, final.error || null);
+  }
+}
+
 function restoreLive(state) {
   const info = state.trace || {};
   if (!info.open) { return; }
@@ -545,6 +558,7 @@ function resetView() {
   pendingReplies = [];
   pendingUser = '';
   lastDrawn = null;
+  shownFailure = '';
   ctx.store.set('decided', false);
   ctx.store.set('pendings', []);
   updateToBottom();
@@ -555,5 +569,5 @@ function setPendingUser(value) { pendingUser = value; }
 function getPendingUser() { return pendingUser; }
 function getLastDrawn() { return lastDrawn; }
 
-  return { ensureLive: ensureLive, replaceSection: replaceSection, appendDelta: appendDelta, addTraceLine: addTraceLine, pushTraceLine: pushTraceLine, splitReport: splitReport, fillReport: fillReport, lastAssistantCard: lastAssistantCard, fillReply: fillReply, finishLive: finishLive, liveCardFor: liveCardFor, adoptMessage: adoptMessage, historyCard: historyCard, restoreLive: restoreLive, drawHistory: drawHistory, syncLiveTasks: syncLiveTasks, atBottom: atBottom, scrollDown: scrollDown, updateToBottom: updateToBottom, add: add, resetView: resetView, getLive: getLive, setPendingUser: setPendingUser, getPendingUser: getPendingUser, getLastDrawn: getLastDrawn };
+  return { ensureLive: ensureLive, replaceSection: replaceSection, appendDelta: appendDelta, addTraceLine: addTraceLine, pushTraceLine: pushTraceLine, splitReport: splitReport, fillReport: fillReport, lastAssistantCard: lastAssistantCard, fillReply: fillReply, finishLive: finishLive, liveCardFor: liveCardFor, adoptMessage: adoptMessage, historyCard: historyCard, showSnapshotFinal: showSnapshotFinal, restoreLive: restoreLive, drawHistory: drawHistory, syncLiveTasks: syncLiveTasks, foldTaskEvent: foldTaskEvent, atBottom: atBottom, scrollDown: scrollDown, updateToBottom: updateToBottom, add: add, resetView: resetView, getLive: getLive, setPendingUser: setPendingUser, getPendingUser: getPendingUser, getLastDrawn: getLastDrawn };
 }

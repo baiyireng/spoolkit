@@ -35,14 +35,7 @@ function createTasks(ctx) {
   }
 
   function taskWaiting(task) {
-    const events = (task && task.events) || [];
-    for (let index = 0; index < events.length; index += 1) {
-      const event = events[index];
-      if (String(event.phase || '') === 'approval' && approvalWaiting(event.status)) {
-        return true;
-      }
-    }
-    return false;
+    return taskStillWaiting(task);
   }
 
   function matchesTask(task, name) {

@@ -292,7 +292,7 @@ def test_对比度达到AA() -> None:
     css = (ASSETS / "css" / "thread.css").read_text(encoding="utf-8")
     assert ".ask-apply { background:#1f6b32; color:#fff; }" in css
     tokens = (ASSETS / "css" / "tokens.css").read_text(encoding="utf-8")
-    assert "--bubble-assistant:#f7f7f8;" in tokens
+    assert "background:transparent; border:0; box-shadow:none;" in css
     assert "--text-dim:#9b9b9b;" in tokens
     assert "--text-dim:#5d5d5d;" in tokens
 
