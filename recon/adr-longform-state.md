@@ -1,8 +1,8 @@
 # ADR：长文 State / Graph 边界
 
-状态：已接受（L0.1）  
+状态：已接受（L0.1），L0.3–L0.14 后续写结论（L3.0）  
 基线：`web-taskflow-rc2` / `ab08bf2`  
-范围：契约。本文件不引入代码、不改 `AgentLoop`、不引入 LangGraph。
+范围：契约。本文件不改 `AgentLoop`、不引入 LangGraph。L3.1 只落地 `DocumentState` 类型。
 
 一份长文档用一套 `DocumentState` 和一张 `LongFormGraph`。聊天和文件是两个 sink，不是两条管道。正文在 artifact / 文件里。State、checkpoint、每轮上下文、`TaskEvent` 只放进度和引用。
 
@@ -17,18 +17,23 @@
 | `source_artifacts` | 旧文档 id 元组 | 调用方 | append（按 id 去重） | 只存 id |
 | `deliverable` | `chat` / `file` / `both` | 调用方 | replace | 存 |
 | `path` | 目标路径；纯聊天为空 | 调用方提议，审批后才算数 | replace | 只存路径 |
-| `outline` | 节标题、要点、目标 tokens | `plan_outline` | replace | 存大纲，不存正文 |
-| `next_section` | 下一节下标 | `commit_section` | replace | 存 |
-| `partial` | 当前节的有界尾部或空 | `write_section` / `continue_section` | replace | 见下 |
-| `sections` | 已提交节的引用和摘要 | `commit_section` | append | 只存引用和摘要 |
-| `phase` | `plan` / `write` / `continue` / `commit` / `finalize` / `stopped` / `error` | 运行时 | replace | 存 |
-| `error` | 最近一次失败说明；无则空 | 运行时 | replace | 存 |
+| `outline` | 节：`index` / `title` / `points` / `target_chars` | `plan_outline` | replace | 存大纲，不存正文 |
+| `completed_sections` | 已提交节：`index` / `title` / `summary` / `artifact_id` / `path` / `char_count` | `commit_section` | append | 只存引用、摘要、字数 |
+| `current_section` | 当前节：`index` / `title` / `summary` / `tail` / `char_count` / `status` | `write_section` / `continue_section` / repair / rewrite | replace | 见下 |
+| `pending_sections` | 还没开始的节下标 | 运行时 | replace | 存下标 |
+| `phase` | `plan` / `write` / `continue` / `repair` / `rewrite` / `commit` / `finalize` / `stopped` / `error` | 运行时 | replace | 存 |
 | `status` | `running` / `paused` / `done` / `failed` / `cancelled` | 运行时 | replace | 存 |
+| `error` | 最近一次失败说明；无则空 | 运行时 | replace | 存 |
+| `length_floor` | 单节完成下限，默认 450 | 运行时 | replace | 存 |
+| `repair_attempts` | 每节已补写次数，按下标对齐 | repair | replace | 存次数 |
+| `rewrite_attempts` | 每节已改写次数，按下标对齐 | rewrite | replace | 存次数 |
 
-`partial` 和 `sections` 的正文规则：
+正文规则：
 
-- `sections[]` 每项只有 `index`、`title`、`summary`、`artifact_id`、`path`、`char_start`、`char_end`。`summary` 沿用现有摘要上限，不放节正文。
-- `partial` 要么为空，要么是 `{section_index, artifact_id, path, char_end, tail}`。`tail` 最多 2000 字符（落在 1500–2500 的续写窗口内），只为续写请求服务。更早的正文在文件或 artifact 里，用 `path` / `artifact_id` / `char_end` 指回去。
+- state 不存整节正文，也不存整篇文档。
+- `completed_sections[]` 只有引用、摘要和字数。`summary` 不超过现有 240 字摘要上限。
+- `current_section.tail` 最多 200 字，只给下一次续写看最后一个字之后的衔接。更早的正文在文件或 artifact 里，用 `path` / `artifact_id` 指回去。L0.6、L0.7 里 280 字窗口会从窗口开头重放，短尾才接得上。
+- `char_count` 是字数，不是正文。
 - 禁止字段：节全文、整篇文档、聊天记录、工具 raw。
 
 ## State / Update / reducer
@@ -37,8 +42,8 @@
 |------|------|
 | State | frozen。更新产出新对象，旧对象不变。 |
 | Update | 节点的唯一返回值。缺省字段表示不动。 |
-| replace | 标量：`goal`、`path`、`deliverable`、`outline`、`next_section`、`partial`、`phase`、`error`、`status`、`schema_version`。 |
-| append | `sections`、`source_artifacts`。后者按 id 去重，顺序稳定。 |
+| replace | 标量：`goal`、`path`、`deliverable`、`outline`、`current_section`、`pending_sections`、`phase`、`error`、`status`、`schema_version`、`length_floor`、`repair_attempts`、`rewrite_attempts`。 |
+| append | `completed_sections`、`source_artifacts`。后者按 id 去重，顺序稳定。 |
 | merge_tuple | 有序不可变元组的合并，调用方指定；未知项拒绝。 |
 | merge_dict | 预留给元数据。v1 没有正文 map。 |
 | 非法字段 | reducer 拒绝，不静默丢掉。 |
@@ -67,7 +72,7 @@
 
 不存：节正文、整篇文档、prompt、模型 raw、`TaskEvent` 列表、工具输出。
 
-原子写 JSON。恢复时跳过已完成节点，从 `next_node` 继续。`partial.tail` 超过窗口的文件视为坏 checkpoint，不把多余正文读进 state。正文以 `path` / `artifact_id` 为准。
+原子写 JSON。恢复时跳过已完成节点，从 `next_node` 继续。`schema_version` 与当前代码不一致就拒绝恢复，不猜字段。`current_section.tail` 超过 200 字的文件视为坏 checkpoint，不把多余正文读进 state。正文以 `path` / `artifact_id` 为准。
 
 ## Sink 副作用
 
@@ -87,7 +92,7 @@
 | 做 | 不做 |
 |----|------|
 | 节内容先写临时文件，完成后原子替换目标 | 绕过现有 `write_file` / 权限 |
-| 中断留下 `.partial`，路径写进 `partial` | 未批准就替换目标文件 |
+| 中断留下 `.partial`，路径写进 `current_section` | 未批准就替换目标文件 |
 | 走现有 pending / confirm | 把文件内容抄进 state 或 `TaskEvent` |
 | 完成后回 `path`、hash、size、区间 | 自己发 UI 事件 |
 
@@ -105,15 +110,32 @@
 
 图节点以后只通过现有 `on_event` 发 `TaskEvent`，不新造事件信封，不在事件里塞全文。`TaskState.current` 可以点出「正在写某份文档」，文档进度仍在 `DocumentState`。
 
-`AgentLoop` 继续负责 ReAct。图只负责确定性的长文和记忆流程。L1 的续写修复在 `request_final` 里，尾部只存在那一次请求的消息里，不写入 `TaskState`，也不写 checkpoint。
+`AgentLoop` 继续负责 ReAct。图只负责确定性的长文和记忆流程。L1.1 留在 `request_final` 里，只作为聊天截断时的 fallback：那一次请求可以带预算内的尾部，尾部不写入 `TaskState`，也不写 checkpoint。它不是长文主路径。
+
+## 续写实验结论（L0.3–L0.14）
+
+三篇技术说明、项目复盘、方案对比，在 `temperature=0`、同一本地模型、`n_ctx=8192` 下各跑 3 次。初稿是已经裁好的半句。完成线在看到结果之前定下，之后没有改：每节至少 450 字且为完整句，全文至少 3000 字，每节有标题，不提前写「完」，12 字重叠低于 0.5。
+
+| 结论 | 依据 |
+|------|------|
+| L1.2 多轮 raw tail 取消 | L0.3：只把尾部再送一轮，不能稳定写完，还会整段重放 |
+| L1.1 只做 chat fallback | 产品路径仍是截断后带尾部续写一次。长文主路径不靠它加轮数 |
+| L3 用结构续写，不按节各写一次 | 大纲、最近标题、上一节摘要、未完成标题要一起给。按节单独写会丢标题。形状是先收当前节，再一次写出未开始的节 |
+| 短尾衔接 | 当前节用最后约 80 字，从最后一个字之后接着写。280 字窗口会从窗口开头重放 |
+| repair 按节隔离，失败后 rewrite | 每节最多补 2 次。仍短、重复或脚手架命中，就整节改写并替换，不追加。一节失败不停下其他节。改写通过也不代替全文判定 |
+| novelty 守卫 | 补写对已有正文的 12 字重叠达到 0.5，或同一结尾句再出现，整段不写入。重试一次仍重复则这次补写失败 |
+| scaffold 守卫 | 行首标签「要点」「目标剩余字数」「本节目标」「提示词」「指令」「大纲」不写入。句子里的「系统提示词」「指令」「大纲」不算 |
+| think 守卫 | `<think>`、思考过程或大段英文分析整段拒绝，不删标签再算完成。重试一次仍泄漏则失败 |
+| anchor 守卫 | 重试开头看不到当前节最后 12 字，也看不到被拒绝返回的最后 12 字，记 `anchor_lost`，不再从尾部接，改为改写当前节。未恢复的 `anchor_lost` 不算完成 |
+
+L0.14 上三篇都达到上述完成线。泄漏和脚手架留在被拒绝的返回里，没有进入正文。
 
 ## 本轮不做
 
-- 不实现 `DocumentState`、reducer、图运行时、checkpoint、sink。
+- 不实现图运行时、checkpoint、`ChatSink`、`FileSink`。
+- 不把 `DocumentState` 接进 `AgentLoop`、UI、artifact 或 session memory。
 - 不做 L0.2 指标。
-- 不做 L1.2 多轮续写。`request_final` 仍是截断后续写一次，再截断就停并留下「继续」。
-- 不做 L1.3 预算预分配，也不改整篇 1.5 倍重写。
-- `sections.generate_section` 仍用原来的续写指令，不带 partial 尾部。
+- 不做 L1.2。不做 L3.2。
 - 不改 UI、`task_events`、持久化。
 - 不把长文放进 semantic memory。
 - 不做多租户或分布式 checkpoint。
