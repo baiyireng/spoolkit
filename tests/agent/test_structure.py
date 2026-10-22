@@ -43,7 +43,11 @@ def test_围栏未闭合的终稿只续写一次且不重写() -> None:
     gateway = _Script([_done(opened), _done(opened[-400:]), _done("不该再请求")])
     draft = request_final(gateway, prefix, max_tokens=800)
     assert len(gateway.requests) == 2
-    assert gateway.requests[1].messages[-1].content == CONTINUATION_INSTRUCTION
+    assert gateway.requests[1].messages[-2].role == "assistant"
+    assert gateway.requests[1].messages[-2].content == opened
+    assert gateway.requests[1].messages[-1].content == (
+        "以上是你已经写出的最后一段。只输出紧接其后的新增内容，不要重复，不要重新开头，不要总结。"
+    )
     assert "不该再请求" not in draft.text
     assert draft.truncated is False
 

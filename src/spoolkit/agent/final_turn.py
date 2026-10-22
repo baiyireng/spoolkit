@@ -1,7 +1,8 @@
 """终稿纯文本请求。
 
-前缀必须与控制回合逐条相同，只在末尾追加一条 user 指令，
+第一次终稿的前缀必须与控制回合逐条相同，只在末尾追加一条 user 指令，
 这样 llama.cpp 的 `cache_prompt` 才能复用已经算过的 KV。
+续写仍保留这份前缀，再追加已写正文的尾部（assistant）和一条只要求新增内容的 user 指令。
 """
 
 import logging
@@ -31,6 +32,13 @@ CONTINUATION_INSTRUCTION = (
     "接着你已写的结尾继续写。不要重复已写内容，不要重新开头，不要总结，不要加标题。"
 )
 
+# 续写窗口。落在 1500–2500 之间：够接上结尾，又不把整篇正文塞回提示词。
+PARTIAL_TAIL_CHARS = 2000
+
+CONTINUATION_TAIL_INSTRUCTION = (
+    "以上是你已经写出的最后一段。只输出紧接其后的新增内容，不要重复，不要重新开头，不要总结。"
+)
+
 # 续写仍被截断时留给用户的入口。不能悄悄把半截当成写完。
 SHORT_CONTINUE = "\n\n（未写完。需要的话回复「继续」，从这里接着写。）"
 
@@ -55,6 +63,31 @@ def final_request(prefix: Sequence[Message], *, max_tokens: int) -> ChatRequest:
         response_schema=None,
         cache_prompt=True,
     )
+
+
+def partial_tail(text: str, *, limit: int = PARTIAL_TAIL_CHARS) -> str:
+    """已写正文的尾部。空串原样返回；短于窗口的不补、不截成空。"""
+    if not text or limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def continuation_messages(
+    prefix: Sequence[Message], partial: str
+) -> tuple[Message, ...]:
+    """控制前缀不动。非空尾部作为 assistant，后面接续写指令。"""
+    tail = partial_tail(partial)
+    extra: tuple[Message, ...]
+    if tail:
+        extra = (
+            Message(role="assistant", content=tail),
+            Message(role="user", content=CONTINUATION_TAIL_INSTRUCTION),
+        )
+    else:
+        extra = (Message(role="user", content=CONTINUATION_TAIL_INSTRUCTION),)
+    return tuple(prefix) + extra
 
 
 @dataclass(frozen=True)
@@ -183,9 +216,7 @@ def request_final(
         follow = _complete(
             gateway,
             ChatRequest(
-                messages=tuple(prefix) + (
-                    Message(role="user", content=CONTINUATION_INSTRUCTION),
-                ),
+                messages=continuation_messages(prefix, response.text),
                 max_tokens=follow_limit,
                 response_schema=None,
                 cache_prompt=True,

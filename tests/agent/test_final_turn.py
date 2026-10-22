@@ -50,6 +50,9 @@ def test_终稿请求不带schema并打开前缀缓存() -> None:
     assert request.cache_prompt is True
     assert request.max_tokens == 800
     assert request.messages[:-1] == prefix
+    assert request.messages[-1].role == "user"
+    assert request.messages[-1].content == FINAL_INSTRUCTION
+    assert all(item.role != "assistant" for item in request.messages)
 
 
 def test_第二次提示词增量低于200才算命中前缀() -> None:
