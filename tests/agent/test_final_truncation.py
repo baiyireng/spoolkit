@@ -1,15 +1,10 @@
 """终稿截断：续写一次或改成短答，不做整段预算翻倍。"""
 
 import logging
-import math
 
 from spoolkit.agent.final_turn import SHORT_CONTINUE, estimate_tokens, request_final
-from spoolkit.context.phase_budget import (
-    CHARS_PER_TOKEN,
-    DEFAULT_MARGIN,
-    MIN_OUTPUT,
-    compute_budget,
-)
+from spoolkit.context.phase_budget import DEFAULT_MARGIN, MIN_OUTPUT, compute_budget
+from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
 
@@ -121,6 +116,10 @@ def test_长会话续写把尾部算进上下文(caplog) -> None:
     caplog.set_level(logging.WARNING)
     prefix = (Message(role="user", content="写说明"),)
     partial = "甲" * 2000
+    counter = OfflineTokenCounter()
+    assert counter.count(partial) == 2000
+    assert counter.count(partial) != 1250
+    assert estimate_tokens(partial) == counter.count(partial)
     gateway = _Cuts([_cut(partial, prompt_tokens=7000), _done("紧接的新内容")])
     draft = request_final(
         gateway, prefix, n_ctx=8192, prompt_tokens=7000
@@ -128,18 +127,16 @@ def test_长会话续写把尾部算进上下文(caplog) -> None:
     assert len(gateway.requests) == 2
     follow = gateway.requests[1]
     tail = _last_assistant(follow).content
+    instruction_tokens = counter.count(_TAIL_INSTRUCTION)
+    room = 8192 - DEFAULT_MARGIN - 7000 - instruction_tokens - MIN_OUTPUT
     assert partial.endswith(tail)
+    assert len(tail) == room
+    assert counter.count(tail) == len(tail)
     assert len(tail) < len(partial)
-    assert estimate_tokens(tail) >= estimate_tokens("甲" * 200)
-    follow_prompt = (
-        7000
-        + estimate_tokens(tail)
-        + estimate_tokens(_TAIL_INSTRUCTION)
-    )
+    follow_prompt = 7000 + counter.count(tail) + instruction_tokens
     assert follow_prompt + follow.max_tokens <= 8192 - DEFAULT_MARGIN
     assert follow.max_tokens >= MIN_OUTPUT
     assert draft.text == partial + "紧接的新内容"
-    assert estimate_tokens("甲" * 8) == math.ceil(8 / CHARS_PER_TOKEN)
 
 
 def test_续写预算不足时不发第二次请求(caplog) -> None:

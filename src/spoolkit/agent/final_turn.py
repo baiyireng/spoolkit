@@ -7,7 +7,6 @@
 """
 
 import logging
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -21,12 +20,12 @@ from spoolkit.agent.continuation import (
 )
 from spoolkit.agent.structure import fences_closed
 from spoolkit.context.phase_budget import (
-    CHARS_PER_TOKEN,
     DEFAULT_MARGIN,
     MIN_OUTPUT,
     Phase,
     compute_budget,
 )
+from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
 
 logger = logging.getLogger(__name__)
@@ -84,33 +83,19 @@ def partial_tail(text: str, *, limit: int = PARTIAL_TAIL_CHARS) -> str:
     return text[-limit:]
 
 
+# 只给续写插入量用。CHARS_PER_TOKEN 仍是旧路径的粗估，这里不碰它。
+_CONTINUATION_COUNTER = OfflineTokenCounter()
+
+
 def estimate_tokens(text: str) -> int:
-    """续写增量的 token 上界。
+    """续写尾部和续写指令的保守 token 数。
 
-    口径与 `phase_budget.CHARS_PER_TOKEN`（1.6 字/token）相同，但向上取整。
-    `resolve_n_past` 在缺 usage 时向下取整；续写要把即将插入的字算进窗口，
-    低估会让 prompt + max_tokens 超过 n_ctx。角色等特殊 token 不单计，
-    留给 `DEFAULT_MARGIN`。
+    与 OfflineTokenCounter 相同：ASCII 4 字 1 token，非 ASCII 1 字 1 token。
+    不用 CHARS_PER_TOKEN。1.6 字/token 会把「甲」*2000 估成 1250，
+    中文实际接近一字一 token，插进续写请求就会撑破 n_ctx。
+    角色等特殊 token 不单计，留给 DEFAULT_MARGIN。
     """
-    return _tokens_for_chars(len(text))
-
-
-def _tokens_for_chars(chars: int) -> int:
-    if chars <= 0 or CHARS_PER_TOKEN <= 0:
-        return 0
-    return math.ceil(chars / CHARS_PER_TOKEN)
-
-
-def _chars_within(token_budget: int) -> int:
-    """最多能放多少字，才让 `estimate_tokens` 不超过 token_budget。"""
-    if token_budget <= 0 or CHARS_PER_TOKEN <= 0:
-        return 0
-    guess = int(token_budget * CHARS_PER_TOKEN)
-    while guess > 0 and _tokens_for_chars(guess) > token_budget:
-        guess -= 1
-    while _tokens_for_chars(guess + 1) <= token_budget:
-        guess += 1
-    return guess
+    return _CONTINUATION_COUNTER.count(text)
 
 
 def continuation_messages(
@@ -187,17 +172,26 @@ def plan_continuation(
 
 
 def _fit_tail(partial: str, spare_tokens: int) -> str | None:
-    """None 表示最小可用尾部放不进剩余预算。空 partial 返回空串。"""
+    """按真实后缀 token 二分。None 表示最小可用尾部放不进剩余预算。"""
     if not partial:
         return ""
     if spare_tokens <= 0:
         return None
-    budget_chars = _chars_within(spare_tokens)
-    minimum = min(len(partial), PARTIAL_TAIL_MIN_CHARS)
-    if budget_chars < minimum:
+    cap = min(len(partial), PARTIAL_TAIL_CHARS)
+    minimum = min(cap, PARTIAL_TAIL_MIN_CHARS)
+    if estimate_tokens(partial[-minimum:]) > spare_tokens:
         return None
-    size = min(len(partial), PARTIAL_TAIL_CHARS, budget_chars)
-    return partial[-size:]
+    lo = minimum
+    hi = cap
+    best = minimum
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if estimate_tokens(partial[-mid:]) <= spare_tokens:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return partial[-best:]
 
 
 @dataclass(frozen=True)
