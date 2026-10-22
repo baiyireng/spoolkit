@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from spoolkit.agent.chat_sink import ChatSink
 from spoolkit.agent.document_bodies import InMemoryBodyStore, section_ref
 from spoolkit.agent.document_state import (
     SUMMARY_CAP,
@@ -167,9 +168,18 @@ def finalize_messages() -> tuple[Message, ...]:
 
 
 class LongFormRunner:
-    """持有 state、gateway 和 BodyStore。调用方的 state 对象不会被改写。"""
+    """持有 state、gateway 和 BodyStore。调用方的 state 对象不会被改写。
 
-    def __init__(self, state: DocumentState, gateway: ModelGateway, bodies: InMemoryBodyStore) -> None:
+    sink 可选。它只接收已经接受的节正文，异常不会改变 runner 的结果。
+    """
+
+    def __init__(
+        self,
+        state: DocumentState,
+        gateway: ModelGateway,
+        bodies: InMemoryBodyStore,
+        sink: ChatSink | None = None,
+    ) -> None:
         if state.current_section is None:
             if not state.pending_sections:
                 raise LongFormError("没有可写的节")
@@ -182,11 +192,14 @@ class LongFormRunner:
         self.bodies = bodies
         self._gateway = gateway
         self._origin = origin
+        self._sink = sink
         self._steps: list[PhaseStep] = []
         self._failures: dict[int, str] = {}
         self._anchor_unresolved = False
+        self._published: set[int] = set()
 
     def run(self) -> LongFormResult:
+        self._notify("start", self.state)
         self._open_from_outline()
         self._drive_current()
         while self.state.pending_sections:
@@ -203,7 +216,7 @@ class LongFormRunner:
                 status="failed",
                 error=",".join(reasons) if reasons else "finalize",
             )
-        return LongFormResult(
+        result = LongFormResult(
             state=self.state,
             steps=tuple(self._steps),
             reasons=reasons,
@@ -211,6 +224,11 @@ class LongFormRunner:
             ending=ending,
             failures=tuple(sorted(self._failures.items())),
         )
+        if done:
+            self._notify("complete", result)
+        else:
+            self._notify("fail", reasons if reasons else ("finalize",))
+        return result
 
     def _open_from_outline(self) -> None:
         if self.state.current_section is not None:
@@ -234,6 +252,7 @@ class LongFormRunner:
         if current is None:
             return
         index = current.index
+        self._notify("section_start", index, current.title)
         if not self._section_ok(index):
             hard = self._finish(index)
             if hard and not self._section_ok(index):
@@ -251,6 +270,7 @@ class LongFormRunner:
             pending_sections=self.state.pending_sections[1:],
             phase="write",
         )
+        self._notify("section_start", index, entry.title)
         hard = self._write(index)
         if hard and not self._section_ok(index):
             self._rewrite(index, "rewrite_pending")
@@ -314,6 +334,7 @@ class LongFormRunner:
             self._record("finish_current", index, False, "early_done")
             return True
         self._store(index, merged)
+        self._published.add(index)
         self._sync(index, "open")
         self._record("finish_current", index, True, "")
         return False
@@ -338,6 +359,7 @@ class LongFormRunner:
             self._record("write_pending", index, False, reason or "early_done")
             return True
         self._store(index, cleaned)
+        self._published.add(index)
         self._sync(index, "open")
         self._record("write_pending", index, True, "")
         return False
@@ -373,6 +395,7 @@ class LongFormRunner:
             self._record(phase, index, False, "early_done")
             return False
         self._store(index, merged)
+        self._published.add(index)
         self._sync(index, "repairing")
         self._record(phase, index, True, "")
         return True
@@ -396,6 +419,7 @@ class LongFormRunner:
         cleaned = "" if text is None else _strip_heading(entry.title, text)
         if cleaned and self._rewrite_ok(old, cleaned, entry.points):
             self._store(index, cleaned)
+            self._published.add(index)
             self._sync(index, "closed")
             self._failures.pop(index, None)
             if index == self._origin:
@@ -532,6 +556,8 @@ class LongFormRunner:
             current_section=None,
             phase="commit",
         )
+        if current.index in self._published and body.strip():
+            self._notify("section_commit", current.index, body)
 
     def _store(self, index: int, body: str) -> None:
         ref = section_ref(index)
@@ -571,11 +597,23 @@ class LongFormRunner:
         values[index] += 1
         self.state = replace(self.state, **{field: tuple(values)})
 
+    def _notify(self, name: str, *args: object) -> None:
+        if self._sink is None:
+            return
+        method = getattr(self._sink, name, None)
+        if not callable(method):
+            return
+        try:
+            method(*args)
+        except Exception:
+            return
+
     def _record(self, phase: str, index: int, accepted: bool, reason: str = "") -> None:
         self._steps.append(PhaseStep(phase, index, accepted, reason))
         state_phase = _STATE_PHASE[phase]
         if self.state.phase != state_phase:
             self.state = replace(self.state, phase=state_phase)
+        self._notify("progress", phase, index)
 
     def _completed_summaries(self) -> str:
         lines = [f"- {item.title}：{item.summary or '（空）'}" for item in self.state.completed_sections]
