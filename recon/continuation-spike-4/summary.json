@@ -1,0 +1,83 @@
+{
+  "runs": 18,
+  "requests": 33,
+  "fresh_requests": 30,
+  "within_budget": 33,
+  "over_budget": 0,
+  "fresh_tokens": 19608,
+  "fresh_elapsed_s": 331.7,
+  "cells": {
+    "compare:D3": {
+      "n": 3,
+      "true_complete": 0,
+      "false_complete": 3,
+      "current_closed": 0,
+      "long_enough": 0,
+      "mean_doc_chars": 1645.0,
+      "mean_outline_overlap": 0.0093,
+      "mean_draft_overlap": 0.0,
+      "mean_total_tokens": 1411.0,
+      "mean_elapsed_s": 33.0
+    },
+    "compare:D4": {
+      "n": 3,
+      "true_complete": 0,
+      "false_complete": 0,
+      "current_closed": 0,
+      "long_enough": 0,
+      "mean_doc_chars": 1770.0,
+      "mean_outline_overlap": 0.0,
+      "mean_draft_overlap": 0.9605,
+      "mean_total_tokens": 2304.0,
+      "mean_elapsed_s": 34.8
+    },
+    "retro:D3": {
+      "n": 3,
+      "true_complete": 0,
+      "false_complete": 3,
+      "current_closed": 0,
+      "long_enough": 0,
+      "mean_doc_chars": 2015.0,
+      "mean_outline_overlap": 0.0,
+      "mean_draft_overlap": 0.0,
+      "mean_total_tokens": 1593.0,
+      "mean_elapsed_s": 36.7
+    },
+    "retro:D4": {
+      "n": 3,
+      "true_complete": 0,
+      "false_complete": 3,
+      "current_closed": 3,
+      "long_enough": 0,
+      "mean_doc_chars": 2426.0,
+      "mean_outline_overlap": 0.0,
+      "mean_draft_overlap": 0.0051,
+      "mean_total_tokens": 2164.0,
+      "mean_elapsed_s": 44.5
+    },
+    "tech:D3": {
+      "n": 3,
+      "true_complete": 0,
+      "false_complete": 3,
+      "current_closed": 0,
+      "long_enough": 0,
+      "mean_doc_chars": 2422.0,
+      "mean_outline_overlap": 0.0409,
+      "mean_draft_overlap": 0.0095,
+      "mean_total_tokens": 1725.0,
+      "mean_elapsed_s": 35.9
+    },
+    "tech:D4": {
+      "n": 3,
+      "true_complete": 0,
+      "false_complete": 3,
+      "current_closed": 3,
+      "long_enough": 3,
+      "mean_doc_chars": 4641.0,
+      "mean_outline_overlap": 0.0135,
+      "mean_draft_overlap": 0.0061,
+      "mean_total_tokens": 2897.0,
+      "mean_elapsed_s": 61.1
+    }
+  }
+}
