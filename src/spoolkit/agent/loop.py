@@ -67,6 +67,7 @@ from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.answer_plan import SHORT_CUES, should_use_long_answer
 from spoolkit.agent.evidence_gate import check_evidence
 from spoolkit.agent.final_turn import SHORT_CONTINUE, request_final
+from spoolkit.agent.longform_bridge import try_longform_text
 from spoolkit.agent.sections import STOP_MARK, compose_long_answer
 from spoolkit.agent.protocol import (
     ParseFailure,
@@ -3809,21 +3810,35 @@ class AgentLoop:
                         room=room,
                     )
                     long_text = None
+                    longform_draft = None
                     if long_mode and room >= 3:
                         facts = "\n\n".join(
                             item.content.strip()
                             for item in history
                             if item.role == "tool" and item.content.strip()
                         ) or "工具结果：无额外材料。"
-                        long_text = compose_long_answer(
-                            self.gateway,
-                            assembled.messages,
-                            goal=state.goal or "",
-                            facts=facts,
-                            token_budget=room,
-                            n_ctx=self._budget.window,
-                            on_event=self._emit,
-                        )
+                        try:
+                            longform_draft = try_longform_text(
+                                gateway=self.gateway,
+                                prefix=assembled.messages,
+                                goal=state.goal or "",
+                                plan=getattr(turn, "answer_plan", None),
+                                token_budget=room,
+                            )
+                        except GenerationCancelled:
+                            longform_draft = None
+                        if longform_draft is not None:
+                            long_text = longform_draft.text
+                        else:
+                            long_text = compose_long_answer(
+                                self.gateway,
+                                assembled.messages,
+                                goal=state.goal or "",
+                                facts=facts,
+                                token_budget=room,
+                                n_ctx=self._budget.window,
+                                on_event=self._emit,
+                            )
                         if long_text:
                             self._metric_task = "long"
                             if STOP_MARK in long_text:
@@ -3837,7 +3852,17 @@ class AgentLoop:
                             trace.append(f"step{state.step}: 长文没写成，改走短终稿")
                     if long_text:
                         conclusion_text = long_text
+                        if (
+                            longform_draft is not None
+                            and long_text == longform_draft.text
+                        ):
+                            self._longform_summary = (
+                                f"长文完成：{longform_draft.sections} 节 / {longform_draft.chars} 字"
+                            )
+                        else:
+                            self._longform_summary = ""
                     else:
+                        self._longform_summary = ""
                         conclusion_text = request_final(
                             self.gateway,
                             assembled.messages,
@@ -7533,7 +7558,12 @@ class AgentLoop:
         return self._event_seq
 
     def _emit_outcome(self, status: str, summary: str, step: int) -> None:
-        """本轮收尾。未完成和异常走 error，不从这里再发一条 final。"""
+        """本轮收尾。未完成和异常走 error，不从这里再发一条 final。
+
+        长文走 runner 成功时，这条 final 只留「N 节 / M 字」，不把正文放进 summary。
+        """
+        if status == "ok" and getattr(self, "_longform_summary", ""):
+            summary = self._longform_summary
         self._emit_task(
             TaskEvent(
                 task_id=self._event_task_id,

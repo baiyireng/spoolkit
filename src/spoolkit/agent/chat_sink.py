@@ -64,3 +64,49 @@ class RecorderSink:
 
     def fail(self, reasons: tuple[str, ...]) -> None:
         self.events.append(("fail", reasons))
+
+
+class CollectingChatSink:
+    """只留下已提交或已替换的节。complete 之后按节号拼出正文，不写界面。"""
+
+    def __init__(self) -> None:
+        self._titles: dict[int, str] = {}
+        self._sections: dict[int, str] = {}
+        self._done = False
+
+    def start(self, state: DocumentState) -> None:
+        del state
+
+    def section_start(self, index: int, title: str) -> None:
+        self._titles.setdefault(index, title)
+
+    def section_commit(self, index: int, body: str) -> None:
+        self._sections[index] = body
+
+    def section_replace(self, index: int, body: str) -> None:
+        self._sections[index] = body
+
+    def progress(self, phase: str, index: int) -> None:
+        del phase, index
+
+    def complete(self, result: object) -> None:
+        del result
+        self._done = True
+
+    def fail(self, reasons: tuple[str, ...]) -> None:
+        del reasons
+        self._done = False
+
+    def text(self) -> str:
+        """完成之后按节号排列。没完成时是空串，避免半截正文流出去。"""
+        if not self._done:
+            return ""
+        parts: list[str] = []
+        for index in sorted(self._sections):
+            body = self._sections[index].strip()
+            title = self._titles.get(index, "")
+            if title:
+                parts.append(f"## {title}\n\n{body}")
+            elif body:
+                parts.append(body)
+        return "\n\n".join(parts)
