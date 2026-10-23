@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 
 from spoolkit.agent.chat_sink import ChatSink
 from spoolkit.agent.document_bodies import InMemoryBodyStore, section_ref
+from spoolkit.agent.document_source import SourceContext
 from spoolkit.agent.document_state import (
     SUMMARY_CAP,
     TAIL_CAP,
@@ -80,8 +81,16 @@ class LongFormResult:
     failures: tuple[tuple[int, str], ...]
 
 
-def finish_messages(title: str, index: int, tail: str) -> tuple[Message, ...]:
-    user = f"当前节：第 {index} 节「{title}」。只补完这一节，不要写其他标题，不要写「完」。"
+def finish_messages(
+    title: str,
+    index: int,
+    tail: str,
+    source: SourceContext | None = None,
+) -> tuple[Message, ...]:
+    user = _attach_source(
+        f"当前节：第 {index} 节「{title}」。只补完这一节，不要写其他标题，不要写「完」。",
+        source,
+    )
     follow = "只从最后一个字之后继续，把这一节收成完整段落。不要写其他节，不要写「完」。"
     items = [Message("system", SYSTEM), Message("user", user)]
     if tail.strip():
@@ -99,17 +108,18 @@ def repair_messages(
     target_chars: int,
     body: str,
     current: bool,
+    source: SourceContext | None = None,
 ) -> tuple[Message, ...]:
     gap = max(0, target_chars - len(body.strip()))
     verb = "只补完当前节" if current else "只补完这一节"
-    user = "\n".join(
+    user = _attach_source("\n".join(
         [
             f"这一节：## {title}",
             f"要点：{points}",
             f"目标剩余字数：{gap}",
             f"{verb}，不写下一节，不写「完」。",
         ]
-    )
+    ), source)
     follow = f"只从最后一个字之后继续。{verb}，不写下一节，不写「完」。"
     items = [Message("system", SYSTEM), Message("user", user)]
     tail = body.strip()[-PROMPT_TAIL:]
@@ -127,8 +137,9 @@ def rewrite_messages(
     points: str,
     previous_summary: str,
     target_chars: int,
+    source: SourceContext | None = None,
 ) -> tuple[Message, ...]:
-    user = "\n".join(
+    user = _attach_source("\n".join(
         [
             f"重写当前节：## {title}",
             f"要点：{points}",
@@ -136,7 +147,7 @@ def rewrite_messages(
             f"目标字数：{target_chars}",
             "只输出这一节的完整正文。不要写其他标题，不要写「完」，不要写思考过程。",
         ]
-    )
+    ), source)
     return (Message("system", SYSTEM), Message("user", user))
 
 
@@ -146,8 +157,9 @@ def write_pending_messages(
     points: str,
     target_chars: int,
     summaries: str,
+    source: SourceContext | None = None,
 ) -> tuple[Message, ...]:
-    user = "\n\n".join(
+    user = _attach_source("\n\n".join(
         [
             "已完成节摘要：\n" + (summaries or "（还没有）"),
             f"未开始标题：## {title}：目标 {target_chars} 字。要点：{points}",
@@ -156,7 +168,7 @@ def write_pending_messages(
                 "不要写「完」。不要把大纲要点原样抄一遍。不要重复已完成的节。"
             ),
         ]
-    )
+    ), source)
     return (Message("system", SYSTEM), Message("user", user))
 
 
@@ -179,6 +191,7 @@ class LongFormRunner:
         gateway: ModelGateway,
         bodies: InMemoryBodyStore,
         sink: ChatSink | None = None,
+        source: SourceContext | tuple[SourceContext, ...] | None = None,
     ) -> None:
         if state.current_section is None:
             if not state.pending_sections:
@@ -193,6 +206,7 @@ class LongFormRunner:
         self._gateway = gateway
         self._origin = origin
         self._sink = sink
+        self._sources = _contexts(source)
         self._steps: list[PhaseStep] = []
         self._failures: dict[int, str] = {}
         self._anchor_unresolved = False
@@ -321,7 +335,7 @@ class LongFormRunner:
         entry = self.state.outline[index]
         body = self.bodies.get(section_ref(index))
         text, reason, rejected = self._accept(
-            finish_messages(entry.title, index + 1, _prompt_tail(body)),
+            finish_messages(entry.title, index + 1, _prompt_tail(body), self._source_for(index)),
             FINISH_MAX,
             allow_done=False,
         )
@@ -350,6 +364,7 @@ class LongFormRunner:
                 points=entry.points,
                 target_chars=entry.target_chars,
                 summaries=self._completed_summaries(),
+                source=self._source_for(index),
             ),
             WRITE_MAX,
             allow_done=False,
@@ -378,6 +393,7 @@ class LongFormRunner:
             target_chars=entry.target_chars,
             body=body,
             current=phase.endswith("current"),
+            source=self._source_for(index),
         )
         text, reason, _rejected = self._accept(messages, REPAIR_MAX, allow_done=False)
         if text is not None and (repeats_existing(body, text) or section_repeats(_append(body, text))):
@@ -415,6 +431,7 @@ class LongFormRunner:
                 points=entry.points,
                 previous_summary=self._previous_summary(index),
                 target_chars=entry.target_chars,
+                source=self._source_for(index),
             ),
             REWRITE_MAX,
             allow_done=False,
@@ -628,6 +645,12 @@ class LongFormRunner:
             self.state = replace(self.state, phase=state_phase)
         self._notify("progress", phase, index)
 
+    def _source_for(self, index: int) -> SourceContext | None:
+        for item in self._sources:
+            if item.index == index:
+                return item
+        return None
+
     def _completed_summaries(self) -> str:
         lines = [f"- {item.title}：{item.summary or '（空）'}" for item in self.state.completed_sections]
         return "\n".join(lines) or "（还没有）"
@@ -639,6 +662,28 @@ class LongFormRunner:
             if item.index == index - 1:
                 return item.summary or "（空）"
         return "（空）"
+
+
+def _contexts(source: SourceContext | tuple[SourceContext, ...] | None) -> tuple[SourceContext, ...]:
+    if source is None:
+        return ()
+    if isinstance(source, SourceContext):
+        return (source,)
+    return tuple(source)
+
+
+def _attach_source(text: str, source: SourceContext | None) -> str:
+    if source is None:
+        return text
+    return "\n".join(
+        [
+            text,
+            f"旧节标题：{source.title}",
+            f"旧节摘要：{source.summary}",
+            f"旧节摘录：{source.excerpt}",
+            "只作为素材，不要照抄整段。",
+        ]
+    )
 
 
 def _summary(body: str) -> str:
