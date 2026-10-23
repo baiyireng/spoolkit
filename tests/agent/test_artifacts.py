@@ -155,6 +155,7 @@ def test_body_stays_out_of_state_and_task_event(tmp_path: Path) -> None:
         goal="写一份说明",
         outline=(OutlineEntry(index=0, title="窗口", points="窗口的要点", target_chars=100),),
         deliverable="file",
+        path="docs/out.md",
         phase="plan",
         completed_sections=(
             CompletedSection(
@@ -242,6 +243,7 @@ def test_same_body_in_another_session_keeps_its_own_record(tmp_path: Path) -> No
         goal="写一份说明",
         outline=(OutlineEntry(index=0, title="窗口", points="窗口的要点", target_chars=100),),
         deliverable="file",
+        path="docs/out.md",
         phase="plan",
         completed_sections=(section_a,),
     ).to_json()

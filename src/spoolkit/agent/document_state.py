@@ -266,6 +266,8 @@ class DocumentState:
         _nonempty(self.goal, "goal")
         if self.deliverable not in DELIVERABLES:
             raise DocumentStateError(f"deliverable 无效：{self.deliverable}")
+        if self.deliverable in ("file", "both") and not self.path.strip():
+            raise DocumentStateError("file/both 需要文档路径")
         if self.phase not in PHASES:
             raise DocumentStateError(f"phase 无效：{self.phase}")
         if self.status not in STATUSES:

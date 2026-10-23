@@ -204,6 +204,13 @@ def test_chat_completed_section_can_omit_artifact() -> None:
     assert restored.completed_sections[0].path == ""
 
 
+def test_file_deliverable_requires_document_path() -> None:
+    with pytest.raises(DocumentStateError, match="文档路径"):
+        _state(**_parked(deliverable="file", path=""))
+    with pytest.raises(DocumentStateError, match="文档路径"):
+        _state(**_parked(deliverable="both", path="   "))
+
+
 def test_file_completed_section_needs_artifact_or_path() -> None:
     empty = CompletedSection(0, "窗口", "摘要", "  ", "", 500)
     with pytest.raises(DocumentStateError, match="artifact_id 或 path"):
