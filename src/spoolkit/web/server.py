@@ -52,6 +52,7 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urlsplit
 
 from spoolkit.health import (
     PROBE_TIMEOUT_SECONDS,
@@ -70,6 +71,13 @@ from spoolkit.kernel.sessions import (
 )
 from spoolkit.kernel.target import Target, resolve_target
 from spoolkit.kernel.workspaces import WorkspaceError
+from spoolkit.web.memory_read import (
+    artifact_limit,
+    empty_summary,
+    read_artifacts,
+    read_checkpoints,
+    read_session_summary,
+)
 from spoolkit.web.page import INDEX
 from spoolkit.web.static import AssetError, load_asset
 from spoolkit.web.probe import (
@@ -894,6 +902,45 @@ def _removed_rows(target: Target | None) -> list[dict]:
     ]
 
 
+def _memory_route(raw: str) -> str:
+    """记忆接口只认这三条路径。查询串留在后面，不参与路径判断。"""
+    path = urlsplit(str(raw)).path
+    if path in {"/artifacts", "/session/summary", "/checkpoints"}:
+        return path
+    return ""
+
+
+def _workspace(state: WebState) -> tuple[Path, str] | None:
+    target = state.target()
+    if target is None:
+        return None
+    return target.root, str(target.session or "")
+
+
+def _artifacts_payload(state: WebState, raw_path: str) -> list:
+    found = _workspace(state)
+    if found is None:
+        return []
+    root, session = found
+    return read_artifacts(root, session, limit=artifact_limit(raw_path))
+
+
+def _summary_payload(state: WebState) -> dict:
+    found = _workspace(state)
+    if found is None:
+        return empty_summary("")
+    root, session = found
+    return read_session_summary(root, session)
+
+
+def _checkpoints_payload(state: WebState) -> list:
+    found = _workspace(state)
+    if found is None:
+        return []
+    root, session = found
+    return read_checkpoints(root, session)
+
+
 def _task_catalog(state: WebState) -> dict:
     """当前工作区的任务历史。没有目标、或这一下读失败，给空目录。"""
     target = state.target()
@@ -912,7 +959,7 @@ def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
         def log_message(self, *args: Any) -> None:
             """默认会往 stderr 刷每一行请求，本地调试时全是噪音。"""
 
-        def _json(self, status: int, payload: dict) -> None:
+        def _json(self, status: int, payload: dict | list) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -996,6 +1043,13 @@ def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
             elif self.path == "/tasks":
                 # 跨会话任务历史只读目录。不写进 /state，请求里也不接收路径。
                 self._json(200, _task_catalog(state))
+            elif _memory_route(self.path) == "/artifacts":
+                # 只读当前 session 的产物元数据。查询串不能变成路径。
+                self._json(200, _artifacts_payload(state, self.path))
+            elif _memory_route(self.path) == "/session/summary":
+                self._json(200, _summary_payload(state))
+            elif _memory_route(self.path) == "/checkpoints":
+                self._json(200, _checkpoints_payload(state))
             elif self.path == "/events":
                 self._stream()
             elif self.path.startswith("/assets/"):

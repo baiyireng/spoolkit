@@ -40,6 +40,50 @@ def _segment(value: str, label: str) -> str:
     return raw
 
 
+_META_FIELDS = (
+    "checkpoint_key",
+    "artifact_id",
+    "task_id",
+    "turn_id",
+    "phase",
+    "status",
+    "updated_at",
+)
+
+
+def _checkpoint_meta(directory: Path, path: Path, session: str) -> dict[str, str] | None:
+    """一个普通 json。符号链接、子目录、坏文件和越界文件都不当记录。"""
+    name = path.name
+    if not name.endswith(".json") or name.startswith("."):
+        return None
+    key = name[: -len(".json")]
+    if not key or key != safe(key) or ".." in key or "/" in key or "\\" in key:
+        return None
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        if path.parent.resolve() != directory:
+            return None
+        if not path.resolve().is_relative_to(directory):
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema_version") != SCHEMA_VERSION:
+        return None
+    if payload.get("session") != session or payload.get("checkpoint_key") != key:
+        return None
+    meta: dict[str, str] = {}
+    for field in _META_FIELDS:
+        value = payload.get(field, "")
+        if not isinstance(value, str):
+            return None
+        meta[field] = value
+    if meta["checkpoint_key"] != key:
+        return None
+    return meta
+
+
 def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -189,6 +233,28 @@ class DocumentCheckpointStore:
             status=status,
             updated_at=updated,
         )
+
+    def list_meta(self, session: str) -> tuple[dict[str, str], ...]:
+        """只读这一层的元数据。坏文件跳过，不返回 state 和 bodies，也不写盘。"""
+        try:
+            folder = _segment(session, "session")
+        except CheckpointError:
+            return ()
+        base = (self._root / ".agent" / _DIR).resolve()
+        directory = (self._root / ".agent" / _DIR / folder).resolve()
+        if not directory.is_relative_to(base) or not directory.is_dir():
+            return ()
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            return ()
+        found: list[dict[str, str]] = []
+        for path in entries:
+            item = _checkpoint_meta(directory, path, folder)
+            if item is not None:
+                found.append(item)
+        found.sort(key=lambda item: (item["updated_at"], item["checkpoint_key"]), reverse=True)
+        return tuple(found)
 
     def delete(self, session: str, checkpoint_key: str) -> None:
         path = self.path_for(session, checkpoint_key)
