@@ -194,28 +194,29 @@ def try_longform_text(
     ).run()
     if not result.done:
         return None
+    written = result.state
     chars = 0
-    for entry in state.outline:
+    for entry in written.outline:
         chars += len(bodies.get(section_ref(entry.index)).strip())
     if state.deliverable == "file":
         if sink.pending is None or sink.record is None:
             return None
         return LongformDraft(
             text=f"已生成文档，待确认：{sink.path}",
-            sections=len(state.outline),
+            sections=len(written.outline),
             chars=chars,
             deliverable="file",
             artifact_id=sink.artifact_id,
             path=sink.path,
         )
-    text = render_document(state, bodies)
+    text = render_document(written, bodies)
     if not text:
         return None
     artifact_id = ""
     stored_path = ""
     if artifact_root is not None and (plan is None or plan.deliverable != "both"):
         artifact_id, stored_path = _store_chat(
-            state,
+            written,
             bodies,
             text,
             root=artifact_root,
@@ -226,7 +227,7 @@ def try_longform_text(
         )
     return LongformDraft(
         text=text,
-        sections=len(state.outline),
+        sections=len(written.outline),
         chars=chars,
         artifact_id=artifact_id,
         path=stored_path,

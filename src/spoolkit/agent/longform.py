@@ -13,7 +13,11 @@ from dataclasses import dataclass, replace
 
 from spoolkit.agent.chat_sink import ChatSink
 from spoolkit.agent.document_bodies import InMemoryBodyStore, section_ref
-from spoolkit.agent.document_checkpoint import DocumentCheckpoint, DocumentCheckpointStore
+from spoolkit.agent.document_checkpoint import (
+    DocumentCheckpoint,
+    DocumentCheckpointStore,
+    checkpoint_key,
+)
 from spoolkit.agent.document_source import SourceContext
 from spoolkit.agent.document_state import (
     SUMMARY_CAP,
@@ -199,6 +203,7 @@ class LongFormRunner:
         artifact_id: str = "",
         task_id: str = "",
         turn_id: str = "",
+        checkpoint_key_value: str = "",
     ) -> None:
         if state.current_section is None:
             if not state.pending_sections:
@@ -219,6 +224,19 @@ class LongFormRunner:
         self._artifact_id = artifact_id.strip()
         self._task_id = task_id.strip()
         self._turn_id = turn_id.strip()
+        explicit_key = checkpoint_key_value.strip()
+        if explicit_key:
+            self._checkpoint_key = explicit_key
+        elif checkpoint is not None and self._session and self._task_id:
+            self._checkpoint_key = checkpoint_key(
+                session=self._session,
+                task_id=self._task_id,
+                path=state.path,
+                deliverable=state.deliverable,
+                goal=state.goal,
+            )
+        else:
+            self._checkpoint_key = ""
         self._steps: list[PhaseStep] = []
         self._failures: dict[int, str] = {}
         self._anchor_unresolved = False
@@ -270,7 +288,7 @@ class LongFormRunner:
         return result
 
     def _maybe_resume(self) -> None:
-        """同一 session 和 artifact 有未完成 checkpoint 时，从那份进度继续。"""
+        """同一份文稿有未完成 checkpoint 时，从那份进度继续。产物编号可以换。"""
         loaded = self._load_checkpoint()
         if loaded is None or loaded.state.status == "done":
             return
@@ -293,9 +311,9 @@ class LongFormRunner:
         self._published.update(done)
 
     def _load_checkpoint(self) -> DocumentCheckpoint | None:
-        if self._checkpoint is None or not self._session or not self._artifact_id:
+        if self._checkpoint is None or not self._session or not self._checkpoint_key:
             return None
-        return self._checkpoint.load(self._session, self._artifact_id)
+        return self._checkpoint.load(self._session, self._checkpoint_key)
 
     def _reached(self, stop_after: int | None) -> bool:
         return stop_after is not None and len(self.state.completed_sections) >= stop_after
@@ -321,19 +339,21 @@ class LongFormRunner:
         return tuple(found)
 
     def _save_checkpoint(self) -> None:
-        if self._checkpoint is None or not self._session or not self._artifact_id:
+        if self._checkpoint is None or not self._session or not self._checkpoint_key:
             return
         try:
             self._checkpoint.save(
                 DocumentCheckpoint(
                     schema_version=self.state.schema_version,
                     session=self._session,
+                    checkpoint_key=self._checkpoint_key,
                     artifact_id=self._artifact_id,
                     task_id=self._task_id,
                     turn_id=self._turn_id,
                     state=self.state,
                     bodies=self._checkpoint_bodies(),
                     phase=self.state.phase,
+                    status=self.state.status,
                     updated_at="",
                 )
             )
@@ -341,10 +361,10 @@ class LongFormRunner:
             return
 
     def _clear_checkpoint(self) -> None:
-        if self._checkpoint is None or not self._session or not self._artifact_id:
+        if self._checkpoint is None or not self._session or not self._checkpoint_key:
             return
         try:
-            self._checkpoint.delete(self._session, self._artifact_id)
+            self._checkpoint.delete(self._session, self._checkpoint_key)
         except Exception:
             return
 

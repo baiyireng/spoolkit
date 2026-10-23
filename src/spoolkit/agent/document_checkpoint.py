@@ -1,6 +1,9 @@
 """长文 checkpoint。
 
-写在 `<root>/.agent/checkpoints/<session>/<artifact_id>.json`。
+写在 `<root>/.agent/checkpoints/<session>/<checkpoint_key>.json`。
+checkpoint_key 由 session、task、path、deliverable 决定，不含 turn。
+空 path 的 chat 再混入 goal 的摘要，避免两份聊天稿共用一份进度。
+文件里的 artifact_id 只记录当前这一轮，恢复后会换成新的产物编号。
 state 仍是进度和引用。bodies 按节下标保留正文，供中断后继续写。
 不写 TaskEvent，不写工作区目标文件。
 """
@@ -8,6 +11,7 @@ state 仍是进度和引用。bodies 按节下标保留正文，供中断后继�
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import tempfile
@@ -40,18 +44,42 @@ def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def checkpoint_key(
+    *,
+    session: str,
+    task_id: str,
+    path: str = "",
+    deliverable: str = "chat",
+    goal: str = "",
+) -> str:
+    """同一份文稿跨 turn 的恢复键。不含 turn。"""
+    relative = str(path).strip()
+    kind = str(deliverable).strip() or "chat"
+    task = str(task_id).strip()
+    scope = str(session).strip()
+    if relative:
+        material = f"{scope}|{task}|{relative}|{kind}"
+    else:
+        goal_hash = hashlib.sha256(str(goal).strip().encode("utf-8")).hexdigest()
+        material = f"{scope}|{task}|{kind}|{goal_hash}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    return f"ck-{digest}"
+
+
 @dataclass(frozen=True, slots=True)
 class DocumentCheckpoint:
     """一次可恢复的长文进度。"""
 
     schema_version: int
     session: str
+    checkpoint_key: str
     artifact_id: str
     task_id: str
     turn_id: str
     state: DocumentState
     bodies: tuple[tuple[int, str], ...]
     phase: str
+    status: str
     updated_at: str
 
     def body_map(self) -> dict[int, str]:
@@ -59,14 +87,14 @@ class DocumentCheckpoint:
 
 
 class DocumentCheckpointStore:
-    """一个 session、一个 artifact 一份 checkpoint。"""
+    """一个 session、一个 checkpoint_key 一份进度。"""
 
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
 
-    def path_for(self, session: str, artifact_id: str) -> Path:
+    def path_for(self, session: str, checkpoint_key: str) -> Path:
         folder = _segment(session, "session")
-        name = _segment(artifact_id, "artifact_id")
+        name = _segment(checkpoint_key, "checkpoint_key")
         directory = (self._root / ".agent" / _DIR / folder).resolve()
         base = (self._root / ".agent" / _DIR).resolve()
         if not directory.is_relative_to(base):
@@ -85,20 +113,22 @@ class DocumentCheckpointStore:
         payload = {
             "schema_version": SCHEMA_VERSION,
             "session": checkpoint.session,
+            "checkpoint_key": checkpoint.checkpoint_key,
             "artifact_id": checkpoint.artifact_id,
             "task_id": checkpoint.task_id,
             "turn_id": checkpoint.turn_id,
             "state": checkpoint.state.to_dict(),
             "bodies": {str(index): text for index, text in checkpoint.bodies},
             "phase": checkpoint.phase or checkpoint.state.phase,
+            "status": checkpoint.status or checkpoint.state.status,
             "updated_at": checkpoint.updated_at or _stamp(),
         }
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self._atomic_write(self.path_for(checkpoint.session, checkpoint.artifact_id), encoded)
+        self._atomic_write(self.path_for(checkpoint.session, checkpoint.checkpoint_key), encoded)
 
-    def load(self, session: str, artifact_id: str) -> DocumentCheckpoint | None:
+    def load(self, session: str, checkpoint_key: str) -> DocumentCheckpoint | None:
         """坏文件返回 None。schema 不一致则拒绝。"""
-        path = self.path_for(session, artifact_id)
+        path = self.path_for(session, checkpoint_key)
         if not path.is_file():
             return None
         try:
@@ -111,7 +141,7 @@ class DocumentCheckpointStore:
             raise SchemaVersionError(
                 f"schema_version {payload.get('schema_version')} 与 {SCHEMA_VERSION} 不一致"
             )
-        if payload.get("session") != session or payload.get("artifact_id") != artifact_id:
+        if payload.get("session") != session or payload.get("checkpoint_key") != checkpoint_key:
             return None
         state_raw = payload.get("state")
         if not isinstance(state_raw, dict):
@@ -142,20 +172,26 @@ class DocumentCheckpointStore:
             updated = ""
         task_id = payload.get("task_id")
         turn_id = payload.get("turn_id")
+        artifact_id = payload.get("artifact_id")
+        status = payload.get("status")
+        if not isinstance(status, str) or not status:
+            status = state.status
         return DocumentCheckpoint(
             schema_version=SCHEMA_VERSION,
             session=session,
-            artifact_id=artifact_id,
+            checkpoint_key=checkpoint_key,
+            artifact_id=artifact_id if isinstance(artifact_id, str) else "",
             task_id=task_id if isinstance(task_id, str) else "",
             turn_id=turn_id if isinstance(turn_id, str) else "",
             state=state,
             bodies=tuple(bodies),
             phase=phase,
+            status=status,
             updated_at=updated,
         )
 
-    def delete(self, session: str, artifact_id: str) -> None:
-        path = self.path_for(session, artifact_id)
+    def delete(self, session: str, checkpoint_key: str) -> None:
+        path = self.path_for(session, checkpoint_key)
         with contextlib.suppress(OSError):
             path.unlink()
 

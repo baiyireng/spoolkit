@@ -3911,7 +3911,7 @@ class AgentLoop:
                                 pending=self.pending,
                                 artifact_root=self.config.project_root,
                                 session=artifact_session(self.pending),
-                                task_id=self._event_task_id,
+                                task_id=state.task_id or "task",
                                 turn_id=current_turn_id(),
                             )
                         except GenerationCancelled:
