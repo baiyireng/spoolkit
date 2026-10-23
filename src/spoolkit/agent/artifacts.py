@@ -12,7 +12,6 @@ import json
 import os
 import tempfile
 import threading
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -170,7 +169,11 @@ def as_task_artifact(record: ArtifactRecord) -> Artifact:
 
 
 class ArtifactStore:
-    """按 session 落盘。id 由调用方给出，仓库不生成随机 id。"""
+    """按 session 落盘。id 在一个 session 内唯一，仓库不生成随机 id。
+
+    相同 hash 只在同一 session 内复用记录。另一个 session 的相同正文另写一份，
+    不返回别的 session 的记录。
+    """
 
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
@@ -204,12 +207,12 @@ class ArtifactStore:
             size=size,
         )
         with self._lock:
-            current = self._read_id(record.id)
+            current = self._read_id(record.session, record.id)
             if current is not None:
                 if current.content_hash == digest:
                     return current
-                raise ArtifactError("同一 id 已有不同正文")
-            by_hash = self._read_hash(digest)
+                raise ArtifactError("同一 session 内该 id 已有不同正文")
+            by_hash = self._read_hash(record.session, digest)
             if by_hash is not None:
                 return by_hash
             content_path = self._inside(canonical)
@@ -228,22 +231,24 @@ class ArtifactStore:
                 raise
         return filled
 
-    def get(self, artifact_id: str) -> tuple[ArtifactRecord, str]:
+    def get(self, session: str, artifact_id: str) -> tuple[ArtifactRecord, str]:
+        _segment(session)
         _segment(artifact_id)
-        record = self._read_id(artifact_id)
+        record = self._read_id(session, artifact_id)
         if record is None:
-            raise ArtifactNotFound(f"找不到 artifact：{artifact_id}")
+            raise ArtifactNotFound(f"找不到 artifact：{session}/{artifact_id}")
         path = self._inside(record.path)
         if not path.is_file():
-            raise ArtifactNotFound(f"正文文件缺失：{artifact_id}")
+            raise ArtifactNotFound(f"正文文件缺失：{session}/{artifact_id}")
         return record, path.read_text(encoding="utf-8")
 
-    def exists(self, artifact_id: str) -> bool:
+    def exists(self, session: str, artifact_id: str) -> bool:
         try:
+            _segment(session)
             _segment(artifact_id)
         except ArtifactError:
             return False
-        return self._read_id(artifact_id) is not None
+        return self._read_id(session, artifact_id) is not None
 
     def list(self, session: str, limit: int) -> tuple[ArtifactRecord, ...]:
         _segment(session)
@@ -271,32 +276,29 @@ class ArtifactStore:
             raise ArtifactError("路径越界")
         return target
 
-    def _iter_metas(self) -> Iterator[Path]:
-        base = self._root / ".agent" / "artifacts"
-        if not base.is_dir():
-            return
-        for session_dir in base.iterdir():
-            if session_dir.is_dir():
-                yield from session_dir.glob("*.json")
-
     def _load_meta(self, path: Path) -> ArtifactRecord:
         payload = json.loads(path.read_text(encoding="utf-8"))
         return ArtifactRecord.from_dict(payload)
 
-    def _read_id(self, artifact_id: str) -> ArtifactRecord | None:
-        found: ArtifactRecord | None = None
-        for path in self._iter_metas():
-            if path.stem != artifact_id:
-                continue
-            record = self._load_meta(path)
-            if found is not None:
-                raise ArtifactError(f"artifact id 重复：{artifact_id}")
-            found = record
-        return found
+    def _read_id(self, session: str, artifact_id: str) -> ArtifactRecord | None:
+        path = self._meta_path(session, artifact_id)
+        if not path.is_file():
+            return None
+        record = self._load_meta(path)
+        if record.session != session or record.id != artifact_id:
+            raise ArtifactError("记录与 session 不一致")
+        if record.path and not record.path.startswith(f"{_LAYOUT}/{session}/"):
+            raise ArtifactError("记录与 session 不一致")
+        return record
 
-    def _read_hash(self, digest: str) -> ArtifactRecord | None:
-        for path in self._iter_metas():
+    def _read_hash(self, session: str, digest: str) -> ArtifactRecord | None:
+        directory = self._root / ".agent" / "artifacts" / session
+        if not directory.is_dir():
+            return None
+        for path in directory.glob("*.json"):
             record = self._load_meta(path)
+            if record.session != session:
+                raise ArtifactError("记录与 session 不一致")
             if record.content_hash == digest:
                 return record
         return None

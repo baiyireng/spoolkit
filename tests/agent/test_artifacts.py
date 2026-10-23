@@ -55,9 +55,9 @@ def test_put_get_list_exists(tmp_path: Path) -> None:
     assert stored.content_hash
     assert stored.size == len(BODY.encode("utf-8"))
     assert stored.path == f".agent/artifacts/sess-a/{stored.content_hash}"
-    assert store.exists("doc-1")
-    assert store.exists("missing") is False
-    record, content = store.get("doc-1")
+    assert store.exists("sess-a", "doc-1")
+    assert store.exists("sess-a", "missing") is False
+    record, content = store.get("sess-a", "doc-1")
     assert record == stored
     assert content == BODY
     assert store.list("sess-a", limit=10) == (stored,)
@@ -77,7 +77,7 @@ def test_same_content_hash_returns_existing(tmp_path: Path) -> None:
     first = store.put(_record(), BODY)
     second = store.put(_record(id="doc-2", title="另一份"), BODY)
     assert second == first
-    assert store.exists("doc-2") is False
+    assert store.exists("sess-a", "doc-2") is False
     files = [path for path in (tmp_path / ".agent" / "artifacts").rglob("*") if path.is_file()]
     bodies = [path for path in files if path.name == first.content_hash]
     assert len(bodies) == 1
@@ -103,7 +103,7 @@ def test_same_id_rejects_different_content(tmp_path: Path) -> None:
     store.put(_record(), BODY)
     with pytest.raises(ArtifactError):
         store.put(_record(), "另一份正文。")
-    _record_again, content = store.get("doc-1")
+    _record_again, content = store.get("sess-a", "doc-1")
     assert content == BODY
 
 
@@ -118,7 +118,7 @@ def test_failed_replace_leaves_no_partial(tmp_path: Path, monkeypatch: pytest.Mo
         store.put(_record(), BODY)
     files = [path for path in tmp_path.rglob("*") if path.is_file()]
     assert files == []
-    assert store.exists("doc-1") is False
+    assert store.exists("sess-a", "doc-1") is False
 
 
 def test_path_escape_is_rejected(tmp_path: Path) -> None:
@@ -133,7 +133,7 @@ def test_path_escape_is_rejected(tmp_path: Path) -> None:
         with pytest.raises(ArtifactError):
             store.put(bad, BODY)
     assert not outside.exists()
-    assert store.exists("doc-1") is False
+    assert store.exists("sess-a", "doc-1") is False
     assert list(tmp_path.rglob("*")) == []
 
 
@@ -195,14 +195,84 @@ def test_missing_content_file_is_not_invented(tmp_path: Path) -> None:
     stored = store.put(_record(), BODY)
     (tmp_path / stored.path).unlink()
     with pytest.raises(ArtifactNotFound):
-        store.get("doc-1")
+        store.get("sess-a", "doc-1")
+
+
+def _completed(record: ArtifactRecord) -> CompletedSection:
+    return CompletedSection(
+        index=0,
+        title=record.sections[0].title,
+        summary=record.summary,
+        artifact_id=record.id,
+        path=record.path,
+        char_count=record.sections[0].char_count,
+    )
+
+
+def test_same_body_in_another_session_keeps_its_own_record(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    first = store.put(_record(), BODY)
+    second = store.put(_record(id="doc-b", session="sess-b", title="另一会话"), BODY)
+    assert second.session == "sess-b"
+    assert second.id == "doc-b"
+    assert second.path == f".agent/artifacts/sess-b/{second.content_hash}"
+    assert second.content_hash == first.content_hash
+    assert second != first
+    assert store.list("sess-a", limit=10) == (first,)
+    assert store.list("sess-b", limit=10) == (second,)
+    got_a, content_a = store.get("sess-a", "doc-1")
+    got_b, content_b = store.get("sess-b", "doc-b")
+    assert (got_a, content_a) == (first, BODY)
+    assert (got_b, content_b) == (second, BODY)
+    assert store.exists("sess-a", "doc-b") is False
+    assert store.exists("sess-b", "doc-1") is False
+    bodies = [
+        path
+        for path in (tmp_path / ".agent" / "artifacts").rglob("*")
+        if path.is_file() and path.name == first.content_hash
+    ]
+    assert {path.parent.name for path in bodies} == {"sess-a", "sess-b"}
+    section_a = _completed(first)
+    section_b = _completed(second)
+    assert section_a.artifact_id == "doc-1"
+    assert section_b.artifact_id == "doc-b"
+    assert section_a.path.startswith(".agent/artifacts/sess-a/")
+    assert section_b.path.startswith(".agent/artifacts/sess-b/")
+    assert BODY not in DocumentState(
+        goal="写一份说明",
+        outline=(OutlineEntry(index=0, title="窗口", points="窗口的要点", target_chars=100),),
+        deliverable="file",
+        phase="plan",
+        completed_sections=(section_a,),
+    ).to_json()
+
+
+def test_same_id_in_another_session_does_not_cross(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    first = store.put(_record(), BODY)
+    other = "会话乙自己的正文。"
+    second = store.put(_record(session="sess-b", title="乙的说明"), other)
+    assert second.session == "sess-b"
+    assert second.id == "doc-1"
+    assert store.get("sess-a", "doc-1") == (first, BODY)
+    assert store.get("sess-b", "doc-1") == (second, other)
+    assert store.list("sess-a", limit=10) == (first,)
+    assert store.list("sess-b", limit=10) == (second,)
+    third = store.put(_record(session="sess-c"), BODY)
+    assert third.session == "sess-c"
+    assert third.id == "doc-1"
+    assert third.path.startswith(".agent/artifacts/sess-c/")
+    assert store.get("sess-c", "doc-1") == (third, BODY)
+    assert store.get("sess-a", "doc-1")[0] == first
+    assert store.exists("sess-a", "doc-1") is True
+    assert store.exists("sess-b", "missing") is False
 
 
 def test_returned_id_is_the_caller_id(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path)
     stored = store.put(_record(), BODY)
     assert stored.id == "doc-1"
-    again = ArtifactStore(tmp_path).get("doc-1")[0]
+    again = ArtifactStore(tmp_path).get("sess-a", "doc-1")[0]
     assert again.id == stored.id
     assert again.path == stored.path
     assert replace(stored, summary="x") != stored
