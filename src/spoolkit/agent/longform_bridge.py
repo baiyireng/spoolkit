@@ -118,6 +118,22 @@ def render_document(state: DocumentState, bodies: InMemoryBodyStore) -> str | No
     return "\n\n".join(parts)
 
 
+def artifact_session(pending: Any) -> str:
+    """artifact 按会话分目录，不按单次 run。
+
+    优先 `pending.run_session`。它为空时回退 `pending.session`，
+    仍为空再用 `pending.run_id`。同一会话里的多次 run 因此落在
+    `.agent/artifacts/<session>/`。三者都空时，目录名再由调用方收成 `run`。
+    """
+    if pending is None:
+        return ""
+    for name in ("run_session", "session", "run_id"):
+        value = str(getattr(pending, name, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def try_longform_text(
     *,
     gateway: Any,

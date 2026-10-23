@@ -131,7 +131,7 @@ class FileSink:
                 ArtifactSection(
                     index=entry.index,
                     title=entry.title,
-                    summary=_clip(entry.title),
+                    summary=_section_summary(body),
                     char_count=len(body),
                 )
             )
@@ -146,6 +146,12 @@ class FileSink:
             created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             sections=tuple(sections),
         )
+
+
+def _section_summary(body: str) -> str:
+    """节摘要取正文本身，最多 240 字。不把整节正文放进元数据。"""
+    compact = "".join(line.strip() for line in body.splitlines() if line.strip())
+    return _clip(compact)
 
 
 def _clip(text: str) -> str:

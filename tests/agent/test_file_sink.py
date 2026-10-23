@@ -109,7 +109,7 @@ def test_complete_stages_artifact_without_writing_target(tmp_path: Path) -> None
         completed_sections=refs,
     )
     blob = viewed.to_json()
-    assert MARKER not in blob
+    assert change.new_text not in blob
     assert viewed.path == TARGET
     assert all(item.path != viewed.path for item in viewed.completed_sections)
 
@@ -162,6 +162,32 @@ def test_second_complete_does_not_propose_again(tmp_path: Path) -> None:
     assert pending.apply_calls == 0
 
 
+def test_section_summaries_come_from_bodies(tmp_path: Path) -> None:
+    bodies = {
+        index: (f"{title}这一节写{title}的依据与边界。" * 30)
+        for index, title in enumerate(("窗口", "估算", "余量"))
+    }
+    sink, _pending, _target = _sink(tmp_path)
+    _commit_all(sink, bodies)
+    sink.complete(object())
+    record, content = sink.artifacts.get("sess-a", "doc-1")
+    summaries = [item.summary for item in record.sections]
+    assert len(set(summaries)) == 3
+    for item, body in zip(record.sections, bodies.values(), strict=True):
+        assert item.summary != item.title
+        assert len(item.summary) <= 240
+        assert item.summary[:20] in body
+        assert body not in json.dumps(record.to_dict(), ensure_ascii=False)
+    meta = json.loads(
+        (tmp_path / ".agent" / "artifacts" / "sess-a" / f"{record.id}.json").read_text(encoding="utf-8")
+    )
+    blob = json.dumps(meta, ensure_ascii=False)
+    for body in bodies.values():
+        assert body not in blob
+    for body in bodies.values():
+        assert body in content
+
+
 def test_artifact_metadata_does_not_contain_body(tmp_path: Path) -> None:
     sink, pending, _ = _sink(tmp_path)
     _commit_all(sink)
@@ -170,6 +196,6 @@ def test_artifact_metadata_does_not_contain_body(tmp_path: Path) -> None:
     meta_path = tmp_path / ".agent" / "artifacts" / "sess-a" / f"{record.id}.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     blob = json.dumps(meta, ensure_ascii=False)
-    assert MARKER not in blob
     assert pending.items()[0].new_text not in blob
+    assert all(item["summary"] != item["title"] for item in meta["sections"])
     assert meta["path"].startswith(".agent/artifacts/sess-a/")

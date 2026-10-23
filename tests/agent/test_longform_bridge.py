@@ -67,12 +67,14 @@ class _Gateway:
         mode: str = "long",
         deliverable: str = "",
         path: str = "",
+        marker: str = _MARKER,
     ) -> None:
         self.requests: list[ChatRequest] = []
         self.outline = outline if outline is not None else _outline_text()
         self.mode = mode
         self.deliverable = deliverable
         self.path = path
+        self.marker = marker
         self._tokenizer = OfflineTokenCounter()
 
     def chat(self, request: ChatRequest) -> ChatResponse:
@@ -84,7 +86,7 @@ class _Gateway:
             text = "完"
         elif "只补完" in blob or "未开始标题" in blob or "重写当前节" in blob:
             title = next((item for item in _TITLES if item in blob), _TITLES[0])
-            text = _body(title)
+            text = self.marker + _piece(title, 1000)
         elif "进入终稿阶段" in blob:
             text = "一句话回答。"
         else:
@@ -316,8 +318,76 @@ def test_file_deliverable_stages_pending_and_summarizes(tmp_path: Path) -> None:
     metas = list((tmp_path / ".agent" / "artifacts").rglob(f"{artifact_id}.json"))
     assert len(metas) == 1
     meta = json.loads(metas[0].read_text(encoding="utf-8"))
-    assert _MARKER not in json.dumps(meta, ensure_ascii=False)
-    assert _MARKER in (tmp_path / str(meta["path"])).read_text(encoding="utf-8")
+    blob = json.dumps(meta, ensure_ascii=False)
+    content = (tmp_path / str(meta["path"])).read_text(encoding="utf-8")
+    assert content not in blob
+    assert _MARKER in content
+    assert all(
+        item["summary"] != item["title"] and item["summary"].rstrip("…") in content
+        for item in meta["sections"]
+    )
+
+
+def test_artifact_directory_follows_run_session(tmp_path: Path) -> None:
+    from spoolkit.agent.artifacts import ArtifactStore
+
+    first = _Pending(tmp_path)
+    first.run_id = "run-9"
+    first.run_session = "sess-chat"
+    _loop(
+        tmp_path,
+        _Gateway(deliverable="file", path="docs/out.md"),
+        v2=True,
+        events=[],
+        pending=first,
+    ).run("写一份说明")
+    second = _Pending(tmp_path)
+    second.run_id = "run-10"
+    second.run_session = "sess-chat"
+    _loop(
+        tmp_path,
+        _Gateway(deliverable="file", path="docs/other.md", marker="标记乙"),
+        v2=True,
+        events=[],
+        pending=second,
+    ).run("写一份说明")
+    root = tmp_path / ".agent" / "artifacts"
+    assert (root / "sess-chat").is_dir()
+    assert not (root / "run-9").exists()
+    assert not (root / "run-10").exists()
+    listed = ArtifactStore(tmp_path).list("sess-chat", limit=10)
+    assert len(listed) == 2
+    assert {item.session for item in listed} == {"sess-chat"}
+    assert all(item.path.startswith(".agent/artifacts/sess-chat/") for item in listed)
+
+
+def test_empty_run_session_falls_back_to_session_then_run_id(tmp_path: Path) -> None:
+    pending = _Pending(tmp_path)
+    pending.run_id = "run-9"
+    pending.run_session = ""
+    pending.session = "sess-fallback"
+    _loop(
+        tmp_path,
+        _Gateway(deliverable="file", path="docs/out.md"),
+        v2=True,
+        events=[],
+        pending=pending,
+    ).run("写一份说明")
+    root = tmp_path / ".agent" / "artifacts"
+    assert (root / "sess-fallback").is_dir()
+    assert not (root / "run-9").exists()
+
+    only_run = _Pending(tmp_path)
+    only_run.run_id = "run-11"
+    only_run.run_session = "   "
+    _loop(
+        tmp_path,
+        _Gateway(deliverable="file", path="docs/third.md", marker="标记丙"),
+        v2=True,
+        events=[],
+        pending=only_run,
+    ).run("写一份说明")
+    assert (root / "run-11").is_dir()
 
 
 def test_missing_or_escaping_path_does_not_pending(tmp_path: Path) -> None:

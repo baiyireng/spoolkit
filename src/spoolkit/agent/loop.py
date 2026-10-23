@@ -67,7 +67,7 @@ from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.answer_plan import SHORT_CUES, should_use_long_answer
 from spoolkit.agent.evidence_gate import check_evidence
 from spoolkit.agent.final_turn import SHORT_CONTINUE, request_final
-from spoolkit.agent.longform_bridge import try_longform_text
+from spoolkit.agent.longform_bridge import artifact_session, try_longform_text
 from spoolkit.agent.sections import STOP_MARK, compose_long_answer
 from spoolkit.agent.protocol import (
     ParseFailure,
@@ -3826,7 +3826,7 @@ class AgentLoop:
                                 token_budget=room,
                                 pending=self.pending,
                                 artifact_root=self.config.project_root,
-                                session=str(getattr(self.pending, "run_id", "") or ""),
+                                session=artifact_session(self.pending),
                                 task_id=self._event_task_id,
                                 turn_id=current_turn_id(),
                             )
