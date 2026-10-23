@@ -19,6 +19,7 @@ from spoolkit.agent.protocol import AnswerPlan
 from spoolkit.config import Config
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.llm.types import ChatRequest, ChatResponse, Message
+from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.registry import ToolRegistry
 
 _TITLES = ("窗口", "估算", "余量")
@@ -41,7 +42,7 @@ def _outline_text() -> str:
     return "\n".join(f"{title} | {title}的要点 | 1000" for title in _TITLES)
 
 
-def _control(mode: str = "long") -> str:
+def _control(mode: str = "long", *, deliverable: str = "", path: str = "") -> str:
     payload: dict[str, object] = {
         "thought": "这题要分节写",
         "tool_calls": [],
@@ -49,15 +50,29 @@ def _control(mode: str = "long") -> str:
         "summary": "无需外部信息。按三节展开。",
     }
     if mode:
-        payload["answer_plan"] = {"mode": mode, "target_tokens": 4000, "sections": 3}
+        plan: dict[str, object] = {"mode": mode, "target_tokens": 4000, "sections": 3}
+        if deliverable:
+            plan["deliverable"] = deliverable
+        if path:
+            plan["path"] = path
+        payload["answer_plan"] = plan
     return json.dumps(payload, ensure_ascii=False)
 
 
 class _Gateway:
-    def __init__(self, *, outline: str | None = None, mode: str = "long") -> None:
+    def __init__(
+        self,
+        *,
+        outline: str | None = None,
+        mode: str = "long",
+        deliverable: str = "",
+        path: str = "",
+    ) -> None:
         self.requests: list[ChatRequest] = []
         self.outline = outline if outline is not None else _outline_text()
         self.mode = mode
+        self.deliverable = deliverable
+        self.path = path
         self._tokenizer = OfflineTokenCounter()
 
     def chat(self, request: ChatRequest) -> ChatResponse:
@@ -73,7 +88,7 @@ class _Gateway:
         elif "进入终稿阶段" in blob:
             text = "一句话回答。"
         else:
-            text = _control(self.mode)
+            text = _control(self.mode, deliverable=self.deliverable, path=self.path)
         return ChatResponse(
             text=text,
             prompt_tokens=sum(self._tokenizer.count(item.content) for item in request.messages),
@@ -87,7 +102,24 @@ class _Gateway:
         return response
 
 
-def _loop(tmp_path: Path, gateway: _Gateway, *, v2: bool, events: list) -> AgentLoop:
+class _Pending(PendingChanges):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root, overrides={}, run_id="run-1")
+        self.apply_calls = 0
+
+    def apply(self) -> list[str]:
+        self.apply_calls += 1
+        raise AssertionError("不应落盘")
+
+
+def _loop(
+    tmp_path: Path,
+    gateway: _Gateway,
+    *,
+    v2: bool,
+    events: list,
+    pending: PendingChanges | None = None,
+) -> AgentLoop:
     return AgentLoop(
         gateway=gateway,  # type: ignore[arg-type]
         tokenizer=OfflineTokenCounter(),
@@ -100,6 +132,7 @@ def _loop(tmp_path: Path, gateway: _Gateway, *, v2: bool, events: list) -> Agent
             overrides={"protocol_v2": 1 if v2 else 0},
         ),
         on_event=lambda kind, data: events.append((kind, dict(data))),
+        pending=pending,
     )
 
 
@@ -126,6 +159,49 @@ def test_build_document_state_from_outline() -> None:
     assert [item.title for item in state.outline] == list(_TITLES)
     assert [item.points for item in state.outline] == [f"{title}的要点" for title in _TITLES]
     assert [item.target_chars for item in state.outline] == [1000, 1000, 1000]
+
+
+def test_build_file_state_keeps_path_and_char_rule() -> None:
+    gateway = _Gateway()
+    state = build_document_state(
+        "写一份估算说明",
+        AnswerPlan(mode="long", target_tokens=4000, sections=3, deliverable="file", path="docs/out.md"),
+        (Message(role="user", content="写一份估算说明"),),
+        gateway,
+        token_budget=8000,
+    )
+    assert state is not None
+    assert state.deliverable == "file"
+    assert state.path == "docs/out.md"
+    assert [item.target_chars for item in state.outline] == [1000, 1000, 1000]
+    assert build_document_state(
+        "写一份估算说明",
+        AnswerPlan(mode="long", target_tokens=4000, deliverable="file", path=""),
+        (Message(role="user", content="写一份估算说明"),),
+        gateway,
+        token_budget=8000,
+    ) is None
+    assert build_document_state(
+        "写一份估算说明",
+        AnswerPlan(mode="long", target_tokens=4000, deliverable="file", path="../out.md"),
+        (Message(role="user", content="写一份估算说明"),),
+        gateway,
+        token_budget=8000,
+    ) is None
+
+
+def test_both_deliverable_is_not_supported_and_stays_chat() -> None:
+    gateway = _Gateway()
+    state = build_document_state(
+        "写一份估算说明",
+        AnswerPlan(mode="long", target_tokens=4000, deliverable="both", path="docs/out.md"),
+        (Message(role="user", content="写一份估算说明"),),
+        gateway,
+        token_budget=8000,
+    )
+    assert state is not None
+    assert state.deliverable == "chat"
+    assert state.path == ""
 
 
 def test_build_document_state_returns_none_when_outline_fails() -> None:
@@ -213,6 +289,61 @@ def test_v2_long_mode_uses_longform_runner(tmp_path: Path) -> None:
     assert all(data.get("source") == "system" and data.get("status") == "ok" for kind, data in events if kind == "task_event" and data.get("phase") == "final")
     assert all(_MARKER not in str(data.get("summary", "")) for _kind, data in events if _kind == "task_event")
     assert not any(kind == "section_start" for kind, _data in events)
+
+
+def _final_events(events: list) -> list[dict]:
+    return [data for kind, data in events if kind == "task_event" and data.get("phase") == "final"]
+
+
+def test_file_deliverable_stages_pending_and_summarizes(tmp_path: Path) -> None:
+    events: list = []
+    pending = _Pending(tmp_path)
+    gateway = _Gateway(deliverable="file", path="docs/out.md")
+    result = _loop(tmp_path, gateway, v2=True, events=events, pending=pending).run("写一份说明")
+    target = tmp_path / "docs" / "out.md"
+    assert result.final == "已生成文档，待确认：docs/out.md"
+    assert _MARKER not in result.final
+    assert not target.exists()
+    assert pending.apply_calls == 0
+    assert len(pending.items()) == 1
+    assert pending.items()[0].path == "docs/out.md"
+    assert _MARKER in pending.items()[0].new_text
+    finals = _final_events(events)
+    assert finals[0]["summary"] == "已生成文档，待确认：docs/out.md"
+    assert _MARKER not in finals[0]["summary"]
+    assert finals[0]["artifacts"][0]["path"] == "docs/out.md"
+    artifact_id = finals[0]["artifacts"][0]["ref"]
+    metas = list((tmp_path / ".agent" / "artifacts").rglob(f"{artifact_id}.json"))
+    assert len(metas) == 1
+    meta = json.loads(metas[0].read_text(encoding="utf-8"))
+    assert _MARKER not in json.dumps(meta, ensure_ascii=False)
+    assert _MARKER in (tmp_path / str(meta["path"])).read_text(encoding="utf-8")
+
+
+def test_missing_or_escaping_path_does_not_pending(tmp_path: Path) -> None:
+    for path in ("", "../out.md", "C:/tmp/out.md"):
+        events: list = []
+        pending = _Pending(tmp_path)
+        gateway = _Gateway(deliverable="file", path=path)
+        result = _loop(tmp_path, gateway, v2=True, events=events, pending=pending).run("写一份说明")
+        assert pending.items() == []
+        assert pending.apply_calls == 0
+        assert "已生成文档" not in result.final
+        assert not (tmp_path / "docs" / "out.md").exists()
+
+
+def test_both_falls_back_to_chat_without_pending(tmp_path: Path) -> None:
+    events: list = []
+    pending = _Pending(tmp_path)
+    gateway = _Gateway(deliverable="both", path="docs/out.md")
+    result = _loop(tmp_path, gateway, v2=True, events=events, pending=pending).run("写一份说明")
+    assert result.final.index("## 窗口") < result.final.index("## 估算")
+    assert _MARKER in result.final
+    assert "已生成文档" not in result.final
+    assert pending.items() == []
+    assert not (tmp_path / ".agent" / "artifacts").exists()
+    assert _final_events(events)[0]["summary"] == "长文完成：3 节 / 3009 字"
+    assert _final_events(events)[0]["artifacts"] == []
 
 
 def test_outline_failure_falls_back_to_compose(tmp_path: Path) -> None:

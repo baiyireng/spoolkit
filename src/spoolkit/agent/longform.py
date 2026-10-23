@@ -543,6 +543,12 @@ class LongFormRunner:
             self._failures.pop(current.index, None)
         elif current.index not in self._failures:
             self._failures[current.index] = "short_section"
+        artifact_id = ""
+        section_path = ""
+        if self.state.deliverable in ("file", "both"):
+            artifact_id = str(getattr(self._sink, "artifact_id", "") or "")
+            if not artifact_id:
+                section_path = self.state.path
         self.state = replace(
             self.state,
             completed_sections=self.state.completed_sections
@@ -551,8 +557,8 @@ class LongFormRunner:
                     index=current.index,
                     title=current.title,
                     summary=_summary(body),
-                    artifact_id="",
-                    path="",
+                    artifact_id=artifact_id,
+                    path=section_path,
                     char_count=len(body.strip()),
                 ),
             ),

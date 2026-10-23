@@ -136,6 +136,8 @@ def build_turn_schema(
                 "mode": {"type": "string", "enum": ["short", "long"]},
                 "sections": {"type": "integer"},
                 "target_tokens": {"type": "integer"},
+                "deliverable": {"type": "string", "enum": ["chat", "file", "both"]},
+                "path": {"type": "string"},
             },
             "required": ["mode", "target_tokens"],
         }
@@ -151,11 +153,13 @@ def build_turn_schema(
 
 @dataclass(frozen=True)
 class AnswerPlan:
-    """控制回合对自己要写多长的申报。长文触发在后续阶段用它。"""
+    """控制回合对自己要写多长、交到哪里的申报。长文触发在后续阶段用它。"""
 
     mode: Literal["short", "long"]
     target_tokens: int
     sections: int | None = None
+    deliverable: Literal["chat", "file", "both"] = "chat"
+    path: str = ""
 
 
 @dataclass(frozen=True)
@@ -279,7 +283,23 @@ def _parse_answer_plan(raw: Any) -> AnswerPlan | None | str:
     sections = raw.get("sections")
     if sections is not None and (isinstance(sections, bool) or not isinstance(sections, int)):
         return "answer_plan.sections 必须是整数"
-    return AnswerPlan(mode=mode, target_tokens=target, sections=sections)
+    deliverable = raw.get("deliverable", "chat")
+    if deliverable is None:
+        deliverable = "chat"
+    if deliverable not in ("chat", "file", "both"):
+        return "answer_plan.deliverable 必须是 chat、file 或 both"
+    path = raw.get("path", "")
+    if path is None:
+        path = ""
+    if not isinstance(path, str):
+        return "answer_plan.path 必须是字符串"
+    return AnswerPlan(
+        mode=mode,
+        target_tokens=target,
+        sections=sections,
+        deliverable=deliverable,
+        path=path,
+    )
 
 
 def parse_turn(text: str) -> AgentTurn | ParseFailure:

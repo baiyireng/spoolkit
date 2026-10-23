@@ -198,7 +198,7 @@ from spoolkit.agent.contract import (
     tool_event,
 )
 from spoolkit.tools.call_context import tool_call_context
-from spoolkit.tools.types import REVERSE_CLAUSE, ToolCall, ToolResult
+from spoolkit.tools.types import REVERSE_CLAUSE, Artifact, ToolCall, ToolResult
 from spoolkit.tools.verify import (
     CANNOT_CHECK,
     ENVIRONMENT_MARKER,
@@ -3824,6 +3824,11 @@ class AgentLoop:
                                 goal=state.goal or "",
                                 plan=getattr(turn, "answer_plan", None),
                                 token_budget=room,
+                                pending=self.pending,
+                                artifact_root=self.config.project_root,
+                                session=str(getattr(self.pending, "run_id", "") or ""),
+                                task_id=self._event_task_id,
+                                turn_id=current_turn_id(),
                             )
                         except GenerationCancelled:
                             longform_draft = None
@@ -3856,13 +3861,26 @@ class AgentLoop:
                             longform_draft is not None
                             and long_text == longform_draft.text
                         ):
-                            self._longform_summary = (
-                                f"长文完成：{longform_draft.sections} 节 / {longform_draft.chars} 字"
-                            )
+                            if longform_draft.deliverable == "file":
+                                self._longform_summary = longform_draft.text
+                                self._longform_artifacts = (
+                                    Artifact(
+                                        type="document",
+                                        path=longform_draft.path,
+                                        ref=longform_draft.artifact_id,
+                                    ),
+                                )
+                            else:
+                                self._longform_summary = (
+                                    f"长文完成：{longform_draft.sections} 节 / {longform_draft.chars} 字"
+                                )
+                                self._longform_artifacts = ()
                         else:
                             self._longform_summary = ""
+                            self._longform_artifacts = ()
                     else:
                         self._longform_summary = ""
+                        self._longform_artifacts = ()
                         conclusion_text = request_final(
                             self.gateway,
                             assembled.messages,
@@ -7560,10 +7578,12 @@ class AgentLoop:
     def _emit_outcome(self, status: str, summary: str, step: int) -> None:
         """本轮收尾。未完成和异常走 error，不从这里再发一条 final。
 
-        长文走 runner 成功时，这条 final 只留「N 节 / M 字」，不把正文放进 summary。
+        长文走 runner 成功时，这条 final 只留摘要。file 再带 artifact_id 和目标路径，不放正文。
         """
+        artifacts: tuple[Artifact, ...] = ()
         if status == "ok" and getattr(self, "_longform_summary", ""):
             summary = self._longform_summary
+            artifacts = tuple(getattr(self, "_longform_artifacts", ()) or ())
         self._emit_task(
             TaskEvent(
                 task_id=self._event_task_id,
@@ -7575,6 +7595,7 @@ class AgentLoop:
                 source="system",
                 status=status,
                 summary=summary,
+                artifacts=artifacts,
             )
         )
 

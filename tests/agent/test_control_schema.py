@@ -85,7 +85,44 @@ def test_v2完成时收下summary且没有final正文() -> None:
     assert turn.answer_plan is not None
     assert turn.answer_plan.mode == "short"
     assert turn.answer_plan.target_tokens == 400
+    assert turn.answer_plan.deliverable == "chat"
+    assert turn.answer_plan.path == ""
     assert turn.tool_calls == ()
+
+
+def test_answer_plan缺省交付形态是chat() -> None:
+    schema = build_turn_schema_v2(_EmptyRegistry())
+    plan_schema = schema["properties"]["answer_plan"]
+    assert plan_schema["properties"]["deliverable"]["enum"] == ["chat", "file", "both"]
+    assert plan_schema["properties"]["path"]["type"] == "string"
+    assert "deliverable" not in plan_schema["required"]
+    assert "path" not in plan_schema["required"]
+    turn = TurnProtocol(v2=True).parse(
+        _v2(
+            tool_calls=[],
+            done=True,
+            summary="结论：写到文件。依据：用户指定了路径。",
+            answer_plan={
+                "mode": "long",
+                "target_tokens": 4000,
+                "deliverable": "file",
+                "path": "docs/out.md",
+            },
+        )
+    )
+    assert isinstance(turn, AgentTurn)
+    assert turn.answer_plan is not None
+    assert turn.answer_plan.deliverable == "file"
+    assert turn.answer_plan.path == "docs/out.md"
+    bad = TurnProtocol(v2=True).parse(
+        _v2(
+            tool_calls=[],
+            done=True,
+            summary="结论：形态不对。依据：交付字段无效。",
+            answer_plan={"mode": "long", "target_tokens": 400, "deliverable": "note"},
+        )
+    )
+    assert isinstance(bad, ParseFailure)
 
 
 def test_v2未完成时允许工具且summary为空() -> None:

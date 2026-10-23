@@ -8,13 +8,17 @@ target_chars 按中文离线口径估算：1 token 约等于 1 字。这是写�
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from spoolkit.agent.artifacts import ArtifactStore
 from spoolkit.agent.chat_sink import CollectingChatSink
 from spoolkit.agent.document_bodies import InMemoryBodyStore, section_ref
 from spoolkit.agent.document_state import DocumentState, OutlineEntry
+from spoolkit.agent.file_sink import FileSink, FileSinkError
 from spoolkit.agent.longform import LongFormRunner
 from spoolkit.agent.protocol import AnswerPlan
 from spoolkit.agent.sections import fallback_outline, request_outline
@@ -30,6 +34,9 @@ class LongformDraft:
     text: str
     sections: int
     chars: int
+    deliverable: str = "chat"
+    artifact_id: str = ""
+    path: str = ""
 
 
 def target_chars_for(target_tokens: int) -> int:
@@ -37,10 +44,22 @@ def target_chars_for(target_tokens: int) -> int:
     return max(1, target_tokens * CHARS_PER_TOKEN)
 
 
-def document_state_from_writing(state: WritingState) -> DocumentState | None:
+def document_state_from_writing(
+    state: WritingState,
+    *,
+    deliverable: str = "chat",
+    path: str = "",
+) -> DocumentState | None:
     """同一套字段转换。request_outline 和 fallback_outline 都走这里。"""
     if not state.outline:
         return None
+    if deliverable not in ("chat", "file"):
+        return None
+    relative = ""
+    if deliverable == "file":
+        relative = _safe_file_path(path) or ""
+        if not relative:
+            return None
     outline = tuple(
         OutlineEntry(
             index=index,
@@ -53,7 +72,8 @@ def document_state_from_writing(state: WritingState) -> DocumentState | None:
     return DocumentState(
         goal=state.goal,
         outline=outline,
-        deliverable="chat",
+        deliverable=deliverable,  # type: ignore[arg-type]
+        path=relative,
         phase="plan",
         pending_sections=tuple(range(len(outline))),
     )
@@ -68,13 +88,16 @@ def build_document_state(
     token_budget: int,
 ) -> DocumentState | None:
     """要一份大纲并收成 plan 阶段的 DocumentState。失败时返回 None。"""
-    del plan
     if token_budget < 1 or not goal.strip():
         return None
+    delivery = _delivery(plan)
+    if delivery is None:
+        return None
+    deliverable, path = delivery
     written = request_outline(gateway, prefix, goal=goal, token_budget=token_budget)
     if isinstance(written, OutlineFailure) or not isinstance(written, WritingState):
         return None
-    return document_state_from_writing(written)
+    return document_state_from_writing(written, deliverable=deliverable, path=path)
 
 
 def render_document(state: DocumentState, bodies: InMemoryBodyStore) -> str | None:
@@ -102,23 +125,96 @@ def try_longform_text(
     goal: str,
     plan: AnswerPlan | None,
     token_budget: int,
+    pending: Any = None,
+    artifact_root: Path | None = None,
+    session: str = "",
+    task_id: str = "",
+    turn_id: str = "",
 ) -> LongformDraft | None:
-    """跑完并校验通过才返回正文。否则返回 None，调用方回退旧的分节组装。"""
+    """跑完并校验通过才返回。file 成功时 text 只是待确认摘要，不是全文。"""
     state = build_document_state(goal, plan, prefix, gateway, token_budget=token_budget)
     if state is None:
         return None
     bodies = InMemoryBodyStore()
-    sink = CollectingChatSink()
+    sink: Any
+    if state.deliverable == "file":
+        if pending is None or artifact_root is None:
+            return None
+        try:
+            sink = FileSink(
+                state=state,
+                path=state.path,
+                session=_session_segment(session),
+                task_id=task_id or "task",
+                turn_id=turn_id or "turn",
+                artifacts=ArtifactStore(artifact_root),
+                pending=pending,
+                artifact_id=_artifact_id(session, task_id, turn_id, state.path),
+            )
+        except FileSinkError:
+            return None
+    else:
+        sink = CollectingChatSink()
     result = LongFormRunner(state, gateway, bodies, sink).run()
     if not result.done:
-        return None
-    text = render_document(state, bodies)
-    if not text:
         return None
     chars = 0
     for entry in state.outline:
         chars += len(bodies.get(section_ref(entry.index)).strip())
+    if state.deliverable == "file":
+        if sink.pending is None or sink.record is None:
+            return None
+        return LongformDraft(
+            text=f"已生成文档，待确认：{sink.path}",
+            sections=len(state.outline),
+            chars=chars,
+            deliverable="file",
+            artifact_id=sink.artifact_id,
+            path=sink.path,
+        )
+    text = render_document(state, bodies)
+    if not text:
+        return None
     return LongformDraft(text=text, sections=len(state.outline), chars=chars)
+
+
+def _delivery(plan: AnswerPlan | None) -> tuple[str, str] | None:
+    """file 路径不成立时返回 None。both 暂不支持，按 chat 写，不带路径。"""
+    deliverable = "chat" if plan is None else plan.deliverable
+    if deliverable == "both":
+        return ("chat", "")
+    if deliverable == "chat":
+        return ("chat", "")
+    if deliverable != "file":
+        return None
+    relative = _safe_file_path("" if plan is None else plan.path)
+    if relative is None:
+        return None
+    return ("file", relative)
+
+
+def _safe_file_path(path: str) -> str | None:
+    text = str(path).strip()
+    if not text:
+        return None
+    raw = Path(text)
+    if raw.is_absolute() or text.startswith(("/", "\\")) or ":" in text:
+        return None
+    parts = [part for part in raw.parts if part != "."]
+    if not parts or any(part in ("..", "") for part in parts):
+        return None
+    return "/".join(parts)
+
+
+def _session_segment(value: str) -> str:
+    cleaned = "".join(char if char.isalnum() or char in "._-" else "-" for char in value.strip())
+    cleaned = cleaned.strip(".-")[:80]
+    return cleaned or "run"
+
+
+def _artifact_id(session: str, task_id: str, turn_id: str, path: str) -> str:
+    digest = hashlib.sha256(f"{session}|{task_id}|{turn_id}|{path}".encode("utf-8")).hexdigest()[:16]
+    return f"doc-{digest}"
 
 
 def fallback_document_state(goal: str, budget: int) -> DocumentState | None:
