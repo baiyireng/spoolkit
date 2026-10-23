@@ -83,6 +83,12 @@ class CollectingChatSink:
     def section_commit(self, index: int, body: str) -> None:
         self._sections[index] = body
 
+    def section_restore(self, index: int, body: str, title: str = "") -> None:
+        """恢复已完成节，不算新写一遍。"""
+        if title:
+            self._titles.setdefault(index, title)
+        self._sections[index] = body
+
     def section_replace(self, index: int, body: str) -> None:
         self._sections[index] = body
 

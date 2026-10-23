@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 
 from spoolkit.agent.chat_sink import ChatSink
 from spoolkit.agent.document_bodies import InMemoryBodyStore, section_ref
+from spoolkit.agent.document_checkpoint import DocumentCheckpoint, DocumentCheckpointStore
 from spoolkit.agent.document_source import SourceContext
 from spoolkit.agent.document_state import (
     SUMMARY_CAP,
@@ -192,6 +193,12 @@ class LongFormRunner:
         bodies: InMemoryBodyStore,
         sink: ChatSink | None = None,
         source: SourceContext | tuple[SourceContext, ...] | None = None,
+        *,
+        checkpoint: DocumentCheckpointStore | None = None,
+        session: str = "",
+        artifact_id: str = "",
+        task_id: str = "",
+        turn_id: str = "",
     ) -> None:
         if state.current_section is None:
             if not state.pending_sections:
@@ -207,6 +214,11 @@ class LongFormRunner:
         self._origin = origin
         self._sink = sink
         self._sources = _contexts(source)
+        self._checkpoint = checkpoint
+        self._session = session.strip()
+        self._artifact_id = artifact_id.strip()
+        self._task_id = task_id.strip()
+        self._turn_id = turn_id.strip()
         self._steps: list[PhaseStep] = []
         self._failures: dict[int, str] = {}
         self._anchor_unresolved = False
@@ -215,17 +227,26 @@ class LongFormRunner:
         # 否则聊天层会把同一节追加两遍。
         self._committed: set[int] = set()
 
-    def run(self) -> LongFormResult:
+    def run(self, *, stop_after: int | None = None) -> LongFormResult:
+        self._maybe_resume()
         self._notify("start", self.state)
+        self._restore_completed()
+        if self._reached(stop_after):
+            return self._pause()
         self._open_from_outline()
         self._drive_current()
+        if self._reached(stop_after):
+            return self._pause()
         while self.state.pending_sections:
             self._drive_pending()
+            if self._reached(stop_after):
+                return self._pause()
         reasons = self._validate_and_route()
         ending = self._finalize() if not reasons else ""
         done = not reasons and ending == "完"
         if done:
             self.state = replace(self.state, phase="finalize", status="done", error="")
+            self._clear_checkpoint()
         else:
             self.state = replace(
                 self.state,
@@ -233,6 +254,7 @@ class LongFormRunner:
                 status="failed",
                 error=",".join(reasons) if reasons else "finalize",
             )
+            self._save_checkpoint()
         result = LongFormResult(
             state=self.state,
             steps=tuple(self._steps),
@@ -246,6 +268,106 @@ class LongFormRunner:
         else:
             self._notify("fail", reasons if reasons else ("finalize",))
         return result
+
+    def _maybe_resume(self) -> None:
+        """同一 session 和 artifact 有未完成 checkpoint 时，从那份进度继续。"""
+        loaded = self._load_checkpoint()
+        if loaded is None or loaded.state.status == "done":
+            return
+        self.state = loaded.state
+        for index, body in loaded.bodies:
+            ref = section_ref(index)
+            if self.bodies.exists(ref):
+                self.bodies.update(ref, body)
+            else:
+                self.bodies.put(index, body)
+        if self.state.current_section is not None:
+            index = self.state.current_section.index
+            self._origin = index
+            if not self.bodies.exists(section_ref(index)):
+                self.bodies.put(index, "")
+        elif self.state.pending_sections:
+            self._origin = self.state.pending_sections[0]
+        done = {item.index for item in self.state.completed_sections}
+        self._committed.update(done)
+        self._published.update(done)
+
+    def _load_checkpoint(self) -> DocumentCheckpoint | None:
+        if self._checkpoint is None or not self._session or not self._artifact_id:
+            return None
+        return self._checkpoint.load(self._session, self._artifact_id)
+
+    def _reached(self, stop_after: int | None) -> bool:
+        return stop_after is not None and len(self.state.completed_sections) >= stop_after
+
+    def _pause(self) -> LongFormResult:
+        self.state = replace(self.state, phase="stopped", status="paused", error="")
+        self._save_checkpoint()
+        return LongFormResult(
+            state=self.state,
+            steps=tuple(self._steps),
+            reasons=("stopped",),
+            done=False,
+            ending="",
+            failures=tuple(sorted(self._failures.items())),
+        )
+
+    def _checkpoint_bodies(self) -> tuple[tuple[int, str], ...]:
+        found: list[tuple[int, str]] = []
+        for entry in self.state.outline:
+            ref = section_ref(entry.index)
+            if self.bodies.exists(ref):
+                found.append((entry.index, self.bodies.get(ref)))
+        return tuple(found)
+
+    def _save_checkpoint(self) -> None:
+        if self._checkpoint is None or not self._session or not self._artifact_id:
+            return
+        try:
+            self._checkpoint.save(
+                DocumentCheckpoint(
+                    schema_version=self.state.schema_version,
+                    session=self._session,
+                    artifact_id=self._artifact_id,
+                    task_id=self._task_id,
+                    turn_id=self._turn_id,
+                    state=self.state,
+                    bodies=self._checkpoint_bodies(),
+                    phase=self.state.phase,
+                    updated_at="",
+                )
+            )
+        except Exception:
+            return
+
+    def _clear_checkpoint(self) -> None:
+        if self._checkpoint is None or not self._session or not self._artifact_id:
+            return
+        try:
+            self._checkpoint.delete(self._session, self._artifact_id)
+        except Exception:
+            return
+
+    def _restore_completed(self) -> None:
+        """把已完成节的正文交回 sink，不再走 section_commit。"""
+        if self._sink is None:
+            return
+        restore = getattr(self._sink, "section_restore", None)
+        if not callable(restore):
+            return
+        for item in self.state.completed_sections:
+            ref = section_ref(item.index)
+            if not self.bodies.exists(ref):
+                continue
+            try:
+                restore(item.index, self.bodies.get(ref), item.title)
+            except TypeError:
+                try:
+                    restore(item.index, self.bodies.get(ref))
+                except Exception:
+                    return
+            except Exception:
+                return
 
     def _open_from_outline(self) -> None:
         if self.state.current_section is not None:
@@ -582,6 +704,7 @@ class LongFormRunner:
             current_section=None,
             phase="commit",
         )
+        self._save_checkpoint()
         if current.index in self._published and body.strip():
             if current.index in self._committed:
                 self._notify("section_replace", current.index, body)

@@ -65,6 +65,11 @@ class FileSink:
         """记下这一节的最终正文。不写目标文件。"""
         self._remember(index, body)
 
+    def section_restore(self, index: int, body: str, title: str = "") -> None:
+        """恢复已完成节的正文。不登记待确认修改。"""
+        del title
+        self._remember(index, body)
+
     def section_replace(self, index: int, body: str) -> None:
         """替换这一节的最终正文。不写目标文件。"""
         self._remember(index, body)

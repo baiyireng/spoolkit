@@ -18,6 +18,7 @@ from typing import Any
 from spoolkit.agent.artifacts import ArtifactRecord, ArtifactSection, ArtifactStore
 from spoolkit.agent.chat_sink import CollectingChatSink
 from spoolkit.agent.document_bodies import InMemoryBodyStore, section_ref
+from spoolkit.agent.document_checkpoint import DocumentCheckpointStore
 from spoolkit.agent.document_state import SUMMARY_CAP, DocumentState, OutlineEntry
 from spoolkit.agent.file_sink import FileSink, FileSinkError
 from spoolkit.agent.longform import LongFormRunner
@@ -153,6 +154,14 @@ def try_longform_text(
     if state is None:
         return None
     bodies = InMemoryBodyStore()
+    task = task_id or "task"
+    turn = turn_id or "turn"
+    if state.deliverable == "file":
+        checkpoint_session = _session_segment(session)
+        checkpoint_artifact = _artifact_id(session, task, turn, state.path)
+    else:
+        checkpoint_session = _session_segment(artifact_session(pending) or session)
+        checkpoint_artifact = _artifact_id(checkpoint_session, task, turn, "")
     sink: Any
     if state.deliverable == "file":
         if pending is None or artifact_root is None:
@@ -161,18 +170,28 @@ def try_longform_text(
             sink = FileSink(
                 state=state,
                 path=state.path,
-                session=_session_segment(session),
-                task_id=task_id or "task",
-                turn_id=turn_id or "turn",
+                session=checkpoint_session,
+                task_id=task,
+                turn_id=turn,
                 artifacts=ArtifactStore(artifact_root),
                 pending=pending,
-                artifact_id=_artifact_id(session, task_id, turn_id, state.path),
+                artifact_id=checkpoint_artifact,
             )
         except FileSinkError:
             return None
     else:
         sink = CollectingChatSink()
-    result = LongFormRunner(state, gateway, bodies, sink).run()
+    result = LongFormRunner(
+        state,
+        gateway,
+        bodies,
+        sink,
+        checkpoint=DocumentCheckpointStore(artifact_root) if artifact_root is not None else None,
+        session=checkpoint_session,
+        artifact_id=checkpoint_artifact,
+        task_id=task,
+        turn_id=turn,
+    ).run()
     if not result.done:
         return None
     chars = 0
