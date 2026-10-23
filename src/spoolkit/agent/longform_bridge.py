@@ -11,13 +11,14 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from spoolkit.agent.artifacts import ArtifactStore
+from spoolkit.agent.artifacts import ArtifactRecord, ArtifactSection, ArtifactStore
 from spoolkit.agent.chat_sink import CollectingChatSink
 from spoolkit.agent.document_bodies import InMemoryBodyStore, section_ref
-from spoolkit.agent.document_state import DocumentState, OutlineEntry
+from spoolkit.agent.document_state import SUMMARY_CAP, DocumentState, OutlineEntry
 from spoolkit.agent.file_sink import FileSink, FileSinkError
 from spoolkit.agent.longform import LongFormRunner
 from spoolkit.agent.protocol import AnswerPlan
@@ -191,7 +192,77 @@ def try_longform_text(
     text = render_document(state, bodies)
     if not text:
         return None
-    return LongformDraft(text=text, sections=len(state.outline), chars=chars)
+    artifact_id = ""
+    stored_path = ""
+    if artifact_root is not None and (plan is None or plan.deliverable != "both"):
+        artifact_id, stored_path = _store_chat(
+            state,
+            bodies,
+            text,
+            root=artifact_root,
+            pending=pending,
+            session=session,
+            task_id=task_id,
+            turn_id=turn_id,
+        )
+    return LongformDraft(
+        text=text,
+        sections=len(state.outline),
+        chars=chars,
+        artifact_id=artifact_id,
+        path=stored_path,
+    )
+
+
+def _store_chat(
+    state: DocumentState,
+    bodies: InMemoryBodyStore,
+    text: str,
+    *,
+    root: Path,
+    pending: Any,
+    session: str,
+    task_id: str,
+    turn_id: str,
+) -> tuple[str, str]:
+    """chat 成功后把全文写入 artifact。元数据只留摘要。"""
+    resolved = _session_segment(artifact_session(pending) or session)
+    task = task_id or "task"
+    turn = turn_id or "turn"
+    artifact_id = _artifact_id(resolved, task, turn, "")
+    sections = []
+    for entry in state.outline:
+        body = bodies.get(section_ref(entry.index)).strip()
+        sections.append(
+            ArtifactSection(
+                index=entry.index,
+                title=entry.title,
+                summary=_excerpt(body),
+                char_count=len(body),
+            )
+        )
+    record = ArtifactStore(root).put(
+        ArtifactRecord(
+            id=artifact_id,
+            session=resolved,
+            task_id=task,
+            turn_id=turn,
+            kind="document",
+            title=_excerpt(state.outline[0].title),
+            summary=_excerpt(state.goal),
+            created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            sections=tuple(sections),
+        ),
+        text,
+    )
+    return record.id, record.path
+
+
+def _excerpt(text: str) -> str:
+    compact = "".join(line.strip() for line in text.splitlines() if line.strip())
+    if len(compact) <= SUMMARY_CAP:
+        return compact
+    return compact[: SUMMARY_CAP - 1] + "…"
 
 
 def _delivery(plan: AnswerPlan | None) -> tuple[str, str] | None:

@@ -293,6 +293,33 @@ def test_v2_long_mode_uses_longform_runner(tmp_path: Path) -> None:
     assert not any(kind == "section_start" for kind, _data in events)
 
 
+def test_chat_longform_captures_artifact(tmp_path: Path) -> None:
+    events: list = []
+    pending = _Pending(tmp_path)
+    pending.run_id = "run-9"
+    pending.run_session = "sess-chat"
+    result = _loop(tmp_path, _Gateway(), v2=True, events=events, pending=pending).run("写一份说明")
+    assert _MARKER in result.final
+    finals = _final_events(events)
+    assert finals[0]["summary"] == "长文完成：3 节 / 3009 字"
+    assert _MARKER not in finals[0]["summary"]
+    artifact_id = finals[0]["artifacts"][0]["ref"]
+    assert finals[0]["artifacts"][0]["path"].startswith(".agent/artifacts/sess-chat/")
+    root = tmp_path / ".agent" / "artifacts"
+    assert (root / "sess-chat").is_dir()
+    assert not (root / "run-9").exists()
+    metas = list(root.rglob("*.json"))
+    assert len(metas) == 1
+    meta = json.loads(metas[0].read_text(encoding="utf-8"))
+    assert meta["id"] == artifact_id
+    assert meta["session"] == "sess-chat"
+    content = (tmp_path / str(meta["path"])).read_text(encoding="utf-8")
+    blob = json.dumps(meta, ensure_ascii=False)
+    assert content not in blob
+    assert _MARKER in content
+    assert all(item["summary"].rstrip("…") in content and item["summary"] != item["title"] for item in meta["sections"])
+
+
 def _final_events(events: list) -> list[dict]:
     return [data for kind, data in events if kind == "task_event" and data.get("phase") == "final"]
 
@@ -315,8 +342,9 @@ def test_file_deliverable_stages_pending_and_summarizes(tmp_path: Path) -> None:
     assert _MARKER not in finals[0]["summary"]
     assert finals[0]["artifacts"][0]["path"] == "docs/out.md"
     artifact_id = finals[0]["artifacts"][0]["ref"]
-    metas = list((tmp_path / ".agent" / "artifacts").rglob(f"{artifact_id}.json"))
+    metas = list((tmp_path / ".agent" / "artifacts").rglob("*.json"))
     assert len(metas) == 1
+    assert metas[0].name == f"{artifact_id}.json"
     meta = json.loads(metas[0].read_text(encoding="utf-8"))
     blob = json.dumps(meta, ensure_ascii=False)
     content = (tmp_path / str(meta["path"])).read_text(encoding="utf-8")
@@ -423,6 +451,7 @@ def test_outline_failure_falls_back_to_compose(tmp_path: Path) -> None:
     assert "背景与目标" in result.final
     assert [kind for kind, _data in events].count("section_start") == 3
     assert _MARKER not in result.final
+    assert not (tmp_path / ".agent" / "artifacts").exists()
 
 
 def test_short_answer_skips_longform(tmp_path: Path) -> None:
@@ -432,6 +461,7 @@ def test_short_answer_skips_longform(tmp_path: Path) -> None:
     blobs = ["\n".join(item.content for item in request.messages) for request in gateway.requests]
     assert not any("不是控制层" in blob for blob in blobs)
     assert "一句话回答。" in result.final
+    assert not (tmp_path / ".agent" / "artifacts").exists()
 
 
 def test_legacy_protocol_skips_longform(tmp_path: Path) -> None:

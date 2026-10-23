@@ -3874,7 +3874,17 @@ class AgentLoop:
                                 self._longform_summary = (
                                     f"长文完成：{longform_draft.sections} 节 / {longform_draft.chars} 字"
                                 )
-                                self._longform_artifacts = ()
+                                self._longform_artifacts = (
+                                    (
+                                        Artifact(
+                                            type="document",
+                                            path=longform_draft.path,
+                                            ref=longform_draft.artifact_id,
+                                        ),
+                                    )
+                                    if longform_draft.artifact_id
+                                    else ()
+                                )
                         else:
                             self._longform_summary = ""
                             self._longform_artifacts = ()
