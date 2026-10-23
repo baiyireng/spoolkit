@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from spoolkit.agent.chat_sink import CollectingChatSink
 from spoolkit.agent.document_bodies import InMemoryBodyStore
 from spoolkit.agent.document_state import DocumentState, OutlineEntry
@@ -14,7 +16,9 @@ from spoolkit.agent.longform_bridge import (
     render_document,
     target_chars_for,
 )
+from spoolkit.agent.artifacts import ArtifactStore
 from spoolkit.agent.loop import AgentLoop
+from spoolkit.agent.session_summary import SessionSummaryStore
 from spoolkit.agent.protocol import AnswerPlan
 from spoolkit.config import Config
 from spoolkit.llm.tokenizer import OfflineTokenCounter
@@ -487,3 +491,80 @@ def test_legacy_protocol_skips_longform(tmp_path: Path) -> None:
     assert len(gateway.requests) == 1
     assert "写完了" in result.final
     assert not any("不是控制层" in "\n".join(item.content for item in request.messages) for request in gateway.requests)
+
+
+def _summary_text(tmp_path: Path, session: str) -> str:
+    path = tmp_path / ".agent" / "sessions" / session / "summary.json"
+    return path.read_text(encoding="utf-8")
+
+
+def test_chat_success_records_summary_for_the_next_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    reads = {"n": 0}
+    original = ArtifactStore.get
+
+    def counted(self, *args, **kwargs):
+        reads["n"] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ArtifactStore, "get", counted)
+    events: list = []
+    pending = _Pending(tmp_path)
+    pending.run_session = "sess-chat"
+    loop = _loop(tmp_path, _Gateway(), v2=True, events=events, pending=pending)
+    result = loop.run("写一份说明")
+    summary = SessionSummaryStore(tmp_path, "sess-chat").load()
+    assert summary.headline == "写一份说明"
+    assert summary.what_done
+    assert summary.what_done[0].startswith("## 窗口")
+    assert summary.open_items == ()
+    assert len(summary.artifacts) == 1
+    assert summary.artifacts[0].id == _final_events(events)[0]["artifacts"][0]["ref"]
+    assert summary.artifacts[0].title == "窗口"
+    blob = _summary_text(tmp_path, "sess-chat")
+    content = (tmp_path / summary.artifacts[0].path).read_text(encoding="utf-8")
+    assert content not in blob
+    assert reads["n"] == 0
+    assert _final_events(events)[0]["summary"] == "长文完成：3 节 / 3009 字"
+    assert "【会话记忆】" not in json.dumps(events, ensure_ascii=False)
+    loop._record_session_outcome(result, "写一份说明")
+    again = SessionSummaryStore(tmp_path, "sess-chat").load()
+    assert len(again.what_done) == 1
+    assert len(again.artifacts) == 1
+    follow = _loop(tmp_path, _Gateway(mode=""), v2=True, events=[], pending=pending)
+    follow.run("今天天气如何")
+    prompt = "\n".join(item.content for item in follow.gateway.requests[0].messages)
+    assert "【会话记忆】" in prompt
+    assert "窗口" in prompt
+
+
+def test_file_success_records_artifact_without_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    reads = {"n": 0}
+    original = ArtifactStore.get
+
+    def counted(self, *args, **kwargs):
+        reads["n"] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ArtifactStore, "get", counted)
+    events: list = []
+    pending = _Pending(tmp_path)
+    pending.run_session = "sess-file"
+    _loop(
+        tmp_path,
+        _Gateway(deliverable="file", path="docs/out.md"),
+        v2=True,
+        events=events,
+        pending=pending,
+    ).run("写一份说明")
+    summary = SessionSummaryStore(tmp_path, "sess-file").load()
+    assert summary.what_done == ("已生成文档，待确认：docs/out.md",)
+    assert summary.open_items == ()
+    assert summary.artifacts[0].id == _final_events(events)[0]["artifacts"][0]["ref"]
+    blob = _summary_text(tmp_path, "sess-file")
+    assert _MARKER not in blob
+    assert reads["n"] == 0
+    follow = _loop(tmp_path, _Gateway(mode=""), v2=True, events=[], pending=pending)
+    follow.run("今天天气如何")
+    prompt = "\n".join(item.content for item in follow.gateway.requests[0].messages)
+    assert "【会话记忆】" in prompt
+    assert "已生成文档，待确认：docs/out.md" in prompt

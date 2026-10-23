@@ -12,6 +12,7 @@ import logging
 import os
 import tempfile
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -338,3 +339,55 @@ class SessionSummaryStore:
             with contextlib.suppress(OSError):
                 tmp.unlink()
             raise
+
+
+def _clip(text: str) -> str:
+    """收成摘要长度。超长时留下省略号，不再调用模型。"""
+    cleaned = redact_secrets(str(text).strip())
+    if len(cleaned) <= TEXT_CAP:
+        return cleaned
+    return cleaned[: TEXT_CAP - 1] + "…"
+
+
+def record_session_outcome(
+    store: SessionSummaryStore,
+    *,
+    session: str,
+    updated_at: str,
+    task_summary: str,
+    artifacts: Sequence[ArtifactRecord],
+    finished: bool,
+    final: str,
+    failure_reason: str,
+    turn_id: str = "",
+) -> None:
+    """把这一轮的产物和结果写进会话摘要。
+
+    空会话什么都不写。写入失败留在原地，调用方的任务结果不变。
+    同一轮同样的内容再写一次，不追加重复条目。
+    """
+    if not str(session).strip() or str(session).strip() != store._session:
+        return
+    try:
+        turn = _clip(turn_id)
+        for record in artifacts:
+            if record.session != store._session:
+                continue
+            store.record_artifact(record, updated_at=updated_at, turn_id=turn)
+        done = _clip(final)
+        reason = _clip(failure_reason) or done or "未完成"
+        if finished and done:
+            store.record_done(done, updated_at=updated_at, turn_id=turn)
+        else:
+            store.record_open_item(reason, updated_at=updated_at, turn_id=turn)
+        current = store.load()
+        headline = _clip(task_summary)
+        updates: dict[str, str] = {}
+        if not current.headline and headline:
+            updates["headline"] = headline
+        if turn and current.last_turn_id != turn:
+            updates["last_turn_id"] = turn
+        if updates:
+            store.save(replace(current, updated_at=_plain(updated_at, "updated_at", required=True), **updates))
+    except Exception:
+        return

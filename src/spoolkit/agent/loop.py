@@ -67,11 +67,11 @@ from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.answer_plan import SHORT_CUES, should_use_long_answer
 from spoolkit.agent.evidence_gate import check_evidence
 from spoolkit.agent.final_turn import SHORT_CONTINUE, request_final
-from spoolkit.agent.artifacts import ArtifactStore
+from spoolkit.agent.artifacts import ArtifactRecord, ArtifactStore
 from spoolkit.agent.context_inject import build_context_block
 from spoolkit.agent.context_pack import build_context_pack
 from spoolkit.agent.longform_bridge import artifact_session, try_longform_text
-from spoolkit.agent.session_summary import SessionSummaryStore
+from spoolkit.agent.session_summary import SessionSummaryStore, record_session_outcome
 from spoolkit.agent.sections import STOP_MARK, compose_long_answer
 from spoolkit.agent.protocol import (
     ParseFailure,
@@ -2183,6 +2183,49 @@ class AgentLoop:
         except Exception:
             self._session_context_text = ""
 
+    def _record_session_outcome(self, result: LoopResult, goal: str) -> None:
+        """收尾写一次会话摘要。失败不影响这次运行的返回。"""
+        session = artifact_session(self.pending)
+        if not session:
+            return
+        try:
+            stopped = bool(self._user_stopped)
+            finished = bool(result.finished) and not stopped
+            reason = result.failed_reason or ""
+            if stopped and not reason.strip():
+                reason = "已停止"
+            record_session_outcome(
+                SessionSummaryStore(self.config.project_root, session),
+                session=session,
+                updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                task_summary=result.state.goal or goal,
+                artifacts=self._outcome_artifacts(session),
+                finished=finished,
+                final="" if stopped else (result.final or ""),
+                failure_reason=reason,
+                turn_id=current_turn_id(),
+            )
+        except Exception:
+            return
+
+    def _outcome_artifacts(self, session: str) -> tuple[ArtifactRecord, ...]:
+        """只读本轮产物的元数据。不打开正文。"""
+        refs: list[str] = []
+        for item in getattr(self, "_longform_artifacts", ()) or ():
+            ref = str(getattr(item, "ref", "") or "").strip()
+            if ref and ref not in refs:
+                refs.append(ref)
+        if not refs:
+            return ()
+        try:
+            listed = ArtifactStore(self.config.project_root).list(session, limit=50)
+        except Exception:
+            return ()
+        by_id = {record.id: record for record in listed}
+        return tuple(
+            by_id[ref] for ref in refs if ref in by_id and by_id[ref].session == session
+        )
+
     def run(
         self,
         goal: str,
@@ -2214,6 +2257,8 @@ class AgentLoop:
         self._event_run_id = str(getattr(self.pending, "run_id", "") or "")
         self._event_task_id = event_task_id(self._event_run_id, current_turn_id())
         self._event_step = 0
+        self._longform_artifacts = ()
+        self._longform_summary = ""
         self._load_session_context(goal)
         previous_sigint = self._install_stop_signal()
         try:
@@ -2246,6 +2291,8 @@ class AgentLoop:
                 )
             elif result is not None:
                 self._emit_outcome("ok", result.final or "", result.state.step)
+            if result is not None:
+                self._record_session_outcome(result, goal)
             return result
         finally:
             if previous_sigint is not None:

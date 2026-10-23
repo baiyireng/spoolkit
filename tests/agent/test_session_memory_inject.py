@@ -116,7 +116,6 @@ def test_有摘要和产物时控制提示出现会话记忆(tmp_path: Path, mon
         pending=_pending(tmp_path, session),
         events=events,
     )
-    before = (tmp_path / ".agent" / "sessions" / session / "summary.json").read_bytes()
     result = loop.run("估算说明")
     assert result.finished is True
     first = _prompt(loop, 0)
@@ -138,7 +137,8 @@ def test_有摘要和产物时控制提示出现会话记忆(tmp_path: Path, mon
     dumped = json.dumps(events, ensure_ascii=False)
     assert "【会话记忆】" not in dumped
     assert BODY not in dumped
-    assert (tmp_path / ".agent" / "sessions" / session / "summary.json").read_bytes() == before
+    kept = SessionSummaryStore(tmp_path, session).load()
+    assert "写过估算大纲" in kept.what_done
 
 
 def test_空摘要且没有产物时不注入(tmp_path: Path) -> None:
