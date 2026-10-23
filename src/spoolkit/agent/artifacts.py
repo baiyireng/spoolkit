@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from spoolkit.agent.document_state import SUMMARY_CAP
+from spoolkit.memory.transcript import redact_secrets
 from spoolkit.tools.types import Artifact
 
 KINDS = ("document", "report", "code", "output")
@@ -163,6 +164,104 @@ class ArtifactRecord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactHit:
+    """一次元数据命中。不含正文。"""
+
+    record: ArtifactRecord
+    score: int
+    matched: tuple[str, ...]
+    snippet: str
+
+
+_MATCH_FIELDS = ("title", "summary", "section.title", "section.summary", "path", "id")
+_SCORE = {
+    "title": (0, 400, 500, 600),
+    "summary": (0, 100, 200, 300),
+    "section.title": (0, 40, 50, 60),
+    "section.summary": (0, 40, 50, 60),
+    "path": (0, 20, 20, 20),
+    "id": (0, 20, 20, 20),
+}
+
+
+def _quality(text: str, needle: str) -> int:
+    """0 未命中，1 包含，2 前缀，3 整段相等。比较前已 casefold。"""
+    if needle not in text:
+        return 0
+    if text == needle:
+        return 3
+    if text.startswith(needle):
+        return 2
+    return 1
+
+
+def _best_section(sections: tuple[ArtifactSection, ...], needle: str, attr: str) -> tuple[int, str]:
+    quality = 0
+    source = ""
+    for section in sections:
+        text = getattr(section, attr)
+        rank = _quality(text.casefold(), needle)
+        if rank > quality:
+            quality = rank
+            source = text
+    return quality, source
+
+
+def _match(record: ArtifactRecord, needle: str) -> ArtifactHit | None:
+    folded = needle.casefold()
+    sources = {
+        "title": record.title,
+        "summary": record.summary,
+        "path": record.path,
+        "id": record.id,
+    }
+    ranks = {name: _quality(text.casefold(), folded) for name, text in sources.items()}
+    section_title, section_title_text = _best_section(record.sections, folded, "title")
+    section_summary, section_summary_text = _best_section(record.sections, folded, "summary")
+    ranks["section.title"] = section_title
+    ranks["section.summary"] = section_summary
+    sources["section.title"] = section_title_text
+    sources["section.summary"] = section_summary_text
+    matched = tuple(name for name in _MATCH_FIELDS if ranks[name])
+    if not matched:
+        return None
+    best = max(matched, key=lambda name: _SCORE[name][ranks[name]])
+    snippet = redact_secrets(sources[best])[:SUMMARY_CAP]
+    return ArtifactHit(
+        record=_redacted(record),
+        score=_SCORE[best][ranks[best]],
+        matched=matched,
+        snippet=snippet,
+    )
+
+
+def _redacted(record: ArtifactRecord) -> ArtifactRecord:
+    """返回给调用方的标题和摘要先脱敏。磁盘上的记录不动。"""
+    return ArtifactRecord(
+        id=record.id,
+        session=record.session,
+        task_id=record.task_id,
+        turn_id=record.turn_id,
+        kind=record.kind,
+        title=redact_secrets(record.title),
+        summary=redact_secrets(record.summary),
+        created_at=record.created_at,
+        sections=tuple(
+            ArtifactSection(
+                index=section.index,
+                title=redact_secrets(section.title),
+                summary=redact_secrets(section.summary),
+                char_count=section.char_count,
+            )
+            for section in record.sections
+        ),
+        path=record.path,
+        content_hash=record.content_hash,
+        size=record.size,
+    )
+
+
 def as_task_artifact(record: ArtifactRecord) -> Artifact:
     """事件里只放 kind、路径和 id。"""
     return Artifact(type=record.kind, path=record.path, ref=record.id)
@@ -260,6 +359,28 @@ class ArtifactStore:
         records = [self._load_meta(path) for path in directory.glob("*.json")]
         records.sort(key=lambda item: (item.created_at, item.id), reverse=True)
         return tuple(records[:limit])
+
+    def search(self, session: str, query: str, limit: int = 10) -> tuple[ArtifactHit, ...]:
+        """只查当前 session 的元数据。不打开正文文件。"""
+        _segment(session)
+        if limit < 0:
+            raise ArtifactError("limit 为负")
+        needle = query.strip()
+        if not needle or limit == 0:
+            return ()
+        directory = self._root / ".agent" / "artifacts" / session
+        if not directory.is_dir():
+            return ()
+        hits: list[ArtifactHit] = []
+        for path in directory.glob("*.json"):
+            record = self._load_meta(path)
+            if record.session != session:
+                raise ArtifactError("记录与 session 不一致")
+            hit = _match(record, needle)
+            if hit is not None:
+                hits.append(hit)
+        hits.sort(key=lambda item: (item.score, item.record.created_at, item.record.id), reverse=True)
+        return tuple(hits[:limit])
 
     def _meta_path(self, session: str, artifact_id: str) -> Path:
         return self._root / ".agent" / "artifacts" / session / f"{artifact_id}.json"
