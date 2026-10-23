@@ -53,6 +53,8 @@ FLEX_QUOTAS: dict[str, float] = {
     # 教训是「以前踩过的坑」，在动手前看到它最有用。
     # 给它一块固定额度，避免它和别的检索内容抢位置而被裁掉。
     "lessons": 0.10,
+    # 会话记忆是摘要和产物元数据，不是正文。比例小，避免把系统提示和任务状态挤出去。
+    "session_memory": 0.08,
 }
 
 SOFT_TRIGGER_RATIO = 0.70
@@ -68,6 +70,7 @@ _FLEX_KNOBS = {
     "retrieval": "retrieval_ratio",
     "code": "code_ratio",
     "lessons": "lessons_ratio",
+    "session_memory": "session_memory_ratio",
 }
 
 

@@ -403,6 +403,11 @@ PROTOCOL_V2_KNOBS: tuple[tuple[str, float], ...] = (
     ("protocol_v2", 0),
 )
 
+# 会话记忆块。比例配额，小窗口仍走系统固定封顶，不靠它去挤任务状态。
+SESSION_MEMORY_KNOBS: tuple[tuple[str, float], ...] = (
+    ("session_memory_ratio", 0.08),
+)
+
 
 def test_p1_旋钮全部登记且可覆盖() -> None:
     """Task 1 验收 1：清单里每个名字都在表里、是 CAPABILITY、默认值如冻结。"""
@@ -420,6 +425,7 @@ def test_p1_旋钮全部登记且可覆盖() -> None:
         + OBSERVATION_KNOBS
         + CONTINUATION_KNOBS
         + PROTOCOL_V2_KNOBS
+        + SESSION_MEMORY_KNOBS
     ):
         entry = limits.knob(name)
         assert entry is not None, f"{name} 没登记"
@@ -465,7 +471,8 @@ def test_旋钮没有重名() -> None:
     + **「收束期还准不准写成果」那一轮的 1**（`CONVERGE_WRITE_KNOBS`）
     + **观察外置的 1**（`OBSERVATION_KNOBS`）
     + **长文续写重叠的 1**（`CONTINUATION_KNOBS`）
-    + **协议灰度的 1**（`PROTOCOL_V2_KNOBS`）。
+    + **协议灰度的 1**（`PROTOCOL_V2_KNOBS`）
+    + **会话记忆的 1**（`SESSION_MEMORY_KNOBS`）。
 
     最后那 2 项与 `KNOBS_BEFORE_P1` 是**两个不同的口径**：那个元组是「P1 改造
     之前就有的 62 项」的历史快照（它不该长），而这两个是 P0 之后新登记的。
@@ -488,6 +495,7 @@ def test_旋钮没有重名() -> None:
         + len(OBSERVATION_KNOBS)
         + len(CONTINUATION_KNOBS)
         + len(PROTOCOL_V2_KNOBS)
+        + len(SESSION_MEMORY_KNOBS)
     )
 
 

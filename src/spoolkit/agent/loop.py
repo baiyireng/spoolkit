@@ -67,7 +67,11 @@ from spoolkit.agent.monitor import ToolSight, inspect
 from spoolkit.agent.answer_plan import SHORT_CUES, should_use_long_answer
 from spoolkit.agent.evidence_gate import check_evidence
 from spoolkit.agent.final_turn import SHORT_CONTINUE, request_final
+from spoolkit.agent.artifacts import ArtifactStore
+from spoolkit.agent.context_inject import build_context_block
+from spoolkit.agent.context_pack import build_context_pack
 from spoolkit.agent.longform_bridge import artifact_session, try_longform_text
+from spoolkit.agent.session_summary import SessionSummaryStore
 from spoolkit.agent.sections import STOP_MARK, compose_long_answer
 from spoolkit.agent.protocol import (
     ParseFailure,
@@ -1977,6 +1981,7 @@ class AgentLoop:
         self._budget = Budget(
             window=config.context_window, overrides=config.overrides
         )
+        self._session_context_text = ""
         self._turn_protocol = TurnProtocol(
             v2=protocol_v2_enabled(config.overrides)
         )
@@ -2110,6 +2115,14 @@ class AgentLoop:
                 priority=30,
             )
         )
+        if self._session_context_text:
+            sections.append(
+                Section(
+                    name="session_memory",
+                    text=self._session_context_text,
+                    priority=31,
+                )
+            )
         observed = self.observations.render()
         if observed:
             # 必留：这个区段没有单独配额，不标必留就会被裁成「内容已裁剪」，
@@ -2147,6 +2160,29 @@ class AgentLoop:
             )
         return assembler.assemble(sections, recent_turns=history[-MAX_RECENT_TURNS:])
 
+    def _load_session_context(self, goal: str) -> None:
+        """一次 run 只构建一次。失败或空块留空，装配时不注入。"""
+        self._session_context_text = ""
+        session = artifact_session(self.pending)
+        if not session:
+            return
+        try:
+            summary = SessionSummaryStore(self.config.project_root, session).load()
+            hits = ArtifactStore(self.config.project_root).search(session, goal, limit=5)
+            quota = self._budget.quota("session_memory")
+            pack = build_context_pack(
+                goal=goal,
+                task_summary="",
+                summary=summary,
+                artifacts=hits,
+                token_budget=quota,
+                counter=self.tokenizer,
+            )
+            block = build_context_block(pack, self.tokenizer, quota)
+            self._session_context_text = block.text
+        except Exception:
+            self._session_context_text = ""
+
     def run(
         self,
         goal: str,
@@ -2178,6 +2214,7 @@ class AgentLoop:
         self._event_run_id = str(getattr(self.pending, "run_id", "") or "")
         self._event_task_id = event_task_id(self._event_run_id, current_turn_id())
         self._event_step = 0
+        self._load_session_context(goal)
         previous_sigint = self._install_stop_signal()
         try:
             result = self._run(goal, task_id=task_id, resume=resume, prompt=prompt)

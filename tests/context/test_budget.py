@@ -46,8 +46,19 @@ def test_分配表可查询() -> None:
         "retrieval",
         "code",
         "lessons",
+        "session_memory",
     }
     assert all(value > 0 for value in table.values())
+
+
+def test_会话记忆占有效预算且不挤占系统与任务状态() -> None:
+    large = Budget(window=32000)
+    effective = large.effective()
+    assert large.quota("session_memory") == int(effective * 0.08)
+    small = Budget(window=1000)
+    assert small.quota("system") == int(850 * 0.20)
+    assert small.quota("task_state") == int(small.effective() * 0.05)
+    assert small.quota("session_memory") == int(small.effective() * 0.08)
 
 
 def test_未知区段配额为零() -> None:

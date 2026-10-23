@@ -341,6 +341,10 @@ KNOBS: tuple[Knob, ...] = (
     Knob("retrieval_ratio", 0.15, CAPABILITY, "检索内容占有效预算的比例"),
     Knob("lessons_ratio", 0.10, CAPABILITY, "历史教训占有效预算的比例"),
     Knob(
+        "session_memory_ratio", 0.08, CAPABILITY,
+        "会话记忆占有效预算的比例。系统提示仍走固定额度封顶，任务状态比例不变",
+    ),
+    Knob(
         "recent_chat_turns", 6, CAPABILITY,
         "通道/网页带进本轮提示的最近几条往来（不是工具往返；强模型可加）",
     ),
