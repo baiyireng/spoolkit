@@ -51,6 +51,7 @@ JS_ORDER = (
     "js/render/trace_box.js",
     "js/render/task_card.js",
     "js/render/artifact_list.js",
+    "js/render/session_summary.js",
     "js/render/diff.js",
     "js/render/code.js",
     "js/features/toasts.js",

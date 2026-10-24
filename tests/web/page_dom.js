@@ -3113,5 +3113,182 @@ async function extras2() {
     empty_task_count: artifactEmptyTasks,
   };
   ctx.__fetchImpl = null;
+
+  if (ids.get('tasks-close') && taskPanel && !taskPanel.classList.contains('hidden')) {
+    ids.get('tasks-close').onclick();
+  }
+  const memoryPayload = {
+    schema_version: 1,
+    session: 'sess-mem',
+    updated_at: 'STAMP-999',
+    headline: '这一轮把估算写完了',
+    what_done: ['完成一', '完成二', '完成三', '完成四', '完成五', '完成六', '完成七'],
+    artifacts: [{ id: 'doc-secret', title: '不应出现的产物标题', summary: 'BODY-MEMORY', path: 'secret/path.md' }],
+    decisions: ['先写摘要', '不改接口'],
+    open_items: ['补测试'],
+    last_turn_id: 'turn-9',
+    content: 'FULL-BODY',
+    checkpoint: 'ck-should-not-show',
+  };
+  const memoryEmptyPayload = {
+    schema_version: 1,
+    session: 'sess-empty',
+    updated_at: '',
+    headline: '',
+    what_done: [],
+    artifacts: [{ id: 'doc-empty', title: '空会话产物', path: 'docs/empty.md' }],
+    decisions: [],
+    open_items: [],
+    last_turn_id: '',
+  };
+  let memoryMode = 'hang';
+  let memoryRelease = null;
+  ctx.__fetchImpl = (url) => {
+    if (url === '/session/summary') {
+      if (memoryMode === 'hang') {
+        return new Promise((resolve) => {
+          memoryRelease = () => resolve({
+            ok: false, status: 500, json: async () => ({ error: 'nope' }),
+          });
+        });
+      }
+      if (memoryMode === 'fail') {
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'nope' }) });
+      }
+      if (memoryMode === 'empty') {
+        return Promise.resolve({ ok: true, status: 200, json: async () => memoryEmptyPayload });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => memoryPayload });
+    }
+    if (url === '/artifacts') {
+      if (memoryMode === 'empty') {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => [{ id: 'doc-keep', kind: 'document', title: '面板产物', summary: '产物摘要', path: 'docs/keep.md' }],
+      });
+    }
+    if (url === '/tasks') {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ sessions: [], groups: [] }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+  };
+  ctx.__spoolTest.applyState(frame('D:/memory', 'sess-mem', WROWS, SROWS_A, [], {
+    task_groups: [
+      searchTask('mem-1', 'running', '还在跑', [taskEvent(1, 'understand', 'running', '还在跑')]),
+      searchTask('mem-2', 'done', '已完成', [taskEvent(1, 'final', 'ok', '已完成')]),
+    ],
+  }));
+  const memoryBefore = ctx.fetchCalls.length;
+  if (taskBtn) { taskBtn.onclick(); }
+  const memoryOpened = countUrl(memoryBefore, '/session/summary');
+  const memoryTasks = countUrl(memoryBefore, '/tasks');
+  const memoryArtifacts = countUrl(memoryBefore, '/artifacts');
+  await settleTasks();
+  const memoryBox = ids.get('tasks-memory-body');
+  const memoryLoading = memoryBox ? memoryBox.textContent : '';
+  const memoryArtifactDuringHang = ids.get('tasks-artifacts-list')
+    ? ids.get('tasks-artifacts-list').textContent : '';
+  const memoryTaskDuringHang = ids.get('tasks-count').textContent;
+  if (memoryRelease) { memoryRelease(); }
+  await settleTasks();
+  const memoryFailed = memoryBox ? memoryBox.textContent : '';
+  memoryMode = 'ok';
+  const memoryRetry = memoryBox ? memoryBox.querySelector('button') : null;
+  const beforeMemoryRetry = ctx.fetchCalls.length;
+  if (memoryRetry) { memoryRetry.onclick(); }
+  await settleTasks();
+  const memoryRetryPosts = countUrl(beforeMemoryRetry, '/session/summary');
+  const memoryArtifactPostsOnRetry = countUrl(beforeMemoryRetry, '/artifacts');
+  function memoryNodes(cls) {
+    const box = ids.get('tasks-memory-body');
+    if (!box) { return []; }
+    return box.querySelectorAll('.' + cls).map((node) => node.textContent);
+  }
+  const memoryTitle = ids.get('tasks-memory-title') ? ids.get('tasks-memory-title').textContent : '';
+  const memoryHeadline = memoryNodes('tasks-memory-headline');
+  const memoryDone = memoryNodes('tasks-memory-item');
+  const memoryLabels = memoryNodes('tasks-memory-label');
+  const memoryMore = memoryNodes('tasks-memory-more');
+  const memoryTurn = memoryNodes('tasks-memory-turn');
+  const memoryText = memoryBox ? memoryBox.textContent : '';
+  const memoryTaskCount = ids.get('tasks-count').textContent;
+  const memoryArtifactCount = ids.get('tasks-artifacts-count')
+    ? ids.get('tasks-artifacts-count').textContent : '';
+  const memoryArtifactRows = ids.get('tasks-artifacts-list')
+    ? ids.get('tasks-artifacts-list').querySelectorAll('.artifact-title').map((node) => node.textContent) : [];
+  const memoryFilters = ids.get('tasks-filters').children.map((node) => node.textContent);
+  const beforeMemoryFilter = ctx.fetchCalls.length;
+  clickFilter('失败');
+  const memoryFilteredDone = memoryNodes('tasks-memory-item');
+  const memoryFilterPosts = countUrl(beforeMemoryFilter, '/session/summary');
+  const memoryFilteredTaskCount = ids.get('tasks-count').textContent;
+  const memoryFilteredArtifactCount = ids.get('tasks-artifacts-count')
+    ? ids.get('tasks-artifacts-count').textContent : '';
+  clickFilter('全部');
+  const memoryToggle = ids.get('tasks-memory-toggle');
+  const beforeMemoryToggle = ctx.fetchCalls.length;
+  if (memoryToggle) { memoryToggle.onclick(); }
+  const memoryCollapsed = memoryToggle ? memoryToggle.getAttribute('aria-expanded') : '';
+  const memoryCollapsedClass = ids.get('tasks-memory')
+    ? ids.get('tasks-memory').classList.contains('is-collapsed') : false;
+  if (memoryToggle) { memoryToggle.onclick(); }
+  const memoryExpanded = memoryToggle ? memoryToggle.getAttribute('aria-expanded') : '';
+  const memoryTogglePosts = ctx.fetchCalls.length - beforeMemoryToggle;
+  if (ids.get('tasks-close')) { ids.get('tasks-close').onclick(); }
+  const beforeMemoryReopen = ctx.fetchCalls.length;
+  if (taskBtn) { taskBtn.onclick(); }
+  await settleTasks();
+  const memoryReopen = countUrl(beforeMemoryReopen, '/session/summary');
+  memoryMode = 'empty';
+  ctx.__spoolTest.applyState(frame('D:/memory', 'sess-empty', WROWS, SROWS_A, [], {
+    task_groups: [
+      searchTask('mem-1', 'running', '还在跑', [taskEvent(1, 'understand', 'running', '还在跑')]),
+    ],
+  }));
+  await settleTasks();
+  const memoryEmpty = ids.get('tasks-memory-body') ? ids.get('tasks-memory-body').textContent : '';
+  const memoryEmptyTasks = ids.get('tasks-count').textContent;
+  const memoryEmptyArtifacts = ids.get('tasks-artifacts-count')
+    ? ids.get('tasks-artifacts-count').textContent : '';
+  const memorySwitchPosts = countUrl(beforeMemoryReopen, '/session/summary');
+  out.task_memory = {
+    opened_posts: memoryOpened,
+    tasks_posts: memoryTasks,
+    artifact_posts: memoryArtifacts,
+    loading: memoryLoading,
+    artifact_during_hang: memoryArtifactDuringHang,
+    task_during_hang: memoryTaskDuringHang,
+    failed: memoryFailed,
+    retry_posts: memoryRetryPosts,
+    artifact_posts_on_retry: memoryArtifactPostsOnRetry,
+    title: memoryTitle,
+    headline: memoryHeadline,
+    labels: memoryLabels,
+    done: memoryDone,
+    more: memoryMore,
+    turn: memoryTurn,
+    text: memoryText,
+    task_count: memoryTaskCount,
+    artifact_count: memoryArtifactCount,
+    artifact_rows: memoryArtifactRows,
+    filters: memoryFilters,
+    filtered_done: memoryFilteredDone,
+    filter_posts: memoryFilterPosts,
+    filtered_task_count: memoryFilteredTaskCount,
+    filtered_artifact_count: memoryFilteredArtifactCount,
+    collapsed: memoryCollapsed,
+    collapsed_class: memoryCollapsedClass,
+    expanded: memoryExpanded,
+    toggle_posts: memoryTogglePosts,
+    reopen_posts: memoryReopen,
+    empty: memoryEmpty,
+    empty_task_count: memoryEmptyTasks,
+    empty_artifact_count: memoryEmptyArtifacts,
+    switch_posts: memorySwitchPosts,
+  };
+  ctx.__fetchImpl = null;
 }
 

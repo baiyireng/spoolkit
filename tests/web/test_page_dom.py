@@ -520,6 +520,56 @@ def test_任务面板列出当前会话的产物(dom: dict) -> None:
     assert found["empty_task_count"] == "1", found
 
 
+def test_任务面板显示会话记忆摘要(dom: dict) -> None:
+    """打开时读一次 /session/summary。挂起时任务和产物照常出现。"""
+    found = dom["task_memory"]
+    assert found["opened_posts"] == 1, found
+    assert found["tasks_posts"] == 1, found
+    assert found["artifact_posts"] == 1, found
+    assert found["loading"] == "正在加载记忆", found
+    assert "面板产物" in found["artifact_during_hang"], found
+    assert found["task_during_hang"] == "2", found
+    assert found["failed"] == "记忆加载失败，可重试", found
+    assert found["retry_posts"] == 1, found
+    assert found["artifact_posts_on_retry"] == 0, found
+    assert found["title"] == "会话记忆", found
+    assert found["headline"] == ["这一轮把估算写完了"], found
+    assert found["labels"] == ["已完成", "未完成", "决定", "最近一轮"], found
+    assert found["done"] == ["完成一", "完成二", "完成三", "完成四", "完成五", "补测试", "先写摘要", "不改接口"], found
+    assert found["more"] == ["还有 2 条"], found
+    assert found["turn"] == ["turn-9"], found
+    assert "FULL-BODY" not in found["text"], found
+    assert "BODY-MEMORY" not in found["text"], found
+    assert "doc-secret" not in found["text"], found
+    assert "secret/path.md" not in found["text"], found
+    assert "不应出现的产物标题" not in found["text"], found
+    assert "面板产物" not in found["text"], found
+    assert "docs/keep.md" not in found["text"], found
+    assert "STAMP-999" not in found["text"], found
+    assert "ck-should-not-show" not in found["text"], found
+    assert "checkpoint" not in found["text"].lower(), found
+    assert "last_turn_id" not in found["text"], found
+    assert found["task_count"] == "2", found
+    assert found["artifact_count"] == "1 个产物", found
+    assert found["artifact_rows"] == ["面板产物"], found
+    assert found["filters"] == ["全部", "进行中", "待审批", "失败", "完成"], found
+    assert found["filtered_done"] == found["done"], found
+    assert found["filter_posts"] == 0, found
+    assert found["filtered_task_count"] == "2", found
+    assert found["filtered_artifact_count"] == "1 个产物", found
+    assert found["collapsed"] == "false", found
+    assert found["collapsed_class"] is True, found
+    assert found["expanded"] == "true", found
+    assert found["toggle_posts"] == 0, found
+    assert found["reopen_posts"] == 0, found
+    assert found["switch_posts"] == 1, found
+    assert found["empty"] == "当前会话还没有记忆摘要", found
+    assert "doc-empty" not in found["empty"], found
+    assert "docs/empty.md" not in found["empty"], found
+    assert found["empty_task_count"] == "1", found
+    assert found["empty_artifact_count"] == "0 个产物", found
+
+
 def test_可见文案不用旧术语(dom: dict) -> None:
     """顶栏、状态面板和任务筛选不再出现旧说法。用户目标正文不在这张清单里。"""
     blobs = [

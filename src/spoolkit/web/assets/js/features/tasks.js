@@ -3,10 +3,12 @@ import "../core/dom.js";
 import "../core/store.js";
 import "../render/task_card.js";
 import "../render/artifact_list.js";
+import "../render/session_summary.js";
 import "../render/failure.js";
 /* 任务面板。当前会话来自 state.task_groups；跨会话只读 GET /tasks。
-   产物只在首次打开时读 GET /artifacts，之后用缓存。搜索、状态筛选、会话范围都在本地做。
-   详情复用任务卡正文，不画 raw，也不复制应用/拒绝。产物行不提供打开或继续。 */
+   产物和会话记忆只在首次打开时各读一次，之后按 root+session 缓存。
+   搜索、状态筛选、会话范围都在本地做。详情复用任务卡正文，不画 raw，
+   也不复制应用/拒绝。产物行和记忆摘要都不提供打开或继续。 */
 const TASK_FILTERS = [
   ['all', '全部'],
   ['running', '进行中'],
@@ -30,6 +32,10 @@ function createTasks(ctx) {
   let artifactState = 'idle';
   let artifactKey = '';
   let artifactRows = [];
+  let summaryState = 'idle';
+  let summaryKey = '';
+  let summaryView = null;
+  let summaryOpen = true;
 
   function groupsOf(state) {
     const rows = ((state && state.task_groups) || []).slice();
@@ -324,6 +330,17 @@ function createTasks(ctx) {
     );
   }
 
+  function paintSummary() {
+    if (!ctx.store.get('tasksOpen')) { return; }
+    if (tasksMemoryTitle) { tasksMemoryTitle.textContent = '会话记忆'; }
+    if (tasksMemory) { tasksMemory.classList.toggle('is-collapsed', !summaryOpen); }
+    if (tasksMemoryToggle) {
+      tasksMemoryToggle.setAttribute('aria-expanded', summaryOpen ? 'true' : 'false');
+      tasksMemoryToggle.textContent = summaryOpen ? '收起' : '展开';
+    }
+    paintSessionSummary(tasksMemoryBody, summaryState, summaryView, loadSummary);
+  }
+
   function inScope(task) {
     if (scope === 'all') { return true; }
     return String((task && task.session) || currentSessionId()) === currentSessionId();
@@ -336,6 +353,7 @@ function createTasks(ctx) {
     paintScope();
     paintHistory();
     paintArtifacts();
+    paintSummary();
     paintFilters();
     const merged = mergeGroups(live, historyState === 'ready' ? historyGroups : []);
     const scoped = [];
@@ -487,6 +505,34 @@ function createTasks(ctx) {
     loadArtifacts();
   }
 
+  function loadSummary() {
+    const key = targetKey();
+    summaryKey = key;
+    summaryState = 'loading';
+    summaryView = null;
+    renderPanel();
+    requestSessionSummary(function (ok, payload) {
+      if (summaryKey !== key) { return; }
+      const view = ok ? summaryFromPayload(payload) : null;
+      if (!view) {
+        summaryState = 'error';
+        summaryView = null;
+      } else {
+        summaryState = 'ready';
+        summaryView = view;
+      }
+      renderPanel();
+    });
+  }
+
+  function ensureSummary() {
+    const key = targetKey();
+    if (summaryKey === key && (summaryState === 'loading' || summaryState === 'ready' || summaryState === 'error')) {
+      return;
+    }
+    loadSummary();
+  }
+
   function setTasksOpen(open) {
     if (!tasksPanel) { return; }
     const want = Boolean(open);
@@ -498,6 +544,7 @@ function createTasks(ctx) {
     if (want) {
       ensureHistory();
       ensureArtifacts();
+      ensureSummary();
       renderPanel();
       if (tasksClose && typeof tasksClose.focus === 'function') { tasksClose.focus(); }
     } else if (tasksBtn && typeof tasksBtn.focus === 'function') {
@@ -510,6 +557,7 @@ function createTasks(ctx) {
     if (ctx.store.get('tasksOpen')) {
       ensureHistory();
       ensureArtifacts();
+      ensureSummary();
       renderPanel();
     }
   }
@@ -530,6 +578,12 @@ function createTasks(ctx) {
     tasksSearch.oninput = function () {
       query = String(tasksSearch.value || '');
       renderPanel();
+    };
+  }
+  if (tasksMemoryToggle) {
+    tasksMemoryToggle.onclick = function () {
+      summaryOpen = !summaryOpen;
+      paintSummary();
     };
   }
   paintCounts([]);

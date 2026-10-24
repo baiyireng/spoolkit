@@ -65,6 +65,10 @@ const tasksList = document.getElementById('tasks-list');
 const tasksDetail = document.getElementById('tasks-detail');
 const tasksArtifactsCount = document.getElementById('tasks-artifacts-count');
 const tasksArtifactsList = document.getElementById('tasks-artifacts-list');
+const tasksMemory = document.getElementById('tasks-memory');
+const tasksMemoryTitle = document.getElementById('tasks-memory-title');
+const tasksMemoryBody = document.getElementById('tasks-memory-body');
+const tasksMemoryToggle = document.getElementById('tasks-memory-toggle');
 const renameBox = document.getElementById('rename');
 const renameForm = document.getElementById('rename-form');
 const renameInput = document.getElementById('rename-input');
@@ -1233,6 +1237,117 @@ function paintArtifactList(host, count, state, rows, retry) {
   for (let index = 0; index < items.length; index += 1) {
     host.appendChild(paintArtifact(items[index]));
   }
+}
+
+// spool web · js/render/session_summary.js
+/* 任务面板里的会话记忆。只画摘要字段，不画产物、正文、路径或 checkpoint。 */
+
+function summaryStrings(raw) {
+  if (!Array.isArray(raw)) { return []; }
+  const rows = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const item = raw[index];
+    if (typeof item !== 'string') { continue; }
+    const text = item.trim();
+    if (text) { rows.push(text); }
+  }
+  return rows;
+}
+
+function summaryFromPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) { return null; }
+  const done = summaryStrings(payload.what_done);
+  return {
+    headline: String(payload.headline || '').trim(),
+    done: done.slice(0, 5),
+    doneMore: done.length > 5 ? done.length - 5 : 0,
+    openItems: summaryStrings(payload.open_items),
+    decisions: summaryStrings(payload.decisions),
+    turn: String(payload.last_turn_id || '').trim(),
+  };
+}
+
+function summaryIsEmpty(view) {
+  return !view.headline && !view.done.length && !view.openItems.length
+    && !view.decisions.length && !view.turn;
+}
+
+function paintMemoryItems(host, label, items) {
+  if (!items.length) { return; }
+  const name = h('div', 'tasks-memory-label');
+  name.textContent = label;
+  host.appendChild(name);
+  for (let index = 0; index < items.length; index += 1) {
+    const row = h('div', 'tasks-memory-item');
+    row.textContent = items[index];
+    host.appendChild(row);
+  }
+}
+
+function paintSessionSummary(host, state, view, retry) {
+  if (!host) { return; }
+  host.replaceChildren();
+  if (state === 'loading') {
+    const note = h('div', 'tasks-empty');
+    note.textContent = '正在加载记忆';
+    host.appendChild(note);
+    return;
+  }
+  if (state === 'error' || !view) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'tasks-memory-retry';
+    button.textContent = '记忆加载失败，可重试';
+    button.onclick = function () { retry(); };
+    host.appendChild(button);
+    return;
+  }
+  if (summaryIsEmpty(view)) {
+    const empty = h('div', 'tasks-empty');
+    empty.textContent = '当前会话还没有记忆摘要';
+    host.appendChild(empty);
+    return;
+  }
+  if (view.headline) {
+    const headline = h('div', 'tasks-memory-headline');
+    headline.textContent = view.headline;
+    host.appendChild(headline);
+  }
+  paintMemoryItems(host, '已完成', view.done);
+  if (view.doneMore) {
+    const more = h('div', 'tasks-memory-more');
+    more.textContent = '还有 ' + view.doneMore + ' 条';
+    host.appendChild(more);
+  }
+  paintMemoryItems(host, '未完成', view.openItems);
+  paintMemoryItems(host, '决定', view.decisions);
+  if (view.turn) {
+    const label = h('div', 'tasks-memory-label');
+    label.textContent = '最近一轮';
+    const turn = h('div', 'tasks-memory-turn');
+    turn.textContent = view.turn;
+    host.appendChild(label);
+    host.appendChild(turn);
+  }
+}
+
+function requestSessionSummary(finish) {
+  let pending;
+  try {
+    pending = fetch('/session/summary');
+  } catch (err) {
+    finish(false, null);
+    return;
+  }
+  Promise.resolve(pending).then(function (response) {
+    if (!response || !response.ok || typeof response.json !== 'function') {
+      finish(false, null);
+      return null;
+    }
+    return response.json().then(function (payload) {
+      finish(true, payload);
+    }, function () { finish(false, null); });
+  }, function () { finish(false, null); });
 }
 
 // spool web · js/render/diff.js
@@ -3247,8 +3362,9 @@ function getLastDrawn() { return lastDrawn; }
 
 // spool web · js/features/tasks.js
 /* 任务面板。当前会话来自 state.task_groups；跨会话只读 GET /tasks。
-   产物只在首次打开时读 GET /artifacts，之后用缓存。搜索、状态筛选、会话范围都在本地做。
-   详情复用任务卡正文，不画 raw，也不复制应用/拒绝。产物行不提供打开或继续。 */
+   产物和会话记忆只在首次打开时各读一次，之后按 root+session 缓存。
+   搜索、状态筛选、会话范围都在本地做。详情复用任务卡正文，不画 raw，
+   也不复制应用/拒绝。产物行和记忆摘要都不提供打开或继续。 */
 const TASK_FILTERS = [
   ['all', '全部'],
   ['running', '进行中'],
@@ -3272,6 +3388,10 @@ function createTasks(ctx) {
   let artifactState = 'idle';
   let artifactKey = '';
   let artifactRows = [];
+  let summaryState = 'idle';
+  let summaryKey = '';
+  let summaryView = null;
+  let summaryOpen = true;
 
   function groupsOf(state) {
     const rows = ((state && state.task_groups) || []).slice();
@@ -3566,6 +3686,17 @@ function createTasks(ctx) {
     );
   }
 
+  function paintSummary() {
+    if (!ctx.store.get('tasksOpen')) { return; }
+    if (tasksMemoryTitle) { tasksMemoryTitle.textContent = '会话记忆'; }
+    if (tasksMemory) { tasksMemory.classList.toggle('is-collapsed', !summaryOpen); }
+    if (tasksMemoryToggle) {
+      tasksMemoryToggle.setAttribute('aria-expanded', summaryOpen ? 'true' : 'false');
+      tasksMemoryToggle.textContent = summaryOpen ? '收起' : '展开';
+    }
+    paintSessionSummary(tasksMemoryBody, summaryState, summaryView, loadSummary);
+  }
+
   function inScope(task) {
     if (scope === 'all') { return true; }
     return String((task && task.session) || currentSessionId()) === currentSessionId();
@@ -3578,6 +3709,7 @@ function createTasks(ctx) {
     paintScope();
     paintHistory();
     paintArtifacts();
+    paintSummary();
     paintFilters();
     const merged = mergeGroups(live, historyState === 'ready' ? historyGroups : []);
     const scoped = [];
@@ -3729,6 +3861,34 @@ function createTasks(ctx) {
     loadArtifacts();
   }
 
+  function loadSummary() {
+    const key = targetKey();
+    summaryKey = key;
+    summaryState = 'loading';
+    summaryView = null;
+    renderPanel();
+    requestSessionSummary(function (ok, payload) {
+      if (summaryKey !== key) { return; }
+      const view = ok ? summaryFromPayload(payload) : null;
+      if (!view) {
+        summaryState = 'error';
+        summaryView = null;
+      } else {
+        summaryState = 'ready';
+        summaryView = view;
+      }
+      renderPanel();
+    });
+  }
+
+  function ensureSummary() {
+    const key = targetKey();
+    if (summaryKey === key && (summaryState === 'loading' || summaryState === 'ready' || summaryState === 'error')) {
+      return;
+    }
+    loadSummary();
+  }
+
   function setTasksOpen(open) {
     if (!tasksPanel) { return; }
     const want = Boolean(open);
@@ -3740,6 +3900,7 @@ function createTasks(ctx) {
     if (want) {
       ensureHistory();
       ensureArtifacts();
+      ensureSummary();
       renderPanel();
       if (tasksClose && typeof tasksClose.focus === 'function') { tasksClose.focus(); }
     } else if (tasksBtn && typeof tasksBtn.focus === 'function') {
@@ -3752,6 +3913,7 @@ function createTasks(ctx) {
     if (ctx.store.get('tasksOpen')) {
       ensureHistory();
       ensureArtifacts();
+      ensureSummary();
       renderPanel();
     }
   }
@@ -3772,6 +3934,12 @@ function createTasks(ctx) {
     tasksSearch.oninput = function () {
       query = String(tasksSearch.value || '');
       renderPanel();
+    };
+  }
+  if (tasksMemoryToggle) {
+    tasksMemoryToggle.onclick = function () {
+      summaryOpen = !summaryOpen;
+      paintSummary();
     };
   }
   paintCounts([]);

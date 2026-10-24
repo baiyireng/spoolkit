@@ -71,6 +71,27 @@
   .task-wait { color:var(--warn-text); background:var(--warn-bg);
                border-color:var(--warn-line); }
   .tasks-empty { margin:var(--space-2) 0; color:var(--text-dim); font-size:var(--font-sm); }
+  .tasks-memory { min-width:0; max-width:100%; margin:0 0 var(--space-3);
+                  padding-bottom:var(--space-2); border-bottom:1px solid var(--line-soft); }
+  .tasks-memory-head { display:flex; align-items:baseline; justify-content:space-between;
+                       gap:var(--space-2); min-width:0; margin:var(--space-2) 0 var(--space-1); }
+  .tasks-memory-head h3 { margin:0; min-width:0; font-size:var(--font-sm); font-weight:650; }
+  .tasks-memory-toggle { flex:0 0 auto; margin:0; padding:0; border:0; background:transparent;
+                         color:var(--text-dim); cursor:pointer; font:var(--font-xs)/1.3 var(--sans); }
+  #tasks-memory-body { min-width:0; max-width:100%; overflow-x:hidden; }
+  .tasks-memory.is-collapsed #tasks-memory-body { display:none; }
+  .tasks-memory-headline, .tasks-memory-item, .tasks-memory-turn {
+    display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; line-clamp:2;
+    overflow:hidden; min-width:0; max-width:100%; overflow-wrap:anywhere; }
+  .tasks-memory-headline { font-size:var(--font-sm); }
+  .tasks-memory-label, .tasks-memory-more, .tasks-memory-item, .tasks-memory-turn {
+    color:var(--text-dim); font-size:var(--font-xs); }
+  .tasks-memory-label { margin-top:var(--space-2); }
+  .tasks-memory-item, .tasks-memory-turn { color:var(--text); }
+  .tasks-memory-retry { display:block; width:100%; max-width:100%; box-sizing:border-box;
+                        margin:0; padding:0; border:0; background:transparent; color:var(--warn-text);
+                        cursor:pointer; text-align:left; white-space:normal;
+                        font:var(--font-xs)/var(--leading-tight) var(--sans); }
   .tasks-artifacts { min-width:0; max-width:100%; margin:0 0 var(--space-3);
                      padding-bottom:var(--space-2); border-bottom:1px solid var(--line-soft); }
   .tasks-artifacts-head { display:flex; align-items:baseline; justify-content:space-between;
