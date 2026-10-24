@@ -12,6 +12,12 @@
                 border-color:var(--warn-line); }
   #tasks-panel { position:fixed; top:0; right:0; bottom:0; z-index:36;
                  width:min(400px, 100%); display:flex; }
+  @media (min-width: 861px) {
+    #tasks-panel { bottom:128px; max-height:calc(100vh - 128px); }
+    body:has(#tasks-panel:not(.hidden)) #thread {
+      margin-right:calc(min(400px, 100%) + 12px);
+    }
+  }
   #tasks-panel.hidden { display:none; }
   .tasks-sheet { width:100%; height:100%; min-height:0; display:flex;
                  flex-direction:column; background:var(--panel); color:var(--text);
@@ -157,7 +163,8 @@
   #tasks-detail { margin-top:4px; min-width:0; }
   @media (max-width: 860px) {
     #tasks-panel { left:0; right:0; top:auto; bottom:0; width:auto;
-                   height:min(78vh, 100%); }
+                   height:min(78vh, 100%); max-height:none; }
+    body:has(#tasks-panel:not(.hidden)) #thread { margin-right:0; }
     .tasks-sheet { height:100%; border-left:0;
                    border-radius:var(--radius-lg) var(--radius-lg) 0 0;
                    box-shadow:var(--shadow-overlay);
