@@ -237,7 +237,7 @@ def _match(record: ArtifactRecord, needle: str) -> ArtifactHit | None:
 
 
 def _redacted(record: ArtifactRecord) -> ArtifactRecord:
-    """返回给调用方的标题和摘要先脱敏。磁盘上的记录不动。"""
+    """标题、摘要、节摘要和路径先脱敏。正文不在这条记录里。"""
     return ArtifactRecord(
         id=record.id,
         session=record.session,
@@ -256,7 +256,7 @@ def _redacted(record: ArtifactRecord) -> ArtifactRecord:
             )
             for section in record.sections
         ),
-        path=record.path,
+        path=redact_secrets(record.path),
         content_hash=record.content_hash,
         size=record.size,
     )
@@ -309,18 +309,19 @@ class ArtifactStore:
             current = self._read_id(record.session, record.id)
             if current is not None:
                 if current.content_hash == digest:
-                    return current
+                    return _redacted(current)
                 raise ArtifactError("同一 session 内该 id 已有不同正文")
             by_hash = self._read_hash(record.session, digest)
             if by_hash is not None:
-                return by_hash
+                return _redacted(by_hash)
+            stored = _redacted(filled)
             content_path = self._inside(canonical)
             meta_path = self._meta_path(record.session, record.id)
             self._atomic_write(content_path, content.encode("utf-8"))
             try:
                 self._atomic_write(
                     meta_path,
-                    json.dumps(filled.to_dict(), ensure_ascii=False).encode("utf-8"),
+                    json.dumps(stored.to_dict(), ensure_ascii=False).encode("utf-8"),
                 )
             except Exception:
                 with contextlib.suppress(OSError):
@@ -328,7 +329,7 @@ class ArtifactStore:
                 with contextlib.suppress(OSError):
                     meta_path.unlink()
                 raise
-        return filled
+        return stored
 
     def get(self, session: str, artifact_id: str) -> tuple[ArtifactRecord, str]:
         _segment(session)
@@ -339,7 +340,7 @@ class ArtifactStore:
         path = self._inside(record.path)
         if not path.is_file():
             raise ArtifactNotFound(f"正文文件缺失：{session}/{artifact_id}")
-        return record, path.read_text(encoding="utf-8")
+        return _redacted(record), path.read_text(encoding="utf-8")
 
     def exists(self, session: str, artifact_id: str) -> bool:
         try:
@@ -358,7 +359,7 @@ class ArtifactStore:
             return ()
         records = [self._load_meta(path) for path in directory.glob("*.json")]
         records.sort(key=lambda item: (item.created_at, item.id), reverse=True)
-        return tuple(records[:limit])
+        return tuple(_redacted(item) for item in records[:limit])
 
     def search(self, session: str, query: str, limit: int = 10) -> tuple[ArtifactHit, ...]:
         """只查当前 session 的元数据。不打开正文文件。"""

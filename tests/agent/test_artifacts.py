@@ -19,6 +19,8 @@ from spoolkit.agent.contract import TaskEvent
 from spoolkit.agent.document_state import CompletedSection, DocumentState, OutlineEntry
 
 BODY = "只有文件里才有的正文甲。这一段不该出现在状态或事件里。"
+SECRET = "API_KEY=sk-test-secret-value"
+REDACTED = "API_KEY=***"
 
 
 def _section(**overrides: object) -> ArtifactSection:
@@ -46,6 +48,82 @@ def _record(**overrides: object) -> ArtifactRecord:
     }
     payload.update(overrides)
     return ArtifactRecord(**payload)  # type: ignore[arg-type]
+
+
+def test_put_writes_redacted_metadata_and_keeps_body(tmp_path: Path) -> None:
+    """元数据落盘前脱敏。正文文件保留原文。读出来的记录也是脱敏后的。"""
+    store = ArtifactStore(tmp_path)
+    body = f"正文保留 {SECRET}。BODY-LEAK-MARKER"
+    stored = store.put(
+        _record(
+            title=f"标题 {SECRET}",
+            summary=f"摘要 {SECRET}",
+            sections=(_section(title=f"节 {SECRET}", summary=f"节摘要 {SECRET}"),),
+        ),
+        body,
+    )
+    meta_path = tmp_path / ".agent" / "artifacts" / "sess-a" / "doc-1.json"
+    meta = meta_path.read_text(encoding="utf-8")
+    assert SECRET not in meta
+    assert "sk-test-secret-value" not in meta
+    assert REDACTED in meta
+    assert (tmp_path / stored.path).read_text(encoding="utf-8") == body
+    loaded, content = store.get("sess-a", "doc-1")
+    assert loaded.title == f"标题 {REDACTED}"
+    assert loaded.summary == f"摘要 {REDACTED}"
+    assert loaded.sections[0].title == f"节 {REDACTED}"
+    assert loaded.sections[0].summary == f"节摘要 {REDACTED}"
+    assert SECRET not in loaded.path
+    assert content == body
+    listed = store.list("sess-a", limit=10)
+    assert listed[0].summary == f"摘要 {REDACTED}"
+
+
+def test_legacy_metadata_is_redacted_on_read_without_rewrite(tmp_path: Path) -> None:
+    """旧元数据磁盘上仍是原文。list 和 get 交出去时脱敏，并且不改文件。"""
+    digest = "ab" * 32
+    relative = f".agent/artifacts/sess-a/note-{SECRET}"
+    body_path = tmp_path / relative
+    body_path.parent.mkdir(parents=True)
+    body_path.write_text(f"旧正文 {SECRET}", encoding="utf-8")
+    meta_path = tmp_path / ".agent" / "artifacts" / "sess-a" / "doc-old.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "id": "doc-old",
+                "session": "sess-a",
+                "task_id": "task-1",
+                "turn_id": "turn-1",
+                "kind": "document",
+                "title": f"旧标题 {SECRET}",
+                "summary": f"旧摘要 {SECRET}",
+                "path": relative,
+                "content_hash": digest,
+                "size": len(f"旧正文 {SECRET}".encode("utf-8")),
+                "created_at": "2026-10-23T00:00:00Z",
+                "sections": [
+                    {
+                        "index": 0,
+                        "title": f"旧节 {SECRET}",
+                        "summary": f"旧节摘要 {SECRET}",
+                        "char_count": 4,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    before = meta_path.read_bytes()
+    store = ArtifactStore(tmp_path)
+    loaded, content = store.get("sess-a", "doc-old")
+    assert loaded.title == f"旧标题 {REDACTED}"
+    assert loaded.path == f".agent/artifacts/sess-a/note-{REDACTED}"
+    assert loaded.sections[0].summary == f"旧节摘要 {REDACTED}"
+    assert SECRET in content
+    assert store.list("sess-a", limit=10)[0].title == f"旧标题 {REDACTED}"
+    assert meta_path.read_bytes() == before
+    assert SECRET.encode("utf-8") in before
 
 
 def test_put_get_list_exists(tmp_path: Path) -> None:

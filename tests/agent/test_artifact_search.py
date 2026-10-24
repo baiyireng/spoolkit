@@ -136,7 +136,7 @@ def test_search_stays_in_session_and_hides_body_and_secrets(tmp_path: Path) -> N
         created_at="2026-10-23T03:00:00Z",
         content="会话乙的正文。",
     )
-    hits = store.search("sess-a", SECRET)
+    hits = store.search("sess-a", "密钥说明")
     assert len(hits) == 1
     assert hits[0].record.id == "doc-secret"
     assert hits[0].record.session == "sess-a"
@@ -150,7 +150,10 @@ def test_search_stays_in_session_and_hides_body_and_secrets(tmp_path: Path) -> N
         ]
     )
     assert SECRET not in blob
-    assert "API_KEY=***" in hits[0].snippet
+    assert "API_KEY=***" in hits[0].record.summary
+    assert store.search("sess-a", SECRET) == ()
+    meta = (tmp_path / ".agent" / "artifacts" / "sess-a" / "doc-secret.json").read_text(encoding="utf-8")
+    assert SECRET not in meta
     assert BODY not in blob
     assert store.search("sess-a", BODY) == ()
     assert store.search("sess-b", "密钥说明")[0].record.id == "doc-other"
