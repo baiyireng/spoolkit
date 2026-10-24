@@ -570,6 +570,65 @@ def test_任务面板显示会话记忆摘要(dom: dict) -> None:
     assert found["empty_artifact_count"] == "0 个产物", found
 
 
+def test_任务面板列出未完成文档(dom: dict) -> None:
+    """打开时读一次 /checkpoints。挂起时任务、产物和记忆照常出现。"""
+    page = Path(__file__).resolve().parents[2] / "src" / "spoolkit" / "web" / "assets" / "index.html"
+    html = page.read_text(encoding="utf-8")
+    assert html.index('id="tasks-memory"') < html.index('id="tasks-artifacts"')
+    assert html.index('id="tasks-artifacts"') < html.index('id="tasks-checkpoints"')
+    assert html.index('id="tasks-checkpoints"') < html.index('id="tasks-list"')
+    found = dom["task_checkpoints"]
+    assert found["opened_posts"] == 1, found
+    assert found["tasks_posts"] == 1, found
+    assert found["artifact_posts"] == 1, found
+    assert found["summary_posts"] == 1, found
+    assert found["loading"] == "正在加载未完成文档", found
+    assert "面板产物" in found["artifact_during_hang"], found
+    assert "这一轮把估算写完了" in found["memory_during_hang"], found
+    assert found["task_during_hang"] == "2", found
+    assert found["failed"] == "未完成文档加载失败，可重试", found
+    assert found["retry_posts"] == 1, found
+    assert found["artifact_posts_on_retry"] == 0, found
+    assert found["summary_posts_on_retry"] == 0, found
+    assert found["title"] == "未完成文档", found
+    assert found["rows"] == [
+        {
+            "title": "把很长的估算说明写完",
+            "path": "docs/estimate.md",
+            "phase": "draft",
+            "status": "paused",
+            "updated": "2026-01-03T00:00:00Z",
+        },
+        {
+            "title": "只有目标",
+            "path": "docs/notes.md",
+            "phase": "plan",
+            "status": "running",
+            "updated": "2026-01-01T00:00:00Z",
+        },
+    ], found["rows"]
+    assert "STATE-LEAK" not in found["text"], found
+    assert "BODY-LEAK" not in found["text"], found
+    assert "doc-hidden" not in found["text"], found
+    assert "ck-2" not in found["text"] and "ck-1" not in found["text"], found
+    assert "并且超出标题" not in found["text"], found
+    assert "继续" not in found["text"], found
+    assert found["buttons"] == 0, found
+    assert found["task_count"] == "2", found
+    assert found["artifact_count"] == "1 个产物", found
+    assert "这一轮把估算写完了" in found["memory"], found
+    assert found["filtered_rows"] == found["rows"], found
+    assert found["filter_posts"] == 0, found
+    assert found["filtered_task_count"] == "2", found
+    assert found["click_posts"] == 0, found
+    assert found["reopen_posts"] == 0, found
+    assert found["switch_posts"] == 1, found
+    assert found["empty"] == "没有未完成文档", found
+    assert found["empty_task_count"] == "1", found
+    assert found["empty_artifact_count"] == "0 个产物", found
+    assert found["empty_memory"] == "当前会话还没有记忆摘要", found
+
+
 def test_可见文案不用旧术语(dom: dict) -> None:
     """顶栏、状态面板和任务筛选不再出现旧说法。用户目标正文不在这张清单里。"""
     blobs = [

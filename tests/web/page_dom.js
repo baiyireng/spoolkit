@@ -3290,5 +3290,195 @@ async function extras2() {
     switch_posts: memorySwitchPosts,
   };
   ctx.__fetchImpl = null;
+
+  if (ids.get('tasks-close') && taskPanel && !taskPanel.classList.contains('hidden')) {
+    ids.get('tasks-close').onclick();
+  }
+  const checkpointPayload = [
+    {
+      checkpoint_key: 'ck-2',
+      artifact_id: 'doc-hidden',
+      goal: '把很长的估算说明写完并且超出标题',
+      title: '把很长的估算说明写完',
+      path: 'docs/estimate.md',
+      deliverable: 'file',
+      phase: 'draft',
+      status: 'paused',
+      updated_at: '2026-01-03T00:00:00Z',
+      state: { goal: 'STATE-LEAK', bodies: 'BODY-LEAK' },
+      bodies: { 0: 'BODY-LEAK' },
+    },
+    {
+      checkpoint_key: 'ck-1',
+      title: '',
+      goal: '只有目标',
+      path: 'docs/notes.md',
+      deliverable: 'chat',
+      phase: 'plan',
+      status: 'running',
+      updated_at: '2026-01-01T00:00:00Z',
+    },
+  ];
+  let checkpointMode = 'hang';
+  let checkpointRelease = null;
+  ctx.__fetchImpl = (url) => {
+    if (url === '/checkpoints') {
+      if (checkpointMode === 'hang') {
+        return new Promise((resolve) => {
+          checkpointRelease = () => resolve({
+            ok: false, status: 500, json: async () => ({ error: 'nope' }),
+          });
+        });
+      }
+      if (checkpointMode === 'fail') {
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'nope' }) });
+      }
+      if (checkpointMode === 'empty') {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => checkpointPayload });
+    }
+    if (url === '/artifacts') {
+      if (checkpointMode === 'empty') {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => [{ id: 'doc-keep', kind: 'document', title: '面板产物', summary: '产物摘要', path: 'docs/keep.md' }],
+      });
+    }
+    if (url === '/session/summary') {
+      if (checkpointMode === 'empty') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ headline: '', what_done: [], open_items: [], decisions: [], last_turn_id: '' }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ headline: '这一轮把估算写完了', what_done: ['完成一'], open_items: [], decisions: [], last_turn_id: 'turn-9' }),
+      });
+    }
+    if (url === '/tasks') {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ sessions: [], groups: [] }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+  };
+  ctx.__spoolTest.applyState(frame('D:/checkpoints', 'sess-ck', WROWS, SROWS_A, [], {
+    task_groups: [
+      searchTask('ck-task-1', 'running', '还在跑', [taskEvent(1, 'understand', 'running', '还在跑')]),
+      searchTask('ck-task-2', 'done', '已完成', [taskEvent(1, 'final', 'ok', '已完成')]),
+    ],
+  }));
+  const checkpointBefore = ctx.fetchCalls.length;
+  if (taskBtn) { taskBtn.onclick(); }
+  const checkpointOpened = countUrl(checkpointBefore, '/checkpoints');
+  const checkpointTasks = countUrl(checkpointBefore, '/tasks');
+  const checkpointArtifacts = countUrl(checkpointBefore, '/artifacts');
+  const checkpointSummary = countUrl(checkpointBefore, '/session/summary');
+  await settleTasks();
+  const checkpointBox = ids.get('tasks-checkpoints-list');
+  const checkpointLoading = checkpointBox ? checkpointBox.textContent : '';
+  const checkpointArtifactDuring = ids.get('tasks-artifacts-list')
+    ? ids.get('tasks-artifacts-list').textContent : '';
+  const checkpointMemoryDuring = ids.get('tasks-memory-body')
+    ? ids.get('tasks-memory-body').textContent : '';
+  const checkpointTaskDuring = ids.get('tasks-count').textContent;
+  if (checkpointRelease) { checkpointRelease(); }
+  await settleTasks();
+  const checkpointFailed = checkpointBox ? checkpointBox.textContent : '';
+  checkpointMode = 'ok';
+  const checkpointRetry = checkpointBox ? checkpointBox.querySelector('button') : null;
+  const beforeCheckpointRetry = ctx.fetchCalls.length;
+  if (checkpointRetry) { checkpointRetry.onclick(); }
+  await settleTasks();
+  const checkpointRetryPosts = countUrl(beforeCheckpointRetry, '/checkpoints');
+  const checkpointArtifactOnRetry = countUrl(beforeCheckpointRetry, '/artifacts');
+  const checkpointSummaryOnRetry = countUrl(beforeCheckpointRetry, '/session/summary');
+  function checkpointRows() {
+    const box = ids.get('tasks-checkpoints-list');
+    if (!box) { return []; }
+    return box.querySelectorAll('.checkpoint-line').map((node) => ({
+      title: node.querySelector('.checkpoint-title') ? node.querySelector('.checkpoint-title').textContent : '',
+      path: node.querySelector('.checkpoint-path') ? node.querySelector('.checkpoint-path').textContent : '',
+      phase: node.querySelector('.checkpoint-phase') ? node.querySelector('.checkpoint-phase').textContent : '',
+      status: node.querySelector('.checkpoint-status') ? node.querySelector('.checkpoint-status').textContent : '',
+      updated: node.querySelector('.checkpoint-updated') ? node.querySelector('.checkpoint-updated').textContent : '',
+    }));
+  }
+  const checkpointTitle = ids.get('tasks-checkpoints-title')
+    ? ids.get('tasks-checkpoints-title').textContent : '';
+  const checkpointReadyRows = checkpointRows();
+  const checkpointText = checkpointBox ? checkpointBox.textContent : '';
+  const checkpointButtons = checkpointBox ? checkpointBox.querySelectorAll('button').length : -1;
+  const checkpointTaskCount = ids.get('tasks-count').textContent;
+  const checkpointArtifactCount = ids.get('tasks-artifacts-count')
+    ? ids.get('tasks-artifacts-count').textContent : '';
+  const checkpointMemory = ids.get('tasks-memory-body') ? ids.get('tasks-memory-body').textContent : '';
+  const beforeCheckpointFilter = ctx.fetchCalls.length;
+  clickFilter('失败');
+  const checkpointFilteredRows = checkpointRows();
+  const checkpointFilterPosts = countUrl(beforeCheckpointFilter, '/checkpoints');
+  const checkpointFilteredTasks = ids.get('tasks-count').textContent;
+  clickFilter('全部');
+  const beforeCheckpointClick = ctx.fetchCalls.length;
+  const checkpointLine = checkpointBox ? checkpointBox.querySelector('.checkpoint-line') : null;
+  if (checkpointLine && checkpointLine.onclick) { checkpointLine.onclick(); }
+  const checkpointClickPosts = ctx.fetchCalls.length - beforeCheckpointClick;
+  if (ids.get('tasks-close')) { ids.get('tasks-close').onclick(); }
+  const beforeCheckpointReopen = ctx.fetchCalls.length;
+  if (taskBtn) { taskBtn.onclick(); }
+  await settleTasks();
+  const checkpointReopen = countUrl(beforeCheckpointReopen, '/checkpoints');
+  checkpointMode = 'empty';
+  ctx.__spoolTest.applyState(frame('D:/checkpoints', 'sess-ck-empty', WROWS, SROWS_A, [], {
+    task_groups: [
+      searchTask('ck-task-1', 'running', '还在跑', [taskEvent(1, 'understand', 'running', '还在跑')]),
+    ],
+  }));
+  await settleTasks();
+  const checkpointEmpty = ids.get('tasks-checkpoints-list')
+    ? ids.get('tasks-checkpoints-list').textContent : '';
+  const checkpointEmptyTasks = ids.get('tasks-count').textContent;
+  const checkpointEmptyArtifacts = ids.get('tasks-artifacts-count')
+    ? ids.get('tasks-artifacts-count').textContent : '';
+  const checkpointEmptyMemory = ids.get('tasks-memory-body')
+    ? ids.get('tasks-memory-body').textContent : '';
+  const checkpointSwitch = countUrl(beforeCheckpointReopen, '/checkpoints');
+  out.task_checkpoints = {
+    opened_posts: checkpointOpened,
+    tasks_posts: checkpointTasks,
+    artifact_posts: checkpointArtifacts,
+    summary_posts: checkpointSummary,
+    loading: checkpointLoading,
+    artifact_during_hang: checkpointArtifactDuring,
+    memory_during_hang: checkpointMemoryDuring,
+    task_during_hang: checkpointTaskDuring,
+    failed: checkpointFailed,
+    retry_posts: checkpointRetryPosts,
+    artifact_posts_on_retry: checkpointArtifactOnRetry,
+    summary_posts_on_retry: checkpointSummaryOnRetry,
+    title: checkpointTitle,
+    rows: checkpointReadyRows,
+    text: checkpointText,
+    buttons: checkpointButtons,
+    task_count: checkpointTaskCount,
+    artifact_count: checkpointArtifactCount,
+    memory: checkpointMemory,
+    filtered_rows: checkpointFilteredRows,
+    filter_posts: checkpointFilterPosts,
+    filtered_task_count: checkpointFilteredTasks,
+    click_posts: checkpointClickPosts,
+    reopen_posts: checkpointReopen,
+    empty: checkpointEmpty,
+    empty_task_count: checkpointEmptyTasks,
+    empty_artifact_count: checkpointEmptyArtifacts,
+    empty_memory: checkpointEmptyMemory,
+    switch_posts: checkpointSwitch,
+  };
+  ctx.__fetchImpl = null;
 }
 

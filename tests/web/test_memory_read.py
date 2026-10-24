@@ -48,7 +48,14 @@ def _put(root: Path, session: str, artifact_id: str, title: str, created_at: str
     )
 
 
-def _checkpoint(session: str, key: str, updated_at: str) -> dict:
+def _checkpoint(
+    session: str,
+    key: str,
+    updated_at: str,
+    goal: str = "把估算写完",
+    path: str = "docs/estimate.md",
+    deliverable: str = "file",
+) -> dict:
     return {
         "schema_version": 1,
         "session": session,
@@ -59,7 +66,12 @@ def _checkpoint(session: str, key: str, updated_at: str) -> dict:
         "phase": "stopped",
         "status": "paused",
         "updated_at": updated_at,
-        "state": {"goal": STATE_TEXT},
+        "state": {
+            "goal": goal,
+            "path": path,
+            "deliverable": deliverable,
+            "error": STATE_TEXT,
+        },
         "bodies": {"0": CHECKPOINT_BODY},
     }
 
@@ -242,10 +254,20 @@ def test_三个接口只读当前session且不含正文(tmp_path: Path) -> None:
             "phase",
             "status",
             "updated_at",
+            "goal",
+            "path",
+            "deliverable",
+            "title",
         }
         assert checkpoints[0]["artifact_id"] == "doc-turn-1"
         assert checkpoints[0]["status"] == "paused"
         assert checkpoints[0]["phase"] == "stopped"
+        assert checkpoints[0]["goal"] == "把估算写完"
+        assert checkpoints[0]["path"] == "docs/estimate.md"
+        assert checkpoints[0]["deliverable"] == "file"
+        assert checkpoints[0]["title"] == "把估算写完"
+        assert "state" not in checkpoints[0]
+        assert "bodies" not in checkpoints[0]
         assert CHECKPOINT_BODY not in checkpoint_body
         assert STATE_TEXT not in checkpoint_body
         assert "ck-other" not in checkpoint_body
@@ -385,6 +407,83 @@ def test_产物元数据里的密钥只在返回时脱敏(tmp_path: Path) -> Non
         assert summary_path.read_bytes() == summary_before
         assert SECRET.encode("utf-8") in meta_before
         assert _files(tmp_path) == before
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_checkpoint列表给出可续写字段并脱敏(tmp_path: Path) -> None:
+    """goal、path、deliverable 和标题来自 state。正文和密钥不出现在返回里。"""
+    long_goal = "写完这一节" * 10
+    folder = tmp_path / ".agent" / "checkpoints" / "sess-a"
+    folder.mkdir(parents=True)
+    long_path = folder / "ck-long.json"
+    long_path.write_text(
+        json.dumps(
+            _checkpoint("sess-a", "ck-long", "2026-01-03T00:00:00Z", goal=long_goal),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    secret_path = folder / "ck-secret.json"
+    secret_path.write_text(
+        json.dumps(
+            _checkpoint(
+                "sess-a",
+                "ck-secret",
+                "2026-01-02T00:00:00Z",
+                goal=f"目标 {SECRET} 后续",
+                path=f"docs/{SECRET}.md",
+                deliverable=f"file {SECRET}",
+            ),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (folder / "ck-plain.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "session": "sess-a",
+                "checkpoint_key": "ck-plain",
+                "artifact_id": "doc-turn-1",
+                "task_id": "task-1",
+                "turn_id": "turn-1",
+                "phase": "draft",
+                "status": "running",
+                "updated_at": "2026-01-01T00:00:00Z",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (folder / "broken.json").write_text("{", encoding="utf-8")
+    before = _files(tmp_path)
+    httpd, url = _serve(tmp_path, "sess-a")
+    try:
+        status, body = _get(url + "/checkpoints")
+        assert status == 200
+        rows = json.loads(body)
+        assert [item["checkpoint_key"] for item in rows] == ["ck-long", "ck-secret", "ck-plain"]
+        assert rows[0]["goal"] == long_goal
+        assert rows[0]["title"] == long_goal[:40]
+        assert len(rows[0]["title"]) == 40
+        assert rows[1]["goal"] == "目标 API_KEY=*** 后续"
+        assert rows[1]["title"] == "目标 API_KEY=*** 后续"
+        assert rows[1]["path"] == "docs/API_KEY=***"
+        assert rows[1]["deliverable"] == "file API_KEY=***"
+        assert SECRET not in body
+        assert CHECKPOINT_BODY not in body
+        assert STATE_TEXT not in body
+        assert "state" not in rows[1]
+        assert "bodies" not in rows[1]
+        assert rows[2]["goal"] == ""
+        assert rows[2]["path"] == ""
+        assert rows[2]["deliverable"] == ""
+        assert rows[2]["title"] == ""
+        assert _files(tmp_path) == before
+        assert secret_path.read_bytes() == before[secret_path.relative_to(tmp_path).as_posix()]
+        assert SECRET.encode("utf-8") in secret_path.read_bytes()
     finally:
         httpd.shutdown()
         httpd.server_close()

@@ -91,10 +91,10 @@ function paintSessionSummary(host, state, view, retry) {
   }
 }
 
-function requestSessionSummary(finish) {
+function fetchJson(path, finish) {
   let pending;
   try {
-    pending = fetch('/session/summary');
+    pending = fetch(path);
   } catch (err) {
     finish(false, null);
     return;
@@ -108,4 +108,8 @@ function requestSessionSummary(finish) {
       finish(true, payload);
     }, function () { finish(false, null); });
   }, function () { finish(false, null); });
+}
+
+function requestSessionSummary(finish) {
+  fetchJson('/session/summary', finish);
 }

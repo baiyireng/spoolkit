@@ -4,11 +4,12 @@ import "../core/store.js";
 import "../render/task_card.js";
 import "../render/artifact_list.js";
 import "../render/session_summary.js";
+import "../render/checkpoint_list.js";
 import "../render/failure.js";
 /* 任务面板。当前会话来自 state.task_groups；跨会话只读 GET /tasks。
-   产物和会话记忆只在首次打开时各读一次，之后按 root+session 缓存。
+   产物、会话记忆和未完成文档只在首次打开时各读一次，按 root+session 缓存。
    搜索、状态筛选、会话范围都在本地做。详情复用任务卡正文，不画 raw，
-   也不复制应用/拒绝。产物行和记忆摘要都不提供打开或继续。 */
+   也不复制应用/拒绝。产物、记忆和未完成文档都不提供打开或继续。 */
 const TASK_FILTERS = [
   ['all', '全部'],
   ['running', '进行中'],
@@ -36,6 +37,9 @@ function createTasks(ctx) {
   let summaryKey = '';
   let summaryView = null;
   let summaryOpen = true;
+  let checkpointState = 'idle';
+  let checkpointKey = '';
+  let checkpointRows = [];
 
   function groupsOf(state) {
     const rows = ((state && state.task_groups) || []).slice();
@@ -341,6 +345,12 @@ function createTasks(ctx) {
     paintSessionSummary(tasksMemoryBody, summaryState, summaryView, loadSummary);
   }
 
+  function paintCheckpoints() {
+    if (!ctx.store.get('tasksOpen')) { return; }
+    if (tasksCheckpointTitle) { tasksCheckpointTitle.textContent = '未完成文档'; }
+    paintCheckpointList(tasksCheckpointList, checkpointState, checkpointRows, loadCheckpoints);
+  }
+
   function inScope(task) {
     if (scope === 'all') { return true; }
     return String((task && task.session) || currentSessionId()) === currentSessionId();
@@ -354,6 +364,7 @@ function createTasks(ctx) {
     paintHistory();
     paintArtifacts();
     paintSummary();
+    paintCheckpoints();
     paintFilters();
     const merged = mergeGroups(live, historyState === 'ready' ? historyGroups : []);
     const scoped = [];
@@ -418,30 +429,19 @@ function createTasks(ctx) {
       historyState = 'ready';
       renderPanel();
     };
-    let pending;
-    try {
-      pending = fetch('/tasks');
-    } catch (err) {
-      finish(false, null);
+    fetchJson('/tasks', finish);
+  }
+
+  function ensureFresh(heldKey, state, load) {
+    const key = targetKey();
+    if (heldKey === key && (state === 'loading' || state === 'ready' || state === 'error')) {
       return;
     }
-    Promise.resolve(pending).then(function (response) {
-      if (!response || !response.ok || typeof response.json !== 'function') {
-        finish(false, null);
-        return null;
-      }
-      return response.json().then(function (payload) {
-        finish(true, payload);
-      }, function () { finish(false, null); });
-    }, function () { finish(false, null); });
+    load();
   }
 
   function ensureHistory() {
-    const key = targetKey();
-    if (historyKey === key && (historyState === 'loading' || historyState === 'ready' || historyState === 'error')) {
-      return;
-    }
-    loadHistory();
+    ensureFresh(historyKey, historyState, loadHistory);
   }
 
   function artifactItems(payload) {
@@ -479,30 +479,11 @@ function createTasks(ctx) {
       artifactState = 'ready';
       renderPanel();
     };
-    let pending;
-    try {
-      pending = fetch('/artifacts');
-    } catch (err) {
-      finish(false, null);
-      return;
-    }
-    Promise.resolve(pending).then(function (response) {
-      if (!response || !response.ok || typeof response.json !== 'function') {
-        finish(false, null);
-        return null;
-      }
-      return response.json().then(function (payload) {
-        finish(true, payload);
-      }, function () { finish(false, null); });
-    }, function () { finish(false, null); });
+    fetchJson('/artifacts', finish);
   }
 
   function ensureArtifacts() {
-    const key = targetKey();
-    if (artifactKey === key && (artifactState === 'loading' || artifactState === 'ready' || artifactState === 'error')) {
-      return;
-    }
-    loadArtifacts();
+    ensureFresh(artifactKey, artifactState, loadArtifacts);
   }
 
   function loadSummary() {
@@ -526,11 +507,31 @@ function createTasks(ctx) {
   }
 
   function ensureSummary() {
+    ensureFresh(summaryKey, summaryState, loadSummary);
+  }
+
+  function loadCheckpoints() {
     const key = targetKey();
-    if (summaryKey === key && (summaryState === 'loading' || summaryState === 'ready' || summaryState === 'error')) {
-      return;
-    }
-    loadSummary();
+    checkpointKey = key;
+    checkpointState = 'loading';
+    checkpointRows = [];
+    renderPanel();
+    fetchJson('/checkpoints', function (ok, payload) {
+      if (checkpointKey !== key) { return; }
+      const rows = ok ? checkpointItems(payload) : null;
+      if (!rows) {
+        checkpointState = 'error';
+        checkpointRows = [];
+      } else {
+        checkpointState = 'ready';
+        checkpointRows = rows;
+      }
+      renderPanel();
+    });
+  }
+
+  function ensureCheckpoints() {
+    ensureFresh(checkpointKey, checkpointState, loadCheckpoints);
   }
 
   function setTasksOpen(open) {
@@ -545,6 +546,7 @@ function createTasks(ctx) {
       ensureHistory();
       ensureArtifacts();
       ensureSummary();
+      ensureCheckpoints();
       renderPanel();
       if (tasksClose && typeof tasksClose.focus === 'function') { tasksClose.focus(); }
     } else if (tasksBtn && typeof tasksBtn.focus === 'function') {
@@ -558,6 +560,7 @@ function createTasks(ctx) {
       ensureHistory();
       ensureArtifacts();
       ensureSummary();
+      ensureCheckpoints();
       renderPanel();
     }
   }

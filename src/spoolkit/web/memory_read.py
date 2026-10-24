@@ -17,6 +17,8 @@ from spoolkit.memory.transcript import redact_secrets
 
 #: 一次最多交出去这么多条产物元数据。再大的 limit 也停在这里。
 ARTIFACT_LIST_MAX = 50
+#: 列表标题只取 goal 的前这么多个字。
+CHECKPOINT_TITLE_CAP = 40
 
 
 def artifact_limit(raw_path: str) -> int | None:
@@ -62,14 +64,20 @@ def read_session_summary(root: Path, session: str) -> dict:
 
 
 def read_checkpoints(root: Path, session: str) -> list[dict[str, str]]:
-    """当前 session 的 checkpoint 元数据。坏文件跳过。"""
+    """当前 session 的 checkpoint 元数据。文本先脱敏，再取标题。坏文件跳过。"""
     scope = str(session or "").strip()
     if not scope:
         return []
     try:
-        return [dict(item) for item in DocumentCheckpointStore(root).list_meta(scope)]
+        rows = DocumentCheckpointStore(root).list_meta(scope)
     except (CheckpointError, OSError, UnicodeError, ValueError):
         return []
+    found: list[dict[str, str]] = []
+    for item in rows:
+        redacted = {key: redact_secrets(value) for key, value in item.items()}
+        redacted["title"] = redacted.get("goal", "")[:CHECKPOINT_TITLE_CAP]
+        found.append(redacted)
+    return found
 
 
 def empty_summary(session: str) -> dict:

@@ -81,6 +81,11 @@ def _checkpoint_meta(directory: Path, path: Path, session: str) -> dict[str, str
         meta[field] = value
     if meta["checkpoint_key"] != key:
         return None
+    state = payload.get("state")
+    source = state if isinstance(state, dict) else {}
+    for field in ("goal", "path", "deliverable"):
+        value = source.get(field, "")
+        meta[field] = value if isinstance(value, str) else ""
     return meta
 
 
@@ -235,7 +240,7 @@ class DocumentCheckpointStore:
         )
 
     def list_meta(self, session: str) -> tuple[dict[str, str], ...]:
-        """只读这一层的元数据。坏文件跳过，不返回 state 和 bodies，也不写盘。"""
+        """只读这一层的元数据。带上 goal、path、deliverable。坏文件跳过，不返回 state 和 bodies，也不写盘。"""
         try:
             folder = _segment(session, "session")
         except CheckpointError:
