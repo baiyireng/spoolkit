@@ -101,7 +101,7 @@ def _artifact_meta(record: ArtifactRecord) -> dict:
         "id": record.id,
         "title": redact_secrets(record.title),
         "summary": redact_secrets(record.summary),
-        "path": record.path,
+        "path": redact_secrets(record.path),
         "kind": record.kind,
         "created_at": record.created_at,
         "sections": [

@@ -22,6 +22,8 @@ from spoolkit.web.runner import Runner
 from spoolkit.web.server import build_server
 
 BODY = "ARTIFACT-BODY-LEAK"
+SECRET = "API_KEY=sk-test-secret-value"
+REDACTED = "API_KEY=***"
 CHECKPOINT_BODY = "CHECKPOINT-BODY-LEAK"
 STATE_TEXT = "STATE-SHOULD-NOT-LEAK"
 OTHER = "别的会话独有"
@@ -284,6 +286,105 @@ def test_没有摘要时返回空摘要且坏checkpoint留在盘上(tmp_path: Pa
         assert json.loads(checkpoints) == []
         assert _files(tmp_path) == before
         assert broken.read_text(encoding="utf-8") == "{"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_产物元数据里的密钥只在返回时脱敏(tmp_path: Path) -> None:
+    meta_path = tmp_path / ".agent" / "artifacts" / "sess-a" / "doc-secret.json"
+    meta_path.parent.mkdir(parents=True)
+    meta_path.write_text(
+        json.dumps(
+            {
+                "id": "doc-secret",
+                "session": "sess-a",
+                "task_id": "task-1",
+                "turn_id": "turn-1",
+                "kind": "document",
+                "title": f"标题 {SECRET}",
+                "summary": f"摘要 {SECRET}",
+                "path": f"docs/{SECRET}.md",
+                "created_at": "2026-01-01T00:00:00Z",
+                "content": BODY,
+                "sections": [
+                    {
+                        "index": 0,
+                        "title": f"节标题 {SECRET}",
+                        "summary": f"节摘要 {SECRET}",
+                        "char_count": 4,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    summary_path = tmp_path / ".agent" / "sessions" / "sess-a" / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    summary_path.write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "session": "sess-a",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "headline": f"进度 {SECRET}",
+                "what_done": [],
+                "artifacts": [
+                    {
+                        "id": "doc-secret",
+                        "title": f"标题 {SECRET}",
+                        "summary": f"摘要 {SECRET}",
+                        "path": f"docs/{SECRET}.md",
+                    }
+                ],
+                "decisions": [],
+                "open_items": [],
+                "last_turn_id": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    meta_before = meta_path.read_bytes()
+    summary_before = summary_path.read_bytes()
+    before = _files(tmp_path)
+    httpd, url = _serve(tmp_path, "sess-a")
+    try:
+        status, listed = _get(url + "/artifacts")
+        assert status == 200
+        item = json.loads(listed)[0]
+        assert item["title"] == f"标题 {REDACTED}"
+        assert item["summary"] == f"摘要 {REDACTED}"
+        assert item["path"] == f"docs/{REDACTED}"
+        assert item["sections"] == [
+            {
+                "index": 0,
+                "title": f"节标题 {REDACTED}",
+                "summary": f"节摘要 {REDACTED}",
+                "char_count": 4,
+            }
+        ]
+        assert SECRET not in listed
+        assert REDACTED in listed
+        assert BODY not in listed
+        status, summary_body = _get(url + "/session/summary")
+        assert status == 200
+        summary = json.loads(summary_body)
+        assert summary["headline"] == f"进度 {REDACTED}"
+        assert summary["artifacts"] == [
+            {
+                "id": "doc-secret",
+                "title": f"标题 {REDACTED}",
+                "summary": f"摘要 {REDACTED}",
+                "path": f"docs/{REDACTED}",
+            }
+        ]
+        assert SECRET not in summary_body
+        assert meta_path.read_bytes() == meta_before
+        assert summary_path.read_bytes() == summary_before
+        assert SECRET.encode("utf-8") in meta_before
+        assert _files(tmp_path) == before
     finally:
         httpd.shutdown()
         httpd.server_close()
