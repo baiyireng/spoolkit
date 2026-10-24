@@ -76,7 +76,9 @@ from spoolkit.web.memory_read import (
     empty_summary,
     read_artifacts,
     read_checkpoints,
+    read_resume_fields,
     read_session_summary,
+    resume_key,
 )
 from spoolkit.web.page import INDEX
 from spoolkit.web.static import AssetError, load_asset
@@ -140,6 +142,8 @@ WRITE_PATHS = (
     "/session/title",
     # 人手改标题：写 meta，并把来源标成 manual。远程只读走上面同一张表。
     "/session/rename",
+    # 从当前会话的一份长文 checkpoint 继续。会拉起一轮运行，远程只读必须拒绝。
+    "/longform/resume",
 )
 
 #: 网页壳在 `clients.json` 里的键。与 `resolve_target(client=…)` 用的是同一套键，
@@ -1305,6 +1309,37 @@ def _handler_for(state: WebState) -> type[BaseHTTPRequestHandler]:
                     self._json(409, {"error": message})
                     return
                 self._json(200, {"ok": True, "message": message})
+                return
+
+            if self.path == "/longform/resume":
+                payload = self._body()
+                if set(payload) != {"checkpoint_key"}:
+                    self._json(400, {"error": "只接受 checkpoint_key"})
+                    return
+                key = resume_key(payload.get("checkpoint_key"))
+                if not key:
+                    self._json(400, {"error": "checkpoint_key 不合法"})
+                    return
+                found = _workspace(state)
+                _version, runner = state.current()
+                if found is None or runner is None:
+                    self._json(
+                        409,
+                        {
+                            "error": "还没有选工作区：先在页面顶上的选择栏里选一个"
+                            "（或 POST /target），再继续未完成文档。"
+                        },
+                    )
+                    return
+                root, session = found
+                fields = read_resume_fields(root, session, key)
+                if fields is None:
+                    self._json(404, {"error": "没有这份未完成文档"})
+                    return
+                if runner.running or not runner.start(fields["goal"], resume_checkpoint=key):
+                    self._json(409, {"error": "已有运行在进行，等它结束再发"})
+                    return
+                self._json(202, {"ok": True, "checkpoint_key": key})
                 return
 
             self._json(404, {"error": "没有这个路径"})

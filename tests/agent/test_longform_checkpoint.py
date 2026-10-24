@@ -21,6 +21,8 @@ from spoolkit.agent.document_state import (
 )
 from spoolkit.agent.file_sink import FileSink
 from spoolkit.agent.longform import LongFormRunner
+from spoolkit.agent.longform_bridge import try_longform_text
+from spoolkit.agent.writing_state import OUTLINE_INSTRUCTION
 from spoolkit.llm.types import ChatRequest, ChatResponse
 from spoolkit.tools.edit import PendingChanges
 
@@ -172,6 +174,114 @@ def test_第二轮换_artifact_仍恢复且只提交后两节(tmp_path: Path) ->
     prompts = "\n".join(message.content for request in gateway.requests for message in request.messages)
     assert "未开始标题：## 窗口" not in prompts
     assert "当前节：第 1 节「窗口」" not in prompts
+
+
+def test_resume_checkpoint直接恢复且不重新要大纲(tmp_path: Path) -> None:
+    first_sink = RecorderSink()
+    first, _gateway, store = _runner(tmp_path, [_piece("窗口")], first_sink)
+    first.run(stop_after=1)
+    key = _key()
+    assert store.path_for("sess-a", key).is_file()
+    gateway = ScriptedGateway([_piece("估算"), _piece("余量"), "完"])
+    draft = try_longform_text(
+        gateway=gateway,
+        prefix=(),
+        goal="另一句目标",
+        plan=None,
+        token_budget=4000,
+        artifact_root=tmp_path,
+        session="sess-a",
+        task_id="task-9",
+        turn_id="turn-9",
+        resume_checkpoint=key,
+    )
+    assert draft is not None
+    assert draft.text.count("## 窗口") == 1
+    assert "## 估算" in draft.text and "## 余量" in draft.text
+    prompts = "\n".join(
+        message.content for request in gateway.requests for message in request.messages
+    )
+    assert OUTLINE_INSTRUCTION.split("{", 1)[0] not in prompts
+    assert "当前节：第 1 节「窗口」" not in prompts
+    assert "未开始标题：## 窗口" not in prompts
+    assert not store.path_for("sess-a", key).exists()
+    missed = ScriptedGateway([])
+    assert try_longform_text(
+        gateway=missed,
+        prefix=(),
+        goal="另一句目标",
+        plan=None,
+        token_budget=4000,
+        artifact_root=tmp_path,
+        session="sess-a",
+        resume_checkpoint="ck-missing",
+    ) is None
+    assert missed.requests == []
+    assert try_longform_text(
+        gateway=missed,
+        prefix=(),
+        goal="另一句目标",
+        plan=None,
+        token_budget=4000,
+        artifact_root=tmp_path,
+        session="sess-b",
+        resume_checkpoint=key,
+    ) is None
+    assert missed.requests == []
+
+
+def test_file_resume只登记一条待确认(tmp_path: Path) -> None:
+    pending = PendingChanges(tmp_path, overrides={}, run_id="run-1")
+    artifacts = ArtifactStore(tmp_path)
+    key = _key(path="docs/out.md", deliverable="file")
+
+    def sink(artifact_id: str, turn_id: str) -> FileSink:
+        return FileSink(
+            state=_state(deliverable="file", path="docs/out.md"),
+            path="docs/out.md",
+            session="sess-a",
+            task_id="task-1",
+            turn_id=turn_id,
+            artifacts=artifacts,
+            pending=pending,
+            artifact_id=artifact_id,
+        )
+
+    first, _gateway, store = _runner(
+        tmp_path,
+        ["甲节唯一" + _piece("窗口")],
+        sink("doc-turn-1", "turn-1"),
+        deliverable="file",
+        path="docs/out.md",
+    )
+    first.run(stop_after=1)
+    assert pending.items() == []
+    gateway = ScriptedGateway([_piece("估算"), _piece("余量"), "完"])
+    draft = try_longform_text(
+        gateway=gateway,
+        prefix=(),
+        goal="另一句目标",
+        plan=None,
+        token_budget=4000,
+        pending=pending,
+        artifact_root=tmp_path,
+        session="sess-a",
+        task_id="task-9",
+        turn_id="turn-9",
+        resume_checkpoint=key,
+    )
+    assert draft is not None
+    assert draft.text == "已生成文档，待确认：docs/out.md"
+    assert "甲节唯一" not in draft.text
+    prompts = "\n".join(
+        message.content for request in gateway.requests for message in request.messages
+    )
+    assert OUTLINE_INSTRUCTION.split("{", 1)[0] not in prompts
+    assert len(pending.items()) == 1
+    assert pending.items()[0].path == "docs/out.md"
+    assert pending.items()[0].new_text.count("甲节唯一") == 1
+    assert not (tmp_path / "docs" / "out.md").exists()
+    assert not store.path_for("sess-a", key).exists()
 
 
 def test_失败保留_checkpoint(tmp_path: Path) -> None:

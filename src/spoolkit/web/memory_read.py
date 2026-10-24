@@ -12,6 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from spoolkit.agent.artifacts import ArtifactError, ArtifactRecord, ArtifactStore
 from spoolkit.agent.document_checkpoint import CheckpointError, DocumentCheckpointStore
+from spoolkit.agent.document_state import SchemaVersionError
+from spoolkit.session_state import safe
 from spoolkit.agent.session_summary import SCHEMA_VERSION, SessionSummaryError, SessionSummaryStore
 from spoolkit.memory.transcript import redact_secrets
 
@@ -78,6 +80,41 @@ def read_checkpoints(root: Path, session: str) -> list[dict[str, str]]:
         redacted["title"] = redacted.get("goal", "")[:CHECKPOINT_TITLE_CAP]
         found.append(redacted)
     return found
+
+
+def resume_key(value: object) -> str:
+    """checkpoint 文件名。斜杠、盘符和 .. 都不是合法的键。"""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or text in {".", ".."} or text != Path(text).name:
+        return ""
+    if any(char in text for char in ("/", "\\", ":")) or ".." in text:
+        return ""
+    if safe(text) != text:
+        return ""
+    return text
+
+
+def read_resume_fields(root: Path, session: str, key: str) -> dict[str, str] | None:
+    """只读 goal、path、deliverable。没有这份 checkpoint 时返回 None，不写盘。"""
+    scope = str(session or "").strip()
+    token = resume_key(key)
+    if not scope or not token:
+        return None
+    try:
+        loaded = DocumentCheckpointStore(root).load(scope, token)
+    except (CheckpointError, SchemaVersionError, OSError, UnicodeError, ValueError):
+        return None
+    if loaded is None or loaded.state.status == "done":
+        return None
+    if not str(loaded.state.goal or "").strip():
+        return None
+    return {
+        "goal": loaded.state.goal,
+        "path": loaded.state.path,
+        "deliverable": loaded.state.deliverable,
+    }
 
 
 def empty_summary(session: str) -> dict:

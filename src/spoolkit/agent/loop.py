@@ -2232,6 +2232,7 @@ class AgentLoop:
         task_id: str = "task",
         resume: bool = False,
         prompt: str | None = None,
+        resume_checkpoint: str = "",
     ) -> LoopResult:
         """运行任务直到给出最终答复或达到步数上限。
 
@@ -2259,6 +2260,7 @@ class AgentLoop:
         self._event_step = 0
         self._longform_artifacts = ()
         self._longform_summary = ""
+        self._resume_checkpoint = str(resume_checkpoint or "").strip()
         self._load_session_context(goal)
         previous_sigint = self._install_stop_signal()
         try:
@@ -3913,6 +3915,7 @@ class AgentLoop:
                                 session=artifact_session(self.pending),
                                 task_id=state.task_id or "task",
                                 turn_id=current_turn_id(),
+                                resume_checkpoint=self._resume_checkpoint,
                             )
                         except GenerationCancelled:
                             longform_draft = None

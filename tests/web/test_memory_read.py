@@ -1,18 +1,24 @@
 """当前会话的产物、摘要、checkpoint 只读接口。不写盘，不交正文。"""
 
+import argparse
 import json
+import sys
 import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from spoolkit.agent.artifacts import ArtifactRecord, ArtifactSection, ArtifactStore
+from spoolkit.agent.document_checkpoint import DocumentCheckpoint, DocumentCheckpointStore
+from spoolkit.agent.document_state import SCHEMA_VERSION as DOC_SCHEMA
+from spoolkit.agent.document_state import DocumentState, OutlineEntry
 from spoolkit.agent.session_summary import (
     SCHEMA_VERSION,
     SessionSummary,
     SessionSummaryStore,
     SummaryArtifact,
 )
+from spoolkit.cli.app import _add_run_command
 from spoolkit.web.memory_read import (
     ARTIFACT_LIST_MAX,
     artifact_limit,
@@ -487,6 +493,190 @@ def test_checkpoint列表给出可续写字段并脱敏(tmp_path: Path) -> None:
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+class RecordingRunner(Runner):
+    """记下 resume 想启动的目标和键，不拉起真实进程。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.started: list[tuple[str, str]] = []
+        self.force_busy = False
+
+    @property
+    def running(self) -> bool:
+        return self.force_busy or super().running
+
+    def start(self, goal: str, resume_checkpoint: str = "") -> bool:
+        if self.running:
+            return False
+        self.started.append((goal, resume_checkpoint))
+        self._resume_checkpoint = str(resume_checkpoint or "")
+        return True
+
+
+def _resume_state(*, status: str = "paused", goal: str = "把估算写完") -> DocumentState:
+    return DocumentState(
+        goal=goal,
+        outline=(OutlineEntry(index=0, title="窗口", points="要点", target_chars=1000),),
+        deliverable="chat",
+        phase="stopped",
+        status=status,  # type: ignore[arg-type]
+        pending_sections=(0,),
+        error=STATE_TEXT,
+    )
+
+
+def _save_resume(root: Path, session: str, key: str, *, status: str = "paused") -> Path:
+    DocumentCheckpointStore(root).save(
+        DocumentCheckpoint(
+            schema_version=DOC_SCHEMA,
+            session=session,
+            checkpoint_key=key,
+            artifact_id="doc-turn-1",
+            task_id="task-1",
+            turn_id="turn-1",
+            state=_resume_state(status=status),
+            bodies=((0, CHECKPOINT_BODY),),
+            phase="stopped",
+            status=status,
+            updated_at="2026-01-03T00:00:00Z",
+        )
+    )
+    return DocumentCheckpointStore(root).path_for(session, key)
+
+
+def _serve_resume(root: Path, session: str, host: str = "127.0.0.1"):
+    runner = RecordingRunner(
+        root, session=session, extra_args=["--provider", "fake", "--script", ""]
+    )
+    httpd = build_server(runner, host, 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return runner, httpd, f"http://127.0.0.1:{httpd.server_port}"
+
+
+def test_resume只接受当前会话的键且响应不含正文(tmp_path: Path) -> None:
+    key = "ck-fixed"
+    path = _save_resume(tmp_path, "sess-a", key)
+    _save_resume(tmp_path, "sess-b", "ck-other")
+    before = _files(tmp_path)
+    runner, httpd, url = _serve_resume(tmp_path, "sess-a")
+    try:
+        status, body = _post(url + "/longform/resume", {"checkpoint_key": key})
+        assert status == 202
+        assert json.loads(body) == {"ok": True, "checkpoint_key": key}
+        assert CHECKPOINT_BODY not in body
+        assert STATE_TEXT not in body
+        assert "state" not in json.loads(body)
+        assert "bodies" not in json.loads(body)
+        assert runner.started == [("把估算写完", key)]
+        assert path.is_file()
+        assert path.read_bytes() == before[path.relative_to(tmp_path).as_posix()]
+
+        status, extra = _post(
+            url + "/longform/resume",
+            {"checkpoint_key": key, "path": "docs/out.md"},
+        )
+        assert status == 400
+        assert "只接受 checkpoint_key" in extra
+        assert CHECKPOINT_BODY not in extra
+
+        for bad in ("ck/x", "../ck-fixed", "a\\b", "ck-abc..", "ck-abc:", "", 12):
+            status, denied = _post(url + "/longform/resume", {"checkpoint_key": bad})
+            assert status == 400, bad
+            assert "checkpoint_key 不合法" in denied
+        assert runner.started == [("把估算写完", key)]
+
+        status, missing = _post(url + "/longform/resume", {"checkpoint_key": "ck-nope"})
+        assert status == 404
+        assert "没有这份未完成文档" in missing
+        status, other = _post(url + "/longform/resume", {"checkpoint_key": "ck-other"})
+        assert status == 404
+        status, queried = _post(url + "/longform/resume?path=../sess-b", {"checkpoint_key": key})
+        assert status == 404
+        assert runner.started == [("把估算写完", key)]
+        assert _files(tmp_path) == before
+        assert not (tmp_path / "ck-x").exists()
+        assert not (tmp_path.parent / "ck-fixed.json").exists()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_resume坏文件已完成只读和忙着都不启动(tmp_path: Path) -> None:
+    key = "ck-fixed"
+    path = _save_resume(tmp_path, "sess-a", key)
+    broken = path.parent / "ck-broken.json"
+    broken.write_text("{", encoding="utf-8")
+    mismatch = path.parent / "ck-schema.json"
+    mismatch.write_text(
+        json.dumps({"schema_version": 2, "session": "sess-a", "checkpoint_key": "ck-schema"}),
+        encoding="utf-8",
+    )
+    done = _save_resume(tmp_path, "sess-a", "ck-done", status="done")
+    before = _files(tmp_path)
+    runner, httpd, url = _serve_resume(tmp_path, "sess-a")
+    try:
+        for token in ("ck-broken", "ck-schema", "ck-done"):
+            status, body = _post(url + "/longform/resume", {"checkpoint_key": token})
+            assert status == 404, token
+            assert CHECKPOINT_BODY not in body
+            assert STATE_TEXT not in body
+        assert runner.started == []
+        assert done.is_file()
+
+        runner.force_busy = True
+        status, busy = _post(url + "/longform/resume", {"checkpoint_key": key})
+        assert status == 409
+        assert "已有运行在进行" in busy
+        assert runner.started == []
+        assert _files(tmp_path) == before
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    readonly, httpd, url = _serve_resume(tmp_path, "sess-a", host="0.0.0.0")
+    try:
+        status, body = _post(url + "/longform/resume", {"checkpoint_key": key})
+        assert status == 403
+        assert CHECKPOINT_BODY not in body
+        assert STATE_TEXT not in body
+        assert readonly.started == []
+        assert _files(tmp_path) == before
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_命令和_cli都传递resume键(tmp_path: Path) -> None:
+    runner = Runner(tmp_path, session="sess-a", extra_args=["--provider", "fake", "--script", ""])
+    plain = runner.command("把估算写完")
+    assert "--resume-checkpoint" not in plain
+    assert "--goal" in plain
+
+    class Capture(Runner):
+        def command(self, goal: str) -> list[str]:
+            self.argv = super().command(goal)
+            return [sys.executable, "-c", "pass"]
+
+    capture = Capture(tmp_path, session="sess-a", extra_args=["--provider", "fake", "--script", ""])
+    assert capture.start("把估算写完", resume_checkpoint="ck-fixed") is True
+    try:
+        argv = capture.argv
+        assert argv[argv.index("--goal") + 1] == "把估算写完"
+        assert argv[argv.index("--resume-checkpoint") + 1] == "ck-fixed"
+        assert CHECKPOINT_BODY not in " ".join(argv)
+    finally:
+        capture.stop()
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    _add_run_command(sub)
+    args = parser.parse_args(["run", "--goal", "写", "--resume-checkpoint", "ck-fixed"])
+    assert args.resume_checkpoint == "ck-fixed"
+    bare = parser.parse_args(["run", "--goal", "写"])
+    assert bare.resume_checkpoint == ""
 
 
 def test_只读壳仍能看这三个接口(tmp_path: Path) -> None:

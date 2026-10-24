@@ -384,7 +384,7 @@ class Runner:
 
     def command(self, goal: str) -> list[str]:
         """拼出要执行的命令行。子类可覆盖它来换掉被测进程。"""
-        return [
+        command = [
             sys.executable,
             "-m",
             "spoolkit.cli.app",
@@ -402,6 +402,10 @@ class Runner:
             "--goal",
             goal,
         ]
+        key = str(getattr(self, "_resume_checkpoint", "") or "").strip()
+        if key:
+            command.extend(["--resume-checkpoint", key])
+        return command
 
     # --- 生命周期 ---
 
@@ -409,12 +413,17 @@ class Runner:
     def running(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
-    def start(self, goal: str) -> bool:
-        """启动一次运行。已有运行在跑则拒绝。"""
+    def start(self, goal: str, resume_checkpoint: str = "") -> bool:
+        """启动一次运行。已有运行在跑则拒绝。
+
+        `resume_checkpoint` 只是当前会话里的 checkpoint 键。命令行把它原样带给
+        `run --resume-checkpoint`，不把正文放进参数。
+        """
         with self._lock:
             if self.running:
                 return False
             self._goal = goal
+            self._resume_checkpoint = str(resume_checkpoint or "").strip()
             self._awaiting = 0
             self._await_detail = {}
             self._usage = {}

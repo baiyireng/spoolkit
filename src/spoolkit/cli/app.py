@@ -199,6 +199,11 @@ def _add_run_command(sub: argparse._SubParsersAction) -> None:
         "--resume", action="store_true", help="接着上次未完成的检查点继续"
     )
     parser.add_argument(
+        "--resume-checkpoint",
+        default="",
+        help="从当前会话的这份长文 checkpoint 继续，不重新规划大纲",
+    )
+    parser.add_argument(
         "--policy",
         choices=POLICIES,
         default="",

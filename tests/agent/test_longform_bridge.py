@@ -11,6 +11,7 @@ from spoolkit.agent.document_state import DocumentState, OutlineEntry
 from spoolkit.agent.longform import LongFormRunner
 from spoolkit.agent.longform_bridge import (
     CHARS_PER_TOKEN,
+    LongformDraft,
     build_document_state,
     fallback_document_state,
     render_document,
@@ -295,6 +296,28 @@ def test_v2_long_mode_uses_longform_runner(tmp_path: Path) -> None:
     assert all(data.get("source") == "system" and data.get("status") == "ok" for kind, data in events if kind == "task_event" and data.get("phase") == "final")
     assert all(_MARKER not in str(data.get("summary", "")) for _kind, data in events if _kind == "task_event")
     assert not any(kind == "section_start" for kind, _data in events)
+
+
+def test_run把resume_checkpoint交给长文且不把正文放进事件(tmp_path: Path, monkeypatch) -> None:
+    seen: dict[str, str] = {}
+
+    def spy(**kwargs):
+        seen["key"] = str(kwargs.get("resume_checkpoint") or "")
+        return LongformDraft(text="续写完成", sections=2, chars=4)
+
+    monkeypatch.setattr("spoolkit.agent.loop.try_longform_text", spy)
+    events: list = []
+    pending = _Pending(tmp_path)
+    pending.run_session = "sess-a"
+    result = _loop(tmp_path, _Gateway(), v2=True, events=events, pending=pending).run(
+        "写一份说明",
+        resume_checkpoint="ck-abc",
+    )
+    assert seen["key"] == "ck-abc"
+    assert result.final == "续写完成"
+    blob = json.dumps(events, ensure_ascii=False)
+    assert "bodies" not in blob
+    assert "CHECKPOINT-BODY" not in blob
 
 
 def test_chat_longform_captures_artifact(tmp_path: Path) -> None:

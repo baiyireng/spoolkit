@@ -18,8 +18,13 @@ from typing import Any
 from spoolkit.agent.artifacts import ArtifactRecord, ArtifactSection, ArtifactStore
 from spoolkit.agent.chat_sink import CollectingChatSink
 from spoolkit.agent.document_bodies import InMemoryBodyStore, section_ref
-from spoolkit.agent.document_checkpoint import DocumentCheckpointStore
-from spoolkit.agent.document_state import SUMMARY_CAP, DocumentState, OutlineEntry
+from spoolkit.agent.document_checkpoint import CheckpointError, DocumentCheckpointStore
+from spoolkit.agent.document_state import (
+    SUMMARY_CAP,
+    DocumentState,
+    OutlineEntry,
+    SchemaVersionError,
+)
 from spoolkit.agent.file_sink import FileSink, FileSinkError
 from spoolkit.agent.longform import LongFormRunner
 from spoolkit.agent.protocol import AnswerPlan
@@ -148,12 +153,27 @@ def try_longform_text(
     session: str = "",
     task_id: str = "",
     turn_id: str = "",
+    resume_checkpoint: str = "",
 ) -> LongformDraft | None:
-    """跑完并校验通过才返回。file 成功时 text 只是待确认摘要，不是全文。"""
-    state = build_document_state(goal, plan, prefix, gateway, token_budget=token_budget)
-    if state is None:
-        return None
-    bodies = InMemoryBodyStore()
+    """跑完并校验通过才返回。file 成功时 text 只是待确认摘要，不是全文。
+
+    给了 resume_checkpoint 就只读那一份进度。找不到就不规划大纲，也不启动写作。
+    """
+    resume_key = str(resume_checkpoint or "").strip()
+    if resume_key:
+        restored = _restore_checkpoint(
+            artifact_root,
+            session or artifact_session(pending),
+            resume_key,
+        )
+        if restored is None:
+            return None
+        state, bodies = restored
+    else:
+        state = build_document_state(goal, plan, prefix, gateway, token_budget=token_budget)
+        if state is None:
+            return None
+        bodies = InMemoryBodyStore()
     task = task_id or "task"
     turn = turn_id or "turn"
     if state.deliverable == "file":
@@ -191,6 +211,7 @@ def try_longform_text(
         artifact_id=checkpoint_artifact,
         task_id=task,
         turn_id=turn,
+        checkpoint_key_value=resume_key,
     ).run()
     if not result.done:
         return None
@@ -232,6 +253,27 @@ def try_longform_text(
         artifact_id=artifact_id,
         path=stored_path,
     )
+
+
+def _restore_checkpoint(
+    root: Path | None,
+    session: str,
+    key: str,
+) -> tuple[DocumentState, InMemoryBodyStore] | None:
+    """把这份 checkpoint 的进度和已写节装回来。正文只进内存，不交给调用方的响应。"""
+    if root is None:
+        return None
+    scope = _session_segment(session)
+    try:
+        loaded = DocumentCheckpointStore(root).load(scope, key)
+    except (CheckpointError, SchemaVersionError, OSError, UnicodeError, ValueError):
+        return None
+    if loaded is None or loaded.state.status == "done":
+        return None
+    bodies = InMemoryBodyStore()
+    for index, text in loaded.bodies:
+        bodies.put(index, text)
+    return loaded.state, bodies
 
 
 def _store_chat(

@@ -393,7 +393,12 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             defer_final_verify=deferred_verify,
         ),
     )
-    result = loop.run(args.goal, resume=args.resume, prompt=prompt)
+    result = loop.run(
+        args.goal,
+        resume=args.resume,
+        prompt=prompt,
+        resume_checkpoint=str(getattr(args, "resume_checkpoint", "") or ""),
+    )
     _report_numbers(loop, result, writer)
     _maybe_file_diagnosis(project_root, before, result, writer)
 
@@ -514,7 +519,11 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             "加 --resume 可以接着做，不加则从零开始。"
         )
 
-    result = loop.run(args.goal, resume=args.resume)
+    result = loop.run(
+        args.goal,
+        resume=args.resume,
+        resume_checkpoint=str(getattr(args, "resume_checkpoint", "") or ""),
+    )
     _report_numbers(loop, result)
     _maybe_file_diagnosis(project_root, before, result)
     if memory is not None:
