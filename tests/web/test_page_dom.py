@@ -612,8 +612,9 @@ def test_任务面板列出未完成文档(dom: dict) -> None:
     assert "doc-hidden" not in found["text"], found
     assert "ck-2" not in found["text"] and "ck-1" not in found["text"], found
     assert "并且超出标题" not in found["text"], found
-    assert "继续" not in found["text"], found
-    assert found["buttons"] == 0, found
+    assert found["text"].count("继续") == 2, found
+    assert "继续中" not in found["text"], found
+    assert found["buttons"] == 2, found
     assert found["task_count"] == "2", found
     assert found["artifact_count"] == "1 个产物", found
     assert "这一轮把估算写完了" in found["memory"], found
@@ -627,6 +628,40 @@ def test_任务面板列出未完成文档(dom: dict) -> None:
     assert found["empty_task_count"] == "1", found
     assert found["empty_artifact_count"] == "0 个产物", found
     assert found["empty_memory"] == "当前会话还没有记忆摘要", found
+
+
+def test_未完成文档可以继续(dom: dict) -> None:
+    """继续只提交 checkpoint_key。202 点亮运行，错误留在列表里。"""
+    found = dom["task_resume"]
+    assert found["labels"] == ["继续", "继续"], found
+    assert found["hidden_titles"] == ["已完成稿", "没有键", "坏键", "无效"], found
+    assert found["stopped"] is True, found
+    assert found["row_clicks"] == 0, found
+    assert found["busy_label"] == "继续中…", found
+    assert found["busy_disabled"] is True, found
+    assert found["other_disabled"] is True, found
+    assert found["posts_while_busy"] == 1, found
+    assert found["method"] == "POST", found
+    assert found["body"] == {"checkpoint_key": "ck-keep"}, found
+    assert found["running"] is True, found
+    assert found["thinking"] is True, found
+    assert found["panel_open"] is True, found
+    assert found["session"] == "sess-resume", found
+    assert found["target_posts"] == 0, found
+    assert found["task_count"] == "1", found
+    assert found["artifact_count"] == "1 个产物", found
+    assert "这一轮把估算写完了" in found["memory"], found
+    assert "STATE-LEAK" not in found["text"], found
+    assert "BODY-LEAK" not in found["text"], found
+    assert "ck-keep" not in found["text"], found
+    assert found["conflict"] == "已有运行在进行，等它结束再发", found
+    assert found["missing"] == "这份未完成文档已不可用", found
+    assert found["missing_posts"] == 1, found
+    assert found["readonly"] == "只读：只能看，不能驱动", found
+    assert found["bad"] == "请求不合法", found
+    assert found["offline"] == "继续失败，可重试", found
+    assert found["offline_enabled"] is True, found
+    assert found["reopen_posts"] == 1, found
 
 
 def test_可见文案不用旧术语(dom: dict) -> None:

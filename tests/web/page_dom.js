@@ -3413,7 +3413,7 @@ async function extras2() {
     ? ids.get('tasks-checkpoints-title').textContent : '';
   const checkpointReadyRows = checkpointRows();
   const checkpointText = checkpointBox ? checkpointBox.textContent : '';
-  const checkpointButtons = checkpointBox ? checkpointBox.querySelectorAll('button').length : -1;
+  const checkpointButtons = checkpointBox ? checkpointBox.querySelectorAll('.checkpoint-resume').length : -1;
   const checkpointTaskCount = ids.get('tasks-count').textContent;
   const checkpointArtifactCount = ids.get('tasks-artifacts-count')
     ? ids.get('tasks-artifacts-count').textContent : '';
@@ -3478,6 +3478,231 @@ async function extras2() {
     empty_artifact_count: checkpointEmptyArtifacts,
     empty_memory: checkpointEmptyMemory,
     switch_posts: checkpointSwitch,
+  };
+  ctx.__fetchImpl = null;
+
+  if (ids.get('tasks-close') && taskPanel && !taskPanel.classList.contains('hidden')) {
+    ids.get('tasks-close').onclick();
+  }
+  ctx.__spoolTest.app.composer.setRunning(false);
+  ctx.__spoolTest.app.composer.setThinking(false);
+  const resumeRows = [
+    {
+      checkpoint_key: 'ck-keep',
+      goal: '可继续的目标',
+      title: '可继续',
+      path: 'docs/keep.md',
+      deliverable: 'file',
+      phase: 'draft',
+      status: 'paused',
+      updated_at: '2026-01-03T00:00:00Z',
+      state: { goal: 'STATE-LEAK' },
+      bodies: { 0: 'BODY-LEAK' },
+    },
+    {
+      checkpoint_key: 'ck-other',
+      title: '另一份',
+      goal: '另一份',
+      path: 'docs/other.md',
+      phase: 'draft',
+      status: 'paused',
+      updated_at: '2026-01-02T00:00:00Z',
+    },
+    {
+      checkpoint_key: 'ck-done',
+      title: '已完成稿',
+      goal: '已完成稿',
+      path: 'docs/done.md',
+      phase: 'done',
+      status: 'done',
+      updated_at: '2026-01-01T00:00:00Z',
+    },
+    {
+      title: '没有键',
+      goal: '没有键',
+      path: 'docs/nokey.md',
+      phase: 'draft',
+      status: 'paused',
+      updated_at: '2026-01-01T00:00:00Z',
+    },
+    {
+      checkpoint_key: 'ck/evil',
+      title: '坏键',
+      goal: '坏键',
+      path: 'docs/evil.md',
+      phase: 'draft',
+      status: 'paused',
+      updated_at: '2026-01-01T00:00:00Z',
+    },
+    {
+      checkpoint_key: 'ck-bad',
+      title: '无效',
+      goal: '无效',
+      path: '',
+      phase: 'stopped',
+      status: 'failed',
+      updated_at: '2026-01-01T00:00:00Z',
+    },
+  ];
+  let resumeMode = 'hang';
+  let resumeRelease = null;
+  const resumePosts = [];
+  ctx.__fetchImpl = (url, opts) => {
+    if (url === '/longform/resume') {
+      let parsed = null;
+      try { parsed = JSON.parse(opts && opts.body ? opts.body : ''); } catch (err) { parsed = { raw: opts && opts.body }; }
+      resumePosts.push({ method: opts && opts.method, body: parsed });
+      if (resumeMode === 'hang') {
+        return new Promise((resolve) => {
+          resumeRelease = () => resolve({
+            ok: true,
+            status: 202,
+            json: async () => ({
+              ok: true,
+              checkpoint_key: 'ck-keep',
+              state: { goal: 'STATE-LEAK' },
+              bodies: { 0: 'BODY-LEAK' },
+            }),
+          });
+        });
+      }
+      const status = resumeMode === 'conflict' ? 409
+        : resumeMode === 'missing' ? 404
+          : resumeMode === 'readonly' ? 403
+            : resumeMode === 'bad' ? 400
+              : 500;
+      if (resumeMode === 'offline') { return Promise.reject(new Error('offline')); }
+      return Promise.resolve({
+        ok: false,
+        status: status,
+        json: async () => ({ error: 'BODY-LEAK', state: 'STATE-LEAK', bodies: 'BODY-LEAK' }),
+      });
+    }
+    if (url === '/checkpoints') {
+      return Promise.resolve({ ok: true, status: 200, json: async () => resumeRows });
+    }
+    if (url === '/artifacts') {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => [{ id: 'doc-keep', kind: 'document', title: '面板产物', summary: '产物摘要', path: 'docs/keep.md' }],
+      });
+    }
+    if (url === '/session/summary') {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ headline: '这一轮把估算写完了', what_done: ['完成一'], open_items: [], decisions: [], last_turn_id: 'turn-9' }),
+      });
+    }
+    if (url === '/tasks') {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ sessions: [], groups: [] }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+  };
+  ctx.__spoolTest.applyState(frame('D:/resume', 'sess-resume', WROWS, SROWS_A, [], {
+    task_groups: [
+      searchTask('resume-task', 'running', '还在跑', [taskEvent(1, 'understand', 'running', '还在跑')]),
+    ],
+  }));
+  if (taskBtn) { taskBtn.onclick(); }
+  await settleTasks();
+  const resumeBox = ids.get('tasks-checkpoints-list');
+  const resumeButtons = resumeBox ? resumeBox.querySelectorAll('.checkpoint-resume') : [];
+  const hiddenTitles = [];
+  const resumeLines = resumeBox ? resumeBox.querySelectorAll('.checkpoint-line') : [];
+  for (const line of resumeLines) {
+    if (!line.querySelector('.checkpoint-resume')) {
+      const title = line.querySelector('.checkpoint-title');
+      hiddenTitles.push(title ? title.textContent : '');
+    }
+  }
+  let rowClicks = 0;
+  let resumeStopped = false;
+  const resumeLine = resumeLines[0] || null;
+  if (resumeLine) { resumeLine.onclick = () => { rowClicks += 1; }; }
+  const firstButton = resumeButtons[0] || null;
+  const secondButton = resumeButtons[1] || null;
+  if (firstButton && firstButton.onclick) {
+    firstButton.onclick({ stopPropagation() { resumeStopped = true; } });
+  }
+  if (secondButton && secondButton.onclick) { secondButton.onclick({ stopPropagation() {} }); }
+  await settleTasks();
+  const liveButtons = resumeBox ? resumeBox.querySelectorAll('.checkpoint-resume') : [];
+  const busyLabel = liveButtons[0] ? liveButtons[0].textContent : '';
+  const busyDisabled = liveButtons[0] ? Boolean(liveButtons[0].disabled) : false;
+  const otherDisabled = liveButtons[1] ? Boolean(liveButtons[1].disabled) : false;
+  const postsWhileBusy = resumePosts.length;
+  const sessionNow = (ctx.__spoolTest.store.get('lastState').target || {}).session;
+  const beforeConflict = ctx.fetchCalls.length;
+  if (resumeRelease) { resumeRelease(); }
+  await settleTasks();
+  const runningAfter = ctx.__spoolTest.store.get('running');
+  const thinkingAfter = ctx.__spoolTest.store.get('thinking');
+  const panelAfter = taskPanel ? !taskPanel.classList.contains('hidden') : false;
+  const taskAfter = ids.get('tasks-count') ? ids.get('tasks-count').textContent : '';
+  const artifactAfter = ids.get('tasks-artifacts-count') ? ids.get('tasks-artifacts-count').textContent : '';
+  const memoryAfter = ids.get('tasks-memory-body') ? ids.get('tasks-memory-body').textContent : '';
+  function resumeNote() {
+    const note = resumeBox ? resumeBox.querySelector('.checkpoint-resume-error') : null;
+    return note ? note.textContent : '';
+  }
+  resumeMode = 'conflict';
+  if (firstButton && firstButton.onclick) { firstButton.onclick({ stopPropagation() {} }); }
+  await settleTasks();
+  const conflictText = resumeNote();
+  resumeMode = 'missing';
+  const beforeMissing = ctx.fetchCalls.length;
+  if (firstButton && firstButton.onclick) { firstButton.onclick({ stopPropagation() {} }); }
+  await settleTasks();
+  const missingPosts = countUrl(beforeMissing, '/checkpoints');
+  const missingText = resumeNote();
+  resumeMode = 'readonly';
+  if (firstButton && firstButton.onclick) { firstButton.onclick({ stopPropagation() {} }); }
+  await settleTasks();
+  const readonlyText = resumeNote();
+  resumeMode = 'bad';
+  if (firstButton && firstButton.onclick) { firstButton.onclick({ stopPropagation() {} }); }
+  await settleTasks();
+  const badText = resumeNote();
+  resumeMode = 'offline';
+  if (firstButton && firstButton.onclick) { firstButton.onclick({ stopPropagation() {} }); }
+  await settleTasks();
+  const offlineText = resumeNote();
+  const offlineButton = resumeBox ? resumeBox.querySelector('.checkpoint-resume') : null;
+  if (ids.get('tasks-close')) { ids.get('tasks-close').onclick(); }
+  const beforeResumeReopen = ctx.fetchCalls.length;
+  ctx.__spoolTest.app.composer.setRunning(false);
+  if (taskBtn) { taskBtn.onclick(); }
+  await settleTasks();
+  out.task_resume = {
+    labels: resumeButtons.map((node) => node.textContent),
+    hidden_titles: hiddenTitles,
+    stopped: resumeStopped,
+    row_clicks: rowClicks,
+    busy_label: busyLabel,
+    busy_disabled: busyDisabled,
+    other_disabled: otherDisabled,
+    posts_while_busy: postsWhileBusy,
+    method: resumePosts[0] ? resumePosts[0].method : '',
+    body: resumePosts[0] ? resumePosts[0].body : null,
+    running: runningAfter,
+    thinking: thinkingAfter,
+    panel_open: panelAfter,
+    session: sessionNow,
+    target_posts: ctx.fetchCalls.slice(beforeConflict).filter((url) => url === '/target').length,
+    task_count: taskAfter,
+    artifact_count: artifactAfter,
+    memory: memoryAfter,
+    text: resumeBox ? resumeBox.textContent : '',
+    conflict: conflictText,
+    missing: missingText,
+    missing_posts: missingPosts,
+    readonly: readonlyText,
+    bad: badText,
+    offline: offlineText,
+    offline_enabled: offlineButton ? offlineButton.disabled === false : false,
+    reopen_posts: countUrl(beforeResumeReopen, '/checkpoints'),
   };
   ctx.__fetchImpl = null;
 }

@@ -14,6 +14,7 @@ function setRunning(value) {
   // 运行中那句提示在状态详情里（见 drawTarget）：这一格变了就要重画一次，
   // 否则它会停在上一帧——"跑完了还写着正在跑"比不写还坏。
   if (was !== ctx.store.get('busy') && ctx.store.get('lastState') && ctx.store.get('lastState').target) { ctx.sidebar.drawTarget(ctx.store.get('lastState')); }
+  if (typeof watchCheckpointRun === 'function') { watchCheckpointRun(Boolean(value)); }
 }
 
 // 那一枚圆键的三态：空闲=发送（箭头），运行中=**停止**（方块，可点），

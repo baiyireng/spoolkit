@@ -9,7 +9,7 @@ import "../render/failure.js";
 /* 任务面板。当前会话来自 state.task_groups；跨会话只读 GET /tasks。
    产物、会话记忆和未完成文档只在首次打开时各读一次，按 root+session 缓存。
    搜索、状态筛选、会话范围都在本地做。详情复用任务卡正文，不画 raw，
-   也不复制应用/拒绝。产物、记忆和未完成文档都不提供打开或继续。 */
+   也不复制应用/拒绝。未完成文档可以按 checkpoint 键继续。 */
 const TASK_FILTERS = [
   ['all', '全部'],
   ['running', '进行中'],
@@ -348,7 +348,7 @@ function createTasks(ctx) {
   function paintCheckpoints() {
     if (!ctx.store.get('tasksOpen')) { return; }
     if (tasksCheckpointTitle) { tasksCheckpointTitle.textContent = '未完成文档'; }
-    paintCheckpointList(tasksCheckpointList, checkpointState, checkpointRows, loadCheckpoints);
+    paintCheckpointList(tasksCheckpointList, checkpointState, checkpointRows, loadCheckpoints, ctx);
   }
 
   function inScope(task) {
@@ -555,6 +555,7 @@ function createTasks(ctx) {
   }
 
   function sync(state) {
+    watchCheckpointRun(Boolean(state && state.running));
     paintCounts(groupsOf(state));
     if (ctx.store.get('tasksOpen')) {
       ensureHistory();
@@ -589,6 +590,10 @@ function createTasks(ctx) {
       paintSummary();
     };
   }
+  bindCheckpointResume(function () {
+    checkpointKey = '';
+    checkpointState = 'idle';
+  }, function () { renderPanel(); });
   paintCounts([]);
 
   return { sync: sync, setTasksOpen: setTasksOpen, renderPanel: renderPanel, clearQuery: clearQuery };
