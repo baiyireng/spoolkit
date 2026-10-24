@@ -488,6 +488,38 @@ def test_任务面板接上跨会话历史(dom: dict) -> None:
     assert found["ready"] == "", found
 
 
+def test_任务面板列出当前会话的产物(dom: dict) -> None:
+    """打开时读一次 /artifacts。筛选任务不改产物区，也不改任务计数。"""
+    found = dom["task_artifacts"]
+    assert found["opened_posts"] == 1, found
+    assert found["tasks_posts"] == 1, found
+    assert found["count_before"] == "2", found
+    assert found["count_loading"] == "2", found
+    assert found["failed"] == "产物加载失败，可重试", found
+    assert found["retry_posts"] == 1, found
+    assert found["rows"] == [
+        {"kind": "代码", "title": "脚本", "summary": "第三份摘要", "path": "src/main.py"},
+        {"kind": "报告", "title": "报告", "summary": "第二份摘要", "path": "docs/report.md"},
+        {"kind": "文档", "title": "估算说明", "summary": "只有摘要", "path": "docs/estimate.md"},
+    ], found["rows"]
+    assert "BODY-LEAK" not in found["text"], found["text"]
+    assert "SECTION-BODY" not in found["text"], found["text"]
+    assert "doc-1" not in found["text"] and "doc-2" not in found["text"] and "doc-3" not in found["text"]
+    assert "checkpoint" not in found["text"].lower()
+    assert found["artifact_count"] == "3 个产物", found
+    assert found["task_count"] == "2", found
+    assert found["filters"] == ["全部", "进行中", "待审批", "失败", "完成"], found
+    assert found["filtered_rows"] == found["rows"], found
+    assert found["filter_posts"] == 0, found
+    assert found["filtered_task_count"] == "2", found
+    assert found["click_posts"] == 0, found
+    assert found["copy_failed"] == "复制失败", found
+    assert found["reopen_posts"] == 0, found
+    assert found["empty"] == "当前会话还没有产物", found
+    assert found["empty_count"] == "0 个产物", found
+    assert found["empty_task_count"] == "1", found
+
+
 def test_可见文案不用旧术语(dom: dict) -> None:
     """顶栏、状态面板和任务筛选不再出现旧说法。用户目标正文不在这张清单里。"""
     blobs = [

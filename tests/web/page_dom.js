@@ -2646,17 +2646,24 @@ async function extras2() {
   ctx.__spoolTest.applyState(frame('D:/task-history', 'a1', WROWS, SROWS_A, [], {
     task_groups: [historyLive[1], historyLive[0]],
   }));
+  function countUrl(from, url) {
+    let total = 0;
+    for (let index = from; index < ctx.fetchCalls.length; index += 1) {
+      if (ctx.fetchCalls[index] === url) { total += 1; }
+    }
+    return total;
+  }
   const beforeOpen = ctx.fetchCalls.length;
   if (taskBtn) { taskBtn.onclick(); }
   clickFilter('全部');
   const historyNode = ids.get('tasks-history');
   const loadingText = historyNode ? historyNode.textContent : '';
   const loadingLines = searchLines();
-  const loadingPosts = ctx.fetchCalls.length - beforeOpen;
+  const loadingPosts = countUrl(beforeOpen, '/tasks');
   const beforeFilter = ctx.fetchCalls.length;
   clickFilter('完成');
   runSearch('现场');
-  const duringLoadPosts = ctx.fetchCalls.length - beforeFilter;
+  const duringLoadPosts = countUrl(beforeFilter, '/tasks');
   if (releaseHistory) { releaseHistory(); }
   await settleTasks();
   clickFilter('全部');
@@ -2669,7 +2676,7 @@ async function extras2() {
   const beforeRetry = ctx.fetchCalls.length;
   if (retry) { retry.onclick(); }
   await settleTasks();
-  const retryPosts = ctx.fetchCalls.length - beforeRetry;
+  const retryPosts = countUrl(beforeRetry, '/tasks');
   clickFilter('全部');
   runSearch('');
   function scopeButton(label) {
@@ -2685,7 +2692,7 @@ async function extras2() {
   const currentChips = ids.get('tasks-list').querySelectorAll('.task-session').length;
   const beforeScope = ctx.fetchCalls.length;
   if (allScope) { allScope.onclick(); }
-  const scopePosts = ctx.fetchCalls.length - beforeScope;
+  const scopePosts = countUrl(beforeScope, '/tasks');
   const allLines = searchLines();
   const allChips = ids.get('tasks-list').querySelectorAll('.task-line').map((node) => {
     const chip = node.querySelector('.task-session');
@@ -2982,6 +2989,128 @@ async function extras2() {
     read_threw: readThrew,
     after_read: afterRead,
     click: typeof ids.get('theme-dark').onclick === 'function',
+  };
+  ctx.__fetchImpl = null;
+
+  if (ids.get('tasks-close')) { ids.get('tasks-close').onclick(); }
+  const artifactItems = [
+    {
+      id: 'doc-3', kind: 'code', title: '脚本', summary: '第三份摘要',
+      path: 'src/main.py', content: 'BODY-LEAK',
+    },
+    {
+      id: 'doc-2', kind: 'report', title: '报告', summary: '第二份摘要',
+      path: 'docs/report.md', sections: [{ title: '节', body: 'SECTION-BODY' }],
+    },
+    {
+      id: 'doc-1', kind: 'document', title: '估算说明', summary: '只有摘要',
+      path: 'docs/estimate.md',
+    },
+  ];
+  let artifactMode = 'fail';
+  ctx.__fetchImpl = (url) => {
+    if (url === '/artifacts') {
+      if (artifactMode === 'fail') {
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'nope' }) });
+      }
+      if (artifactMode === 'empty') {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => artifactItems });
+    }
+    if (url === '/tasks') {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ sessions: [], groups: [] }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+  };
+  ctx.__spoolTest.applyState(frame('D:/artifacts', 'sess-a', WROWS, SROWS_A, [], {
+    task_groups: [
+      searchTask('keep-1', 'running', '还在跑', [taskEvent(1, 'understand', 'running', '还在跑')]),
+      searchTask('keep-2', 'done', '已完成', [taskEvent(1, 'final', 'ok', '已完成')]),
+    ],
+  }));
+  const artifactBefore = ctx.fetchCalls.length;
+  const artifactCountBefore = ids.get('tasks-count').textContent;
+  if (taskBtn) { taskBtn.onclick(); }
+  const artifactOpened = countUrl(artifactBefore, '/artifacts');
+  const tasksOpened = countUrl(artifactBefore, '/tasks');
+  const taskCountWhileLoading = ids.get('tasks-count').textContent;
+  await settleTasks();
+  const artifactBox = ids.get('tasks-artifacts-list');
+  const artifactFailed = artifactBox ? artifactBox.textContent : '';
+  artifactMode = 'ok';
+  const artifactRetry = artifactBox ? artifactBox.querySelector('button') : null;
+  const beforeRetryArtifacts = ctx.fetchCalls.length;
+  if (artifactRetry) { artifactRetry.onclick(); }
+  await settleTasks();
+  const retryArtifacts = countUrl(beforeRetryArtifacts, '/artifacts');
+  function artifactRows() {
+    const box = ids.get('tasks-artifacts-list');
+    if (!box) { return []; }
+    return box.querySelectorAll('.artifact-line').map((node) => ({
+      kind: node.querySelector('.artifact-kind') ? node.querySelector('.artifact-kind').textContent : '',
+      title: node.querySelector('.artifact-title') ? node.querySelector('.artifact-title').textContent : '',
+      summary: node.querySelector('.artifact-summary') ? node.querySelector('.artifact-summary').textContent : '',
+      path: node.querySelector('.artifact-path') ? node.querySelector('.artifact-path').textContent : '',
+    }));
+  }
+  const readyText = artifactBox ? artifactBox.textContent : '';
+  const readyRows = artifactRows();
+  const readyCount = ids.get('tasks-artifacts-count') ? ids.get('tasks-artifacts-count').textContent : '';
+  const taskCountReady = ids.get('tasks-count').textContent;
+  const artifactFilters = ids.get('tasks-filters').children.map((node) => node.textContent);
+  const beforeFilterArtifacts = ctx.fetchCalls.length;
+  clickFilter('失败');
+  const filteredRows = artifactRows();
+  const filterPosts = countUrl(beforeFilterArtifacts, '/artifacts');
+  const taskCountFiltered = ids.get('tasks-count').textContent;
+  clickFilter('全部');
+  const beforeClick = ctx.fetchCalls.length;
+  const firstLine = ids.get('tasks-artifacts-list').querySelector('.artifact-line');
+  if (firstLine && firstLine.onclick) { firstLine.onclick(); }
+  const clickPosts = ctx.fetchCalls.length - beforeClick;
+  const copyBtn = ids.get('tasks-artifacts-list').querySelector('.artifact-copy');
+  ctx.navigator.clipboard.writeText = () => Promise.reject(new Error('denied'));
+  if (copyBtn) { copyBtn.onclick(); }
+  await settleTasks();
+  const copyFailed = copyBtn ? copyBtn.textContent : '';
+  ctx.navigator.clipboard.writeText = () => Promise.resolve();
+  if (ids.get('tasks-close')) { ids.get('tasks-close').onclick(); }
+  const beforeReopen = ctx.fetchCalls.length;
+  if (taskBtn) { taskBtn.onclick(); }
+  await settleTasks();
+  const reopenPosts = countUrl(beforeReopen, '/artifacts');
+  artifactMode = 'empty';
+  ctx.__spoolTest.applyState(frame('D:/artifacts', 'sess-b', WROWS, SROWS_A, [], {
+    task_groups: [
+      searchTask('keep-1', 'running', '还在跑', [taskEvent(1, 'understand', 'running', '还在跑')]),
+    ],
+  }));
+  await settleTasks();
+  const artifactEmpty = ids.get('tasks-artifacts-list') ? ids.get('tasks-artifacts-list').textContent : '';
+  const artifactEmptyCount = ids.get('tasks-artifacts-count') ? ids.get('tasks-artifacts-count').textContent : '';
+  const artifactEmptyTasks = ids.get('tasks-count').textContent;
+  out.task_artifacts = {
+    opened_posts: artifactOpened,
+    tasks_posts: tasksOpened,
+    count_before: artifactCountBefore,
+    count_loading: taskCountWhileLoading,
+    failed: artifactFailed,
+    retry_posts: retryArtifacts,
+    rows: readyRows,
+    text: readyText,
+    artifact_count: readyCount,
+    task_count: taskCountReady,
+    filters: artifactFilters,
+    filtered_rows: filteredRows,
+    filter_posts: filterPosts,
+    filtered_task_count: taskCountFiltered,
+    click_posts: clickPosts,
+    copy_failed: copyFailed,
+    reopen_posts: reopenPosts,
+    empty: artifactEmpty,
+    empty_count: artifactEmptyCount,
+    empty_task_count: artifactEmptyTasks,
   };
   ctx.__fetchImpl = null;
 }

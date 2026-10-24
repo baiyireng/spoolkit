@@ -63,6 +63,8 @@ const tasksHistory = document.getElementById('tasks-history');
 const tasksFilters = document.getElementById('tasks-filters');
 const tasksList = document.getElementById('tasks-list');
 const tasksDetail = document.getElementById('tasks-detail');
+const tasksArtifactsCount = document.getElementById('tasks-artifacts-count');
+const tasksArtifactsList = document.getElementById('tasks-artifacts-list');
 const renameBox = document.getElementById('rename');
 const renameForm = document.getElementById('rename-form');
 const renameInput = document.getElementById('rename-input');
@@ -1132,6 +1134,105 @@ function liveTaskGroups(state, card) {
     }
   }
   return out;
+}
+
+// spool web · js/render/artifact_list.js
+/* 任务面板里的产物行。只画元数据，不画正文，也不提供打开或继续。 */
+const ARTIFACT_KINDS = {
+  document: '文档',
+  report: '报告',
+  code: '代码',
+  output: '输出',
+};
+
+function artifactKind(kind) {
+  const name = String(kind || '');
+  return ARTIFACT_KINDS[name] || name || '产物';
+}
+
+function copyArtifactPath(path, button) {
+  const fail = function () { button.textContent = '复制失败'; };
+  try {
+    const clip = (typeof navigator !== 'undefined' && navigator.clipboard) ? navigator.clipboard : null;
+    if (clip && typeof clip.writeText === 'function') {
+      Promise.resolve().then(function () { return clip.writeText(path); }).then(
+        function () { button.textContent = '已复制'; },
+        fail
+      );
+      return;
+    }
+  } catch (err) {
+    fail();
+    return;
+  }
+  fail();
+}
+
+function paintArtifact(item) {
+  const row = h('div', 'artifact-line');
+  const head = h('div', 'artifact-line-head');
+  const chip = h('span', 'task-chip artifact-kind');
+  chip.textContent = artifactKind(item.kind);
+  const title = h('span', 'artifact-title');
+  title.textContent = item.title || '未命名产物';
+  head.appendChild(chip);
+  head.appendChild(title);
+  row.appendChild(head);
+  const summary = h('div', 'artifact-summary');
+  summary.textContent = item.summary || '';
+  row.appendChild(summary);
+  const pathRow = h('div', 'artifact-path-row');
+  const path = h('span', 'artifact-path');
+  path.textContent = item.path || '';
+  if (item.path) {
+    path.title = item.path;
+    path.setAttribute('title', item.path);
+  }
+  pathRow.appendChild(path);
+  if (item.path) {
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'artifact-copy';
+    copy.textContent = '复制路径';
+    copy.setAttribute('aria-label', '复制路径');
+    copy.onclick = function () { copyArtifactPath(item.path, copy); };
+    pathRow.appendChild(copy);
+  }
+  row.appendChild(pathRow);
+  return row;
+}
+
+function paintArtifactList(host, count, state, rows, retry) {
+  if (!host) { return; }
+  host.replaceChildren();
+  if (state === 'loading') {
+    if (count) { count.textContent = ''; }
+    const note = h('div', 'tasks-empty');
+    note.textContent = '正在加载产物';
+    host.appendChild(note);
+    return;
+  }
+  if (state === 'error') {
+    if (count) { count.textContent = ''; }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'tasks-artifacts-retry';
+    button.textContent = '产物加载失败，可重试';
+    button.onclick = function () { retry(); };
+    host.appendChild(button);
+    return;
+  }
+  const items = rows || [];
+  if (count) { count.textContent = items.length + ' 个产物'; }
+  if (!items.length) {
+    const empty = h('div', 'tasks-empty');
+    empty.textContent = '当前会话还没有产物';
+    host.appendChild(empty);
+    return;
+  }
+  for (let index = 0; index < items.length; index += 1) {
+    host.appendChild(paintArtifact(items[index]));
+  }
 }
 
 // spool web · js/render/diff.js
@@ -3146,8 +3247,8 @@ function getLastDrawn() { return lastDrawn; }
 
 // spool web · js/features/tasks.js
 /* 任务面板。当前会话来自 state.task_groups；跨会话只读 GET /tasks。
-   搜索、状态筛选、会话范围都在本地做，不再发请求。
-   详情复用任务卡正文，不画 raw，也不复制应用/拒绝。 */
+   产物只在首次打开时读 GET /artifacts，之后用缓存。搜索、状态筛选、会话范围都在本地做。
+   详情复用任务卡正文，不画 raw，也不复制应用/拒绝。产物行不提供打开或继续。 */
 const TASK_FILTERS = [
   ['all', '全部'],
   ['running', '进行中'],
@@ -3159,7 +3260,6 @@ const TASK_SCOPES = [
   ['current', '当前会话'],
   ['all', '全部会话'],
 ];
-
 function createTasks(ctx) {
   let filter = 'all';
   let scope = 'current';
@@ -3169,6 +3269,9 @@ function createTasks(ctx) {
   let historyKey = '';
   let historyGroups = [];
   let historySessions = [];
+  let artifactState = 'idle';
+  let artifactKey = '';
+  let artifactRows = [];
 
   function groupsOf(state) {
     const rows = ((state && state.task_groups) || []).slice();
@@ -3452,6 +3555,17 @@ function createTasks(ctx) {
     if (!taskOpen(card)) { setTaskOpen(card, true, false); }
   }
 
+  function paintArtifacts() {
+    if (!ctx.store.get('tasksOpen')) { return; }
+    paintArtifactList(
+      tasksArtifactsList,
+      tasksArtifactsCount,
+      artifactState,
+      artifactRows,
+      loadArtifacts
+    );
+  }
+
   function inScope(task) {
     if (scope === 'all') { return true; }
     return String((task && task.session) || currentSessionId()) === currentSessionId();
@@ -3463,6 +3577,7 @@ function createTasks(ctx) {
     if (!ctx.store.get('tasksOpen')) { return; }
     paintScope();
     paintHistory();
+    paintArtifacts();
     paintFilters();
     const merged = mergeGroups(live, historyState === 'ready' ? historyGroups : []);
     const scoped = [];
@@ -3553,6 +3668,67 @@ function createTasks(ctx) {
     loadHistory();
   }
 
+  function artifactItems(payload) {
+    if (!Array.isArray(payload)) { return null; }
+    const rows = [];
+    for (let index = 0; index < payload.length; index += 1) {
+      const item = payload[index];
+      if (!item || typeof item !== 'object') { continue; }
+      rows.push({
+        kind: String(item.kind || ''),
+        title: String(item.title || ''),
+        summary: String(item.summary || ''),
+        path: String(item.path || ''),
+      });
+    }
+    return rows;
+  }
+
+  function loadArtifacts() {
+    const key = targetKey();
+    artifactKey = key;
+    artifactState = 'loading';
+    artifactRows = [];
+    renderPanel();
+    const finish = function (ok, payload) {
+      if (artifactKey !== key) { return; }
+      const rows = ok ? artifactItems(payload) : null;
+      if (!rows) {
+        artifactState = 'error';
+        artifactRows = [];
+        renderPanel();
+        return;
+      }
+      artifactRows = rows;
+      artifactState = 'ready';
+      renderPanel();
+    };
+    let pending;
+    try {
+      pending = fetch('/artifacts');
+    } catch (err) {
+      finish(false, null);
+      return;
+    }
+    Promise.resolve(pending).then(function (response) {
+      if (!response || !response.ok || typeof response.json !== 'function') {
+        finish(false, null);
+        return null;
+      }
+      return response.json().then(function (payload) {
+        finish(true, payload);
+      }, function () { finish(false, null); });
+    }, function () { finish(false, null); });
+  }
+
+  function ensureArtifacts() {
+    const key = targetKey();
+    if (artifactKey === key && (artifactState === 'loading' || artifactState === 'ready' || artifactState === 'error')) {
+      return;
+    }
+    loadArtifacts();
+  }
+
   function setTasksOpen(open) {
     if (!tasksPanel) { return; }
     const want = Boolean(open);
@@ -3563,6 +3739,7 @@ function createTasks(ctx) {
     if (tasksBtn) { tasksBtn.setAttribute('aria-expanded', want ? 'true' : 'false'); }
     if (want) {
       ensureHistory();
+      ensureArtifacts();
       renderPanel();
       if (tasksClose && typeof tasksClose.focus === 'function') { tasksClose.focus(); }
     } else if (tasksBtn && typeof tasksBtn.focus === 'function') {
@@ -3574,6 +3751,7 @@ function createTasks(ctx) {
     paintCounts(groupsOf(state));
     if (ctx.store.get('tasksOpen')) {
       ensureHistory();
+      ensureArtifacts();
       renderPanel();
     }
   }

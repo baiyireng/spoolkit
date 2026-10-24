@@ -2,10 +2,11 @@
 import "../core/dom.js";
 import "../core/store.js";
 import "../render/task_card.js";
+import "../render/artifact_list.js";
 import "../render/failure.js";
 /* 任务面板。当前会话来自 state.task_groups；跨会话只读 GET /tasks。
-   搜索、状态筛选、会话范围都在本地做，不再发请求。
-   详情复用任务卡正文，不画 raw，也不复制应用/拒绝。 */
+   产物只在首次打开时读 GET /artifacts，之后用缓存。搜索、状态筛选、会话范围都在本地做。
+   详情复用任务卡正文，不画 raw，也不复制应用/拒绝。产物行不提供打开或继续。 */
 const TASK_FILTERS = [
   ['all', '全部'],
   ['running', '进行中'],
@@ -17,7 +18,6 @@ const TASK_SCOPES = [
   ['current', '当前会话'],
   ['all', '全部会话'],
 ];
-
 function createTasks(ctx) {
   let filter = 'all';
   let scope = 'current';
@@ -27,6 +27,9 @@ function createTasks(ctx) {
   let historyKey = '';
   let historyGroups = [];
   let historySessions = [];
+  let artifactState = 'idle';
+  let artifactKey = '';
+  let artifactRows = [];
 
   function groupsOf(state) {
     const rows = ((state && state.task_groups) || []).slice();
@@ -310,6 +313,17 @@ function createTasks(ctx) {
     if (!taskOpen(card)) { setTaskOpen(card, true, false); }
   }
 
+  function paintArtifacts() {
+    if (!ctx.store.get('tasksOpen')) { return; }
+    paintArtifactList(
+      tasksArtifactsList,
+      tasksArtifactsCount,
+      artifactState,
+      artifactRows,
+      loadArtifacts
+    );
+  }
+
   function inScope(task) {
     if (scope === 'all') { return true; }
     return String((task && task.session) || currentSessionId()) === currentSessionId();
@@ -321,6 +335,7 @@ function createTasks(ctx) {
     if (!ctx.store.get('tasksOpen')) { return; }
     paintScope();
     paintHistory();
+    paintArtifacts();
     paintFilters();
     const merged = mergeGroups(live, historyState === 'ready' ? historyGroups : []);
     const scoped = [];
@@ -411,6 +426,67 @@ function createTasks(ctx) {
     loadHistory();
   }
 
+  function artifactItems(payload) {
+    if (!Array.isArray(payload)) { return null; }
+    const rows = [];
+    for (let index = 0; index < payload.length; index += 1) {
+      const item = payload[index];
+      if (!item || typeof item !== 'object') { continue; }
+      rows.push({
+        kind: String(item.kind || ''),
+        title: String(item.title || ''),
+        summary: String(item.summary || ''),
+        path: String(item.path || ''),
+      });
+    }
+    return rows;
+  }
+
+  function loadArtifacts() {
+    const key = targetKey();
+    artifactKey = key;
+    artifactState = 'loading';
+    artifactRows = [];
+    renderPanel();
+    const finish = function (ok, payload) {
+      if (artifactKey !== key) { return; }
+      const rows = ok ? artifactItems(payload) : null;
+      if (!rows) {
+        artifactState = 'error';
+        artifactRows = [];
+        renderPanel();
+        return;
+      }
+      artifactRows = rows;
+      artifactState = 'ready';
+      renderPanel();
+    };
+    let pending;
+    try {
+      pending = fetch('/artifacts');
+    } catch (err) {
+      finish(false, null);
+      return;
+    }
+    Promise.resolve(pending).then(function (response) {
+      if (!response || !response.ok || typeof response.json !== 'function') {
+        finish(false, null);
+        return null;
+      }
+      return response.json().then(function (payload) {
+        finish(true, payload);
+      }, function () { finish(false, null); });
+    }, function () { finish(false, null); });
+  }
+
+  function ensureArtifacts() {
+    const key = targetKey();
+    if (artifactKey === key && (artifactState === 'loading' || artifactState === 'ready' || artifactState === 'error')) {
+      return;
+    }
+    loadArtifacts();
+  }
+
   function setTasksOpen(open) {
     if (!tasksPanel) { return; }
     const want = Boolean(open);
@@ -421,6 +497,7 @@ function createTasks(ctx) {
     if (tasksBtn) { tasksBtn.setAttribute('aria-expanded', want ? 'true' : 'false'); }
     if (want) {
       ensureHistory();
+      ensureArtifacts();
       renderPanel();
       if (tasksClose && typeof tasksClose.focus === 'function') { tasksClose.focus(); }
     } else if (tasksBtn && typeof tasksBtn.focus === 'function') {
@@ -432,6 +509,7 @@ function createTasks(ctx) {
     paintCounts(groupsOf(state));
     if (ctx.store.get('tasksOpen')) {
       ensureHistory();
+      ensureArtifacts();
       renderPanel();
     }
   }
