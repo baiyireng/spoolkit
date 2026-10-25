@@ -4,7 +4,7 @@
 finish_current、repair_current、rewrite_current、write_pending、
 repair_pending、rewrite_pending、validate、finalize。
 正文在 BodyStore。state 只更新字数、摘要和尾部。
-通过线是 length_floor。outline.target_chars 只写进提示，不是通过线。
+通过线是 length_floor。写、补、重写提示里的目标字数不低于这个下限。
 """
 
 from __future__ import annotations
@@ -124,6 +124,7 @@ def repair_messages(
         [
             f"这一节：## {title}",
             f"要点：{points}",
+            f"至少 {target_chars} 字。",
             f"目标剩余字数：{gap}",
             f"{verb}，不写下一节，不写「完」。",
         ]
@@ -153,6 +154,7 @@ def rewrite_messages(
             f"要点：{points}",
             f"上一节摘要：{previous_summary}",
             f"目标字数：{target_chars}",
+            f"至少 {target_chars} 字。",
             "只输出这一节的完整正文。不要写其他标题，不要写「完」，不要写思考过程。",
         ]
     ), source)
@@ -170,7 +172,7 @@ def write_pending_messages(
     user = _attach_source("\n\n".join(
         [
             "已完成节摘要：\n" + (summaries or "（还没有）"),
-            f"未开始标题：## {title}：目标 {target_chars} 字。要点：{points}",
+            f"未开始标题：## {title}：目标 {target_chars} 字。至少 {target_chars} 字。要点：{points}",
             (
                 "只写这一节的正文，写到目标字数，收成完整段落。"
                 "不要写「完」。不要把大纲要点原样抄一遍。不要重复已完成的节。"
@@ -501,13 +503,17 @@ class LongFormRunner:
         self._record("finish_current", index, True, "")
         return False
 
+    def _target_chars(self, entry: object) -> int:
+        target = int(getattr(entry, "target_chars"))
+        return max(target, self.state.length_floor)
+
     def _write(self, index: int) -> bool:
         entry = self.state.outline[index]
         text, reason, _rejected = self._accept(
             write_pending_messages(
                 title=entry.title,
                 points=entry.points,
-                target_chars=entry.target_chars,
+                target_chars=self._target_chars(entry),
                 summaries=self._completed_summaries(),
                 source=self._source_for(index),
             ),
@@ -535,7 +541,7 @@ class LongFormRunner:
         messages = repair_messages(
             title=entry.title,
             points=entry.points,
-            target_chars=entry.target_chars,
+            target_chars=self._target_chars(entry),
             body=body,
             current=phase.endswith("current"),
             source=self._source_for(index),
@@ -575,7 +581,7 @@ class LongFormRunner:
                 title=entry.title,
                 points=entry.points,
                 previous_summary=self._previous_summary(index),
-                target_chars=entry.target_chars,
+                target_chars=self._target_chars(entry),
                 source=self._source_for(index),
             ),
             REWRITE_MAX,

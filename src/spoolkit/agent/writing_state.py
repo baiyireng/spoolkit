@@ -197,13 +197,20 @@ def request_outline(
     *,
     goal: str,
     token_budget: int,
+    sections: int | None = None,
+    correction: str = "",
 ) -> WritingState | OutlineFailure:
     """用控制回合的前缀要一份大纲。纯文本，不带 schema。"""
+    content = OUTLINE_INSTRUCTION.format(remaining=token_budget)
+    if sections is not None and sections > 0:
+        content += f"\n必须正好 {sections} 节，不能多也不能少。"
+    if correction.strip():
+        content += "\n" + correction.strip()
     request = ChatRequest(
         messages=tuple(prefix) + (
             Message(
                 role="user",
-                content=OUTLINE_INSTRUCTION.format(remaining=token_budget),
+                content=content,
             ),
         ),
         max_tokens=HARD_CAP["outline"],

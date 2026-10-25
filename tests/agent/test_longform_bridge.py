@@ -211,6 +211,66 @@ def test_both_deliverable_is_not_supported_and_stays_chat() -> None:
     assert state.path == ""
 
 
+def _seven_outline() -> str:
+    return "\n".join(f"节{index} | 要点{index} | 100" for index in range(7))
+
+
+def test_plan三节时七节大纲重试后仍不进入写作() -> None:
+    gateway = _Gateway(outline=_seven_outline())
+    state = build_document_state(
+        "写一份估算说明",
+        AnswerPlan(mode="long", target_tokens=4000, sections=3),
+        (Message(role="user", content="写一份估算说明"),),
+        gateway,
+        token_budget=8000,
+    )
+    assert state is None
+    assert len(gateway.requests) == 2
+    blobs = ["\n".join(item.content for item in request.messages) for request in gateway.requests]
+    assert all("不是控制层" in blob for blob in blobs)
+    assert all("必须正好 3 节" in blob for blob in blobs)
+    assert "作废" in blobs[1]
+    assert not any("未开始标题" in blob or "只补完" in blob for blob in blobs)
+
+
+def test_目标写明三节时七节大纲不进入写作() -> None:
+    gateway = _Gateway(outline=_seven_outline())
+    state = build_document_state(
+        "写一份三节中文估算说明",
+        AnswerPlan(mode="long", target_tokens=4000),
+        (Message(role="user", content="写一份三节中文估算说明"),),
+        gateway,
+        token_budget=8000,
+    )
+    assert state is None
+    assert len(gateway.requests) == 2
+    assert "必须正好 3 节" in "\n".join(item.content for item in gateway.requests[1].messages)
+
+
+class _RecountOutline(_Gateway):
+    def chat(self, request: ChatRequest) -> ChatResponse:
+        self.requests.append(request)
+        blob = "\n".join(item.content for item in request.messages)
+        text = self.outline if blob.count("必须正好 3 节") == 1 else _outline_text()
+        if "作废" in blob:
+            text = _outline_text()
+        return ChatResponse(text=text, prompt_tokens=10, completion_tokens=4)
+
+
+def test_七节大纲重规划成三节后才收下() -> None:
+    gateway = _RecountOutline(outline=_seven_outline())
+    state = build_document_state(
+        "写一份说明",
+        AnswerPlan(mode="long", target_tokens=4000, sections=3),
+        (Message(role="user", content="写一份说明"),),
+        gateway,
+        token_budget=8000,
+    )
+    assert state is not None
+    assert len(state.outline) == 3
+    assert len(gateway.requests) == 2
+
+
 def test_build_document_state_returns_none_when_outline_fails() -> None:
     gateway = _Gateway(outline="这里没有大纲")
     state = build_document_state(

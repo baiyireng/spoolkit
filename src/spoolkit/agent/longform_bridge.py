@@ -96,6 +96,31 @@ def document_state_from_writing(
     )
 
 
+_CN_SECTION = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+_SECTION_COUNT = re.compile(r"([一二两三四五六七八九十]|\d{1,2})\s*节")
+
+
+def sections_required(goal: str, plan: AnswerPlan | None) -> int | None:
+    """计划里的节数优先。没有计划时，只认目标里唯一的「三节」这类说法。"""
+    if plan is not None and isinstance(plan.sections, int) and plan.sections > 0:
+        return plan.sections
+    found: list[int] = []
+    for match in _SECTION_COUNT.finditer(str(goal or "")):
+        raw = match.group(1)
+        count = _CN_SECTION[raw] if raw in _CN_SECTION else int(raw)
+        if count not in found:
+            found.append(count)
+    if len(found) == 1:
+        return found[0]
+    return None
+
+
+def _outline_matches(written: object, expected: int | None) -> bool:
+    if expected is None:
+        return isinstance(written, WritingState)
+    return isinstance(written, WritingState) and len(written.outline) == expected
+
+
 def build_document_state(
     goal: str,
     plan: AnswerPlan | None,
@@ -111,8 +136,26 @@ def build_document_state(
     if delivery is None:
         return None
     deliverable, path = delivery
-    written = request_outline(gateway, prefix, goal=goal, token_budget=token_budget)
+    expected = sections_required(goal, plan)
+    written = request_outline(
+        gateway,
+        prefix,
+        goal=goal,
+        token_budget=token_budget,
+        sections=expected,
+    )
+    if expected is not None and not _outline_matches(written, expected):
+        written = request_outline(
+            gateway,
+            prefix,
+            goal=goal,
+            token_budget=token_budget,
+            sections=expected,
+            correction="上一份大纲节数不符，作废。按这个节数重新输出。",
+        )
     if isinstance(written, OutlineFailure) or not isinstance(written, WritingState):
+        return None
+    if expected is not None and len(written.outline) != expected:
         return None
     return document_state_from_writing(written, deliverable=deliverable, path=path)
 

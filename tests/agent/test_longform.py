@@ -103,6 +103,32 @@ def _pending(start: int, chars: int = 500) -> list[str]:
     return [_piece(TITLES[index], chars) for index in range(start, len(TITLES))]
 
 
+def test_写作目标不低于长度下限() -> None:
+    bodies = InMemoryBodyStore()
+    bodies.put(0, "窗。")
+    state = DocumentState(
+        goal="写一份说明",
+        outline=(OutlineEntry(index=0, title="窗口", points="窗口的要点", target_chars=100),),
+        phase="write",
+        current_section=CurrentSection(
+            index=0, title="窗口", summary="", tail="窗。", char_count=2, status="open"
+        ),
+        length_floor=450,
+    )
+    gateway = ScriptedGateway(["窗口写完。", "窗口再写完。", "窗口整节写完。"])
+    runner = LongFormRunner(state, gateway, bodies)
+    runner._write(0)
+    runner._repair(0, "repair_pending")
+    runner._rewrite(0, "rewrite_pending")
+    prompts = ["\n".join(item.content for item in request.messages) for request in gateway.requests]
+    assert len(prompts) == 3
+    assert all("至少 450 字" in prompt for prompt in prompts)
+    assert "目标 100 字" not in prompts[0]
+    assert "目标字数：100" not in prompts[2]
+    assert "目标剩余字数：100" not in prompts[1]
+    assert f"目标剩余字数：{450 - len('窗口写完。')}" in prompts[1]
+
+
 def test_prompts_keep_experiment_wording() -> None:
     finish = "\n".join(item.content for item in finish_messages("窗口", 1, "总需求为"))
     assert "不要写「完」" in finish
