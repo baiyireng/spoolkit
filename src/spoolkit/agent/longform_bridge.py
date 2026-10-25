@@ -9,6 +9,7 @@ target_chars 按中文离线口径估算：1 token 约等于 1 字。这是写�
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,10 +31,19 @@ from spoolkit.agent.longform import LongFormRunner
 from spoolkit.agent.protocol import AnswerPlan
 from spoolkit.agent.sections import fallback_outline, request_outline
 from spoolkit.agent.writing_state import OutlineFailure, WritingState
+from spoolkit.errors import PathOutsideProjectError
 from spoolkit.llm.types import Message
 
 # 与 OfflineTokenCounter 的非 ASCII 规则一致：一个汉字计 1 token，也计 1 字。
 CHARS_PER_TOKEN = 1
+_WRITE_ACTIONS = ("写", "保存", "输出", "生成", "导出", "存成", "存到")
+_GOAL_PATH = re.compile(
+    r"(?<![A-Za-z0-9_./:\\-])"
+    r"((?:[A-Za-z0-9_\-\u4e00-\u9fff]+/)*)"
+    r"([A-Za-z0-9_\-\u4e00-\u9fff]+)"
+    r"\.(md|markdown|txt|rst|text)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +170,15 @@ def try_longform_text(
     给了 resume_checkpoint 就只读那一份进度。找不到就不规划大纲，也不启动写作。
     """
     resume_key = str(resume_checkpoint or "").strip()
+    if plan is None and not resume_key:
+        inferred = explicit_file_path(goal, pending)
+        if inferred:
+            plan = AnswerPlan(
+                mode="long",
+                target_tokens=max(1, token_budget),
+                deliverable="file",
+                path=inferred,
+            )
     if resume_key:
         restored = _restore_checkpoint(
             artifact_root,
@@ -325,6 +344,36 @@ def _excerpt(text: str) -> str:
     if len(compact) <= SUMMARY_CAP:
         return compact
     return compact[: SUMMARY_CAP - 1] + "…"
+
+
+def explicit_file_path(goal: str, pending: Any) -> str | None:
+    """计划缺失时，从目标里取出唯一的工作区文本路径。
+
+    必须同时有写、保存、输出或生成这类动作，以及一个相对文本路径。
+    绝对路径、上级目录和多个路径都不取。工作区校验不通过就当没有。
+    """
+    text = str(goal or "")
+    if pending is None or not any(word in text for word in _WRITE_ACTIONS):
+        return None
+    found: list[str] = []
+    for match in _GOAL_PATH.finditer(text):
+        relative = f"{match.group(1)}{match.group(2)}.{match.group(3).lower()}"
+        if relative not in found:
+            found.append(relative)
+    if len(found) != 1:
+        return None
+    candidate = found[0]
+    if _safe_file_path(candidate) != candidate:
+        return None
+    try:
+        stored = pending.path_of(candidate)
+    except PathOutsideProjectError:
+        return None
+    if not isinstance(stored, str) or Path(stored).is_absolute() or ".." in Path(stored).parts:
+        return None
+    if stored.replace("\\", "/") != candidate:
+        return None
+    return candidate
 
 
 def _delivery(plan: AnswerPlan | None) -> tuple[str, str] | None:

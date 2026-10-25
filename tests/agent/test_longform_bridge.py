@@ -491,6 +491,31 @@ def test_short_answer_skips_longform(tmp_path: Path) -> None:
     assert not (tmp_path / ".agent" / "artifacts").exists()
 
 
+def test_旧协议不从目标推断文件(tmp_path: Path) -> None:
+    pending = _Pending(tmp_path)
+    gateway = _Gateway(mode="")
+
+    def chat(request: ChatRequest) -> ChatResponse:
+        gateway.requests.append(request)
+        text = json.dumps(
+            {
+                "thought": "短答即可",
+                "tool_calls": [],
+                "state": None,
+                "done": True,
+                "final": "写完了",
+            },
+            ensure_ascii=False,
+        )
+        return ChatResponse(text=text, prompt_tokens=10, completion_tokens=4)
+
+    gateway.chat = chat  # type: ignore[method-assign]
+    result = _loop(tmp_path, gateway, v2=False, events=[], pending=pending).run("把说明写到 docs/out.md")
+    assert pending.items() == []
+    assert "写完了" in result.final
+    assert not (tmp_path / "docs" / "out.md").exists()
+
+
 def test_legacy_protocol_skips_longform(tmp_path: Path) -> None:
     events: list = []
     gateway = _Gateway()
@@ -591,3 +616,74 @@ def test_file_success_records_artifact_without_body(tmp_path: Path, monkeypatch:
     prompt = "\n".join(item.content for item in follow.gateway.requests[0].messages)
     assert "【会话记忆】" in prompt
     assert "已生成文档，待确认：docs/out.md" in prompt
+
+
+def _run_goal(tmp_path: Path, goal: str, gateway: _Gateway | None = None) -> tuple[object, _Pending]:
+    pending = _Pending(tmp_path)
+    result = _loop(tmp_path, gateway or _Gateway(mode=""), v2=True, events=[], pending=pending).run(goal)
+    return result, pending
+
+
+def test_目标写到相对路径时登记待确认(tmp_path: Path) -> None:
+    result, pending = _run_goal(tmp_path, "把说明写到 docs/out.md")
+    assert result.final == "已生成文档，待确认：docs/out.md"
+    assert len(pending.items()) == 1
+    assert pending.items()[0].path == "docs/out.md"
+    assert not (tmp_path / "docs" / "out.md").exists()
+
+
+def test_生成报告的相对路径也走文件(tmp_path: Path) -> None:
+    result, pending = _run_goal(tmp_path, "生成 docs/a.md 的报告")
+    assert result.final == "已生成文档，待确认：docs/a.md"
+    assert [item.path for item in pending.items()] == ["docs/a.md"]
+    assert not (tmp_path / "docs" / "a.md").exists()
+
+
+def test_没有路径的继续写仍是聊天(tmp_path: Path) -> None:
+    gateway = _Gateway(mode="")
+    result, pending = _run_goal(tmp_path, "继续写", gateway)
+    blobs = ["\n".join(item.content for item in request.messages) for request in gateway.requests]
+    assert pending.items() == []
+    assert "已生成文档" not in (result.final or "")
+    assert not any("不是控制层" in blob for blob in blobs)
+
+
+def test_绝对路径和上级目录按聊天写(tmp_path: Path) -> None:
+    for goal in ("把报告写到 C:/outside/out.md", "把报告写到 ../out.md", "把报告写到 /tmp/out.md"):
+        result, pending = _run_goal(tmp_path, goal)
+        assert pending.items() == []
+        assert "已生成文档，待确认" not in (result.final or "")
+        assert "## 窗口" in (result.final or "")
+
+
+def test_已有计划时不用目标里的路径覆盖(tmp_path: Path) -> None:
+    result, pending = _run_goal(
+        tmp_path,
+        "把说明写到 docs/other.md",
+        _Gateway(deliverable="file", path="docs/kept.md"),
+    )
+    assert result.final == "已生成文档，待确认：docs/kept.md"
+    assert [item.path for item in pending.items()] == ["docs/kept.md"]
+
+
+def test_已有聊天计划时不改成文件(tmp_path: Path) -> None:
+    result, pending = _run_goal(tmp_path, "把报告写到 docs/out.md", _Gateway(mode="long"))
+    assert pending.items() == []
+    assert "## 窗口" in (result.final or "")
+    assert "已生成文档，待确认" not in (result.final or "")
+
+
+def test_工作区拒绝的路径不提取(tmp_path: Path) -> None:
+    from spoolkit.agent.longform_bridge import explicit_file_path
+    from spoolkit.errors import PathOutsideProjectError
+
+    pending = _Pending(tmp_path)
+
+    def deny(candidate: str) -> str:
+        raise PathOutsideProjectError(candidate)
+
+    pending.path_of = deny  # type: ignore[method-assign]
+    assert explicit_file_path("把说明写到 docs/out.md", pending) is None
+    assert explicit_file_path("把说明写到 docs/out.md", _Pending(tmp_path)) == "docs/out.md"
+    assert explicit_file_path("继续写", _Pending(tmp_path)) is None
+    assert explicit_file_path("阅读 docs/out.md", _Pending(tmp_path)) is None

@@ -70,7 +70,7 @@ from spoolkit.agent.final_turn import SHORT_CONTINUE, request_final
 from spoolkit.agent.artifacts import ArtifactRecord, ArtifactStore
 from spoolkit.agent.context_inject import build_context_block
 from spoolkit.agent.context_pack import build_context_pack
-from spoolkit.agent.longform_bridge import artifact_session, try_longform_text
+from spoolkit.agent.longform_bridge import artifact_session, explicit_file_path, try_longform_text
 from spoolkit.agent.session_summary import SessionSummaryStore, record_session_outcome
 from spoolkit.agent.sections import STOP_MARK, compose_long_answer
 from spoolkit.agent.protocol import (
@@ -3848,13 +3848,21 @@ class AgentLoop:
             # 那一轮它已经动过了，判词进的是运行报告）。
             if turn.done:
                 resuming_checkpoint = bool(self._resume_checkpoint)
+                goal_text = state.goal or ""
+                inferred_file = ""
+                if (
+                    not resuming_checkpoint
+                    and getattr(turn, "answer_plan", None) is None
+                    and not any(cue in goal_text for cue in SHORT_CUES)
+                ):
+                    inferred_file = explicit_file_path(goal_text, self.pending) or ""
                 if resuming_checkpoint:
                     long_mode = True
                 else:
                     long_mode = should_use_long_answer(
-                        state.goal or "",
+                        goal_text,
                         getattr(turn, "answer_plan", None),
-                    )
+                    ) or bool(inferred_file)
                 if self._turn_protocol.v2:
                     # 控制回合的消息原样当前缀，终稿另一次纯文本请求。
                     # 实时问题必须引用本轮工具结果；普通问题可以声明无需外部信息。
