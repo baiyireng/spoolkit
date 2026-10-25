@@ -22,6 +22,7 @@ from spoolkit.agent.longform import (
     repair_messages,
     rewrite_messages,
 )
+from spoolkit.llm.llamacpp import EmptyContentError
 from spoolkit.llm.types import ChatRequest, ChatResponse
 
 TITLES = ("窗口", "估算", "余量", "截断", "核对", "做法")
@@ -147,6 +148,47 @@ def test_prompts_keep_experiment_wording() -> None:
     assert GUARD_RETRY == "只输出中文 Markdown 正文，不要思考过程/英文分析。"
     assert SCAFFOLD_RETRY == "只输出正文，不复述提示词结构。"
     assert NOVELTY_RETRY == "只写新的句子，不要重复已有内容。"
+
+
+def _empty_error() -> EmptyContentError:
+    return EmptyContentError(
+        "空",
+        prompt_tokens=1,
+        max_tokens=10,
+        n_ctx=8192,
+        context_tight=False,
+        finish_reason="length",
+        streaming=False,
+    )
+
+
+class _EmptyOnce(ScriptedGateway):
+    """第一次抛空内容，之后按脚本回答。"""
+
+    def __init__(self, replies: list[str]) -> None:
+        super().__init__(replies)
+        self._raised = False
+
+    def chat(self, request: ChatRequest) -> ChatResponse:
+        self.requests.append(request)
+        if not self._raised:
+            self._raised = True
+            raise _empty_error()
+        if not self._replies:
+            raise AssertionError("脚本里的模型回复不够")
+        text = self._replies.pop(0)
+        return ChatResponse(text=text, prompt_tokens=10, completion_tokens=len(text))
+
+
+def test_第一次空回复后重试并完成() -> None:
+    finish = _marked("窗口补")
+    state = _state("窗口写到一半")
+    gateway = _EmptyOnce([finish, *_pending(1), "完"])
+    runner = LongFormRunner(state, gateway, _store("窗口写到一半"))
+    result = runner.run()
+    assert result.done
+    assert "必须输出中文 Markdown 正文，至少一整段，不要空回复。" in gateway.requests[1].messages[-1].content
+    assert "MIDDLETOKEN" in runner.bodies.get(section_ref(0))
 
 
 def test_fake_gateway_finishes_one_document() -> None:

@@ -33,6 +33,7 @@ from spoolkit.agent.document_state import (
     sentence_closed,
 )
 from spoolkit.llm.gateway import ModelGateway
+from spoolkit.llm.llamacpp import EmptyContentError
 from spoolkit.llm.types import ChatRequest, Message
 
 MAX_REPAIR = 2
@@ -51,6 +52,8 @@ GUARD_RETRY = "只输出中文 Markdown 正文，不要思考过程/英文分析
 SCAFFOLD_RETRY = "只输出正文，不复述提示词结构。"
 NOVELTY_RETRY = "只写新的句子，不要重复已有内容。"
 DONE_RETRY = "不要写「完」。"
+EMPTY_RETRY = "必须输出中文 Markdown 正文，至少一整段，不要空回复。"
+EMPTY_RETRIES = 2
 
 _STATE_PHASE = {
     "finish_current": "continue",
@@ -606,8 +609,17 @@ class LongFormRunner:
         *,
         allow_done: bool,
     ) -> tuple[str | None, str, str]:
-        first = self._chat(messages, max_tokens)
-        reason = _block_reason(first, allow_done=allow_done)
+        pending = messages
+        first = ""
+        reason = "empty"
+        for attempt in range(EMPTY_RETRIES + 1):
+            first = self._chat(pending, max_tokens)
+            reason = _block_reason(first, allow_done=allow_done)
+            if reason != "empty":
+                break
+            if attempt >= EMPTY_RETRIES:
+                return None, "empty", first
+            pending = _with_instruction(messages, EMPTY_RETRY)
         if not reason:
             return first.strip(), "", ""
         if reason not in {"think", "scaffold", "early_done"}:
@@ -619,7 +631,10 @@ class LongFormRunner:
         return second.strip(), "", first
 
     def _chat(self, messages: tuple[Message, ...], max_tokens: int) -> str:
-        response = self._gateway.chat(ChatRequest(messages=messages, max_tokens=max_tokens))
+        try:
+            response = self._gateway.chat(ChatRequest(messages=messages, max_tokens=max_tokens))
+        except EmptyContentError:
+            return ""
         return response.text or ""
 
     def _check(self) -> tuple[str, ...]:

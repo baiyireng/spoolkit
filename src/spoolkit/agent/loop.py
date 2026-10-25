@@ -3847,10 +3847,14 @@ class AgentLoop:
             # 那一步有没有产出」（同一步里既改东西又宣告完成的不给自动修：
             # 那一轮它已经动过了，判词进的是运行报告）。
             if turn.done:
-                long_mode = should_use_long_answer(
-                    state.goal or "",
-                    getattr(turn, "answer_plan", None),
-                )
+                resuming_checkpoint = bool(self._resume_checkpoint)
+                if resuming_checkpoint:
+                    long_mode = True
+                else:
+                    long_mode = should_use_long_answer(
+                        state.goal or "",
+                        getattr(turn, "answer_plan", None),
+                    )
                 if self._turn_protocol.v2:
                     # 控制回合的消息原样当前缀，终稿另一次纯文本请求。
                     # 实时问题必须引用本轮工具结果；普通问题可以声明无需外部信息。
@@ -3859,8 +3863,11 @@ class AgentLoop:
                         turn.summary,
                         [item.content for item in history if item.role == "tool"],
                         long_answer=(
-                            turn.answer_plan is not None
-                            and turn.answer_plan.mode == "long"
+                            resuming_checkpoint
+                            or (
+                                turn.answer_plan is not None
+                                and turn.answer_plan.mode == "long"
+                            )
                         ),
                     )
                     if not decision.ok:
@@ -3897,7 +3904,7 @@ class AgentLoop:
                     )
                     long_text = None
                     longform_draft = None
-                    if long_mode and room >= 3:
+                    if long_mode and (room >= 3 or resuming_checkpoint):
                         facts = "\n\n".join(
                             item.content.strip()
                             for item in history
@@ -3909,7 +3916,7 @@ class AgentLoop:
                                 prefix=assembled.messages,
                                 goal=state.goal or "",
                                 plan=getattr(turn, "answer_plan", None),
-                                token_budget=room,
+                                token_budget=room if room >= 3 else 3,
                                 pending=self.pending,
                                 artifact_root=self.config.project_root,
                                 session=artifact_session(self.pending),
@@ -3921,6 +3928,8 @@ class AgentLoop:
                             longform_draft = None
                         if longform_draft is not None:
                             long_text = longform_draft.text
+                        elif resuming_checkpoint:
+                            long_text = None
                         else:
                             long_text = compose_long_answer(
                                 self.gateway,

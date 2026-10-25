@@ -22,6 +22,11 @@ from spoolkit.agent.document_state import (
 from spoolkit.agent.file_sink import FileSink
 from spoolkit.agent.longform import LongFormRunner
 from spoolkit.agent.longform_bridge import try_longform_text
+from spoolkit.agent.loop import AgentLoop
+from spoolkit.config import Config
+from spoolkit.llm.llamacpp import EmptyContentError
+from spoolkit.llm.tokenizer import OfflineTokenCounter
+from spoolkit.tools.registry import ToolRegistry
 from spoolkit.agent.writing_state import OUTLINE_INSTRUCTION
 from spoolkit.llm.types import ChatRequest, ChatResponse
 from spoolkit.tools.edit import PendingChanges
@@ -281,6 +286,137 @@ def test_file_resume只登记一条待确认(tmp_path: Path) -> None:
     assert pending.items()[0].path == "docs/out.md"
     assert pending.items()[0].new_text.count("甲节唯一") == 1
     assert not (tmp_path / "docs" / "out.md").exists()
+    assert not store.path_for("sess-a", key).exists()
+
+
+class _AlwaysEmpty:
+    def __init__(self) -> None:
+        self.requests: list[ChatRequest] = []
+
+    def chat(self, request: ChatRequest) -> ChatResponse:
+        self.requests.append(request)
+        raise EmptyContentError(
+            "空",
+            prompt_tokens=1,
+            max_tokens=10,
+            n_ctx=8192,
+            context_tight=False,
+            finish_reason="length",
+            streaming=False,
+        )
+
+    def context_window(self) -> int:
+        return 8192
+
+
+def test_连续空回复失败但checkpoint还在且不登记待确认(tmp_path: Path) -> None:
+    pending = PendingChanges(tmp_path, overrides={}, run_id="run-1")
+    artifacts = ArtifactStore(tmp_path)
+    sink = FileSink(
+        state=_state(deliverable="file", path="docs/out.md"),
+        path="docs/out.md",
+        session="sess-a",
+        task_id="task-1",
+        turn_id="turn-1",
+        artifacts=artifacts,
+        pending=pending,
+        artifact_id="doc-turn-1",
+    )
+    store = DocumentCheckpointStore(tmp_path)
+    gateway = _AlwaysEmpty()
+    runner = LongFormRunner(
+        _state(deliverable="file", path="docs/out.md"),
+        gateway,  # type: ignore[arg-type]
+        InMemoryBodyStore(),
+        sink,
+        checkpoint=store,
+        session="sess-a",
+        artifact_id="doc-turn-1",
+        task_id="task-1",
+        turn_id="turn-1",
+    )
+    failed = runner.run()
+    assert failed.done is False
+    assert failed.state.status == "failed"
+    assert store.path_for("sess-a", _key(path="docs/out.md", deliverable="file")).is_file()
+    assert pending.items() == []
+    assert not (tmp_path / "docs" / "out.md").exists()
+    assert len(gateway.requests) >= 2
+    assert any(
+        "必须输出中文 Markdown 正文，至少一整段，不要空回复。" in message.content
+        for request in gateway.requests
+        for message in request.messages
+    )
+
+
+def test_短目标恢复不走组装且只写剩余节(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    first, _gateway, store = _runner(tmp_path, [_piece("窗口")], RecorderSink())
+    first.run(stop_after=1)
+    key = _key()
+    assert store.path_for("sess-a", key).is_file()
+    composed = {"n": 0}
+
+    def _compose(*_args: object, **_kwargs: object) -> str:
+        composed["n"] += 1
+        return "不该走组装"
+
+    monkeypatch.setattr("spoolkit.agent.loop.compose_long_answer", _compose)
+    pending = PendingChanges(tmp_path, overrides={}, run_id="run-1")
+    pending.run_session = "sess-a"
+
+    class _ShortThenSections:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+            self._tokenizer = OfflineTokenCounter()
+
+        def chat(self, request: ChatRequest) -> ChatResponse:
+            self.requests.append(request)
+            blob = "\n".join(item.content for item in request.messages)
+            if "只输出最后一行" in blob:
+                text = "完"
+            elif "只补完" in blob or "未开始标题" in blob or "重写当前节" in blob:
+                title = next((item for item in ("估算", "余量") if item in blob), "估算")
+                text = _piece(title)
+            else:
+                text = json.dumps(
+                    {
+                        "thought": "短答",
+                        "tool_calls": [],
+                        "done": True,
+                        "summary": "无需外部信息。",
+                    },
+                    ensure_ascii=False,
+                )
+            return ChatResponse(
+                text=text,
+                prompt_tokens=sum(self._tokenizer.count(item.content) for item in request.messages),
+                completion_tokens=4,
+            )
+
+        def context_window(self) -> int:
+            return 32768
+
+    loop = AgentLoop(
+        gateway=_ShortThenSections(),  # type: ignore[arg-type]
+        tokenizer=OfflineTokenCounter(),
+        registry=ToolRegistry(),
+        config=Config(
+            project_root=tmp_path,
+            context_window=32768,
+            max_steps=2,
+            supervise=False,
+            overrides={"protocol_v2": 1},
+        ),
+        pending=pending,
+    )
+    result = loop.run("继续", resume_checkpoint=key)
+    prompts = "\n".join(message.content for request in loop.gateway.requests for message in request.messages)
+    assert composed["n"] == 0
+    assert "不是控制层" not in prompts
+    assert "当前节：第 1 节「窗口」" not in prompts
+    assert "未开始标题：## 窗口" not in prompts
+    assert result.final.count("## 窗口") == 1
+    assert "## 估算" in result.final and "## 余量" in result.final
     assert not store.path_for("sess-a", key).exists()
 
 
