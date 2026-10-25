@@ -16,18 +16,33 @@ import sys
 from pathlib import Path
 
 from spoolkit.cli.commands.serve import extra_from_serve_args
+from spoolkit.cli.term import print_err
+from spoolkit.kernel.target import Target, resolve_target
 from spoolkit.web.server import serve
 
 CHANNELS = ("fake", "telegram", "wecom", "qqbot")
 CHILD_WAIT = 8.0
 
 
-def bridge_child_argv(args: argparse.Namespace) -> list[str]:
-    """拼出要拉起的 `spool bridge` 命令行。没给通道就空列表。"""
+def bridge_child_argv(args: argparse.Namespace, root: Path | None = None) -> list[str]:
+    """拼出要拉起的 `spool bridge` 命令行。没给通道就空列表。
+
+    `root` 是**内核解析出来的**工作区（`hub_command` 给）。不给就按 `args.root`
+    看：空串 = 没有工作区，那就**不给子进程 `--root`**（机器级桥：每条聊天按
+    自己的指针落到哪个工作区）。
+
+    为什么不能退回 `Path(getattr(args, "root", "."))`：`--root` 的缺省是空串，
+    而 `Path("")` 恰好就是 cwd——于是"服务整台机器"的 hub 把 **cwd 派生的工作区
+    钉给了桥子进程**，子进程再去读 `cwd/.env` 里的模型密钥（2026-09-27 评审实测：
+    hub 起的通道拿到了 `D:\\workSpace\\agents_dev\\.env` 里的凭据，而裸
+    `spool bridge` 说缺凭据）。机器级入口不认 cwd，见设计 §3.2。
+    """
     channel = str(getattr(args, "channel", "") or "").strip()
     if not channel:
         return []
-    root = Path(getattr(args, "root", ".")).resolve()
+    if root is None:
+        raw = str(getattr(args, "root", "") or "").strip()
+        root = Path(raw).resolve() if raw else None
     argv = [
         sys.executable,
         "-m",
@@ -35,10 +50,10 @@ def bridge_child_argv(args: argparse.Namespace) -> list[str]:
         "bridge",
         "--channel",
         channel,
-        "--root",
-        str(root),
-        *extra_from_serve_args(args),
     ]
+    if root is not None:
+        argv += ["--root", str(root)]
+    argv += list(extra_from_serve_args(args))
     access = str(getattr(args, "access", "") or "").strip()
     if access:
         argv += ["--access", access]
@@ -59,12 +74,14 @@ def bridge_child_argv(args: argparse.Namespace) -> list[str]:
     return argv
 
 
-def spawn_bridge(args: argparse.Namespace) -> list[subprocess.Popen]:
+def spawn_bridge(
+    args: argparse.Namespace, root: Path | None = None
+) -> list[subprocess.Popen]:
     """只拉 hub 自己的孩子。llama / ssh 不在这里。"""
-    argv = bridge_child_argv(args)
+    argv = bridge_child_argv(args, root)
     if not argv:
         return []
-    print(f"通道：{' '.join(argv[3:])}", file=sys.stderr)
+    print_err(f"通道：{' '.join(argv[3:])}", markup=False)
     return [subprocess.Popen(argv)]
 
 
@@ -84,13 +101,31 @@ def stop_children(children: list[subprocess.Popen]) -> None:
 def hub_command(args: argparse.Namespace) -> int:
     channel = str(getattr(args, "channel", "") or "").strip()
     if channel and channel not in CHANNELS:
-        print(
+        print_err(
             "未知通道：" + channel + "。可选：" + "、".join(CHANNELS),
-            file=sys.stderr,
+            markup=False,
+            style="bad",
         )
         return 2
 
-    children = spawn_bridge(args)
+    # 与 `serve` 同一条口径：**给了 `--root` = 钉住那一个工作区**（老行为逐字保留），
+    # 没给 = 机器级。机器级这一路这里**不解析目标**——内核顺位（网页壳指针 →
+    # 登记表）由网页壳和桥各自去走，而且都不看这个进程的 cwd：hub 站在哪个目录
+    # 跟"这台机器上有哪些工作区"毫无关系（设计 §3.2）。早先这里把 cwd 派生出来的
+    # 工作区**钉给了桥子进程**，于是通道读的是 `cwd/.env` 里的凭据（评审实测过）。
+    target: Target | None = None
+    if str(getattr(args, "root", "") or "").strip():
+        target = resolve_target(
+            workspace=args.root,
+            session=str(getattr(args, "session", "") or ""),
+            client="web",
+            session_fallback="cli",
+            use_cwd=False,
+        )
+    pinned_root = target.root if target is not None else None
+    # 桥子进程：确实解析出工作区时才给它 `--root`；没解析出来就**一个都不给**
+    # （裸 `spool bridge` = 服务整台机器，每条聊天按自己的指针落）。
+    children = spawn_bridge(args, pinned_root)
 
     def extra_health() -> dict:
         if not children:
@@ -107,14 +142,27 @@ def hub_command(args: argparse.Namespace) -> int:
         }
 
     try:
-        serve(
-            Path(args.root).resolve(),
-            host=args.host,
-            port=args.port,
-            session=args.session,
-            extra_args=extra_from_serve_args(args),
-            extra_health=extra_health,
-        )
+        if target is not None:
+            serve(
+                target.root,
+                host=args.host,
+                port=args.port,
+                session=target.session,
+                extra_args=extra_from_serve_args(args),
+                extra_health=extra_health,
+                pinned=True,
+                target=target,
+            )
+        else:
+            serve(
+                None,
+                host=args.host,
+                port=args.port,
+                session=str(getattr(args, "session", "") or ""),
+                extra_args=extra_from_serve_args(args),
+                extra_health=extra_health,
+                pinned=False,
+            )
         return 0
     finally:
         stop_children(children)

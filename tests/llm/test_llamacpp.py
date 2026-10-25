@@ -32,6 +32,59 @@ def _request(schema=None) -> ChatRequest:
     )
 
 
+def test_一次请求记入指标且不含正文() -> None:
+    from spoolkit.agent.metrics import capture_metrics, dumps_metric, metric_scope
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "答案正文"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 4000, "completion_tokens": 12},
+                "timings": {"prompt_n": 1000},
+            },
+        )
+
+    gateway = _gateway(handler)
+    with capture_metrics() as rows, metric_scope(phase="final", task_type="long", n_ctx=8192):
+        gateway.chat(
+            ChatRequest(
+                messages=(Message(role="user", content="独特口令甲乙丙"),),
+                max_tokens=200,
+            )
+        )
+    gateway.close()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["phase"] == "final"
+    assert row["task_type"] == "long"
+    assert row["prompt_tokens"] == 4000
+    assert row["prompt_n"] == 1000
+    assert row["max_tokens"] == 200
+    assert row["generated_tokens"] == 12
+    assert row["finish_reason"] == "stop"
+    assert row["cache_hit"] is True
+    assert row["cache_reused_tokens"] == 3000
+    assert "独特口令" not in dumps_metric(row)
+
+
+def test_没有重算量时缓存命中留空() -> None:
+    from spoolkit.agent.metrics import capture_metrics, metric_scope
+
+    gateway = _gateway(lambda request: httpx.Response(200, json=_completion()))
+    with capture_metrics() as rows, metric_scope(phase="control", task_type="short"):
+        gateway.chat(_request())
+    gateway.close()
+    assert rows[0]["cache_hit"] is None
+    assert rows[0]["prompt_n"] is None
+    assert rows[0]["prompt_tokens"] == 21
+
+
 def test_解析内容与用量() -> None:
     gateway = _gateway(lambda request: httpx.Response(200, json=_completion()))
     response = gateway.chat(_request())
@@ -71,6 +124,28 @@ def test_有schema时通过response_format下发() -> None:
     gateway.close()
 
 
+def test_cache_prompt总是显式下发() -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(200, json=_completion())
+
+    gateway = _gateway(handler)
+    gateway.chat(_request())
+    assert seen["payload"]["cache_prompt"] is False
+    gateway.chat(
+        ChatRequest(
+            messages=(Message(role="user", content="终稿"),),
+            max_tokens=100,
+            cache_prompt=True,
+        )
+    )
+    assert seen["payload"]["cache_prompt"] is True
+    assert "response_format" not in seen["payload"]
+    gateway.close()
+
+
 def test_无schema时不带response_format() -> None:
     seen: dict = {}
 
@@ -82,6 +157,31 @@ def test_无schema时不带response_format() -> None:
     gateway.chat(_request())
     assert "response_format" not in seen["payload"]
     gateway.close()
+
+
+def test_温度与种子下发给服务端() -> None:
+    """温度 0 下重复 N 次只能证明「可复现」，要测波动必须能把温度抬起来。
+
+    所以这两项必须是**可下发的**，而且默认值不能变：默认温度 0 且不带 seed，
+    历史读数才对得上新读数。
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(200, json=_completion())
+
+    gateway = _gateway(handler, temperature=0.4, seed=7)
+    gateway.chat(_request())
+    assert seen["payload"]["temperature"] == 0.4
+    assert seen["payload"]["seed"] == 7
+    gateway.close()
+
+    default = _gateway(handler)
+    default.chat(_request())
+    assert seen["payload"]["temperature"] == 0.0
+    assert "seed" not in seen["payload"], "不给种子就让服务端自己取"
+    default.close()
 
 
 def test_服务返回非200时报错() -> None:
@@ -103,6 +203,100 @@ def test_内容为空时报错() -> None:
     gateway = _gateway(lambda request: httpx.Response(200, json=payload))
     with pytest.raises(LlamaCppError):
         gateway.chat(_request())
+    gateway.close()
+
+
+def test_空内容先重试一次成功并记下空响应() -> None:
+    from spoolkit.agent.metrics import capture_metrics, metric_scope
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+                    "usage": {"prompt_tokens": 8000, "completion_tokens": 0},
+                },
+            )
+        return httpx.Response(200, json=_completion("补上了"))
+
+    gateway = _gateway(handler, temperature=0.0)
+    with capture_metrics() as rows, metric_scope(phase="section", task_type="long", n_ctx=8192):
+        response = gateway.chat(_request())
+    assert response.text == "补上了"
+    assert calls["n"] == 2
+    empty = [row for row in rows if row.get("event") == "empty_response"]
+    assert empty[0]["finish_reason"] == "length"
+    assert empty[0]["prompt_tokens"] == 8000
+    assert empty[0]["max_tokens"] == 256
+    assert empty[0]["n_ctx"] == 8192
+    assert empty[0]["temperature"] == 0.0
+    assert empty[0]["streaming"] is False
+    assert empty[0]["retry_index"] == 0
+    assert empty[0]["context_tight"] is True
+    ok = [row for row in rows if row.get("phase") == "section"]
+    assert ok[0]["retry_index"] == 1
+    gateway.close()
+
+
+def test_带重试说明时空内容换提示而不是原样重发() -> None:
+    """第二节请求必须多一段「必须输出正文」，不能把第一次的消息原样再发一遍。"""
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 30, "completion_tokens": 0},
+                },
+            )
+        return httpx.Response(200, json=_completion("正文写出来了"))
+
+    note = "必须输出正文，至少 100 字。没有材料时基于目标写，不要留空。"
+    gateway = _gateway(handler)
+    response = gateway.chat(
+        ChatRequest(
+            messages=(
+                Message(role="system", content="目标：写复盘"),
+                Message(role="user", content="只写第 1 节"),
+            ),
+            max_tokens=256,
+            empty_retry=note,
+        )
+    )
+    assert response.text == "正文写出来了"
+    assert len(bodies) == 2
+    assert bodies[1]["messages"][:-1] == bodies[0]["messages"]
+    assert bodies[1]["messages"][-1] == {"role": "user", "content": note}
+    gateway.close()
+
+
+def test_空内容重试仍空才报错() -> None:
+    from spoolkit.llm.llamacpp import EmptyContentError
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+            },
+        )
+
+    gateway = _gateway(handler)
+    with pytest.raises(EmptyContentError) as caught:
+        gateway.chat(_request())
+    assert calls["n"] == 2
+    assert caught.value.context_tight is False
     gateway.close()
 
 
@@ -187,6 +381,46 @@ def test_非本机地址仍按系统代理走() -> None:
         assert proxy_for("http://192.168.1.9:8080") == "http://127.0.0.1:7890"
     finally:
         module.system_proxy = original
+
+
+def test_显式代理也要过本机这一关() -> None:
+    """**显式传进来的代理同样不能套到本机地址上**——这才是真出事的那个口子。
+
+    `cli/runtime.py` 把 `system_proxy()` 当"显式值"传给网关，而构造点原先写的是
+    `proxy if proxy is not None else proxy_for(base_url)`：只要这个值非空，本机地址
+    就绕过判定被套上代理。实测（代理对 loopback 回 502）→ `context_window()` 拿到
+    None → spool 报「无法连接 llama.cpp 服务…先确认服务已启动」，把代理问题说成了
+    "服务没起"。
+    """
+    assert proxy_for("http://127.0.0.1:8080", "http://127.0.0.1:7890") is None
+    assert proxy_for("http://[::1]:8080", "http://127.0.0.1:7890") is None
+    assert (
+        proxy_for("https://api.example.com", "http://127.0.0.1:7890")
+        == "http://127.0.0.1:7890"
+    )
+
+
+def test_网关构造时本机地址不带代理(monkeypatch) -> None:
+    """把规则钉在**构造点**上：光有 `proxy_for` 判对了不够，调用点绕过它才是病根。"""
+    import httpx as httpx_module
+
+    import spoolkit.llm.llamacpp as module
+
+    captured: dict = {}
+    real = httpx_module.Client
+
+    def spy(*args, **kwargs):
+        captured.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module.httpx, "Client", spy)
+    module.LlamaCppGateway("http://127.0.0.1:8080", proxy="http://127.0.0.1:7890")
+    assert captured["proxy"] is None
+    assert captured["trust_env"] is False
+
+    captured.clear()
+    module.LlamaCppTokenCounter("http://127.0.0.1:8080", proxy="http://127.0.0.1:7890")
+    assert captured["proxy"] is None
 
 
 def test_上下文超长单独成类() -> None:

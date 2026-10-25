@@ -21,7 +21,7 @@
 import sqlite3
 import time
 
-from spoolkit.memory.store import Memory, to_memory
+from spoolkit.memory.store import Memory, insert_memory, to_memory
 
 KIND = "lesson"
 
@@ -35,7 +35,7 @@ PUSH_THRESHOLD = 0.45
 PRUNE_THRESHOLD = 0.35
 
 # 样本少于这个数就不调整置信度：一两次成败说明不了什么，
-# 过早调整只会让置信度来回抖，反而不可信。
+# 过早调整只会让置信度反复波动，反而不可信。
 MIN_SAMPLES = 3
 
 MAX_PUSHED = 3
@@ -56,16 +56,15 @@ def record_lesson(
     source: str = "",
     confidence: float = INITIAL_CONFIDENCE,
 ) -> Memory:
-    """写入一条教训。trigger 是「什么时候该用它」的关键词。"""
-    cursor = conn.execute(
-        "INSERT INTO memory"
-        "(kind, text, trigger, source, confidence, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (KIND, rule.strip(), trigger.strip(), source, confidence, time.time()),
-    )
-    conn.commit()
-    return Memory(
-        id=cursor.lastrowid,
+    """写入一条教训。trigger 是「什么时候该用它」的关键词。
+
+    写入走 `store.insert_memory`（全仓唯一写入口）：教训与其它记忆一样要进
+    `memory_fts` 的四列（`text/kind/trigger/source`），否则 `recall` 永远
+    查不到教训，触发词也永远只是个存着不用的字符串（设计稿 §3 缺陷 4）。
+    不用 FTS5 触发器的理由（中文逐字拆是 Python 函数）见 `insert_memory`。
+    """
+    return insert_memory(
+        conn,
         kind=KIND,
         text=rule.strip(),
         source=source,
@@ -84,8 +83,8 @@ def match_lessons(
 ) -> list[Memory]:
     """挑出与当前场景相关的教训，按置信度排序。
 
-    匹配是关键词包含：触发词出现在任务描述里就算命中。规则很土，
-    但它是可解释的——推送了不该推的教训，你能一眼看出是哪个词匹配上的。
+    匹配是关键词包含：触发词出现在任务描述里就算命中。规则简单，
+    但它是可解释的——推送了不该推的教训时，能直接看出是哪个词匹配上的。
     """
     if not context.strip():
         return []
@@ -147,7 +146,7 @@ def prune_lessons(conn: sqlite3.Connection) -> list[int]:
     """把样本足够但效果很差的教训清出推送池，返回被清理的 id。
 
     不是删除——它仍然留在库里，检索时还可能被翻出来。直接删掉会丢掉
-    「我们试过这条路」这个信息本身。
+    「这条路试过了」这个信息本身。
     """
     rows = conn.execute(
         "SELECT id FROM memory WHERE kind = ? AND applied_count >= ?"

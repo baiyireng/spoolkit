@@ -1,0 +1,62 @@
+{
+  "runs": 18,
+  "requests": 64,
+  "within_budget": 64,
+  "over_budget": 0,
+  "strategies": {
+    "D0": {
+      "n": 3,
+      "complete": 0,
+      "mean_total_tokens": 6450.0,
+      "mean_elapsed_s": 163.1,
+      "mean_ngram_repeat": 0.8459,
+      "within_budget": 3
+    },
+    "D1": {
+      "n": 3,
+      "complete": 0,
+      "mean_total_tokens": 3327.0,
+      "mean_elapsed_s": 75.2,
+      "mean_ngram_repeat": 0.6323,
+      "within_budget": 3
+    },
+    "D2": {
+      "n": 3,
+      "complete": 3,
+      "mean_total_tokens": 2496.0,
+      "mean_elapsed_s": 55.5,
+      "mean_ngram_repeat": 0.5056,
+      "within_budget": 3
+    },
+    "D3": {
+      "n": 3,
+      "complete": 3,
+      "mean_total_tokens": 2642.0,
+      "mean_elapsed_s": 64.3,
+      "mean_ngram_repeat": 0.3255,
+      "within_budget": 3
+    },
+    "E1200": {
+      "n": 3,
+      "complete": 0,
+      "mean_total_tokens": 6602.0,
+      "mean_elapsed_s": 138.7,
+      "mean_ngram_repeat": 0.0302,
+      "within_budget": 3,
+      "mean_truncated_sections": 1.0,
+      "mean_conclusion_sections": 2.0,
+      "mean_section_overlap": 0.0045
+    },
+    "E1600": {
+      "n": 3,
+      "complete": 0,
+      "mean_total_tokens": 7002.0,
+      "mean_elapsed_s": 149.1,
+      "mean_ngram_repeat": 0.1047,
+      "within_budget": 3,
+      "mean_truncated_sections": 1.0,
+      "mean_conclusion_sections": 2.0,
+      "mean_section_overlap": 0.0045
+    }
+  }
+}

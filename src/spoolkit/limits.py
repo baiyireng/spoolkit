@@ -61,23 +61,174 @@ KNOBS: tuple[Knob, ...] = (
     ),
     Knob(
         "no_edit_limit", 4, CAPABILITY,
-        "连续几步不提出改动就收窄成只能写（实测模型对文字提醒免疫）",
+        "连续几步查看却没有拿到新信息，就要求这一轮给结论（写明缺什么）。"
+        "不收成只能写：还没有新内容时，写工具只能拿来猜。"
+        "读到了新内容不算进这条：那是探索，到 no_edit_intervene_at 再问督导",
     ),
     Knob(
         "no_edit_intervene_at", 8, CAPABILITY,
-        "漫游到几步升级给督导：每步换一个查询的绕法，机械计数器抓不到",
+        "漫游到几步升级给督导：每步换一个查询的绕法，机械计数器抓不到。"
+        "**只看不写本身不算打转**（见 no_edit_explore_grace）：这条只兜"
+        "「读了很多步却一步新信息都没进来」",
+    ),
+    Knob(
+        "no_edit_explore_grace", 1, CAPABILITY,
+        "「连续只看不写」到干预线时，要不要先看**看的那几步有没有拿到新信息**。"
+        "1 = 最近 no_edit_look_window 步里有任何一次**成功**的查看，"
+        "就按正常探索处理：交给督导的措辞变成「它还在探索，判断该不该继续」，"
+        "而不是「它只看不写」。依据：dogfood 那条「优化一下旧文件的代码」轨迹里，"
+        "它连读 4 步（本来要先读再计划）就被判成打转、督导直接建议收手——"
+        "把正常的先读后计划当成原地打转。0 = 退回老行为（只看不写即打转）",
+    ),
+    Knob(
+        "no_edit_look_window", 6,
+        CAPABILITY,
+        "上面那条往回看几步。它是能力标定值：上下文越长/模型越强，"
+        "「还在探索」的窗口可以放宽；取 6 与 RECENT_WINDOW 同量级",
+    ),
+    Knob(
+        "failed_repeat_at", 2, CAPABILITY,
+        "同一个动作**连续失败**几次就升级给督导。它是「同一失败动作反复重试」"
+        "这条判据的 Mech 阈值——也就是用户说的「后一种才算打转」。"
+        "取 2 = 第一次原样重试就交给判断：mechanical 层已经硬拦了原样重提"
+        "（failed_repeat_block_at），这一步只是把「它在同一个坑里反复试」"
+        "作为**给督导的问题**说出来，不再是「只看不写」这种含糊信号。"
+        "调 0 = 关掉这条升级路径",
     ),
     Knob(
         "empty_turn_limit", 4, CAPABILITY,
         "连续几个空回合判它卡死并收尾（协议里没有「我在等你确认」的表达）",
     ),
     Knob(
+        "converge_at_steps", 2, CAPABILITY,
+        "**临近预算强制收束**：剩余步数 ≤ 这个数时，注入一条收束指令——"
+        "用已有素材给结论，素材不足就写明缺什么，并且不得再开新的探索"
+        "（只允许写结论 / 至多一次必要的读取）。依据：真机对照 36 次"
+        "（HEAD 4906942）实测 33 次没有结论，其中「已经拿到足够素材却还在"
+        "翻文件」是主因之一（A 任务 12 步里 13 次调用全是查看类、末回合仍是"
+        "一个查看调用）；上下文重置又把这些素材整段丢掉，于是最后那几步"
+        "全部用来重新收集，结论一次都没写。取 2 = 留出「写结论」与「一次"
+        "必要重取」两轮；调 0 = 关掉这条注入（变异对照用），调大 = 更早收束",
+    ),
+    Knob(
+        "converge_write_grace", 0, CAPABILITY,
+        "收束态里**还允许写几次成果**。算的是「交内容」的写工具"
+        "（`replace_lines` / `replace_text` / `write_file` / `delete_file`）；"
+        "`confirm_rewrite` 不算——它只是把**已经暂存**的正文落盘，拒它等于把"
+        "这一轮的工作作废（见 `_converge_blocked_call` 的②）。"
+        "0 = 收束态只准给结论（默认）；1 = 只准写一次；-1 = 不设上限（旧行为）。"
+        "为什么默认是 0：真机对照两批（p0 探针、B 靶、t=0、每臂 3–5 次、"
+        "每跑前重摆沙箱）量出来的。步数压紧到 max_steps=5（收束在第 3 步进入）时"
+        "差别很大：不设上限那臂 3/8 跑出结论（其余 5 跑在收束态继续写/改，撞步数"
+        "上限、一句结论都没写），默认拦写那臂 8/8 都给出了结论；步数宽松到"
+        "max_steps=8 时这一档几乎不被触发（9 跑里只拦到 1 次写），两臂都在天花板上，"
+        "没有可重复的代价。也就是说：拦的是「最后两步再开新改动」这种本来就做不完的"
+        "动作，而**已经写下的东西一件都不会少**（拒它的话术里就是这么说的：东西仍在"
+        "盘上、仍可回退，现在该做的是给结论）。调 -1 可以退回旧行为，做对照用。",
+    ),
+    Knob(
         "step_ceiling_factor", 8, CAPABILITY,
         "督导续期的总上限 = 基础步数 × 这个倍数（安全线，不是任务预算）",
     ),
     Knob(
+        "failed_repeat_block_at", 2, CAPABILITY,
+        "同一个调用**失败之后**，第几次原样重提开始硬拦。依据：dogfood 里 write_file "
+        "被拒后模型一字不改地又提了一次，白吃一步、也白等一次模型生成；"
+        "失败过的参数重提不会得到别的结果，所以默认 2 = 第一次重提即拦。"
+        "调 3 = 允许它再试一次（文件可能被别的动作改过，那时指纹会在成功改动后清零）",
+    ),
+    Knob(
         "supervisor_max_grant", 20, CAPABILITY,
         "督导一次最多给多少步：给太多等于取消上限",
+    ),
+    Knob(
+        "explore_grant_steps", 3, CAPABILITY,
+        "督导说「这是正常探索」却给了 stop 时，我们替它续几步。"
+        "依据：本机 27B 复跑「优化一下旧文件的代码」（预算 3 步）时，它的 reason "
+        "写的是「任务处于正常探索阶段，尚未提出改动……总步数预算充足（剩余 21 步）」，"
+        "action 却是 stop——自己说的和做的是两件事，而 stop 把一次尚未开始的探索判死。"
+        "取 3 = 够它落到一处改动上，不是给出一轮新预算；调 0 = 关掉这条兜底",
+    ),
+    Knob(
+        "output_boost_min_lines", 120, CAPABILITY,
+        "目标产出达到这么多行时，**一开始**就把输出预留抬到 boost 档（不等截断）。"
+        "依据：dogfood 实测，一份 120 行的整份产出在 0.15 档（本机 8K 窗口 "
+        "≈ 1225 token）就是不够——那一次被截断、重试才拿到 2455，而重试的那一轮"
+        "有可能丢掉 rewrite_reason 参数（丢了就被护栏拒掉、卡在确认通道外面）。"
+        "阈值取 120 就是这次实测的读数：120 行装不进 0.15 档。"
+        "**本实现初值**：调大 = 更晚才抬，调 0 = 关掉（退回「截断后才抬」的老行为）",
+    ),
+    Knob(
+        "step_lines_per_bonus", 60, CAPABILITY,
+        "**步数预算随产出规模放大**：目标文件每多少行给 1 步额外预算。"
+        "依据：本仓 dogfood 实测，303 行的两份 HTML 合并成单文档这种任务，"
+        "10 步基线用满仍然失败（模型被护栏挡住后原样重试），而整份产出的速度"
+        "按 303 行 ÷ 10 步 ≈ 30 行/步量级，取 60 = 留一倍余量。"
+        "**本实现初值，不是测出来的数**：调大 = 更省步数，调小 = 给得更多",
+    ),
+    Knob(
+        "step_lines_bonus_cap", 12, CAPABILITY,
+        "上一条最多补几步。没有它，一个万行文件会把步数上限抬到没有边界——"
+        "而「一次跑多久」的天花板必须存在（与 step_ceiling_factor 同一性质）",
+    ),
+    Knob(
+        "step_budget_hard_cap", 0, CAPABILITY,
+        "**步数预算的硬上限**：一次运行真正能走的步数不得超过它（0 = 不许任何"
+        "放大，预算就是预算）。依据：真机对照 36 次（HEAD 4906942）实测，配 12 "
+        "步的格子里有 10 格实跑到 13–24 步——「按目标行数放大」在模型反复写"
+        "同一个大文件时被反复触发，而上限被抬高这件事**读数里一个字都没有**，"
+        "报告与事件里只看到「未完成」。所以这条的默认值是 0：自动放大默认关，"
+        "配置多少就是多少；确实需要按规模放宽时按工作区显式写一个数，"
+        "而「放宽了」这件事必须在 trace 与步数读数里看得见（`loop.py` 的"
+        "`step_hard_cap` / `clamp_step_limit`，放大被这条夹住时如实记一行）",
+    ),
+    Knob(
+        "blocked_refund_limit", 3, CAPABILITY,
+        "被硬拦（**没有执行**）的一步最多退还几步预算。判据与工具名无关："
+        "这一步里的每一个调用都被拦下、一个都没跑，这一步就没有产出、也没换来"
+        "新信息，不该白吃预算。改前这里按工具名分类（编辑类 + 几个查看类），"
+        "漏写一个名字不会有报错，只会让那个工具的被拦动作继续吃预算"
+        "（实测 find_symbol 不在名单里，被拦一次照旧占 1 步）。"
+        "退还要有上限，否则模型可以靠不断被拦把预算变成无限。"
+        "依据：dogfood 那次两次被拒的 write_file 白吃了 2 步。0 = 不退还（退回老行为）",
+    ),
+    Knob(
+        "reroute_block_at", 1, CAPABILITY,
+        "同一个（工具 + 参数）组合被硬拦几次之后**停用它**：从这里起这个组合的"
+        "每一次发起都直接拒，并把替代动作清单列出来（换参数 / 换工具 / 先看别的 / "
+        "直接给结论），同时把轨迹交给督导（带上「已被拦几次 + 已经给过哪些替代"
+        "方案」）。依据：探针 l5-set3 实测同一条 search_code 被拦 3 次，模型每一轮"
+        "的意图都写着「已按要求改好」，而参数一字未改——只递一句话拦不住它。"
+        "默认 1 = 第一次被拦之后该组合即停用（不再陪它复读一轮）；"
+        "调大 = 更宽容；0 = 关掉停用（退回「每次都给同一句话」的老行为）",
+    ),
+    Knob(
+        "rewrite_stage_limit", 3, CAPABILITY,
+        "同时最多暂存几份「已声明、清单还没确认完」的重写正文。依据：一次运行"
+        "里真正会大改的文件通常个位数（本仓 dogfood 就 1 份 snake.html），"
+        "3 份足够覆盖「同时合并两个文件」，而条数上界正是暂存区不被当垃圾场的"
+        "第一道闸——没有它，模型反复提重写就能把内存填满。满了不是静默丢："
+        "话术会点名「先生效或放弃已有暂存」",
+    ),
+    Knob(
+        "rewrite_stage_chars", 400000, CAPABILITY,
+        "**单份**暂存正文最多多少字符（≈ 一个 8000 行的文件）。依据：要暂存的"
+        "是模型已经在一次输出里交出来的东西，而输出预算按 token 算（本机 8K 窗口"
+        "下最多 2457 token），所以这个上界实际上够不着；它是防「把整个大文件当"
+        "一次重写塞进来」的安全网，不是性能参数",
+    ),
+    Knob(
+        "rewrite_stage_total_chars", 800000, CAPABILITY,
+        "全部暂存正文的**合计**上界（等于条数上界 × 单份上界的一半）。"
+        "单独设一条的理由：条数上界挡不住「3 份都贴着单份上限」这种组合，"
+        "而内存只认总字节",
+    ),
+    Knob(
+        "rewrite_stage_ttl_seconds", 1800, CAPABILITY,
+        "暂存令牌的时效（秒）。依据：本仓 dogfood 一次运行实测 315.9s 墙钟，"
+        "取 1800 = 6 倍余量——一次运行内足够用，运行结束后暂存随进程消失。"
+        "过期即失效并清理（时效本身就是上界的一部分），令牌失效会给"
+        "「怎么重新发起」的人话，不静默当成功、也不静默丢弃",
     ),
     Knob(
         "name_cycle_window", 12, CAPABILITY,
@@ -114,6 +265,41 @@ KNOBS: tuple[Knob, ...] = (
         "督导缺少 finish 结论，修好后同一批 9 件连过两次",
     ),
     Knob(
+        "review_fix_rounds", 0, CAPABILITY,
+        "「不许宣称完成」时先自动修几轮（设计稿 §3.1 处理顺序第 1 条）。"
+        "**默认 0 = 关**：自动修要**再花一轮模型调用**，短预算的运行（探针的 "
+        "8 步、用例的 2–4 步）付不起这个价，而长任务/无人值守的值可以调大。"
+        "调大之后它仍然是有界的：同一份发现清单连着报两次（说明它什么都没动）"
+        "就停，不会一直复读",
+    ),
+    Knob(
+        "behavior_entry_timeout", 60, CAPABILITY,
+        "L2.2 对照运行里一条入口命令的墙钟上限（秒）。一次对照跑两次子进程，"
+        "超时**不算行为差异、也不当通过**，只报「这一步没验」。默认 60s 是按"
+        "「入口是小脚本、输入是仓库里现成的小样本」标定的；项目入口本身很重时"
+        "要么调大它，要么把 README 里的用法示例换成小样本",
+    ),
+    Knob(
+        "review_trigger_files", 5, CAPABILITY,
+        "L3 语义审查（自动审查层 P2）的**规模触发线**：这一轮改动的文件数达到"
+        "它（或行数达到它 × 80）就跑一次语义审查。依据：设计稿 §5 第 3 条要求"
+        "「与 review_limit 同量级」，5 就是那个量级；行数按 5 × 80 = 400 折算"
+        "（与 `review_gate.trigger_lines` 同一个口径）。**它是省钱的旋钮**："
+        "一次语义审查 ≈ 主循环一步的量级，调小 = 多审查多花钱，调 0 = 只按"
+        "其余四条触发条件跑",
+    ),
+    Knob(
+        "review_max_tokens", 700, CAPABILITY,
+        "L3 一次语义审查的**输出**上限（token）。发现清单是结构化的 JSON，700 "
+        "够它给一屏发现；这是设计稿 §5 说的「上界用 max_tokens 与超时双重约束」"
+        "里的一半（另一半是 `behavior_entry_timeout` 那种墙钟）",
+    ),
+    Knob(
+        "review_max_findings", 12, CAPABILITY,
+        "L3 一次审查最多收几条发现（超出即丢弃并在读数里说明）。依据：设计稿 "
+        "§4 的噪声控制——「一次审查的发现条数设上限，超出说明改动太大、应当拆」",
+    ),
+    Knob(
         "survey_budget", 1200, CAPABILITY,
         "survey 一次最多收多少 token 的上下文",
     ),
@@ -130,8 +316,18 @@ KNOBS: tuple[Knob, ...] = (
         "上下文达到窗口的多少就开始整理历史（不打断任务）",
     ),
     Knob(
-        "hard_trigger_ratio", 0.90, CAPABILITY,
-        "达到多少直接重置上下文（保留任务状态）",
+        "hard_trigger_ratio", 0.98,
+        CAPABILITY,
+        "达到多少直接重置上下文（保留任务状态）。**它是有效预算的比例**"
+        "（`Budget.hard_limit`），不是窗口的比例——P0 取证改的那一处。"
+        "旧口径 `window × 0.90`（8K 窗口下 7372）比装配器真正能装的有效预算"
+        "（6964）还低，于是历史还没装满就重置：真机对照 36 次里 17 次至少重置"
+        "过一次，重置把已读到的工具输出整段丢掉（`p0-turns.json` 逐回合可查："
+        "第 4 步已读到失败原文，第 5 步重置之后回到「先列项目根目录」），"
+        "那是「素材够了却写不出结论」的主要成因。"
+        "为什么不是 1.0：装配器对非必留区段**只裁剪不丢弃**，裁剪会留下"
+        "「内容已裁剪」的半截正文；留一点余量让重置先发生，比让模型读到半截"
+        "内容好。这条仍然可覆盖：窗口更大/模型更强时可以调高到接近 1.0",
     ),
     Knob(
         "hot_memory_ratio", 0.15, CAPABILITY,
@@ -145,6 +341,10 @@ KNOBS: tuple[Knob, ...] = (
     Knob("retrieval_ratio", 0.15, CAPABILITY, "检索内容占有效预算的比例"),
     Knob("lessons_ratio", 0.10, CAPABILITY, "历史教训占有效预算的比例"),
     Knob(
+        "session_memory_ratio", 0.08, CAPABILITY,
+        "会话记忆占有效预算的比例。系统提示仍走固定额度封顶，任务状态比例不变",
+    ),
+    Knob(
         "recent_chat_turns", 6, CAPABILITY,
         "通道/网页带进本轮提示的最近几条往来（不是工具往返；强模型可加）",
     ),
@@ -153,8 +353,102 @@ KNOBS: tuple[Knob, ...] = (
         "上述每条往来最多留多少字；再长截断，避免把整段答复塞回窗口",
     ),
     Knob(
+        "history_digest_turns", 12, CAPABILITY,
+        "「更早那一段」压进本轮提示的摘要最多几条（在最近 recent_chat_turns 条"
+        "之前那一段里取）。12 是「一次会话大致聊多少轮」的量级：让模型天然知道"
+        "我们聊到哪儿了，而不是只能靠它主动检索——实测（本机 27B）它不会主动查。"
+        "强模型/大窗口可以调大；调 0 = 不带摘要",
+    ),
+    Knob(
+        "history_digest_chars", 400, CAPABILITY,
+        "上述摘要的**总字符预算**（不是每条）：每条先按它截（助手那侧取一半），"
+        "再按这个总预算从最老的开始丢。于是摘要正文总量 ≤ 400 字符、行数 ≤ "
+        "history_digest_turns 条——中文大致 1 字 = 1 token，最坏约 300 token。"
+        "它必须有界：摘要进的是每轮都付的提示，而「历史原文不进上下文」这条"
+        "设计不能被摘要绕过去",
+    ),
+    Knob(
+        "history_search_limit", 5, CAPABILITY,
+        "search_history 一次默认回几条历史消息。与 recall 的 5 对齐：每条都要"
+        "占上下文，而历史检索答的是「来源」这种定位问题，不需要一次给全",
+    ),
+    Knob(
+        "history_search_max", 20, CAPABILITY,
+        "search_history 一次最多几条。再多就是把整段历史灌回窗口——"
+        "而历史不进上下文正是短上下文成立的前提；窗口大的模型可以调大",
+    ),
+    Knob(
+        "history_snippet_chars", 240, CAPABILITY,
+        "search_history 每条片段最多多少字。与 recent_chat_chars 对齐："
+        "同一份往来的两种看法，单条截断的口径不该有两套",
+    ),
+    Knob(
         "episode_final_chars", 400, CAPABILITY,
         "事件摘要里任务结论最多留多少字（按本机 27B / 8K 标定）",
+    ),
+    Knob(
+        "remember_max_chars", 400, CAPABILITY,
+        "进热记忆的一条最多多少字（设计稿 §4.3 定案的 remember_max_chars）。"
+        "它是 J4「非一次性产物」的长度线：设计稿 §1 记录的真实工作区里，"
+        "12 城市天气表与三段交付答复都长于它，而可复用的真事实都在一句话量级。"
+        "超线的条目不进热记忆、降级为 episode（由写入门禁判，见 memory/gate.py）",
+    ),
+    Knob(
+        "remember_table_lines", 3, CAPABILITY,
+        "一条记忆里出现几行「同构表格」（每行至少两个 `|`）就不算一句话事实"
+        "（设计稿 §5.1 的 J4：≥3 行同构表格判为一次性产物）。与 remember_max_chars"
+        "同属形态判据，所以同样可覆盖——按工作区调一版判据不该改代码",
+    ),
+    # 去重指纹的口径（设计稿 §4.3 / §5.3 ④ 第 1 级）。
+    # 四个开关一起决定「什么算同一条」：命中同一条不新增，只在报告里记一次。
+    # 它们是标定值而不是实现细节——按工作区调一版去重口径不该改代码。
+    Knob(
+        "dedup_casefold", 1, CAPABILITY,
+        "计算去重指纹时是否不分大小写（1 = 不分，设计稿 §4.3 定案："
+        "「测试命令是 pytest -q」与「测试命令是 PYTEST -Q」视为同一条）。"
+        "0 = 大小写不同即算两条",
+    ),
+    Knob(
+        "dedup_collapse_ws", 1, CAPABILITY,
+        "计算去重指纹时空白怎么算（1 = **整体去掉**，设计稿 §4.3 的「去空白」口径："
+        "换行、Tab、全角空格、零宽字符都不参与比较。0 = 只把连续空白折成一个半角"
+        "空格并去掉首尾——这时「a b」与「ab」是两条）",
+    ),
+    Knob(
+        "dedup_strip_punct", 1, CAPABILITY,
+        "计算去重指纹时是否去掉标点与符号（1 = 去掉，设计稿 §4.3 的「去标点」口径："
+        "「测试命令是 pytest -q」与「测试命令是 pytest -q。」算同一条）。"
+        "去掉之前先把全角字符转半角（（ 转 (、「 转 \" 等），所以全角/半角标点等价。"
+        "0 = 标点参与比较。**只影响指纹，不改写落库/落盘的原文**",
+    ),
+    Knob(
+        "dedup_hash_chars", 16, CAPABILITY,
+        "去重指纹（sha1 十六进制）取前多少位（设计稿 §4.3 定案 16 位 = 64 bit："
+        "这个规模的记忆库碰撞概率远低于手工改错一条的概率）。调大只影响新写指纹，"
+        "存量条目要重新归档才会换指纹",
+    ),
+    # 热记忆的容量口径（设计稿 §4.3 块 4 / §7.1）。两个值都来自设计稿的定案：
+    # 40 条 / 单条 200 字，按真实工作区 9 条的规模留了足够余量（§1 实测）。
+    Knob(
+        "hot_max_items", 40, CAPABILITY,
+        "热记忆最多几条（设计稿 §4.3 / §7.1 定案的 hot_max_items=40）。"
+        "热记忆每轮全量注入，token 预算（hot_memory_ratio）只约束总字数，"
+        "约束不了「条数」：40 条各一行仍然读得动，400 条一行也读不动。"
+        "超限时按重要度从低到高下沉（不是先进先出，见 memory/hot.py）",
+    ),
+    Knob(
+        "hot_item_chars", 200, CAPABILITY,
+        "热记忆**单条**多少字以上就不收（设计稿 §4.3 / §7.1 定案的 hot_item_chars=200）。"
+        "它是写入侧的拒绝线，比 remember_max_chars=400 更紧：一条占半屏的条目"
+        "即使只算一条，也把同节里几条真事实挤了出去。被拒条目下沉为 episode"
+        "（理由 `too_long`），不丢；存量超长条目由重要度里的长度扣分先挤出去",
+    ),
+    Knob(
+        "hot_importance_long_step", 200, CAPABILITY,
+        "重要度启发式里「越长越扣分」的步长：每满这么多字扣 1 分"
+        "（默认 200 与 hot_item_chars 同量级，所以刚过单条线的条目扣 1 分，"
+        "400 余字的天气表扣 2 分、排在任何一条短事实后面）。"
+        "它是「可解释」的一半：分值差要能说清是哪条规则给的",
     ),
     Knob("system_quota", 900, CAPABILITY, "系统提示的固定配额（token）"),
     Knob(
@@ -225,20 +519,266 @@ KNOBS: tuple[Knob, ...] = (
         SAFETY,
         "**符号项**：永久禁止清单——提权与系统级操作，不提供申请入口",
     ),
+    # ---- P1（记忆架构）新增的 22 个旋钮 -----------------------------------
+    #
+    # **一次登记、分批消费**：P1 计划 Task 1 把它们一次性登记在这里，批次 2–4
+    # 的任务只 `resolve` 不追加（`limits.py` 是这一批的单写点，见计划「并行与
+    # 串行」的单写者清单）。每条 note 的「依据」一律写设计稿章节号或计划任务号
+    # ——不许写死魔法数不留出处（Task 1 要点第 1 条）。
+    #
+    # 计划 Task 1 的旋钮表里还有第 23 行 `retrieval_ratio=0.15`：它就是上面
+    # 既有的那一项（P0 已登记、已被 `context/budget.py` 消费），**不重复登记**
+    # ——重复登记会让 `_BY_NAME` 静默取后者，Task 1 验收 5（无重名）会红。
+    #
+    # 嵌入只留 `w_embed` 一个旋钮、默认 0.0（设计稿 §13.11 / §13.13 第 6 条
+    # 定案：P1 不引嵌入）：它是五维公式里的系数，且 `why` 必须能打出这一维
+    # （§14.4 规矩 1、§6.3）。`embed_candidates_n` / `embed_rerank_k` /
+    # `embed_min_cos` / `embed_timeout_ms` 四个选型旋钮**不登记**（属嵌入第③步，
+    # §14.4 规矩 3 + 计划「范围」右列的「不做」）。
+    Knob(
+        "w_bm25", 1.0, CAPABILITY,
+        "五维公式里 bm25 那一维的系数（设计稿 §14.4 规矩 1："
+        "rel = normalize(w_bm25*bm25_norm + w_embed*embed_cos)）。"
+        "**本计划初值，不是设计稿数值**（设计稿没给这个数）：取 1.0 时"
+        "单信号等价于纯 bm25。消费：T5/T6",
+    ),
+    Knob(
+        "w_embed", 0.0, CAPABILITY,
+        "五维公式里嵌入那一维的系数（设计稿 §14.4 规矩 1）。**默认 0.0 是"
+        "定案**（§13.11 的顺序 + §13.13 第 6 条：先分词口径、再 bm25，嵌入"
+        "推迟）：P1 里这一维只会是「关」，但 `why` / `memory_decision` / "
+        "`--events memory` 三个出口必须**可见地**报出来（§14.4 规矩 6 的"
+        "「不许静默降级」）。消费：T6",
+    ),
+    Knob(
+        "rank_w_relevance", 0.40, CAPABILITY,
+        "五维打分里相关度的权重（设计稿 §6.1 的权重块）。"
+        "五个权重与半衰期全部从登记表取，一个都不许写死在 rank.py 里。消费：T6",
+    ),
+    Knob(
+        "rank_w_recency", 0.20, CAPABILITY,
+        "五维打分里新近度的权重（设计稿 §6.1 的权重块）。消费：T6",
+    ),
+    Knob(
+        "rank_w_importance", 0.25, CAPABILITY,
+        "五维打分里重要度的权重（设计稿 §6.1 的权重块）。消费：T6",
+    ),
+    Knob(
+        "rank_w_usage", 0.10, CAPABILITY,
+        "五维打分里使用次数的权重（设计稿 §6.1 的权重块）。消费：T6",
+    ),
+    Knob(
+        "rank_w_penalty", 0.05, CAPABILITY,
+        "五维打分里惩罚项的权重（设计稿 §6.1：penalty = applied_count / "
+        "(use_count + 1)）。消费：T6",
+    ),
+    Knob(
+        "rank_recency_half_life_days", 30, CAPABILITY,
+        "新近度那一维的半衰期天数（设计稿 §6.1：rec = exp(-age_days / "
+        "half_life_days)）。它是能力标定值：外部 API 的模型不该照搬本机 "
+        "27B 的 30 天。消费：T6",
+    ),
+    Knob(
+        "recall_candidates_n", 50, CAPABILITY,
+        "两阶段检索的**候选池**大小（设计稿 §14.4 规矩 3 的 N；设计稿里的名字"
+        "是 embed_candidates_n，P1 不引嵌入所以按计划「口径裁决 3」改成中性名）。"
+        "候选池只在内存里过一遍、**不渲染进 prompt**（§6.2 表：0 token）。"
+        "消费：T6",
+    ),
+    Knob(
+        "recall_rerank_k", 5, CAPABILITY,
+        "两阶段检索的**重排后取几条**（设计稿 §14.4 规矩 3 的 K；设计稿里的"
+        "名字是 embed_rerank_k，「口径裁决 3」改成中性名）。硬约束："
+        "**K ≤ recall_limit**，且重排只能减少进上下文的条数、不能增加。消费：T6",
+    ),
+    Knob(
+        "recall_limit", 5, CAPABILITY,
+        "recall 一次默认回几条（设计稿 §6.2 表：一次 5 条 × 240 字 ≈ 1200 "
+        "token，与 history_search_limit=5 同一口径）。消费：T2（semantic 检索的"
+        "默认条数）/T6/T11",
+    ),
+    Knob(
+        "recall_entry_chars", 240, CAPABILITY,
+        "recall 每条最多多少字（设计稿 §6.2 表；与既有 history_snippet_chars=240 "
+        "对齐：同一份内容的两种看法，单条截断的口径不该有两套）。消费：T11",
+    ),
+    Knob(
+        "dedupe_similarity", 0.90, CAPABILITY,
+        "近似去重的相似度线（设计稿 §5.3 ④ 第 2 级 + §6.1）。它是写入侧第二级"
+        "去重的判据：精确级由 content_hash 唯一部分索引负责，这一级抓同义改写，"
+        "**抓不到的要如实写在 --explain 里、不假装**（计划「不做」清单）。消费：T7",
+    ),
+    Knob(
+        "remember_min_chars", 8, CAPABILITY,
+        "一条记忆的**最短长度**（设计稿 §4.3 容量上限段定案的 "
+        "remember_min_chars=8）：比它短的条目不是一个可复用事实。与既有 "
+        "remember_max_chars=400 是同一条长度线的两端，所以同样可覆盖。消费：T7",
+    ),
+    Knob(
+        "memory_budget_ratio", 0.30, CAPABILITY,
+        "语义记忆（三层注入里的检索层）占有效预算的比例上限（设计稿 §6.2 表）。"
+        "消费：T12",
+    ),
+    Knob(
+        "event_chain_max_units", 2, CAPABILITY,
+        "一轮最多取几个「实体·属性的有序事件链」单元（设计稿 §6.7 / §6.2 表）。"
+        "链作为**一个单元**参与候选与重排，不是把事件逐条塞进去。消费：T11",
+    ),
+    Knob(
+        "event_chain_render_max_chars", 400, CAPABILITY,
+        "一个事件链单元渲染进上下文的最多字数（设计稿 §6.7 / §6.2 表）。"
+        "消费：T11",
+    ),
+    Knob(
+        "state_direct_inject_min_confidence", 0.8, CAPABILITY,
+        "允许**直接注入** state 行的 confidence 门槛（设计稿 §6.6 + §13.13 第 7 "
+        "条：直注要同时过「重要度达标 + 在时间窗内 + 过冲突检查」三关）。"
+        "设计取值，不是测出来的数。消费：T12",
+    ),
+    Knob(
+        "state_direct_inject_max", 1, CAPABILITY,
+        "一轮最多直接注入几条 state 行（设计稿 §6.6：只开这一道口，"
+        "`semantic` 的普通条目一律不做直接注入）。消费：T12",
+    ),
+    Knob(
+        "state_direct_inject_max_age_days", 30, CAPABILITY,
+        "直接注入的 state 行必须有多新（设计稿 §13.13 第 7 条只写「最近 N 天」，"
+        "**没给 N**）。**本计划初值，不是设计稿数值**：取 30 与 "
+        "rank_recency_half_life_days 同量级。消费：T12",
+    ),
+    Knob(
+        "state_auto_pick", 0, CAPABILITY,
+        "冲突的 state 值要不要自动选一个（设计稿 §15.6 第 3 条：默认 0 = 关，"
+        "**不许静默选一个**；开启时也必须在输出里标明是自动选的）。消费：T9",
+    ),
+    Knob(
+        "event_archive_threshold", 1000, CAPABILITY,
+        "memory_event 超过几条就把最旧的搬进归档表（设计稿 §13.13 第 5 条："
+        "与 episode_archive_threshold=1000 同口径，阈值进登记表可覆盖）。"
+        "**待标定初值**：事件增长速率**无实测**（§13.13 第 5 条点名「本轮没测」；"
+        "§7.1 的 episode 26 条/18 天不能外推到 event）。消费：T3/T9",
+    ),
+    # ---- T11 补缺轮登记的两个旋钮 -----------------------------------------
+    #
+    # T11 交回来时如实报了两条缺口，这两项就是其中的「阈值写成了裸常数」：
+    # `rank.CHAIN_INCOMPLETE_FACTOR = 0.5` 与 `session.MIN_MATCHED_TOKENS = 2`
+    # 都**没有**设计稿数值（设计稿 §6.7 表只说「缺基准值就扣分」、判据②只说
+    # 「逐字召回要够区分度」），是本实现的裁决。裁决可以是初值，但不该是**写死**
+    # 的值：本仓的规矩是「阈值不许写死、必须进登记表可覆盖」（设计文档 2.7 的
+    # 判据 + P1 计划 Task 1 的「一次登记」）。所以这一轮把它们补登进表。
+    Knob(
+        "event_chain_incomplete_factor", 0.5, CAPABILITY,
+        "链单元**时序完整度**不足时，重要度乘的扣分系数（设计稿 §6.7 表 / §15.6："
+        "`derived_from` 没覆盖写链 / 缺基准值 / 状态未定时扣分并标 needs_review，"
+        "**不假装完整**）。设计稿只说「扣」、**没给数**——0.5 是 T11 的实现裁决，"
+        "不是设计稿数值：它要能看得见地扣，又不能把一条信息量仍然很大的链打到与"
+        "「没有这条」等价。1.0 = 不扣（排查用），越接近 0 扣得越狠。"
+        "消费：T11 补缺轮（rank._chain_imp_part）",
+    ),
+    Knob(
+        "event_chain_min_matched_tokens", 2, CAPABILITY,
+        "事件侧「逐字召回」把键带进候选所需的**最少不同 token 数**"
+        "（设计稿 §6.7 判据②的实现口径）。为什么默认不是 1：逐字口径把"
+        "「现在还剩多少」拆成 `现 在 还 剩 多 少`，单个「在」几乎每句话里都有"
+        "——只命中一个字就建链会把链单元灌满候选池；两个字符的命中"
+        "（事件「还剩 80」命中 `还`+`剩`）才有区分度。它是**候选选择判据、不是"
+        "打分**（打分只有 rank.py 的五维一条路）；调大 = 更严（键更难被建链）。"
+        "消费：T11 补缺轮（session._keys_recalled_by_events）",
+    ),
+    # ---- 「素材压缩」（O4）第一阶段：动态阈值 --------------------------------
+    #
+    # 规划里 S4 只落一条纯函数（`context/budget.compact_trigger`）：**什么时候
+    # 值得把已读到的素材压一遍、压完允许留多少**。四个数全在这里登记，理由与
+    # 其余旋钮一样——它们会随窗口大小与模型强弱变，写死就是替强模型砍能力。
+    # 但比「可覆盖」更要紧的是**动态**：本仓实测的教训是写死的阈值会随窗口一起
+    # 错（同一个「3000 字」在 8K 窗口下正好半屏，在 2K 窗口下就是全部）。
+    #
+    # 单位一律是 **token**，不是字符：预算与需求全在 token 上算，再折一次字符
+    # 就多出一处口径（`llm/tokenizer.py` 的估算是唯一一处转换）。
+    Knob(
+        "material_compact_ratio", 0.72, CAPABILITY,
+        "**素材压缩的触发比例**：当前需求超过有效预算的这个比例（也就是余量"
+        "低于 1 − 它的 28%）就值得把素材压一遍。0.72 是**本实现初值、不是测出来"
+        "的数**，取法与 soft_trigger_ratio=0.70 同量级但与它不是同一件事：软线管"
+        "「整理历史」（丢旧往返），这条管「压缩素材」（把工具输出变成短摘要）——"
+        "一个丢、一个留，方向相反。调小 = 更早压缩（多花模型调用），"
+        "调 0 = 关掉（退回老行为：只有硬重置，素材在重置时缩成素材卡）",
+    ),
+    Knob(
+        "material_compact_share", 0.5, CAPABILITY,
+        "素材至少占当前需求的多少才值得压（0.5 = 不到半屏就不压）。防的是"
+        "「为压缩而压缩」：需求大但大在系统提示、任务状态与检索结果上时，"
+        "压素材省不下几个 token，而压缩本身要花一次模型调用",
+    ),
+    Knob(
+        "material_compact_floor_tokens", 600, CAPABILITY,
+        "**素材短于这个数就别压**（token）。一次压缩要花一次模型调用，素材本身"
+        "不到这个量级时，省下的 token 还不如调用本身贵。600 与 "
+        "remember_max_chars（一句话事实的长短线）同量级；调 0 = 关掉这条防抖"
+        "（只要过线就压，短素材也压）",
+    ),
+    Knob(
+        "material_compact_model_tokens", 700, CAPABILITY,
+        "**压缩模型那一层最多产出多少 token**：判据行是逐字直通、不占这份额度，"
+        "它只约束模型压出来的普通正文。700 与 L3 的 `review_max_tokens` 同量级"
+        "（只让它做删减与归类，不需要长篇输出）；超了、格式不对、或者被机械核对"
+        "拦空，就整段回退机械层结果，绝不把没压下去的东西硬塞回上下文",
+    ),
+    Knob(
+        "observation_inline_lines", 80, CAPABILITY,
+        "整份读入时，不超过这么多行的可检查文件仍把正文留在对话里。"
+        "超过的只把检查结论记入观察（指纹、结构问题），全文不进主循环。"
+        "80 行量级是「一段还看得完」；snake.html 这种两三百行的文档会走观察。"
+        "调大 = 更长的原文进对话（更早触发压缩），调 0 = 可检查文件一律不内联全文",
+    ),
+    Knob(
+        "material_compact_min_free_tokens", 800, CAPABILITY,
+        "**留给下一条工具输出的余量下限**（token）：目标余量取"
+        "`max(有效预算 × (1 − ratio), 它)`。小窗口下比例线保不住「一条工具输出"
+        "可能上千 token」这件事——窗口 2048 时 28% 只有 487，而 `max_output_chars` "
+        "是 4000 字符（≈ 上千 token），压出来的地方还不够下一条输出用。"
+        "大窗口下它不生效（8K 的 28% 是 1950 > 800），这是刻意的：它的角色就是"
+        "小窗口的绝对量兜底，不是第二个比例线",
+    ),
+    Knob(
+        "continuation_overlap_chars", 200, CAPABILITY,
+        "续写拼接时回看的字数（变更单里的 continuation.overlapChars）。"
+        "默认 200，允许 200–400；超出由 overlap_chars 夹回这个区间。"
+        "续写提示只带这段重叠和本节要求，不把整段旧正文送回去",
+    ),
+    Knob(
+        "protocol_v2", 0, CAPABILITY,
+        "长文控制协议灰度（方案里的 protocol.v2）。"
+        "0 = 旧统一 JSON，done 时带 final；1 = 控制回合去掉 final。"
+        "在工作区 .agent/limits.json 里写数字 1 或 0。写 true 会被忽略。",
+    ),
 )
 
 _BY_NAME = {knob.name: knob for knob in KNOBS}
 
 
 def knob(name: str) -> Knob | None:
+    """按名字查找。找不到返回 None，给「用户输入的名字」那条路用。
+
+    代码里写死的名字用 `require_knob`：写错就在取用处停下，而不是把 None
+    传到 `.default` 上才炸。
+    """
     return _BY_NAME.get(name)
+
+
+def require_knob(name: str) -> Knob:
+    """代码里写死的旋钮名。返回 Knob；名字没登记则抛 KeyError。"""
+    entry = _BY_NAME.get(name)
+    if entry is None:
+        raise KeyError(f"unknown limit: {name}")
+    return entry
 
 
 def resolve(name: str, overrides: Mapping[str, float] | None = None) -> tuple[float, str]:
     """返回值与**来源**。来源要能说出来，否则调参就是猜。"""
     entry = _BY_NAME.get(name)
     if entry is None:
-        raise KeyError(f"没有登记过这个标定值: {name}")
+        raise KeyError(f"unknown limit: {name}")
     if entry.overridable and overrides and name in overrides:
         return float(overrides[name]), "配置"
     return float(entry.default), "默认"
@@ -274,12 +814,25 @@ def save_overrides(project_root: Path, overrides: Mapping[str, float]) -> Path:
 
 
 def render(overrides: Mapping[str, float] | None = None) -> str:
-    """现在生效的是多少、从哪来。"""
-    lines = [f"{'值':>8}  {'来源':<6} {'能不能改':<8} 名字", "-" * 72]
+    """现在生效的是多少、从哪来（Rich markup；TTY 上色，管道无色）。"""
+    from rich.markup import escape
+
+    head = f"{'值':>8}  {'来源':<6} {'能不能改':<8} 名字"
+    lines = [
+        f"[muted]{escape(head)}[/]",
+        f"[muted]{escape('-' * 72)}[/]",
+    ]
     for entry in KNOBS:
         value, source = resolve(entry.name, overrides)
         shown = f"{value:g}"
         can = "可覆盖" if entry.overridable else "写死"
-        lines.append(f"{shown:>8}  {source:<6} {can:<8} {entry.name}")
-        lines.append(f"{'':>8}  {entry.note}")
+        row = f"{shown:>8}  {source:<6} {can:<8} {entry.name}"
+        note = f"{'':>8}  {entry.note}"
+        if source == "配置":
+            lines.append(f"[accent]{escape(row)}[/]")
+        elif not entry.overridable:
+            lines.append(f"[muted]{escape(row)}[/]")
+        else:
+            lines.append(escape(row))
+        lines.append(f"[muted]{escape(note)}[/]")
     return "\n".join(lines)

@@ -1,0 +1,64 @@
+{
+  "runs": 9,
+  "fresh_requests": 84,
+  "within_budget": 84,
+  "over_budget": 0,
+  "max_prompt_plus_max": 4804,
+  "estimate_minus_actual": {
+    "min": 2,
+    "max": 128,
+    "mean": 42.6
+  },
+  "fresh_tokens": 32373,
+  "fresh_elapsed_s": 497.7,
+  "anchor_lost": 3,
+  "novelty_rejected": 27,
+  "rewrites": 3,
+  "cells": {
+    "compare": {
+      "n": 3,
+      "true_complete": 3,
+      "mean_doc_chars": 4163.0,
+      "anchor_lost": 0,
+      "rewrites": 0,
+      "repairs": 0,
+      "failure_shapes": [],
+      "guard_hits_in_doc": 0,
+      "mean_draft_overlap": 0.0,
+      "mean_total_tokens": 2377.0,
+      "mean_elapsed_s": 49.7
+    },
+    "retro": {
+      "n": 3,
+      "true_complete": 0,
+      "mean_doc_chars": 3181.0,
+      "anchor_lost": 3,
+      "rewrites": 3,
+      "repairs": 21,
+      "failure_shapes": [
+        "novelty_rejected",
+        "short_section"
+      ],
+      "guard_hits_in_doc": 0,
+      "mean_draft_overlap": 0.0,
+      "mean_total_tokens": 6253.0,
+      "mean_elapsed_s": 81.8
+    },
+    "tech": {
+      "n": 3,
+      "true_complete": 3,
+      "mean_doc_chars": 3508.0,
+      "anchor_lost": 0,
+      "rewrites": 0,
+      "repairs": 3,
+      "failure_shapes": [],
+      "guard_hits_in_doc": 0,
+      "mean_draft_overlap": 0.0094,
+      "mean_total_tokens": 2161.0,
+      "mean_elapsed_s": 34.4
+    }
+  },
+  "scaffold_hits": 6,
+  "scaffold_retries": 6,
+  "unresolved_anchor": 0
+}

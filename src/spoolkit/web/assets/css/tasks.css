@@ -1,0 +1,175 @@
+  /* 当前会话的任务入口和面板。桌面是右侧抽屉，窄屏是全屏 sheet。 */
+  #tasks-btn { flex:0 0 auto; display:inline-flex; align-items:center; gap:var(--space-1);
+               padding:var(--space-1) var(--space-2); border-radius:999px;
+               border:1px solid var(--line); background:var(--panel-2); color:var(--text);
+               cursor:pointer; font:var(--font-xs)/1.3 var(--sans); white-space:nowrap; }
+  #tasks-btn:hover { border-color:var(--text-dim); }
+  #tasks-count, #tasks-wait { min-width:16px; height:16px; padding:0 5px;
+               border-radius:999px; border:1px solid var(--line);
+               background:var(--bg); color:var(--text-dim); font-size:11px;
+               display:inline-flex; align-items:center; justify-content:center; }
+  #tasks-wait { color:var(--warn-text); background:var(--warn-bg);
+                border-color:var(--warn-line); }
+  #tasks-panel { position:fixed; top:0; right:0; bottom:0; z-index:36;
+                 width:min(400px, 100%); display:flex; }
+  @media (min-width: 861px) {
+    #tasks-panel { bottom:128px; max-height:calc(100vh - 128px); }
+    body:has(#tasks-panel:not(.hidden)) #thread {
+      margin-right:calc(min(400px, 100%) + 12px);
+    }
+  }
+  #tasks-panel.hidden { display:none; }
+  .tasks-sheet { width:100%; height:100%; min-height:0; display:flex;
+                 flex-direction:column; background:var(--panel); color:var(--text);
+                 border-left:1px solid var(--line); box-shadow:var(--shadow-overlay);
+                 padding-top:env(safe-area-inset-top);
+                 padding-bottom:env(safe-area-inset-bottom); }
+  .tasks-head { display:flex; align-items:center; gap:var(--space-2);
+                padding:var(--space-3) var(--space-3) var(--space-2);
+                border-bottom:1px solid var(--line-soft); }
+  .tasks-head h2 { margin:0; flex:1; font-size:var(--font-md); font-weight:650; }
+  .tasks-head .icon-btn { width:30px; height:30px; padding:0; border:0;
+                          border-radius:var(--radius-sm); background:transparent;
+                          color:var(--text-dim); cursor:pointer;
+                          display:flex; align-items:center; justify-content:center; }
+  .tasks-head .icon-btn:hover { color:var(--text); background:var(--bubble-user); }
+  .tasks-head .icon-btn svg { width:15px; height:15px; }
+  .tasks-find { min-width:0; padding:var(--space-2) var(--space-3) 0; }
+  #tasks-search { display:block; width:100%; max-width:100%; box-sizing:border-box; min-width:0;
+                  padding:var(--space-2) var(--space-3);
+                  border-radius:var(--radius-md); border:1px solid var(--line);
+                  background:var(--bg); color:var(--text);
+                  font:var(--font-sm)/var(--leading-tight) var(--sans); }
+  #tasks-search:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .tasks-match { margin-top:var(--space-1); color:var(--text-dim); font-size:var(--font-xs);
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #tasks-scope { display:flex; flex-wrap:wrap; gap:var(--space-2); min-width:0;
+                 padding:var(--space-2) var(--space-3) 0; }
+  .tasks-scope { max-width:100%; padding:2px var(--space-2); border-radius:999px;
+                 border:1px solid var(--line); background:transparent; color:var(--text-dim);
+                 cursor:pointer; font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .tasks-scope.on { color:var(--text); border-color:var(--text-dim); background:var(--panel-2); }
+  .tasks-history { min-width:0; padding:var(--space-1) var(--space-3) 0; color:var(--text-dim);
+                   font-size:var(--font-xs); }
+  .tasks-history:empty { display:none; }
+  .tasks-history-retry { display:block; width:100%; max-width:100%; box-sizing:border-box;
+                         margin:0; padding:0; border:0; background:transparent; color:var(--warn-text);
+                         cursor:pointer; text-align:left; white-space:normal;
+                         font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  #tasks-filters { display:flex; flex-wrap:wrap; gap:var(--space-2); padding:var(--space-2) var(--space-3); }
+  .tasks-filter { padding:2px var(--space-2); border-radius:999px; border:1px solid var(--line);
+                  background:transparent; color:var(--text-dim); cursor:pointer;
+                  font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .tasks-filter.on { color:var(--text); border-color:var(--text-dim);
+                     background:var(--panel-2); }
+  #tasks-body { flex:1; min-height:0; overflow-x:hidden; overflow-y:auto;
+                padding:0 var(--space-3) var(--space-3); }
+  .task-line { display:flex; flex-direction:column; align-items:flex-start; gap:var(--space-1);
+               width:100%; margin:0 0 var(--space-2); padding:var(--space-2) var(--space-3);
+               box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius-md);
+               background:transparent; color:var(--text); cursor:pointer; text-align:left;
+               font:var(--font-sm)/var(--leading-tight) var(--sans); }
+  .task-line.on { border-color:var(--text-dim); }
+  .task-line .task-goal { width:100%; }
+  .task-line-meta { display:flex; flex-wrap:wrap; gap:4px; min-width:0; max-width:100%; }
+  .task-session { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .task-other { margin:0 0 var(--space-2); color:var(--text-dim); font-size:var(--font-xs); }
+  .task-wait { color:var(--warn-text); background:var(--warn-bg);
+               border-color:var(--warn-line); }
+  .tasks-empty { margin:var(--space-2) 0; color:var(--text-dim); font-size:var(--font-sm); }
+  .tasks-memory { min-width:0; max-width:100%; margin:0 0 var(--space-3);
+                  padding-bottom:var(--space-2); border-bottom:1px solid var(--line-soft); }
+  .tasks-memory-head { display:flex; align-items:baseline; justify-content:space-between;
+                       gap:var(--space-2); min-width:0; margin:var(--space-2) 0 var(--space-1); }
+  .tasks-memory-head h3 { margin:0; min-width:0; font-size:var(--font-sm); font-weight:650; }
+  .tasks-memory-toggle { flex:0 0 auto; margin:0; padding:0; border:0; background:transparent;
+                         color:var(--text-dim); cursor:pointer; font:var(--font-xs)/1.3 var(--sans); }
+  #tasks-memory-body { min-width:0; max-width:100%; overflow-x:hidden; }
+  .tasks-memory.is-collapsed #tasks-memory-body { display:none; }
+  .tasks-memory-headline, .tasks-memory-item, .tasks-memory-turn {
+    display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; line-clamp:2;
+    overflow:hidden; min-width:0; max-width:100%; overflow-wrap:anywhere; }
+  .tasks-memory-headline { font-size:var(--font-sm); }
+  .tasks-memory-label, .tasks-memory-more, .tasks-memory-item, .tasks-memory-turn {
+    color:var(--text-dim); font-size:var(--font-xs); }
+  .tasks-memory-label { margin-top:var(--space-2); }
+  .tasks-memory-item, .tasks-memory-turn { color:var(--text); }
+  .tasks-memory-retry { display:block; width:100%; max-width:100%; box-sizing:border-box;
+                        margin:0; padding:0; border:0; background:transparent; color:var(--warn-text);
+                        cursor:pointer; text-align:left; white-space:normal;
+                        font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .tasks-artifacts { min-width:0; max-width:100%; margin:0 0 var(--space-3);
+                     padding-bottom:var(--space-2); border-bottom:1px solid var(--line-soft); }
+  .tasks-artifacts-head { display:flex; align-items:baseline; justify-content:space-between;
+                          gap:var(--space-2); min-width:0; margin:var(--space-2) 0 var(--space-1); }
+  .tasks-artifacts-head h3 { margin:0; min-width:0; font-size:var(--font-sm); font-weight:650; }
+  #tasks-artifacts-count { flex:0 1 auto; min-width:0; color:var(--text-dim);
+                           font-size:var(--font-xs); white-space:nowrap; }
+  #tasks-artifacts-list { min-width:0; max-width:100%; max-height:168px;
+                          overflow-x:hidden; overflow-y:auto; }
+  .tasks-artifacts-retry { display:block; width:100%; max-width:100%; box-sizing:border-box;
+                           margin:0; padding:0; border:0; background:transparent; color:var(--warn-text);
+                           cursor:pointer; text-align:left; white-space:normal;
+                           font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .artifact-line { display:flex; flex-direction:column; align-items:stretch; gap:2px;
+                   width:100%; max-width:100%; min-width:0; box-sizing:border-box;
+                   margin:0 0 var(--space-2); padding:var(--space-2) 0; }
+  .artifact-line-head { display:flex; align-items:center; gap:var(--space-2);
+                        min-width:0; max-width:100%; }
+  .artifact-kind { flex:0 0 auto; }
+  .artifact-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+                    white-space:nowrap; font-size:var(--font-sm); }
+  .artifact-summary { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+                      line-clamp:2; overflow:hidden; min-width:0; max-width:100%;
+                      color:var(--text-dim); font-size:var(--font-xs); line-height:1.45;
+                      overflow-wrap:anywhere; }
+  .artifact-path-row { display:flex; align-items:center; gap:var(--space-2);
+                       min-width:0; max-width:100%; }
+  .artifact-path { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+                   white-space:nowrap; color:var(--text-dim); font-size:var(--font-xs);
+                   font-family:var(--mono); }
+  .artifact-copy { flex:0 0 auto; margin:0; padding:0; border:0; background:transparent;
+                   color:var(--text-dim); cursor:pointer; font:var(--font-xs)/1.3 var(--sans); }
+  .tasks-checkpoints { min-width:0; max-width:100%; margin:0 0 var(--space-3);
+                       padding-bottom:var(--space-2); border-bottom:1px solid var(--line-soft); }
+  .tasks-checkpoints-head { display:flex; align-items:baseline; min-width:0;
+                            margin:var(--space-2) 0 var(--space-1); }
+  .tasks-checkpoints-head h3 { margin:0; min-width:0; font-size:var(--font-sm); font-weight:650; }
+  #tasks-checkpoints-list { min-width:0; max-width:100%; max-height:168px;
+                            overflow-x:hidden; overflow-y:auto; }
+  .tasks-checkpoints-retry { display:block; width:100%; max-width:100%; box-sizing:border-box;
+                             margin:0; padding:0; border:0; background:transparent; color:var(--warn-text);
+                             cursor:pointer; text-align:left; white-space:normal;
+                             font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .checkpoint-line { display:flex; flex-direction:column; align-items:stretch; gap:2px;
+                     width:100%; max-width:100%; min-width:0; box-sizing:border-box;
+                     margin:0 0 var(--space-2); }
+  .checkpoint-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+                      line-clamp:2; overflow:hidden; min-width:0; max-width:100%;
+                      overflow-wrap:anywhere; font-size:var(--font-sm); }
+  .checkpoint-path { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis;
+                     white-space:nowrap; color:var(--text-dim); font-size:var(--font-xs);
+                     font-family:var(--mono); }
+  .checkpoint-meta { display:flex; flex-wrap:wrap; gap:4px; min-width:0; max-width:100%;
+                     color:var(--text-dim); font-size:var(--font-xs); }
+  .checkpoint-phase, .checkpoint-status, .checkpoint-updated {
+    min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .checkpoint-resume { align-self:flex-start; max-width:100%; box-sizing:border-box;
+                       margin:2px 0 0; padding:0; border:0; background:transparent;
+                       color:var(--text); cursor:pointer; font:var(--font-xs)/1.3 var(--sans); }
+  .checkpoint-resume:disabled { color:var(--text-dim); cursor:default; }
+  .checkpoint-resume-error { min-width:0; max-width:100%; overflow-wrap:anywhere;
+                             color:var(--warn-text); font-size:var(--font-xs); }
+  #tasks-detail { margin-top:4px; min-width:0; }
+  @media (max-width: 860px) {
+    #tasks-panel { left:0; right:0; top:auto; bottom:0; width:auto;
+                   height:min(78vh, 100%); max-height:none; }
+    body:has(#tasks-panel:not(.hidden)) #thread { margin-right:0; }
+    .tasks-sheet { height:100%; border-left:0;
+                   border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                   box-shadow:var(--shadow-overlay);
+                   padding-top:env(safe-area-inset-top);
+                   padding-bottom:env(safe-area-inset-bottom); }
+    #tasks-btn, #tasks-close { min-height:44px; }
+    #tasks-close { min-width:44px; }
+  }

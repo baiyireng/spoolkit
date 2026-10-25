@@ -10,7 +10,7 @@
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from spoolkit.agents.runtime import (
     IMPLEMENTER,
@@ -22,8 +22,11 @@ from spoolkit.agents.runtime import (
 from spoolkit.config import Config
 from spoolkit.context import templates as T
 from spoolkit.llm.gateway import ModelGateway
-from spoolkit.llm.types import ChatRequest, Message
+from spoolkit.llm.tokenizer import TokenCounter
+from spoolkit.llm.types import ChatRequest, ChatResponse, Message
+from spoolkit.prompt_sanitize import for_prompt
 from spoolkit.tools.registry import ToolRegistry
+from spoolkit.tools.types import ToolResult, Usage
 
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -145,20 +148,25 @@ def _flatten(text: str, limit: int) -> str:
     return flat[:limit] + "…" if len(flat) > limit else flat
 
 
-def _evidence(artifact: str, verify) -> str:
+def _evidence(artifact: str, verify: Callable[[], ToolResult] | None) -> str:
     """交给审查者的证据：改动差异 + 自动验证的结果。
 
     实测不给测试结果时，审查者会自己一路翻文件去还原「刚才发生了什么」，
     把整轮预算耗光，最后连结论都给不出来。它要的是证据，不是自由度。
+
+    验证正文与异常正文都要过 `for_prompt`：这段文字直接进**审查者**的提示，
+    而验证是在试跑副本里跑的，正文里会带本次副本的随机路径。
     """
     if verify is None:
         return artifact
     try:
         result = verify()
     except Exception as exc:  # 验证出问题不该让审查整个跑不起来
-        return f"{artifact}\n\n自动验证没能跑起来（{type(exc).__name__}）：{exc}"
+        return for_prompt(
+            f"{artifact}\n\n自动验证没能跑起来（{type(exc).__name__}）：{exc}"
+        )
     status = "通过" if result.ok else "未通过"
-    return f"{artifact}\n\n自动验证结果：{status}\n{result.content[:600]}"
+    return for_prompt(f"{artifact}\n\n自动验证结果：{status}\n{result.content[:600]}")
 
 
 def plan_dispatch(
@@ -208,9 +216,7 @@ class DelegatedResult:
     model_calls: int = 0
 
     @property
-    def usage(self):
-        from spoolkit.tools.types import Usage
-
+    def usage(self) -> Usage:
         return Usage(self.prompt_tokens, self.completion_tokens, self.model_calls)
 
     @property
@@ -261,11 +267,11 @@ def plan_repair(
 def run_delegated(
     plan: DispatchPlan,
     gateway: ModelGateway,
-    tokenizer,
+    tokenizer: TokenCounter,
     registry: ToolRegistry,
     config: Config,
     artifacts: str = "",
-    verify=None,
+    verify: Callable[[], ToolResult] | None = None,
     max_rounds: int | None = None,
 ) -> DelegatedResult:
     """先让实现者做，再让审查者在独立上下文里验。
@@ -408,8 +414,9 @@ def run_delegated(
 class _Counting:
     """把网关包一层，数清这一趟花了多少。
 
-    只转 chat：其余属性（context_window / token_counter）原样透传，
-    因为子角色也需要它们。
+    `chat` 与 `chat_stream` 都记账。实现者和审查者跑在 `AgentLoop` 里，
+    主循环会走流式入口；只包 `chat` 时这两笔不进账。
+    其余属性（context_window / token_counter）原样透传。
     """
 
     def __init__(self, inner: ModelGateway) -> None:
@@ -418,12 +425,26 @@ class _Counting:
         self.completion_tokens = 0
         self.calls = 0
 
-    def chat(self, request):
-        response = self._inner.chat(request)
+    def _note(self, response: ChatResponse) -> ChatResponse:
         self.prompt_tokens += response.prompt_tokens
         self.completion_tokens += response.completion_tokens
         self.calls += 1
         return response
 
-    def __getattr__(self, name):
+    def chat(self, request: ChatRequest) -> ChatResponse:
+        return self._note(self._inner.chat(request))
+
+    def chat_stream(
+        self,
+        request: ChatRequest,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ChatResponse:
+        stream = getattr(self._inner, "chat_stream", None)
+        if callable(stream):
+            response = stream(request, on_delta=on_delta)
+        else:
+            response = self._inner.chat(request)
+        return self._note(response)
+
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)

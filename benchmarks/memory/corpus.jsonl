@@ -1,0 +1,16 @@
+{"id": 1, "group": "G1", "text": "归档旧的任务记录"}
+{"id": 2, "group": "G1", "text": "把过期条目存档"}
+{"id": 3, "group": "G1", "text": "清理历史数据并备份"}
+{"id": 4, "group": "G1", "text": "删除三个月前的日志"}
+{"id": 5, "group": "G2", "text": "本项目统一用 uv 管理依赖"}
+{"id": 6, "group": "G2", "text": "不要往主依赖里加包"}
+{"id": 7, "group": "G2", "text": "requirements 要锁版本"}
+{"id": 8, "group": "G2", "text": "安装体积要可控"}
+{"id": 9, "group": "G3", "text": "上下文预算必须给出最坏占用"}
+{"id": 10, "group": "G3", "text": "token 超了就按优先级让位"}
+{"id": 11, "group": "G3", "text": "小窗口下不要全量注入"}
+{"id": 12, "group": "G3", "text": "截断前先做摘要"}
+{"id": 13, "group": "G4", "text": "全文检索用 FTS5"}
+{"id": 14, "group": "G4", "text": "给检索结果打分排序"}
+{"id": 15, "group": "G4", "text": "索引要和主表同步"}
+{"id": 16, "group": "G4", "text": "关键词命中不等于相关"}

@@ -12,6 +12,7 @@ from spoolkit.agents.dispatcher import plan_dispatch, run_delegated
 from spoolkit.config import Config
 from spoolkit.cli.commands.plan import advance_plan, autonomous
 from spoolkit import diagnosis
+from spoolkit import runlog
 from spoolkit.check.numbers import render as render_numbers
 from spoolkit.check.numbers import actionable, mismatched, summarize, untraceable
 from spoolkit.cli.options import (
@@ -31,16 +32,25 @@ from spoolkit.cli.runtime import (
     open_memory,
     prompt_for_turn,
     provider_gateway,
+    bind_model_wait,
     settle_lessons,
     show_history,
 )
-from spoolkit.cli.settle import settle
+from spoolkit.cli.settle import (
+    pending_actions_note,
+    settle,
+    undo_command,
+    verification_header,
+)
 from spoolkit.cli.events import EventWriter, settle_with_events
+from spoolkit.cli.term import print_md, print_out
+from spoolkit.kernel.target import resolve_target
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.memory.transcript import ASSISTANT, USER, record_message
 from spoolkit.tools.edit import PendingChanges
 from spoolkit.tools.grant import Grants
-from spoolkit.web.protocol import AWAIT, CONFIRM, FINAL, NOTE, START, USAGE
+from spoolkit.tools.call_context import current_tool_call_id
+from spoolkit.web.protocol import AWAIT, CONFIRM, FINAL, NOTE, START, TOOL, USAGE
 
 
 def _overrides(args: argparse.Namespace, project_root: Path) -> dict[str, float]:
@@ -62,7 +72,18 @@ def _overrides(args: argparse.Namespace, project_root: Path) -> dict[str, float]
 
 def run(args: argparse.Namespace) -> int:
     """执行一次任务。"""
+    # 会话与工作区只在这里定一次（内核的解析顺序：显式 > 当前目录向上找 > 指针 >
+    # 登记表 > 当前目录）。`--session` 留空时才轮到指针，`cli` 是这条入口一直以来的
+    # 默认名——留着它，老会话与老计划才接得上。
+    target = resolve_target(
+        workspace=args.root, session=args.session, client="cli", session_fallback="cli"
+    )
+    args.root, args.session = str(target.root), target.session
     project_root = Path(args.root).resolve()
+    # 一次入口 = 一轮：id 在这里发一次，后面每一次落盘都记进同一份运行记录。
+    # 计划那条路每一步都会新建待确认清单，但它们共用这一个 id——用户反悔时
+    # 要退掉的是**整次调用**，不是最后一步。
+    args.run_id = runlog.take_run_id(args)
     overrides = _overrides(args, project_root)
     read_roots, bad_roots = _resolve_read_roots(args, project_root)
     if bad_roots:
@@ -78,6 +99,7 @@ def run(args: argparse.Namespace) -> int:
     gateway = provider_gateway(args, project_root)
     if gateway is None:
         return 2
+    bind_model_wait(gateway, args)
 
     window = resolve_window(gateway, args.window)
     # --events 模式下 stdout 上只能有 JSON 行。散文会被解析器忽略，
@@ -106,7 +128,11 @@ def run(args: argparse.Namespace) -> int:
         notice = pending_notice(project_root)
         if notice:
             print(notice)
-    pending = PendingChanges(project_root, extra_roots=read_roots)
+    pending = PendingChanges(project_root, extra_roots=read_roots, run_id=args.run_id)
+    # 运行记录要知道这一轮是谁、为了什么跑的：`.agent/runs/<id>/run.json` 里
+    # 记下它们，事后（`spool revert --run <id>`）才答得出「这是哪一轮」。
+    pending.run_session = args.session
+    pending.run_goal = args.goal
     if args.events:
         return _events_mode(args, project_root, gateway, window, pending)
     if args.delegate:
@@ -129,7 +155,21 @@ def _events_approver(writer: EventWriter, reader=None):
 
     def approver(argv, reason: str) -> str:
         command = " ".join(argv)
-        writer.emit(AWAIT, count=1, command=command, reason=reason)
+        # 这条 `reason` 原先直接放的是**默认策略的拒绝理由**（例如「node 只允许
+        # --check」）。读的人（外部 agent、MCP 客户端、页面）会把它读成"批准也没用"，
+        # 于是放弃申请——实测我自己就是这么判的。它其实是**升级申请的说明**：
+        # 批准之后这条命令照常执行。所以文案必须说清"这是要你批准"这件事。
+        call_id = current_tool_call_id()
+        writer.emit(
+            AWAIT,
+            count=1,
+            command=command,
+            reason=(
+                f"这条命令需要你批准才执行（默认策略不允许它：{reason}）。"
+                "y=只允许这一次，a=始终允许，b=本轮全拒，其它=拒绝。"
+            ),
+            tool_call_id=call_id,
+        )
         answer = ""
         try:
             answer = (source.readline() or "").strip().lower()
@@ -137,7 +177,13 @@ def _events_approver(writer: EventWriter, reader=None):
             answer = ""
         once = ("y", "o", "yes", "ok")
         always = ("a", "s", "always")
-        writer.emit(CONFIRM, applied=answer in once + always, count=1, command=command)
+        writer.emit(
+            CONFIRM,
+            applied=answer in once + always,
+            count=1,
+            command=command,
+            tool_call_id=call_id,
+        )
         if answer in once:
             return "once"
         if answer in always:
@@ -147,6 +193,122 @@ def _events_approver(writer: EventWriter, reader=None):
         return "deny"
 
     return approver
+
+
+def _events_escalation_reviewer(writer: EventWriter, reader=None):
+    """events 模式下风险分级放行的批复通道（§3.2.3 的「网页壳 / 聊天通道」）。
+
+    两个事件、一条回答，与 §3.2.3 的落点一一对应：
+
+    - `AWAIT` + `escalation` 短字段：网页壳/桥**复用既有的等待通道**
+      （`web/runner.py` 的 `awaiting` / `awaiting_detail`）与确认卡片；
+      MCP 那侧复用 `status.awaiting > 0` 这个既有信号，不新增通道。
+    - `NOTE`：五件摘要的**逐行**文本（人真的能读，`--events` 下它也只是一行
+      JSON 的 text，不会污染 stdout 的协议）。
+    - 回答从 stdin 读一行，四档批复词（批准 / 只批几处 / 撤销 / 改方案）。
+
+    **没有 `--ask-on-stdin` 就不注入这一份**——那就是无人值守：不弹问题、
+    把动作挂起为待批、成果照落盘（绝不静默放行，也不一律拒绝）。
+    """
+    source = reader if reader is not None else sys.stdin
+
+    def review(request, text: str) -> tuple[str, str]:
+        # `escalation` 的**字段**与 `count` 平级塞进 AWAIT：网页壳把它整份
+        # 存进 `awaiting_detail`（`web/runner.py:_absorb`），页面与桥都按
+        # 字段名取——套一层嵌套的话，两边都得先知道有这个壳。
+        writer.emit(
+            AWAIT,
+            count=1,
+            escalation=request.trigger,
+            action=request.action,
+            impact=request.summary.get("impact", ""),
+            conclusion=request.summary.get("conclusion", ""),
+            advice=request.summary.get("advice", ""),
+            options=request.summary.get("options", ""),
+            rollback=request.summary.get("rollback", ""),
+            fingerprint=request.fingerprint,
+        )
+        writer.emit_note(text, ok=False, kind="escalation")
+        answer = ""
+        try:
+            answer = (source.readline() or "").strip()
+        except (OSError, ValueError):  # pragma: no cover - 流关了就当没人回答
+            answer = ""
+        writer.emit(CONFIRM, applied=bool(answer), count=1)
+        return answer, "web"
+
+    return review
+
+
+def _terminal_escalation_reviewer(out=print, ask=input, tty=None):
+    """终端上的批复通道（§3.2.3 的「终端」那一栏）。
+
+    五件各一行 + 一条撤销命令，默认答案是**「不执行这个动作」**（沿用现有
+    `[y/N]` 的默认 N）。注意默认不再是「不落盘」——成果已经落在工作区里了；
+    这里批的只是那个动作的执行权。
+
+    `tty` 是「有人在不在」的判据。行首给的不是 TTY（管道、无人值守的调度器）
+    时**不弹问题**：返回空词，由主循环按「挂起待批」处理。不加这道判断，
+    一个没人回答的 `input()` 会把运行挂在原地——那是最坏的一种无人值守。
+    """
+    import sys as _sys
+
+    if tty is None:
+        try:
+            tty = bool(_sys.stdin and _sys.stdin.isatty())
+        except (ValueError, OSError):  # pragma: no cover - 流坏了就当没人
+            tty = False
+
+    def review(request, text: str) -> tuple[str, str]:
+        if not tty:
+            return "", ""
+        out(text)
+        try:
+            answer = ask("执行这个动作吗？[y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        return answer, "terminal"
+
+    return review
+
+
+def _events_settle_header(result, undo: str) -> str:
+    """`--events` 通道里打在 diff 之前的那一段（未通过时才非空）。
+
+    与终端那条路（`_settle_pending` → `settle(header=…)`）**只差一个字段**：
+    **撤销命令不在这里给**。理由（问题②的最后一处残余）：FINAL 事件带着收尾
+    报告，报告里已经有那一行，而且它排在「等你确认 / 已应用」之后——这一份
+    header 在 diff **之前**，多带一遍就等于同一条撤销信息在事件流里出现两次，
+    而且顺序也读反了（用户先看到退路、后看到结果）。终端那条路照旧带着它：
+    那里 diff 是随后 `settle` 打的，用户需要在这一大片 diff 之前就看见退路。
+    """
+    return verification_header(
+        getattr(result, "verified", None),
+        getattr(result, "verify_summary", ""),
+        undo,
+        with_undo=False,
+    )
+
+
+def _emit_deferred_verify(writer: EventWriter, deferred: list[dict]) -> None:
+    """把循环攒下的「最终验证」那一条阶段行**在结算之后**发出去。
+
+    为什么非得推迟（现场见 `tests/fixtures/interact_probe/web-real-reports.md`）：
+    它验的是待确认清单里那批内容，而这条通道上用户要先点「应用」这一轮才算落地。
+    当场发的话，用户读到的次序是「最终验证 → … / 等你确认：1 处改动 / 已应用 1 处
+    改动」——一个阶段跑在自己前面。
+
+    为什么走 `handle` 而不是 `emit(TOOL, **payload)`：第三档那一条 payload 里带一个
+    `kind` 字段（`verifier_no_checker`），它与 `emit(self, kind, ...)` 的位置参数
+    重名，`emit` 会抛 `TypeError: got multiple values for argument 'kind'`——整轮
+    运行在收尾那一刻以「进程退出，退出码 1」收场（probe 的 create-hello 实测踩过）。
+    `EventWriter.handle(kind, data)` 就是为这种 payload 准备的。
+
+    发完清空：它是一次性的推迟出口，留着会让下一次调用重复发一遍。
+    """
+    for payload in deferred:
+        writer.handle(TOOL, payload)
+    deferred.clear()
 
 
 def _events_mode(args, project_root, gateway, window, pending) -> int:
@@ -161,6 +323,11 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
     policy = resolve_policy(args, project_root)
     scope = resolve_scope(args)
     overrides = _overrides(args, project_root)
+    # 「最终验证」那一条阶段行的**推迟出口**：它验的是"待确认清单里那批内容"，
+    # 而这条通道上用户要先点「应用」这一轮才算落地。所以循环把它攒在这里，
+    # 由下面 `settle_with_events` 之后再发（阶段顺序是验收的一部分，现场见
+    # tests/fixtures/interact_probe/web-real-reports.md）。
+    deferred_verify: list[dict] = []
     writer.emit(
         START, session=args.session, goal=args.goal, policy=policy, window=window
     )
@@ -195,6 +362,8 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             # 能力标定：工作区的覆盖 + 命令行显式给的那两个
             overrides=overrides,
             session=args.session,
+            # `--review`：显式要求跑一次语义审查（L3 触发条件第 5 条）。
+            semantic_review=bool(getattr(args, "review", False)),
         ),
         wiring=LoopWiring(
             memory=memory,
@@ -204,6 +373,13 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             # 作为事件发出去、从 stdin 读回答（用户那边就是"回 y 允许这一次"）。
             # 不给就保持原样——无人值守一律拒绝，绝不在没有人的地方等。
             approver=_events_approver(writer) if getattr(args, "ask_on_stdin", False) else None,
+            # 风险分级放行的批复通道与命令授权共用同一个开关：都要能在
+            # stdin 上问一句、把回答读回来。不给开关就是无人值守（§3.2.3）。
+            escalation_review=(
+                _events_escalation_reviewer(writer)
+                if getattr(args, "ask_on_stdin", False)
+                else None
+            ),
             grants=Grants(project_root / ".agent" / "grants.json")
             if getattr(args, "ask_on_stdin", False)
             else None,
@@ -214,9 +390,15 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
             search=web_search_backend(args, project_root),
             mcp=not getattr(args, "no_mcp", False),
             from_channel=getattr(args, "from_channel", False),
+            defer_final_verify=deferred_verify,
         ),
     )
-    result = loop.run(args.goal, resume=args.resume, prompt=prompt)
+    result = loop.run(
+        args.goal,
+        resume=args.resume,
+        prompt=prompt,
+        resume_checkpoint=str(getattr(args, "resume_checkpoint", "") or ""),
+    )
     _report_numbers(loop, result, writer)
     _maybe_file_diagnosis(project_root, before, result, writer)
 
@@ -237,10 +419,42 @@ def _events_mode(args, project_root, gateway, window, pending) -> int:
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
     )
+    # 落盘**之前**取一次撤销命令：`settle` 一跑，待确认清单就空了，
+    # 之后再问就只会拿到「没有可退的」。网页壳那个可点的撤销动作要的就是它。
+    undo = undo_command(pending)
     outcome = settle_with_events(
-        pending, policy, scope, project_root / ".agent" / "last_change.json", writer
+        pending,
+        policy,
+        scope,
+        project_root / ".agent" / "last_change.json",
+        writer,
+        # 验证未通过时，判词必须**排在 diff 事件之前**发出去：网页壳按事件顺序
+        # 渲染，diff 一大，埋在后面的判词就没人读到。
+        header=_events_settle_header(result, undo),
     )
-    writer.emit(FINAL, ok=result.finished, text=result.final or "", settled=outcome)
+    # 「最终验证」这一条阶段行**现在才发**（它验的正是刚刚被用户应用的那批内容）。
+    _emit_deferred_verify(writer, deferred_verify)
+    # 挂起待批的动作清单（§3.2.3）：它在**落盘之后**才说得准（哪些动作真的
+    # 被拦下、哪些成果真的落了盘），所以走在这条通道的最后、FINAL 之前。
+    _settle_pending(args, project_root, pending, result, writer=writer)
+    # 「撤销这一轮」这个动作的**结构化读数**（问题④）：网页壳据此摆一个真能点的
+    # 按钮，桥据此认「回 y 撤销」——两条通道都不必去正文里正则捞命令。
+    # 它在 FINAL 上（最后一条），所以那条动作提示落在「等你确认 / 已应用」之后。
+    writer.emit(
+        FINAL,
+        ok=result.finished,
+        # `text` 走 `report_text`：模型结论与系统判词各占一行、各带标记。
+        # `concluded` / `terminated_by` 是同一件事的**机读形式**——跑分器按它们
+        # 算收敛率，不再靠正则去猜「这段话是谁说的」（P0 指标）。
+        text=result.report_text or "",
+        concluded=result.concluded,
+        terminated_by=result.terminated_by,
+        failed_reason=result.failed_reason,
+        model_final=result.model_final,
+        settled=outcome,
+        revert_command=undo,
+        revert_run_id=pending.run_id if undo else "",
+    )
     return 0 if result.finished else 1
 
 
@@ -274,6 +488,8 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             step_ceiling=args.step_ceiling,
             overrides=overrides,
             session=args.session,
+            # `--review`：显式要求跑一次语义审查（L3 触发条件第 5 条）。
+            semantic_review=bool(getattr(args, "review", False)),
         ),
         wiring=LoopWiring(
             memory=memory,
@@ -281,6 +497,9 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             pending=pending,
             approver=approver,
             grants=grants,
+            # 终端上的批复通道：有 TTY 才弹问题，没有就按挂起待批处理
+            # （§3.2.3 的超时与无人值守行为）。
+            escalation_review=_terminal_escalation_reviewer(),
             lessons=build_lessons(memory) if memory is not None else None,
             read_roots=read_roots,
             web=web_access(args, project_root),
@@ -300,7 +519,11 @@ def _standard(args, project_root, gateway, window, pending) -> int:
             "加 --resume 可以接着做，不加则从零开始。"
         )
 
-    result = loop.run(args.goal, resume=args.resume)
+    result = loop.run(
+        args.goal,
+        resume=args.resume,
+        resume_checkpoint=str(getattr(args, "resume_checkpoint", "") or ""),
+    )
     _report_numbers(loop, result)
     _maybe_file_diagnosis(project_root, before, result)
     if memory is not None:
@@ -314,13 +537,18 @@ def _standard(args, project_root, gateway, window, pending) -> int:
         )
 
     for line in result.trace:
-        print(line)
-    print("---")
-    print(result.usage())
-    print("---")
-    print(result.final)
+        print_out(line, markup=False, style="muted")
+    print_out("---", markup=False, style="muted")
+    print_out(result.usage(), markup=False, style="muted")
+    print_out("---", markup=False, style="muted")
+    # 收尾报告走 `report_text`：模型写的结论与系统判词各占一行、各带各的
+    # 标记（`【模型结论】` / `⚠`）。直接印 `final` 的话，「这一段里哪一句是
+    # 模型说的」读不出来——真机对照 33 次没结论的运行里，用户读到的唯一
+    # 正文就是判词「已达步数上限，任务未完成」。
+    # Human 路径：TTY 下 Markdown；管道 / NO_COLOR 纯文本。`--events` 不走这里。
+    print_md(result.report_text if result.report_text else result.final or "")
 
-    _settle_pending(args, project_root, pending)
+    _settle_pending(args, project_root, pending, result)
     return 0 if result.finished else 1
 
 
@@ -359,28 +587,28 @@ def _delegated(args, project_root, gateway, window, pending) -> int:
         verify=make_verifier(project_root, pending),
     )
     for line in delegated.trace:
-        print(line)
-    print("--- 实现 ---")
-    print(delegated.implementer_final)
-    print("--- 独立审查 ---")
-    print(delegated.reviewer_final)
+        print_out(line, markup=False, style="muted")
+    print_out("--- 实现 ---", markup=False, style="muted")
+    print_md(delegated.implementer_final or "")
+    print_out("--- 独立审查 ---", markup=False, style="muted")
+    print_md(delegated.reviewer_final or "")
     if delegated.rejected:
-        print("--- 审查未通过 ---")
-        print("改动还在待确认清单里，没有自动落盘。理由：")
+        print_out("--- 审查未通过 ---", markup=False, style="muted")
+        print_out("改动还在待确认清单里，没有自动落盘。理由：", markup=False)
         for reason in delegated.review.reasons:
-            print(f"  - {reason}")
+            print_out(f"  - {reason}", markup=False)
     elif delegated.review is not None and delegated.review.inconclusive:
-        print("--- 审查没有结论 ---")
-        print("审查者自己没跑完，所以这次改动既没被否定也没被确认：")
+        print_out("--- 审查没有结论 ---", markup=False, style="muted")
+        print_out("审查者自己没跑完，所以这次改动既没被否定也没被确认：", markup=False)
         for reason in delegated.review.reasons:
-            print(f"  - {reason}")
+            print_out(f"  - {reason}", markup=False)
     elif delegated.too_big:
         # 没送审，就没有「审查结论」。不单列这一支的话，上面那两行都不成立，
         # 用户会以为这次派发是正常结束的。
-        print("--- 这块活太大，子智能体没做完 ---")
-        print(delegated.too_big)
-        print("拆小之后再派，或者加 --subagent-steps 再来一次。")
-    _settle_pending(args, project_root, pending)
+        print_out("--- 这块活太大，子智能体没做完 ---", markup=False, style="muted")
+        print_md(delegated.too_big or "")
+        print_out("拆小之后再派，或者加 --subagent-steps 再来一次。", markup=False)
+    _settle_pending(args, project_root, pending, delegated)
     return 0
 
 
@@ -413,6 +641,11 @@ def _plain_registry(project_root, pending, read_roots=()):
     # （改动还没落盘），它会以为自己的修复没生效，然后去改一个已经改对的函数。
     # trial_workspace 这个模块存在的全部理由就是这个，别在这一条路径上漏掉。
     registry.register(run_command_spec(project_root, pending))
+    # 与主循环共用同一份按产出类型分派的验证入口，否则会出现「同一个项目里
+    # 主循环验得了 HTML、子智能体验不了」这种分叉。
+    from spoolkit.tools.verify import verify_file_spec
+
+    registry.register(verify_file_spec(project_root, pending, read_roots))
     # 与主循环共用同一套判定，否则会出现「同一个项目里子智能体有一把
     # 主循环没有的工具」这种分叉，而它只会在跑偏时才暴露。
     register_edit_tools(registry, project_root, pending)
@@ -514,13 +747,33 @@ def _report_numbers(loop, result, writer: EventWriter | None = None) -> None:
     print(render_numbers(claims, wrong))
 
 
-def _settle_pending(args, project_root, pending) -> None:
-    if not len(pending):
+def _settle_pending(args, project_root, pending, result=None, writer=None) -> None:
+    # 挂起待批的动作清单：**成果已经落盘**，挂起的只是那些没执行的动作
+    # （§3.2.3）。所以它必须在 `settle` 的 early-return **之前**说一次——
+    # 一条「有动作在等批复」的话被漏掉，用户就以为这一轮是普通收工。
+    actions = pending_actions_note(project_root, getattr(args, "session", "") or "")
+    if actions:
+        if writer is not None:
+            writer.emit_note(actions, ok=False, kind="pending_actions")
+        else:
+            print("---")
+            print(actions)
+    # 只有整份改动都落完、暂存也空了才真的没话说：暂存里那几份正文同样需要
+    # 一句交代（`settle` 会替它说话），否则进程一退出就是静默丢弃。
+    if not len(pending) and not pending.staged_count():
         return
-    print("---")
+    if writer is None:
+        print("---")
     settle(
         pending,
         resolve_policy(args, project_root),
         resolve_scope(args),
         baseline_path=project_root / ".agent" / "last_change.json",
+        # 验证未通过时这一段打在 diff **之前**：判词不能埋在一大片 diff 底下
+        # （用户接受了一份没通过验证的改动，就是这么发生的）。
+        header=verification_header(
+            getattr(result, "verified", None),
+            getattr(result, "verify_summary", ""),
+            undo_command(pending),
+        ),
     )

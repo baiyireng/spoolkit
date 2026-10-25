@@ -58,3 +58,28 @@ def test_归档后可按关键词召回失败记录(tmp_path: Path) -> None:
     session.archive(state)
     assert "整文件重解析" in session.recall("重解析")
 
+
+def test_读路径也按条数上限裁剪(tmp_path: Path) -> None:
+    """写路径与**读路径**共用同一套容量规则：`hot_max_items` 覆盖在注入侧也生效。
+
+    五条同重要度时位置作 tie-break（靠前的先走），所以留下的是后两条。
+    """
+    write_hot(
+        tmp_path / "memory.md",
+        {"fact": ["事实一", "事实二", "事实三", "事实四", "事实五"]},
+    )
+    conn = open_db(tmp_path / "memory.db")
+    init_memory_schema(conn)
+    session = MemorySession(
+        conn=conn,
+        hot_path=tmp_path / "memory.md",
+        counter=OfflineTokenCounter(),
+        context_window=8000,
+        session_id="s1",
+        overrides={"hot_max_items": 2},
+    )
+    text = session.hot_text()
+    assert text.count("- ") == 2
+    assert "事实一" not in text and "事实三" not in text
+    assert "事实四" in text and "事实五" in text
+

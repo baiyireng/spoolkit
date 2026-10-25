@@ -44,7 +44,7 @@ class _Reader(HTMLParser):
 
     # --- HTMLParser 回调 ---
 
-    def handle_starttag(self, tag: str, attrs) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _SKIP:
             self._skip_depth += 1
             return

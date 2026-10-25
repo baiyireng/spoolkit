@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import httpx
 
 from spoolkit.fetch.client import USER_AGENT
+from spoolkit.net import client_proxy
 
 TAVILY_URL = "https://api.tavily.com/search"
 
@@ -94,9 +95,12 @@ class TavilySearch:
         try:
             with httpx.Client(
                 timeout=self.timeout,
-                proxy=self.proxy,
+                proxy=client_proxy(self.proxy, self.transport),
                 transport=self.transport,
                 headers=headers,
+                # 代理已经定好，别让 httpx 再读环境变量：环境里的
+                # `NO_PROXY=...,[::1]` 会让它在构造这一步抛 InvalidURL（见 net.py）。
+                trust_env=False,
             ) as client:
                 response = client.post(TAVILY_URL, json=payload)
         except httpx.HTTPError as exc:

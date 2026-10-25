@@ -19,6 +19,7 @@ import argparse
 from pathlib import Path
 
 from spoolkit import workspace
+from spoolkit.cli.term import escape, print_out
 
 IGNORE_LINE = ".agent/"
 
@@ -26,27 +27,36 @@ IGNORE_LINE = ".agent/"
 def init_command(args: argparse.Namespace) -> int:
     target = Path(getattr(args, "path", None) or ".").resolve()
     if not target.is_dir():
-        print(f"没有这个目录：{target}")
+        print_out(f"目录不存在：{target}", markup=False, style="bad")
         return 2
 
     existing = workspace.find_root(target)
     if existing is not None:
         workspace.register(existing)
         if existing == target:
-            print(f"这个目录已经是工作区：{target}")
+            print_out(
+                f"[muted]这个目录已经是工作区：[/][accent]{escape(str(target))}[/]"
+            )
         else:
-            print(
-                f"{target} 已经在工作区 {existing} 里面了，不再套一层。\n"
-                f"（.agent 在 {existing / workspace.MARK}）"
+            print_out(
+                f"{escape(str(target))} [muted]已位于工作区[/] "
+                f"[accent]{escape(str(existing))}[/][muted] 内，不再嵌套一层。[/]\n"
+                f"[muted]（.agent 在 {escape(str(existing / workspace.MARK))}）[/]"
             )
         _report_next()
         return 0
 
     (target / workspace.MARK).mkdir(parents=True, exist_ok=True)
     workspace.register(target)
-    print(f"已初始化工作区：{target}")
-    print(f"  状态目录：{target / workspace.MARK}（记忆、索引、检查点、策略）")
-    print(f"  已登记到 {workspace.registry_path()}（所以在别的目录也能用 `spool approve`）")
+    print_out(f"[ok]已初始化工作区：[/][accent]{escape(str(target))}[/]")
+    print_out(
+        f"  [muted]状态目录：[/]{escape(str(target / workspace.MARK))}"
+        "[muted]（记忆、索引、检查点、策略）[/]"
+    )
+    print_out(
+        f"  [muted]已登记到 [/]{escape(str(workspace.registry_path()))}"
+        "[muted]（因此可在任意目录使用 `spool approve`）[/]"
+    )
     _note_gitignore(target)
     _report_next()
     return 0
@@ -55,7 +65,11 @@ def init_command(args: argparse.Namespace) -> int:
 def _note_gitignore(root: Path) -> None:
     path = root / ".gitignore"
     if not path.is_file():
-        print(f"  提示：这个目录没有 .gitignore；把 `{IGNORE_LINE}` 加进版本库忽略项")
+        print_out(
+            f"  提示：该目录没有 .gitignore；请把 `{IGNORE_LINE}` 加入版本库忽略项",
+            markup=False,
+            style="muted",
+        )
         return
     try:
         text = path.read_text(encoding="utf-8")
@@ -70,8 +84,12 @@ def _note_gitignore(root: Path) -> None:
             handle.write("\n# spoolkit 的运行时数据\n" + IGNORE_LINE + "\n")
     except OSError:
         return
-    print(f"  已把 `{IGNORE_LINE}` 追加到 {path}")
+    print_out(f"  已把 `{IGNORE_LINE}` 追加到 {path}", markup=False)
 
 
 def _report_next() -> None:
-    print("下一步：`spool chat`（对话式），或 `spool run --goal \"...\"`（跑一个任务）。")
+    print_out(
+        "下一步：`spool chat`（对话式），或 `spool run --goal \"...\"`（执行单个任务）。",
+        markup=False,
+        style="muted",
+    )

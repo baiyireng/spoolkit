@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "name": "spool-web-tools",
+  "description": "开发期检查网页壳产物。运行时不需要 Node。",
+  "scripts": {
+    "check": "node build.mjs"
+  },
+    "devDependencies": {
+    "esbuild": "0.25.11",
+    "typescript": "5.9.3"
+  }
+}

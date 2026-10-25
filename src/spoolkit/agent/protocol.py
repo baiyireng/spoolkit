@@ -8,11 +8,16 @@ TURN_SCHEMA 同时用于生成 GBNF 语法约束，从采样层面消灭格式�
 """
 
 import json
+import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from spoolkit.agent.state import StateDelta
 from spoolkit.tools.types import ToolCall
+
+logger = logging.getLogger(__name__)
+
+SUMMARY_LIMIT = 200
 
 TURN_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -25,6 +30,7 @@ TURN_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "name": {"type": "string"},
                     "arguments": {"type": "object"},
+                    "why": {"type": "string"},
                 },
                 "required": ["name", "arguments"],
             },
@@ -32,6 +38,7 @@ TURN_SCHEMA: dict[str, Any] = {
         "state": {"type": "object"},
         "final": {"type": ["string", "null"]},
         "done": {"type": "boolean"},
+        "assessment": {"type": "string"},
     },
     "required": ["thought", "tool_calls", "done"],
 }
@@ -50,7 +57,14 @@ STATE_SCHEMA: dict[str, Any] = {
 }
 
 
-def build_turn_schema(registry: Any, only: list[str] | None = None) -> dict[str, Any]:
+def build_turn_schema_v2(registry: Any, only: list[str] | None = None) -> dict[str, Any]:
+    """控制回合 v2：没有 `final`，完成时改走短 `summary`。"""
+    return build_turn_schema(registry, only, v2=True)
+
+
+def build_turn_schema(
+    registry: Any, only: list[str] | None = None, *, v2: bool = False
+) -> dict[str, Any]:
     """按当前注册的工具生成回合输出的约束 schema。
 
     这是本项目最关键的一处细节。回合输出里的 arguments 是「自由键值对象」，
@@ -63,6 +77,13 @@ def build_turn_schema(registry: Any, only: list[str] | None = None) -> dict[str,
 
     only 给定时只允许这几个工具。这不是裁剪提示词，是改采样本身——
     实测里文字提醒推不动小模型，把选项从语法里拿掉才推得动。
+
+    `why` 必须在这里出现，而且必须与 `arguments` **平级**。放在 arguments
+    里有两个后果，都不能接受：① 它会被当成某个工具的参数，撞上
+    `additionalProperties: false` 的参数校验而整次调用失败；② 上面的并集
+    只有「所有工具参数的并集」这一层，一个不属于任何工具的参数进不去。
+    平级之后它不参与工具参数校验，语法层却能采样出它——这是「意图能被
+    看见」这条要求唯一可靠的位置。
     """
     tool_names = tuple(only) if only is not None else registry.names()
     merged: dict[str, Any] = {}
@@ -81,24 +102,64 @@ def build_turn_schema(registry: Any, only: list[str] | None = None) -> dict[str,
     if tool_names:
         name_rule["enum"] = list(tool_names)
 
+    properties: dict[str, Any] = {
+        "thought": {"type": "string"},
+        "tool_calls": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": name_rule,
+                    "arguments": arguments,
+                    "why": {"type": "string"},
+                },
+                "required": ["name", "arguments"],
+            },
+        },
+        "state": STATE_SCHEMA,
+        "done": {"type": "boolean"},
+    }
+    if v2:
+        # 主循环还要 state / assessment。v2 只拿掉 final，避免长文再进 JSON。
+        # summary 必须出现：允许空串，done=true 时非空由解析器检查。
+        # 不用 minLength / oneOf，避免语法把 done=false 的空串也锁死。
+        properties["summary"] = {
+            "type": "string",
+            "description": (
+                "done=true 时必填，不超过 200 字，写结论与依据；"
+                "done=false 时必须是空串"
+            ),
+        }
+        properties["answer_plan"] = {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["short", "long"]},
+                "sections": {"type": "integer"},
+                "target_tokens": {"type": "integer"},
+                "deliverable": {"type": "string", "enum": ["chat", "file", "both"]},
+                "path": {"type": "string"},
+            },
+            "required": ["mode", "target_tokens"],
+        }
+    else:
+        properties["final"] = {"type": ["string", "null"]}
+    properties["assessment"] = {"type": "string"}
     return {
         "type": "object",
-        "properties": {
-            "thought": {"type": "string"},
-            "tool_calls": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {"name": name_rule, "arguments": arguments},
-                    "required": ["name", "arguments"],
-                },
-            },
-            "state": STATE_SCHEMA,
-            "done": {"type": "boolean"},
-            "final": {"type": ["string", "null"]},
-        },
-        "required": ["thought", "tool_calls", "done"],
+        "properties": properties,
+        "required": ["thought", "tool_calls", "done", "summary"],
     }
+
+
+@dataclass(frozen=True)
+class AnswerPlan:
+    """控制回合对自己要写多长、交到哪里的申报。长文触发在后续阶段用它。"""
+
+    mode: Literal["short", "long"]
+    target_tokens: int
+    sections: int | None = None
+    deliverable: Literal["chat", "file", "both"] = "chat"
+    path: str = ""
 
 
 @dataclass(frozen=True)
@@ -110,6 +171,12 @@ class AgentTurn:
     state_delta: StateDelta | None
     final: str | None
     done: bool
+    # 它对上一次督导建议的表态（接受 / 不接受 + 理由）。空串表示这一轮
+    # 没有督导建议要回应——不是「它没表态」，见 loop 里注入时写死的三种回答。
+    assessment: str = ""
+    # v2 完成回合的短结论。旧协议留空，正文仍在 final。
+    summary: str = ""
+    answer_plan: AnswerPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -122,8 +189,16 @@ class ParseFailure:
     kind: str = ""
 
 
-def _parse_tool_calls(raw: Any) -> tuple[ToolCall, ...] | str:
-    """返回工具调用元组，或返回错误说明字符串。"""
+def _parse_tool_calls(raw: Any, thought: str = "") -> tuple[ToolCall, ...] | str:
+    """返回工具调用元组，或返回错误说明字符串。
+
+    `why` 与 `arguments` 平级读，读不到就退回这一轮的 `thought`——只在
+    **只有一个调用**时退。多个调用共用一句说话时，把它绑到每一个上会把
+    第二个调用的意图写成第一个的，那比没有意图更坏：排查时它是一句假话。
+
+    意图的赋值刻意不做校验（不查长度、不查内容）：它是给人看的旁证，
+    校验只会多出「模型写长了就整轮失败」这种与行为无关的失败。
+    """
     if not isinstance(raw, list):
         return "tool_calls 必须是数组"
 
@@ -137,7 +212,15 @@ def _parse_tool_calls(raw: Any) -> tuple[ToolCall, ...] | str:
         arguments = item.get("arguments", {})
         if not isinstance(arguments, dict):
             return f"tool_calls[{index}].arguments 必须是对象"
-        calls.append(ToolCall(name=name, arguments=arguments))
+        why = item.get("why")
+        intent = why.strip() if isinstance(why, str) and why.strip() else ""
+        calls.append(ToolCall(name=name, arguments=arguments, intent=intent))
+    if len(calls) == 1 and not calls[0].intent and thought.strip():
+        calls[0] = ToolCall(
+            name=calls[0].name,
+            arguments=calls[0].arguments,
+            intent=thought.strip(),
+        )
     return tuple(calls)
 
 
@@ -161,8 +244,8 @@ def _parse_state(raw: Any) -> StateDelta | None | str:
     )
 
 
-def parse_turn(text: str) -> AgentTurn | ParseFailure:
-    """解析模型一轮输出。"""
+def _load_object(text: str) -> dict[str, Any] | ParseFailure:
+    """把一轮输出读成 JSON 对象。失败不抛异常。"""
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -182,6 +265,48 @@ def parse_turn(text: str) -> AgentTurn | ParseFailure:
 
     if not isinstance(payload, dict):
         return ParseFailure(reason="输出必须是 JSON 对象")
+    return payload
+
+
+def _parse_answer_plan(raw: Any) -> AnswerPlan | None | str:
+    """返回计划、None，或错误说明。缺省表示这一轮没申报。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return "answer_plan 必须是对象"
+    mode = raw.get("mode")
+    if mode not in ("short", "long"):
+        return "answer_plan.mode 必须是 short 或 long"
+    target = raw.get("target_tokens")
+    if isinstance(target, bool) or not isinstance(target, int) or target < 0:
+        return "answer_plan.target_tokens 必须是非负整数"
+    sections = raw.get("sections")
+    if sections is not None and (isinstance(sections, bool) or not isinstance(sections, int)):
+        return "answer_plan.sections 必须是整数"
+    deliverable = raw.get("deliverable", "chat")
+    if deliverable is None:
+        deliverable = "chat"
+    if deliverable not in ("chat", "file", "both"):
+        return "answer_plan.deliverable 必须是 chat、file 或 both"
+    path = raw.get("path", "")
+    if path is None:
+        path = ""
+    if not isinstance(path, str):
+        return "answer_plan.path 必须是字符串"
+    return AnswerPlan(
+        mode=mode,
+        target_tokens=target,
+        sections=sections,
+        deliverable=deliverable,
+        path=path,
+    )
+
+
+def parse_turn(text: str) -> AgentTurn | ParseFailure:
+    """解析模型一轮输出。"""
+    payload = _load_object(text)
+    if isinstance(payload, ParseFailure):
+        return payload
 
     thought = payload.get("thought")
     if not isinstance(thought, str):
@@ -193,7 +318,7 @@ def parse_turn(text: str) -> AgentTurn | ParseFailure:
     if not isinstance(done, bool):
         return ParseFailure(reason="缺少布尔字段 done")
 
-    calls = _parse_tool_calls(payload.get("tool_calls", []))
+    calls = _parse_tool_calls(payload.get("tool_calls", []), thought)
     if isinstance(calls, str):
         return ParseFailure(reason=calls)
 
@@ -204,6 +329,12 @@ def parse_turn(text: str) -> AgentTurn | ParseFailure:
     final = payload.get("final")
     if final is not None and not isinstance(final, str):
         return ParseFailure(reason="final 必须是字符串或 null")
+
+    assessment = payload.get("assessment")
+    if assessment is None:
+        assessment = ""
+    elif not isinstance(assessment, str):
+        return ParseFailure(reason="assessment 必须是字符串")
 
     if done:
         if not isinstance(final, str) or not final.strip():
@@ -219,5 +350,173 @@ def parse_turn(text: str) -> AgentTurn | ParseFailure:
         state_delta=state_delta,
         final=final,
         done=done,
+        assessment=assessment.strip(),
     )
+
+
+def parse_turn_v2(text: str) -> AgentTurn | ParseFailure:
+    """解析不含 final 的控制回合。旧格式单独标成 legacy_format，由会话决定是否降级。"""
+    payload = _load_object(text)
+    if isinstance(payload, ParseFailure):
+        return payload
+
+    if "final" in payload:
+        return ParseFailure(
+            reason=(
+                "这是旧协议（含 final）。请改用 v2：不要写 final，"
+                "完成时用 summary 写不超过 200 字的结论与依据"
+            ),
+            kind="legacy_format",
+        )
+
+    thought = payload.get("thought")
+    if not isinstance(thought, str):
+        return ParseFailure(reason="缺少字符串字段 thought")
+
+    done = payload.get("done")
+    if not isinstance(done, bool):
+        return ParseFailure(reason="缺少布尔字段 done")
+
+    calls = _parse_tool_calls(payload.get("tool_calls", []), thought)
+    if isinstance(calls, str):
+        return ParseFailure(reason=calls)
+
+    state_delta = _parse_state(payload.get("state"))
+    if isinstance(state_delta, str):
+        return ParseFailure(reason=state_delta)
+
+    assessment = payload.get("assessment")
+    if assessment is None:
+        assessment = ""
+    elif not isinstance(assessment, str):
+        return ParseFailure(reason="assessment 必须是字符串")
+
+    summary = payload.get("summary", "")
+    if summary is None:
+        summary = ""
+    if not isinstance(summary, str):
+        return ParseFailure(reason="summary 必须是字符串")
+    summary = summary.strip()
+
+    plan = _parse_answer_plan(payload.get("answer_plan"))
+    if isinstance(plan, str):
+        return ParseFailure(reason=plan)
+
+    if done:
+        if calls:
+            return ParseFailure(reason="done 与 tool_calls 互斥：标记完成时不要调用工具")
+        if not summary:
+            missing = "summary" not in payload
+            return ParseFailure(
+                reason=(
+                    "已标记 done，但缺少 summary；请用 ≤200 字写结论与依据"
+                    if missing
+                    else "已标记 done，但 summary 为空；请用 ≤200 字写结论与依据"
+                ),
+                kind="summary_empty",
+            )
+        if len(summary) > SUMMARY_LIMIT:
+            return ParseFailure(
+                reason=f"summary 超过 {SUMMARY_LIMIT} 字",
+                kind="summary_long",
+            )
+    else:
+        if summary:
+            return ParseFailure(reason="未完成时 summary 必须为空")
+        if not calls:
+            return ParseFailure(
+                reason="既没有调用工具，也没有标记 done", kind="empty_turn"
+            )
+
+    return AgentTurn(
+        thought=thought,
+        tool_calls=calls,
+        state_delta=state_delta,
+        final=None,
+        done=done,
+        assessment=assessment.strip(),
+        summary=summary,
+        answer_plan=plan,
+    )
+
+
+def summary_fallback(text: str) -> AgentTurn | None:
+    """重试后 summary 仍空时，用不超过 200 字的 thought 兜底。"""
+    payload = _load_object(text)
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("done") is not True:
+        return None
+    calls = payload.get("tool_calls") or []
+    if calls:
+        return None
+    thought = payload.get("thought")
+    if not isinstance(thought, str):
+        return None
+    thought = thought.strip()
+    if not thought or len(thought) > SUMMARY_LIMIT:
+        return None
+    patched = dict(payload)
+    patched["summary"] = thought
+    result = parse_turn_v2(json.dumps(patched, ensure_ascii=False))
+    if isinstance(result, AgentTurn):
+        return result
+    return None
+
+
+def summary_clip(text: str) -> AgentTurn | None:
+    """重试后 summary 仍超长时，截到 200 字再解析。"""
+    payload = _load_object(text)
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("done") is not True or payload.get("tool_calls"):
+        return None
+    summary = payload.get("summary")
+    if not isinstance(summary, str):
+        return None
+    summary = summary.strip()
+    if len(summary) <= SUMMARY_LIMIT:
+        return None
+    patched = dict(payload)
+    patched["summary"] = summary[:SUMMARY_LIMIT]
+    result = parse_turn_v2(json.dumps(patched, ensure_ascii=False))
+    if isinstance(result, AgentTurn):
+        return result
+    return None
+
+
+class TurnProtocol:
+    """一次运行用哪套控制协议。v2 连续两次收到旧格式就降级，并打日志。"""
+
+    def __init__(self, *, v2: bool) -> None:
+        self.v2 = v2
+        self._legacy_streak = 0
+        self._downgrade_pending = False
+
+    def schema(self, registry: Any, only: list[str] | None = None) -> dict[str, Any]:
+        if self.v2:
+            return build_turn_schema_v2(registry, only)
+        return build_turn_schema(registry, only)
+
+    def parse(self, text: str) -> AgentTurn | ParseFailure:
+        if not self.v2:
+            return parse_turn(text)
+        result = parse_turn_v2(text)
+        if isinstance(result, ParseFailure) and result.kind == "legacy_format":
+            self._legacy_streak += 1
+            if self._legacy_streak >= 2:
+                self.v2 = False
+                self._downgrade_pending = True
+                logger.warning("ControlTurn v2 连续收到旧格式，降级到旧协议")
+                return parse_turn(text)
+            return result
+        if isinstance(result, AgentTurn):
+            self._legacy_streak = 0
+        return result
+
+    def take_downgrade(self) -> bool:
+        """降级只通知调用方一次，避免每轮都重装 schema。"""
+        pending = self._downgrade_pending
+        self._downgrade_pending = False
+        return pending
 

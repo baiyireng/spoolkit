@@ -38,17 +38,15 @@ class GeminiError(RuntimeError):
 
 
 def load_env_file(path: Path) -> dict[str, str]:
-    """读取最简单的 KEY=VALUE 形式 .env。不引入第三方依赖。"""
-    values: dict[str, str] = {}
-    if not path.exists():
-        return values
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip().strip("'\"")
-    return values
+    """读取最简 `KEY=VALUE` 形式 `.env`。
+
+    实现搬到了 `spoolkit/envfile.py`：需要它的还有用户级配置（`settings`）与
+    通道凭据，而那一层不该为了读一个 `.env` 把本模块（连带 `httpx`）拖进来。
+    这里保留同名转出，老的 `from spoolkit.llm.gemini import load_env_file` 照旧能用。
+    """
+    from spoolkit.envfile import load_env_file as _load
+
+    return _load(path)
 
 
 def to_gemini_schema(node: Any) -> Any:
@@ -139,6 +137,9 @@ class GeminiGateway:
                 if transport is not None
                 else (proxy if proxy is not None else system_proxy())
             ),
+            # 代理已经算好了，不让 httpx 再读一遍环境：环境里只要有
+            # `NO_PROXY=...,[::1]`，httpx 0.28 在构造这一步就抛 InvalidURL。
+            trust_env=False,
             headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
         )
 

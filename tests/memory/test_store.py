@@ -96,6 +96,36 @@ def test_事件摘要能按结论数字搜到(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_按类型可检索(tmp_path: Path) -> None:
+    """`kind` 进索引（设计稿 §2.2 / 缺陷 4）：查 `fact` 能捞到事实类条目。"""
+    conn = _conn(tmp_path)
+    add_memory(conn, kind="fact", text="索引层用 ast 提取符号")
+    add_memory(conn, kind="preference", text="提交信息用中文写")
+    hits = search_memories(conn, "fact")
+    assert [item.text for item in hits] == ["索引层用 ast 提取符号"]
+    conn.close()
+
+
+def test_按触发词可检索(tmp_path: Path) -> None:
+    """`trigger` 进索引：教训的触发词查得到（除非它能被检索，否则永远推不出来）。"""
+    conn = _conn(tmp_path)
+    add_memory(
+        conn, kind="lesson", text="先上语法约束", trigger="解析,正则,格式", source="ep#7"
+    )
+    hits = search_memories(conn, "正则")
+    assert [item.text for item in hits] == ["先上语法约束"]
+    conn.close()
+
+
+def test_按来源可检索(tmp_path: Path) -> None:
+    """`source` 进索引：`ep#12` 能回溯到那一条。"""
+    conn = _conn(tmp_path)
+    add_memory(conn, kind="fact", text="渲染层不碰语义", source="ep#12")
+    hits = search_memories(conn, "ep#12")
+    assert [item.text for item in hits] == ["渲染层不碰语义"]
+    conn.close()
+
+
 def test_删除记忆会同步移除检索索引(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     item = add_memory(conn, kind="fact", text="要删掉的归档条目")

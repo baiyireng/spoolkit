@@ -1,0 +1,1176 @@
+  /* ══ 主题变量表：一处定义、整体可换 ══
+     默认深色（ChatGPT 观感），跟随系统；浅色只覆盖这份表，选择器与结构都不动。 */
+  :root {
+    --bg:#212121;
+    --panel:#171717;
+    --panel-2:#0d0d0d;
+    --line:#2f2f2f;
+    --line-soft:#242424;
+    --text:#ececec;
+    --text-dim:#9b9b9b;
+    --text-faint:#6f6f6f;
+    --accent:#3b82f6;
+    --accent-soft:#1e3a5f;
+    --bubble-user:#2f2f2f;
+    --bubble-assistant:#0d0d0d;
+    --code-bg:#0b0b0b;
+    --code-line:#3a3a3a;
+    --code-bar:#1c1c1c;
+    --inline-bg:#2b2b2b;
+    --inline-line:#3d3d3d;
+    --scroll-thumb:#4a4a4a;
+    --scroll-thumb-hover:#6a6a6a;
+    --ok:#6fb36f;
+    --bad:#e07777;
+    --warn-bg:#2a2410;
+    --warn-line:#4a4020;
+    --warn-text:#e8d38a;
+    --info-bg:#10202f;
+    --info-line:#1d3a54;
+    --info-text:#9fd0ff;
+    --ro-bg:#2a1f3d;
+    --ro-line:#443066;
+    --ro-text:#d0bfff;
+    --danger-bg:#3d1515;
+    --danger-line:#5c2020;
+    --danger-text:#f0a0a0;
+    --pair-bg:#3d2a00;
+    --pair-line:#5c4300;
+    --pair-text:#f0c674;
+    --sans:"MiSans","HarmonyOS Sans SC","Source Han Sans SC","Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono","Liberation Mono",monospace;
+    --font-xs:12px;
+    --font-sm:13px;
+    --font-md:15px;
+    --font-lg:18px;
+    --leading-body:1.65;
+    --leading-tight:1.4;
+    --content-width:760px;
+    --scrollbar:10px;
+    --space-1:4px;
+    --space-2:8px;
+    --space-3:12px;
+    --space-4:16px;
+    --space-5:24px;
+    --radius-sm:8px;
+    --radius-md:10px;
+    --radius-lg:14px;
+    --shadow-raised:0 1px 2px rgba(0,0,0,.22);
+    --shadow-overlay:0 8px 24px rgba(0,0,0,.28);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg:#fff;
+      --panel:#f9f9f9;
+      --panel-2:#f4f4f4;
+      --line:#e3e3e3;
+      --line-soft:#ececec;
+      --text:#0d0d0d;
+      --text-dim:#5d5d5d;
+      --text-faint:#8f8f8f;
+      --accent:#2563eb;
+      --accent-soft:#dbeafe;
+      --bubble-user:#f0f0f0;
+      --bubble-assistant:#f7f7f8;
+      --code-bg:#f6f8fa;
+      --code-line:#d8dee4;
+      --code-bar:#eef1f4;
+      --inline-bg:#eef1f4;
+      --inline-line:#d8dee4;
+      --scroll-thumb:#c9cdd3;
+      --scroll-thumb-hover:#a8aeb6;
+      --ok:#2f7a3f;
+      --bad:#b42318;
+      --warn-bg:#fff6d6;
+      --warn-line:#e6d491;
+      --warn-text:#6b4e00;
+      --info-bg:#e8f1fb;
+      --info-line:#b9d3ec;
+      --info-text:#1b4a75;
+      --ro-bg:#f0eaff;
+      --ro-line:#d6c8f5;
+      --ro-text:#4b2f8a;
+      --danger-bg:#fdecec;
+      --danger-line:#f3c2c2;
+      --danger-text:#8f1d1d;
+      --pair-bg:#fff3d6;
+      --pair-line:#e6cf94;
+      --pair-text:#6b4e00;
+      --shadow-raised:0 1px 2px rgba(0,0,0,.08);
+      --shadow-overlay:0 8px 24px rgba(0,0,0,.12);
+    }
+  }
+  /* 显式深色只锁 color-scheme：色值仍是上面的 :root，不另写一套。 */
+  :root[data-theme="dark"] { color-scheme:dark; }
+  /* 显式浅色与系统浅色同一份色值。系统是深色时媒体查询不会生效，所以这里再挂一次。 */
+  :root[data-theme="light"] {
+    color-scheme:light;
+    --bg:#fff;
+    --panel:#f9f9f9;
+    --panel-2:#f4f4f4;
+    --line:#e3e3e3;
+    --line-soft:#ececec;
+    --text:#0d0d0d;
+    --text-dim:#5d5d5d;
+    --text-faint:#8f8f8f;
+    --accent:#2563eb;
+    --accent-soft:#dbeafe;
+    --bubble-user:#f0f0f0;
+    --bubble-assistant:#f7f7f8;
+    --code-bg:#f6f8fa;
+    --code-line:#d8dee4;
+    --code-bar:#eef1f4;
+    --inline-bg:#eef1f4;
+    --inline-line:#d8dee4;
+    --scroll-thumb:#c9cdd3;
+    --scroll-thumb-hover:#a8aeb6;
+    --ok:#2f7a3f;
+    --bad:#b42318;
+    --warn-bg:#fff6d6;
+    --warn-line:#e6d491;
+    --warn-text:#6b4e00;
+    --info-bg:#e8f1fb;
+    --info-line:#b9d3ec;
+    --info-text:#1b4a75;
+    --ro-bg:#f0eaff;
+    --ro-line:#d6c8f5;
+    --ro-text:#4b2f8a;
+    --danger-bg:#fdecec;
+    --danger-line:#f3c2c2;
+    --danger-text:#8f1d1d;
+    --pair-bg:#fff3d6;
+    --pair-line:#e6cf94;
+    --pair-text:#6b4e00;
+    --shadow-raised:0 1px 2px rgba(0,0,0,.08);
+    --shadow-overlay:0 8px 24px rgba(0,0,0,.12);
+  }
+
+  * { box-sizing:border-box; }
+  /* ══ 滚动条：细、跟随主题，深色浅色各一档 ══
+     两套写法都要给：WebKit（Chrome / Edge / Safari）认 `::-webkit-scrollbar`，
+     Firefox 认标准的 `scrollbar-width` / `scrollbar-color`。**只做美化不做隐藏**：
+     thumb 平时低调、悬停才亮，"看不见"不等于"不能滚"——真的 `display:none`
+     会让鼠标用户没有任何抓手（触屏与键盘还能滚，但那是另一个故事）。 */
+  * { scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
+  ::-webkit-scrollbar { width:var(--scrollbar); height:var(--scrollbar); }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb {
+    background:var(--scroll-thumb); border-radius:8px;
+    border:2px solid transparent; background-clip:content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background:var(--scroll-thumb-hover);
+    border:2px solid transparent; background-clip:content-box; }
+  ::-webkit-scrollbar-corner { background:transparent; }
+  html, body { height:100%; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:var(--font-md)/var(--leading-body) var(--sans);
+    letter-spacing:0.03em;
+    display:flex; flex-direction:column; overflow:hidden;
+    -webkit-text-size-adjust:100%;
+  }
+  button, input, textarea, select { font:inherit; color:inherit; }
+  code, pre, kbd, samp { letter-spacing:0; }
+  button:focus-visible, [role="button"]:focus-visible, .st-item:focus-visible,
+  .toast-close:focus-visible, .row-act:focus-visible, #menu:focus-visible {
+    outline:2px solid var(--accent); outline-offset:2px;
+  }
+  .dim { color:var(--text-dim); }
+  .ok { color:var(--ok); }
+  .bad { color:var(--bad); }
+
+  /* ══ 顶部**没有**横幅带 ══
+     以前这里是一条常驻的横幅（只读 / 钉住 / 没有目标 / 探活）：它一出现就把对话流
+     往下推，而"一切正常"的时候又白占一行。现在这些**模式与状态**全收进输入条下面
+     那一行小字（见下面的 `.st`），顶部只剩"我在哪儿"（`#top` 里的目标）。
+     判据有两条：没有任何元素还挂着那个横幅类名；`#readonly` / `#target-note` /
+     `#health` / `#pairing` / `#elsewhere` 这几个挂点一个都不在页面上。 */
+  .hidden { display:none !important; }
+
+
+  /* ── 通知：右上角的浮动气泡。**脱离文档流**（`position:fixed`，`z-index` 高于内容）：
+        出现与消失都不改页面高度、不挪滚动位置——"弹一条通知把对话流推下去"就是这么坏的。
+        容器**不吃点击**（`pointer-events:none`），只有气泡与「全部关闭」自己吃（`auto`）：
+        它跟对话流叠在一起时（宽屏上右侧那一列会压到居中的卡片），底下的按钮照样点得动。
+        可堆叠（竖着排，不叠在一起）、每条一个关闭键；`info` 自己会走，
+        **`error` / `warn` 不会**——错误在用户看到之前消失，比不提示更糟。 */
+  .toast-all { display:none; align-self:flex-end; padding:4px 12px;
+               border-radius:999px; border:1px solid var(--line);
+               background:var(--panel-2); color:var(--text-dim);
+               cursor:pointer; font-size:12px; pointer-events:auto; }
+  .toast-all.show { display:inline-flex; }
+  .toast-all:hover { color:var(--text); border-color:var(--text-dim); }
+  .toast { display:flex; align-items:flex-start; gap:var(--space-2);
+           border:1px solid var(--line); border-radius:var(--radius-lg);
+           padding:var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+           background:var(--panel); color:var(--text); font-size:var(--font-sm);
+           overflow-wrap:anywhere; box-shadow:var(--shadow-overlay);
+           pointer-events:auto; animation:toast-in .14s ease-out; }
+  .toast-body { flex:1 1 auto; min-width:0; }
+  .toast-title { font-weight:600; }
+  .toast-line { margin-top:3px; color:var(--text-dim); }
+  .toast-raw { margin-top:6px; color:var(--text-faint);
+               font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
+  .toast-close { flex:0 0 auto; width:24px; height:24px; padding:0; border:0;
+                 border-radius:6px; background:transparent; color:var(--text-dim);
+                 cursor:pointer; display:flex; align-items:center;
+                 justify-content:center; }
+  .toast-close:hover { background:var(--bubble-user); color:var(--text); }
+  .toast-close svg { width:14px; height:14px; }
+  .pair-code { font:12.5px/1.55 var(--mono); font-weight:700;
+               letter-spacing:.06em; }
+  .toast.info { border-color:var(--info-line); background:var(--info-bg);
+                color:var(--info-text); }
+  .toast.warn { border-color:var(--warn-line); background:var(--warn-bg);
+                color:var(--warn-text); }
+  .toast.error { border-color:var(--danger-line); background:var(--danger-bg);
+                 color:var(--danger-text); }
+  /* `ask` 那一档（待批准）现在**没有调用方**：配对码收进了右上角状态区
+     （那里必须看得见码，气泡会被划走）。配色留着，因为气泡这个组件仍是四档的。 */
+  .toast.ask { border-color:var(--pair-line); background:var(--pair-bg);
+               color:var(--pair-text); }
+  .toast.info .toast-line, .toast.info .toast-close,
+  .toast.warn .toast-line, .toast.warn .toast-close,
+  .toast.error .toast-line, .toast.error .toast-close,
+  .toast.ask .toast-line, .toast.ask .toast-close { color:inherit; opacity:.82; }
+
+  /* 入场只动 `opacity` 与一点位移：`position:fixed` 的元素上做 transform 不会建
+     包含块问题，而 `prefers-reduced-motion` 那一档把它整个关掉（见文件末尾）。 */
+  @keyframes toast-in { from { opacity:0; transform:translateY(-4px); }
+                        to { opacity:1; transform:none; } }
+  /* ══ 右上角那一列：**常驻提示**与**通知**，两样都脱离文档流 ══
+     它们曾经各自占着地方：常驻状态（探活 / 只读 / 钉住 / 待配对 / 别处在跑）先是顶部
+     一条横幅带，上一轮搬进了输入条下面那一行（`.st`）——可那一行**在文档流里**：
+     徽标一多就换行，`#composer` 跟着变高，`#stream`（`flex:1`）就被压矮，
+     而"提示一出现就把对话区挤下去"正是用户这次报的第一条。
+
+     所以这一轮把常驻提示也**收到右上角**，与通知共用一条 `position:fixed` 的列：
+     出现 / 展开 / 收起都**不改对话区的高度、不挪滚动位置**（证据在
+     `tests/web/page_dom.js` 的 `no_squeeze`：对话区可用高度前后一样，而且那个
+     模型先被反证过它量得出"挤"）。两样都在同一列里靠右堆叠，也就不存在"通知盖住
+     徽标"这种事（徽标是不该被划走的状态，通知是不该被盖住的提醒）。
+
+     尺寸的依据（不是随手写的数）：
+     - `width:min(420px, 92vw)`：420px 是"一条状态说明 + 一条 `spool service list`
+       这类命令"在 12.5px 等宽下不折行的量级；92vw 是窄屏那一档的护栏——留 8vw
+       给边距，右锚 14px，视口窄到 175px 才开始贴边，**不越界**（同一件事在
+       860px 以下那条媒体查询里再收一次）。
+     - `height:auto`（一个字都不写死）：内容多少就多高，徽标换行也不会溢出——
+       整列的宽度是定值，高度随内容走。
+     - 容器 `pointer-events:none`，只有徽标、详情面板、气泡自己吃点击：它压在
+       对话流上时，底下的卡片与按钮照样点得动。 */
+  #corner { position:fixed; z-index:30; top:52px; right:14px;
+            width:min(420px, 92vw); height:auto;
+            max-height:calc(100vh - 120px); overflow:auto;
+            display:flex; flex-direction:column; align-items:stretch;
+            gap:8px; pointer-events:none; }
+  #hints { position:relative; width:100%; height:auto; display:flex;
+           flex-wrap:wrap; justify-content:flex-end; align-items:flex-start; gap:6px; }
+  #toasts { display:none; width:min(360px, 100%); max-height:60vh; overflow-y:auto;
+            align-self:flex-end; flex-direction:column; gap:var(--space-2); }
+  #toasts.show { display:flex; }
+
+  /* ══ 状态区：右上角那一列里的常驻提示（`.st-item` 徽标 + `#st-panel` 详情） ══
+     "这一页现在是什么模式 / 探活通不通 / 有没有人在等批准"全在这里，而它**不在文档流里**
+     （挂在 `#corner` 那个 `position:fixed` 的列下）：对话区的高度与滚动位置都不受它影响。
+     三种信息各就各位：① 探活常态只剩一枚小圆点（**不是**"显示一句一切正常"）；
+     ② 只读（非回环）与 `--root` 钉住才摆出一枚锁徽标——它回答"为什么点不动"；
+     ③ 待配对 / 别处还有一条在跑收进同一行，详情里仍然是完整的码与命令。
+     点徽标（或那枚圆点）展开详情；再点、点别处、按 Esc 收起。 */
+  .st { display:flex; align-items:center; gap:6px; width:100%;
+        max-width:var(--content-width); margin:8px auto 0;
+        font-size:var(--font-xs); color:var(--text-faint); }
+  .st-hint { margin-left:auto; padding-left:10px; color:var(--text-dim);
+             white-space:nowrap; }
+  .st-item { display:inline-flex; align-items:center; gap:6px; max-width:44vw;
+             min-width:0; flex:0 1 auto; padding:2px 9px; border-radius:999px;
+             border:1px solid var(--line-soft); background:var(--panel-2);
+             color:var(--text-faint); cursor:pointer; font-size:11.5px;
+             line-height:1.7; pointer-events:auto; }
+  .st-item > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .st-item:hover, .st-item[aria-expanded="true"] { color:var(--text);
+             border-color:var(--line); }
+  /* 常态那枚圆点：绿色、低调，但不沉默——鼠标停上去（`title`）与读屏（`aria-label`）
+     都念得出"模型探活：正常"。 */
+  .st-dot { width:8px; height:8px; flex:0 0 8px; border-radius:50%;
+            background:var(--ok); }
+  .st-item.warn { color:var(--warn-text); border-color:var(--warn-line); }
+  .st-item.warn .st-dot { background:var(--warn-text); }
+  .st-item.bad { color:var(--danger-text); border-color:var(--danger-line); }
+  .st-item.bad .st-dot { background:var(--bad); }
+  .st-item.ro { color:var(--ro-text); border-color:var(--ro-line); }
+  .st-item.ask { color:var(--pair-text); border-color:var(--pair-line); }
+  .st-item svg { width:12px; height:12px; flex:0 0 12px; }
+  /* 顶栏右侧只留任务和状态两枚入口。状态钮留在 #corner 里，点外部仍认这一列。 */
+  #st-health { position:fixed; top:8px; right:12px; z-index:2; height:32px;
+               min-width:88px; max-width:112px; padding:0 10px; border-radius:999px;
+               gap:6px; justify-content:center;
+               font-size:var(--font-xs); line-height:1; white-space:nowrap; }
+  #st-health .st-label { display:inline; overflow:visible; text-overflow:clip; }
+  #st-mode, #st-target, #st-pair, #st-elsewhere { display:none !important; }
+  /* 详情面板：以 `#hints` 为锚**绝对定位**，从徽标下面朝下展开（**不占文档流**）。
+     高度自适应内容、超过 56vh 才自己滚：面板再长也不会把右上角那一列撑出屏。 */
+  /* 详情在徽标下面、通知上面，三者同一列往下排，展开时把通知往下推。 */
+  .st-panel { position:static; width:min(360px, 100%); max-height:56vh; overflow-y:auto;
+              align-self:flex-end; display:flex; flex-direction:column; gap:var(--space-2);
+              padding:var(--space-3) var(--space-3) var(--space-4);
+              border-radius:var(--radius-lg); border:1px solid var(--line);
+              background:var(--panel); color:var(--text); font-size:var(--font-sm);
+              box-shadow:var(--shadow-overlay); pointer-events:auto;
+              animation:toast-in .14s ease-out; }
+  .st-close { align-self:flex-end; flex:0 0 auto; width:30px; height:30px; padding:0;
+              border:0; border-radius:var(--radius-sm); background:transparent;
+              color:var(--text-dim); cursor:pointer; pointer-events:auto;
+              display:flex; align-items:center; justify-content:center; }
+  .st-close:hover { background:var(--bubble-user); color:var(--text); }
+  .st-close svg { width:14px; height:14px; }
+  .st-sec + .st-sec { margin-top:10px; padding-top:10px;
+                      border-top:1px solid var(--line-soft); }
+  .st-sec-head { font-weight:650; font-size:var(--font-sm); }
+  .st-line { margin-top:3px; color:var(--text-dim); overflow-wrap:anywhere; }
+  .st-line.bad { color:var(--danger-text); }
+  .st-raw { margin-top:6px; color:var(--text-faint);
+            font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
+  #conn { position:static; align-self:center; max-width:100%;
+          color:var(--danger-text); background:var(--danger-bg);
+          border:1px solid var(--danger-line); border-radius:999px;
+          padding:4px 14px; font-size:12px; display:none;
+          pointer-events:none; }
+
+
+  /* ── 顶条：抽屉开关 + 当前目标（"我在哪儿"必须直接可读） ── */
+  #top {
+    display:flex; align-items:center; flex-wrap:nowrap; gap:var(--space-2);
+    min-height:48px; padding:calc(var(--space-2) + env(safe-area-inset-top)) 108px var(--space-2) var(--space-3);
+    border-bottom:1px solid var(--line-soft); background:var(--panel);
+    min-width:0;
+  }
+  #menu { display:none; width:34px; height:34px; border-radius:var(--radius-sm); border:0;
+          background:transparent; color:var(--text); cursor:pointer;
+          align-items:center; justify-content:center; }
+  #menu:hover { background:var(--bubble-user); }
+  #menu svg { width:18px; height:18px; }
+  .brand { flex:0 0 auto; display:inline-flex; align-items:center; gap:var(--space-1);
+           min-width:0; color:var(--text); white-space:nowrap; letter-spacing:0; }
+  .brand-mark { width:20px; height:20px; flex:0 0 auto; display:block; }
+  .brand-name { flex:0 0 auto; font-size:var(--font-md); font-weight:650;
+                letter-spacing:-0.02em; line-height:1; }
+  .top-rule { flex:0 0 auto; width:1px; height:16px; display:block;
+              background:var(--text-faint); }
+  #where { color:var(--text); font-weight:600; font-size:var(--font-sm);
+           line-height:var(--leading-tight);
+           flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+           white-space:nowrap; }
+  #where.empty { color:var(--text-dim); font-weight:400; }
+
+  /* ── 主体：左栏 + 对话面 ── */
+  #body { flex:1; display:flex; min-height:0; overflow:hidden; }
+  #scrim { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:11; }
+  #scrim.show { display:block; }
+
+  #sidebar {
+    width:260px; flex:0 0 260px; border-right:1px solid var(--line-soft);
+    background:var(--panel); display:flex; flex-direction:column;
+    min-height:0; z-index:12;
+    font-size:var(--font-sm); line-height:var(--leading-tight); letter-spacing:0;
+  }
+  /* 两条原生选择器：留着当左栏两段的控件层（键鼠 / 读屏都能用），视觉上让位给行。 */
+  .sr-only { position:absolute; width:1px; height:1px; margin:-1px; padding:0;
+             border:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+  .side-head { padding:var(--space-3) var(--space-2) var(--space-1); min-width:0; }
+  .side-head .meta { font-size:var(--font-xs); font-weight:650; letter-spacing:.06em;
+                     color:var(--text-dim); }
+  #side-search { display:block; width:100%; box-sizing:border-box; min-width:0;
+                 margin:var(--space-2) 0 var(--space-1); padding:var(--space-2) var(--space-3);
+                 border-radius:var(--radius-md); border:1px solid var(--line);
+                 background:var(--bg); color:var(--text);
+                 font:var(--font-sm)/var(--leading-tight) var(--sans); }
+  #side-search:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .new { display:flex; align-items:center; gap:var(--space-2); width:100%;
+         margin:var(--space-2) 0 var(--space-1); padding:var(--space-2) var(--space-3);
+         border-radius:var(--radius-md); border:1px solid var(--line);
+         background:transparent; color:var(--text); cursor:pointer;
+         font-size:var(--font-sm); text-align:left; }
+  .new:hover { background:var(--bubble-user); }
+  .new svg { width:16px; height:16px; }
+  .new.locked { opacity:.45; cursor:default; }
+  .new.locked:hover { background:transparent; }
+  #panel { flex:1; overflow-y:auto; padding:6px 8px 12px; }
+  .grp { margin:6px 0 12px; }
+  .grp-name { display:flex; align-items:center; gap:var(--space-2); padding:6px var(--space-2);
+              border-radius:var(--radius-sm); cursor:pointer; font-weight:600;
+              font-size:var(--font-sm); line-height:var(--leading-tight); }
+  .grp-name:hover { background:var(--bubble-user); }
+  .grp-name .caret { color:var(--text-dim); font-size:var(--font-xs); width:10px; }
+  .grp-name .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* 会话行两行：标题独占一行，id 退到下面一行的小字。uuid 很长，放在标题右边
+     会把标题挤成"重构会话标..."——那是把主信息让给了内部 id。 */
+  .nm-wrap { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:1px; }
+  .grp-name .src { color:var(--text-dim); font-size:var(--font-xs); line-height:1.35;
+                   opacity:.85;
+                   margin:0; max-width:100%;
+                   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .grp-name .nm { min-width:0; }
+  .grp-name.on, #sessions .grp-name.on { background:var(--accent-soft);
+              box-shadow:inset 2px 0 0 var(--accent); }
+  .empty-line { color:var(--text-faint); font-size:var(--font-xs); padding:2px 8px 8px; }
+  #sessions .grp-name { font-weight:400; padding-left:var(--space-5); font-size:var(--font-sm); }
+  .li { display:flex; align-items:center; gap:8px; }
+  .li .nm { flex:1 1 auto; }
+  .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* 行上那个小按钮（移除 / 恢复）。一直看得见，不藏在 hover 里——触屏没有 hover。
+     第一次点只是**变成确认态**，第二次点才真的发请求（一点就删太容易误伤）。 */
+  .row-act { flex:0 0 auto; padding:2px var(--space-2); border-radius:var(--radius-sm);
+             cursor:pointer; border:1px solid var(--line); background:transparent;
+             color:var(--text-faint); font-size:var(--font-xs); }
+  .row-act:hover, .row-act:focus-visible { color:var(--text); border-color:var(--text-dim); }
+  .row-act.armed { background:var(--danger-bg); color:var(--danger-text);
+                   border-color:var(--danger-line); }
+  .row-act.back { color:var(--accent); border-color:var(--accent-soft); }
+  .row-acts { flex:0 0 auto; display:inline-flex; align-items:center; gap:4px; min-width:0; }
+  .row-act.rename { display:inline-flex; align-items:center; justify-content:center;
+                    width:28px; height:28px; padding:0; }
+  .row-act.rename svg { width:14px; height:14px; display:block; }
+  .lock .row-act.rename { pointer-events:auto; }
+  /* 「已移除」那一行：只是摆在那里等「恢复」，点它是没有用的。 */
+  .li.gone { opacity:.6; cursor:default; }
+  .grp-sub { padding:6px var(--space-2) 2px; color:var(--text-dim);
+             font-size:var(--font-xs); font-weight:650; letter-spacing:.04em; }
+  .dot { width:7px; height:7px; flex:0 0 7px; border-radius:50%;
+         background:var(--ok); animation:pulse 1.6s ease-in-out infinite; }
+  .lock { opacity:.5; }
+  .lock .grp-name, .lock .new { pointer-events:none; cursor:default; }
+  #side-foot { display:flex; align-items:center; gap:var(--space-2);
+               padding:var(--space-2) var(--space-3); border-top:1px solid var(--line-soft);
+               font-size:var(--font-xs); }
+  #meta { flex:1 1 auto; min-width:0; overflow:hidden;
+          text-overflow:ellipsis; white-space:nowrap; }
+
+  /* 设置是"主动去找已归档"的入口：平时只占页脚一小块，不抢会话列表。 */
+  #settings-btn { flex:0 0 auto; display:inline-flex; align-items:center; gap:5px;
+                  padding:5px 8px; border-radius:8px; border:1px solid transparent;
+                  background:transparent; color:var(--text-dim); cursor:pointer;
+                  font-size:12px; line-height:1; }
+  #settings-btn:hover { color:var(--text); border-color:var(--line);
+                        background:var(--bubble-user); }
+  #settings-btn svg { width:14px; height:14px; }
+  #settings-btn .count { min-width:16px; height:16px; padding:0 5px; border-radius:999px;
+                         background:var(--panel-2); border:1px solid var(--line);
+                         color:var(--text-dim); font-size:10.5px;
+                         display:inline-flex; align-items:center; justify-content:center; }
+  #settings-btn .count.hidden { display:none; }
+  /* 设置弹层：默认不出现；归档列表在打开时才建节点。 */
+  #settings { position:fixed; inset:0; z-index:40; display:flex;
+              align-items:center; justify-content:center;
+              padding:max(var(--space-5), env(safe-area-inset-top)) var(--space-5) max(var(--space-5), env(safe-area-inset-bottom));
+              background:rgba(0,0,0,.5); }
+  #settings.hidden { display:none; }
+  .settings-card { width:min(400px, 100%); max-height:min(72vh, 620px);
+                   display:flex; flex-direction:column; min-height:0;
+                   border:1px solid var(--line); border-radius:var(--radius-lg);
+                   background:var(--panel); color:var(--text);
+                   box-shadow:var(--shadow-overlay); overflow:hidden; }
+  .settings-head { display:flex; align-items:center; gap:var(--space-2);
+                   padding:var(--space-3) var(--space-3) var(--space-2);
+                   border-bottom:1px solid var(--line-soft); }
+  .settings-head h2 { margin:0; flex:1 1 auto; font-size:var(--font-md); font-weight:650; }
+  .settings-head .icon-btn { width:30px; height:30px; padding:0; border:0;
+                             border-radius:var(--radius-sm); background:transparent;
+                             color:var(--text-dim); cursor:pointer;
+                             display:flex; align-items:center; justify-content:center; }
+  .settings-head .icon-btn:hover { color:var(--text); background:var(--bubble-user); }
+  .settings-head .icon-btn svg { width:15px; height:15px; }
+  .settings-body { flex:1 1 auto; min-height:0; overflow-y:auto; padding:var(--space-3); }
+  .set-sec + .set-sec { margin-top:14px; padding-top:12px; border-top:1px solid var(--line-soft); }
+  .set-head { display:flex; align-items:center; gap:8px; font-size:12px;
+              font-weight:650; color:var(--text-dim); margin-bottom:8px; }
+  .theme-choices { display:flex; gap:6px; }
+  .theme-choices button { flex:1 1 0; min-width:0; padding:6px 8px; border-radius:8px;
+                          border:1px solid var(--line); background:transparent;
+                          color:var(--text); cursor:pointer; font-size:12px; }
+  .theme-choices button.on { border-color:var(--accent); background:var(--accent-soft); }
+  .set-head .count { padding:1px 7px; border-radius:999px; background:var(--panel-2);
+                     border:1px solid var(--line); color:var(--text-dim);
+                     font-size:11px; font-weight:400; }
+  .archive-list { display:flex; flex-direction:column; gap:2px; }
+  .archive-row { display:flex; align-items:center; gap:10px; padding:8px 8px;
+                 border-radius:9px; min-width:0; }
+  .archive-row:hover { background:var(--bubble-user); }
+  .archive-main { flex:1 1 auto; min-width:0; }
+  .archive-title { font-size:13px; color:var(--text);
+                   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .archive-id { margin-top:2px; font:11px/1.4 var(--mono); color:var(--text-faint);
+                overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .archive-empty { padding:10px 8px; color:var(--text-faint); font-size:12.5px; }
+  .arc-restore { flex:0 0 auto; padding:6px 12px; border-radius:8px;
+                 border:1px solid var(--line); background:transparent;
+                 color:var(--accent); cursor:pointer; font-size:12px; }
+  .arc-restore:hover { border-color:var(--accent); background:var(--accent-soft); }
+  .arc-restore:disabled { opacity:.5; cursor:default; }
+  #settings [data-focusable]:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  #rename { position:fixed; inset:0; z-index:41; display:flex;
+            align-items:center; justify-content:center; padding:var(--space-5);
+            background:rgba(0,0,0,.5); }
+  #rename.hidden { display:none; }
+  .rename-card { width:min(400px, 100%); box-sizing:border-box; display:flex;
+                 flex-direction:column; gap:8px; margin:0;
+                 border:1px solid var(--line); border-radius:var(--radius-lg);
+                 background:var(--panel); color:var(--text);
+                 box-shadow:var(--shadow-overlay); padding:var(--space-3); }
+  .rename-head { display:flex; align-items:center; gap:var(--space-2); }
+  .rename-head h2 { margin:0; flex:1 1 auto; font-size:var(--font-md); font-weight:650; }
+  .rename-head .icon-btn { width:30px; height:30px; padding:0; border:0;
+                           border-radius:var(--radius-sm); background:transparent;
+                           color:var(--text-dim); cursor:pointer;
+                           display:flex; align-items:center; justify-content:center; }
+  .rename-head .icon-btn:hover { color:var(--text); background:var(--bubble-user); }
+  .rename-head .icon-btn svg { width:15px; height:15px; }
+  .rename-label { font-size:12px; font-weight:650; color:var(--text-dim); }
+  #rename-input { display:block; width:100%; box-sizing:border-box; min-width:0;
+                  margin:0; padding:8px 10px; border-radius:8px;
+                  border:1px solid var(--line); background:var(--panel-2);
+                  color:var(--text); font:inherit; }
+  #rename-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .rename-error { min-height:1.3em; margin:0; color:var(--danger-text); font-size:12.5px; }
+  .rename-actions { display:flex; justify-content:flex-end; gap:8px; }
+  .rename-actions button { padding:6px 12px; border-radius:8px; cursor:pointer;
+                           border:1px solid var(--line); background:transparent;
+                           color:var(--text); font-size:12px; }
+  #rename-save { border-color:var(--accent); background:var(--accent); color:#fff; }
+  #rename-input:disabled, .rename-actions button:disabled, .rename-head .icon-btn:disabled {
+    opacity:.5; cursor:default;
+  }
+
+
+  /* ── 对话面 ── */
+  #thread { flex:1; position:relative; display:flex; flex-direction:column; min-width:0; }
+  #stream { flex:1; overflow-y:auto; overflow-x:hidden; scrollbar-gutter:stable;
+            padding:20px var(--space-4) 26px; scroll-behavior:smooth;
+            padding-left:max(var(--space-4), env(safe-area-inset-left));
+            padding-right:max(var(--space-4), env(safe-area-inset-right));
+            scrollbar-width:thin; scrollbar-color:var(--text-faint) transparent; }
+  #stream::-webkit-scrollbar,
+  .trace-body::-webkit-scrollbar,
+  .task-body::-webkit-scrollbar { width:10px; height:10px; }
+  #stream::-webkit-scrollbar-track,
+  .trace-body::-webkit-scrollbar-track,
+  .task-body::-webkit-scrollbar-track { background:transparent; margin:8px 0; }
+  #stream::-webkit-scrollbar-thumb,
+  .trace-body::-webkit-scrollbar-thumb,
+  .task-body::-webkit-scrollbar-thumb {
+    background:var(--text-faint); border-radius:999px;
+    border:2px solid transparent; background-clip:padding-box; min-height:40px;
+  }
+  #stream::-webkit-scrollbar-thumb:hover,
+  .trace-body::-webkit-scrollbar-thumb:hover,
+  .task-body::-webkit-scrollbar-thumb:hover {
+    background:var(--text-dim); border:2px solid transparent;
+    background-clip:padding-box;
+  }
+  #stream .col { width:100%; max-width:var(--content-width); margin:0 auto;
+                 display:flex; flex-direction:column; gap:12px; }
+  /* 消息成块：用户在右、助手在左（宽屏留白更像文档流） */
+  .msg { display:flex; flex-direction:column; min-width:0; }
+  .msg.user { align-self:flex-end; max-width:84%; align-items:flex-end; }
+  .msg.assistant { align-self:flex-start; max-width:100%; }
+  .bubble { padding:9px 14px; border-radius:14px; white-space:pre-wrap;
+            overflow-wrap:anywhere; word-break:break-word; min-width:0;
+            max-width:100%; }
+  /* 普通正文与代码必须看得出是两类：正文是一段话（保留换行），
+     行内代码是带底色的等宽小片——样式上即可区分。 */
+  .empty-state { max-width:var(--content-width); margin:28px auto; padding:4px 2px;
+                 display:flex; flex-direction:column; gap:8px; min-width:0; }
+  .empty-title { font-size:18px; font-weight:600; overflow-wrap:anywhere; }
+  /* 空会话：问候和输入条收成一簇，垂直居中。有消息后这条不再生效，输入条回到底部。 */
+  #thread:has(.empty-state) { justify-content:safe center; }
+  #thread:has(.empty-state) #stream { flex:0 1 auto; overflow:visible;
+                 padding-top:12px; padding-bottom:0; }
+  #thread:has(.empty-state) .empty-state { margin:0 auto; width:100%;
+                 align-items:center; text-align:center; gap:10px; }
+  #thread:has(.empty-state) .empty-title { font-size:28px; font-weight:600;
+                 letter-spacing:-0.03em; }
+  #composer .empty-actions { width:100%; max-width:var(--content-width); margin:2px auto 0;
+                 justify-content:center; }
+  .empty-note, .empty-where { margin:0; color:var(--text-dim); line-height:1.5;
+                              overflow-wrap:anywhere; }
+  .empty-actions { display:flex; flex-wrap:wrap; gap:8px; }
+  .empty-go, .empty-actions button { max-width:100%; padding:8px 12px;
+                 border-radius:10px; border:1px solid var(--line); background:transparent;
+                 color:var(--text); cursor:pointer; text-align:left;
+                 overflow-wrap:anywhere; }
+  .empty-actions button { border-radius:999px; padding:8px 14px; text-align:center;
+                 background:var(--panel); }
+  .prose { white-space:pre-wrap; }
+  .prose + .prose { margin-top:9px; }
+  .inline-code { font:0.92em/1.5 var(--mono); background:var(--inline-bg);
+                 border:1px solid var(--inline-line); border-radius:5px;
+                 padding:1px 5px; overflow-wrap:anywhere; word-break:break-word; }
+  .msg.user .bubble { background:rgba(255,255,255,.06); border-bottom-right-radius:4px; }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) .msg.user .bubble { background:rgba(0,0,0,.04); }
+  }
+  :root[data-theme="light"] .msg.user .bubble { background:rgba(0,0,0,.04); }
+  .msg.user.failed .bubble { background:var(--danger-bg); color:var(--danger-text);
+                             border:1px dashed var(--danger-line); }
+  .msg.user .unsent { margin-top:4px; color:var(--danger-text); font-size:12px; }
+  .msg-retry { margin-top:4px; padding:2px 10px; border-radius:8px; cursor:pointer;
+               border:1px solid var(--danger-line); background:transparent;
+               color:var(--danger-text); font-size:12.5px; }
+  .msg.assistant .bubble { background:transparent; border:0; box-shadow:none;
+                           border-bottom-left-radius:4px;
+                           line-height:var(--leading-body); letter-spacing:0.03em; }
+  .msg.assistant .bubble :is(pre, code, .inline-code, .code) { letter-spacing:0; }
+  .msg.system { align-self:flex-start; max-width:100%; }
+  .sys-line { color:var(--text-dim); font-size:13px; padding-left:4px;
+              white-space:pre-wrap; overflow-wrap:anywhere; }
+  .sys-line.bad { color:var(--bad); }
+  .sys-line.ok { color:var(--ok); }
+  /* 连不上模型这类失败：一行原始异常谁也读不出下一步。做成一块带左边框的说明。 */
+  .sys-line.failure { margin-top:2px; padding:8px 12px; border-left:3px solid var(--danger-line);
+                      background:var(--danger-bg); color:var(--danger-text);
+                      border-radius:0 8px 8px 0;
+                      font-size:var(--font-sm); line-height:var(--leading-body);
+                      letter-spacing:0.03em; }
+  .sys-line.failure .fail-head { font-weight:600; }
+  .sys-line.failure .fail-line { margin-top:2px; }
+  .sys-line.failure .fail-raw { margin-top:6px; color:var(--text-dim);
+                                font:12px/1.5 var(--mono); letter-spacing:0;
+                                overflow-wrap:anywhere; }
+
+  /* ── 消息卡片上的「思考过程」：**默认收起**，收起时一个节点都不建 ──
+     它回答的是"这一轮它到底干了什么、卡在哪一步"（排错用），而这份内容平时不该占版面：
+     所以正文块 `trace-body` 是**点开才建**的，收起状态下页面上只有那一行小标题。
+     刷新 / 切走再切回之后，这一块由服务端只增的 `messages[i].trace` 重新画出来
+     （`makeTrace` + `fillTrace`），所以"看过就没了"这件事不会再有。 */
+  .msg .trace { margin:8px 0 0; min-width:0; max-width:100%;
+                border:1px solid var(--line); border-radius:10px;
+                background:var(--panel); overflow:hidden; }
+  .msg .trace.trace-empty { display:none; }
+  .trace-head { display:flex; align-items:center; gap:8px; width:100%;
+                max-width:100%; padding:8px 10px; cursor:pointer; border:0;
+                border-radius:0; background:transparent; color:var(--text);
+                font:12.5px/1.35 var(--sans); font-weight:600; text-align:left;
+                letter-spacing:0; overflow:hidden; text-overflow:ellipsis;
+                white-space:nowrap; }
+  .trace-head::before { content:""; width:7px; height:7px; border-radius:50%;
+                flex:0 0 auto; background:var(--text-faint); }
+  .trace-head[aria-expanded="true"]::before { background:var(--info-text); }
+  .trace-head::after { content:""; width:6px; height:6px; margin-left:auto; flex:0 0 auto;
+                border-right:2px solid var(--text-dim); border-bottom:2px solid var(--text-dim);
+                transform:translateY(-1px) rotate(45deg); }
+  .trace-head[aria-expanded="true"]::after { transform:translateY(2px) rotate(225deg); }
+  .trace-head:hover { color:var(--text); }
+  .trace-body { margin:0; padding:0 10px 8px; border:0; border-top:1px solid var(--line-soft);
+                border-radius:0; background:transparent; color:var(--text-dim);
+                font-size:12.5px; max-height:46vh; overflow:auto;
+                scrollbar-width:thin; scrollbar-color:var(--text-faint) transparent; }
+  .trace-line { display:grid; grid-template-columns:14px minmax(0,1fr); gap:8px;
+                margin:0; padding:8px 0; border-top:1px solid var(--line-soft);
+                overflow-wrap:anywhere; }
+  .trace-line:first-child { border-top:0; }
+  .trace-rail { position:relative; width:7px; height:7px; margin-top:5px; }
+  .trace-rail::before { content:""; position:absolute; left:3px; top:9px; bottom:-18px;
+                width:1px; background:var(--line); }
+  .trace-line:last-child .trace-rail::before { display:none; }
+  .trace-rail::after { content:""; position:absolute; left:0; top:0; width:7px; height:7px;
+                border-radius:50%; background:var(--panel); box-shadow:inset 0 0 0 1.5px var(--text-dim); }
+  .trace-line.bad .trace-rail::after { box-shadow:inset 0 0 0 1.5px var(--danger-text); }
+  .trace-line.ok .trace-rail::after { box-shadow:inset 0 0 0 1.5px var(--ok); }
+  .trace-main { min-width:0; }
+  .trace-row { display:grid; grid-template-columns:minmax(0,1.1fr) auto minmax(0,1.6fr);
+               gap:2px 8px; align-items:baseline; }
+  .trace-name { color:var(--text); font-weight:600; min-width:0; overflow-wrap:anywhere; }
+  .trace-arrow { color:var(--text-faint); }
+  .trace-status { color:var(--text); justify-self:end; }
+  .trace-text { color:var(--text-dim); white-space:pre-wrap; }
+  .trace-line.bad, .trace-line.bad .trace-status { color:var(--danger-text); }
+  .trace-line.ok .trace-status, .trace-line.ok .trace-text { color:var(--ok); }
+  .trace-detail { margin-top:2px; color:var(--text-faint); white-space:pre-wrap;
+                  font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
+  .bubble.streaming::after { content:""; display:inline-block; width:2px; height:.9em;
+                margin-left:3px; vertical-align:-1px; background:var(--text-dim);
+                animation:caret 1s steps(1) infinite; }
+  @keyframes caret { 50% { opacity:0; } }
+  @keyframes chain-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+  .stream-row { animation:chain-in .28s ease; }
+  /* 失败 / 停止那一轮：气泡让位给那一块说明（`.sys-line.failure` 自己有底色边框），
+     所以这一档把气泡自己的底色与内边距去掉，免得两层框套在一起。 */
+  .bubble.failed { padding:0; background:transparent; border:0; }
+  .bubble.stopped { color:var(--text-dim); font-size:13px; }
+
+  /* 代码块：**明显**的一块——底色、边框、圆角、内边距；自己横向/纵向滚，
+     不撑破气泡（`.bubble` 与 `.msg` 上的 min-width:0 是这条能成立的前提）。 */
+  .code { position:relative; margin:10px 0 0; border:1px solid var(--code-line); border-radius:10px;
+          overflow:hidden; background:var(--code-bg); max-width:100%; }
+  .code-bar { display:flex; align-items:center; gap:8px; padding:5px 8px 5px 12px;
+              background:var(--code-bar); color:var(--text-dim);
+              font:12px/1.6 var(--mono); border-bottom:1px solid var(--code-line); }
+  /* 语言标签可以让位（长语言名不许把复制键挤走），复制键位置固定在最右。 */
+  .code-lang { flex:1 1 auto; min-width:0; overflow:hidden;
+               text-overflow:ellipsis; white-space:nowrap; }
+  .copy-btn { flex:0 0 auto; padding:3px 10px; border-radius:7px;
+              border:1px solid var(--line); background:transparent;
+              color:var(--text-dim); cursor:pointer; font:12px/1.6 var(--sans); }
+  .copy-btn:hover { color:var(--text); border-color:var(--text-dim); }
+  .code pre { margin:0; padding:11px 13px; max-height:360px; overflow:auto; overflow-x:auto;
+              font:13px/1.55 var(--mono); color:var(--text);
+              scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
+  .code.code-x::after { content:"横向滚动"; position:absolute; right:0; bottom:0; z-index:1;
+              pointer-events:none; padding:2px 8px 3px 28px;
+              font:10px/16px var(--sans); color:var(--text-faint);
+              background:linear-gradient(to left, var(--code-bg) 58%, transparent); }
+  .msg.user .code { border-color:var(--line); }
+
+  /* 历史：一条分隔线 + 略淡。**不在页面上写任何实现说明**——
+     用户要看的只是"以前说过什么"。 */
+  .history-sep { display:flex; align-items:center; gap:10px;
+                 color:var(--text-faint); font-size:12px; }
+  .history-sep::before, .history-sep::after { content:""; flex:1;
+                 border-top:1px solid var(--line-soft); }
+  .msg.history { opacity:.86; }
+  .msg-time { align-self:flex-end; margin:1px 2px 0; color:var(--text-faint);
+              font-size:11px; line-height:1.15; }
+  .day-sep { display:flex; align-items:center; gap:8px; margin:6px 0 2px;
+             color:var(--text-faint); font-size:11px; line-height:1.2; }
+  .day-sep::before, .day-sep::after { content:""; flex:1; height:1px; background:var(--line-soft); }
+
+  /* ── 待确认：**对话流里**的一张卡片（ChatGPT 的工具调用卡片那一挂） ──
+     没有待确认内容时它整个不存在：HTML 里没有这块的占位，节点也不建。
+     一个空框会被读成"有待确认项"，而框里那两个按钮是空的、还能被 Tab 到。 */
+  .ask-card { align-self:stretch; border:1px solid var(--line);
+              border-radius:12px; background:var(--panel-2);
+              padding:10px 12px; min-width:0; }
+  .ask-head { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .ask-who { font-weight:600; font-size:13px; }
+  .ask-kind { color:var(--text-dim); font-size:12px; }
+  .ask-body { margin-top:6px; min-width:0; max-height:45vh; overflow:auto; }
+  .ask-card.command,
+  .ask-card.combined { border-color:var(--danger-line); background:var(--danger-bg); }
+  .ask-card.command .ask-kind,
+  .ask-card.command .ask-title,
+  .ask-card.command .ask-warn,
+  .ask-card.combined .ask-kind,
+  .ask-card.combined .ask-title,
+  .ask-card.combined .ask-warn { color:var(--danger-text); }
+  .ask-card.command .ask-apply,
+  .ask-card.combined .ask-apply { background:#7f1d1d; color:#fff; }
+  .ask-title { font-weight:600; margin-bottom:6px; }
+  .ask-mark { margin-right:4px; }
+  .ask-cmd { margin:0; padding:8px 10px; overflow-x:auto; border-radius:8px;
+             background:var(--code-bg); border:1px solid var(--danger-line);
+             font:12.5px/1.5 var(--mono); }
+  .ask-cmd code { font:inherit; }
+  .ask-reason, .ask-warn { margin-top:6px; font-size:12.5px; }
+  .ask-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:9px; }
+  .ask-actions button { padding:7px 16px; border-radius:9px; border:0;
+                        cursor:pointer; font-size:13.5px; }
+  .ask-apply { background:#1f6b32; color:#fff; }
+  .ask-reject { background:transparent; color:var(--text);
+                border:1px solid var(--line); }
+  .ask-actions button:disabled { opacity:.5; cursor:default; }
+  /* 点完之后留下的那一行状态：与工具结果同一挂，不再是一张等你点的卡片。 */
+  .ask-row { align-self:stretch; border-left:3px solid var(--line);
+             border-radius:0 8px 8px 0; padding:6px 10px; font-size:13px;
+             color:var(--text-dim); background:var(--panel-2); }
+  .ask-row.ok { border-left-color:var(--ok); color:var(--ok); }
+  .ask-row.bad { border-left-color:var(--bad); color:var(--bad); }
+  /* ── 「撤销这一轮」：一个**真能点**的动作，不是一条要抄的命令（问题④） ──
+     它是这一轮成果的退路，所以做成对话流里的一行 + 一枚按钮；点完那行就地
+     变成结论，不留一个还能再点的按钮（同一件事点两次会去撞已退过的记录）。 */
+  .undo-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+              align-self:stretch; border-left:3px solid var(--line);
+              border-radius:0 8px 8px 0; padding:6px 10px; font-size:13px;
+              color:var(--text-dim); background:var(--panel-2); }
+  .undo-row button { padding:5px 12px; border-radius:8px; border:1px solid var(--line);
+                     background:transparent; color:var(--text); cursor:pointer;
+                     font-size:13px; }
+  .undo-row button:disabled { opacity:.5; cursor:default; }
+  .undo-row.ok { border-left-color:var(--ok); color:var(--ok); }
+  .undo-row.bad { border-left-color:var(--bad); color:var(--bad); }
+  .diff-file { border:1px solid var(--line); border-radius:10px; margin:6px 0 0;
+               background:var(--code-bg); min-width:0; }
+  .diff-file-head { display:block; width:100%; text-align:left; padding:8px 10px;
+                    border:0; background:transparent; color:var(--text);
+                    cursor:pointer; font:12.5px/1.45 var(--mono);
+                    overflow-wrap:anywhere; }
+  .diff-file-body { display:none; max-height:32vh; overflow:auto; }
+  .diff-file.open .diff-file-body { display:block; }
+  .diff { padding:0 10px 8px; overflow-x:auto; font:12.5px/1.55 var(--mono); }
+  .diff .add { color:var(--ok); } .diff .del { color:var(--bad); }
+  .diff .dim { color:var(--text-dim); }
+
+  .md-h { font-size:15px; line-height:1.45; font-weight:600; margin:8px 0 4px; }
+  .bubble ul, .bubble ol { margin:4px 0 4px 1.2em; padding:0; }
+  .bubble li { margin:2px 0; }
+  .bubble table { border-collapse:collapse; margin:6px 0; max-width:100%; }
+  .bubble th, .bubble td { border:1px solid var(--line); padding:3px 8px; text-align:left; vertical-align:top; }
+  .bubble a { color:var(--accent); }
+  .bubble strong { font-weight:600; }
+
+  /* ── 任务卡：挂在助手气泡下面。状态色只用现有变量。 ── */
+  .task-list { display:flex; flex-direction:column; gap:8px; margin:8px 0 0;
+               min-width:0; max-width:100%; }
+  .task-card { min-width:0; max-width:100%; border:1px solid var(--line);
+               border-radius:10px; background:var(--panel); overflow:hidden; }
+  .task-head { display:grid; grid-template-columns:auto minmax(0,1fr) 16px;
+               grid-template-areas:"mark goal chev" "meta meta chev";
+               column-gap:8px; row-gap:4px; align-items:center;
+               width:100%; max-width:100%; min-width:0; box-sizing:border-box;
+               padding:8px 10px; cursor:pointer; border:0; background:transparent;
+               color:var(--text); font:12.5px/1.35 var(--sans); letter-spacing:0;
+               text-align:left; }
+  .task-mark { grid-area:mark; }
+  .task-goal { grid-area:goal; min-width:0; overflow-wrap:anywhere;
+               display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+               line-clamp:2; overflow:hidden; line-height:1.35; max-height:2.7em; }
+  .task-meta { grid-area:meta; display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
+  .task-chip { display:inline-flex; align-items:center; gap:4px;
+               padding:1px 7px; border-radius:999px; border:1px solid var(--line);
+               background:var(--panel-2); color:var(--text-dim);
+               font-size:11px; line-height:1.45; font-weight:600; white-space:nowrap; }
+  .task-mark::before { font-weight:700; line-height:1; }
+  .task-card-done .task-mark { color:var(--ok); border-color:var(--ok); background:transparent; }
+  .task-card-done .task-mark::before { content:"✓"; }
+  .task-card-running .task-mark { color:var(--info-text); background:var(--info-bg);
+                                  border-color:var(--info-line); }
+  .task-card-running .task-mark::before { content:"●"; font-size:8px; }
+  .task-card-verify_failed .task-mark { color:var(--warn-text); background:var(--warn-bg);
+                                        border-color:var(--warn-line); }
+  .task-card-verify_failed .task-mark::before { content:"!"; }
+  .task-card-failed .task-mark { color:var(--danger-text); background:var(--danger-bg);
+                                 border-color:var(--danger-line); }
+  .task-card-failed .task-mark::before { content:"×"; }
+  .task-card-cancelled .task-mark { color:var(--text-dim); background:var(--panel-2);
+                                    border-color:var(--line); }
+  .task-card-cancelled .task-mark::before { content:"–"; }
+  .task-chevron { grid-area:chev; width:16px; height:16px; position:relative;
+                  justify-self:end; align-self:center; }
+  .task-chevron::before { content:""; position:absolute; left:4px; top:3px;
+                          width:6px; height:6px; border-right:2px solid var(--text);
+                          border-bottom:2px solid var(--text); transform:rotate(45deg); }
+  .task-card.open .task-chevron::before { top:5px; transform:rotate(225deg); }
+  .task-body { padding:0 10px 10px; min-width:0; max-width:100%;
+               max-height:46vh; overflow-x:hidden; overflow-y:auto;
+               border-top:1px solid var(--line-soft);
+               scrollbar-width:thin; scrollbar-color:var(--text-faint) transparent; }
+  .task-row { display:flex; flex-direction:column; align-items:flex-start; gap:4px;
+              margin:0; padding:8px 0; border-top:1px solid var(--line-soft);
+              font-size:12.5px; line-height:1.4; color:var(--text-dim); text-align:left;
+              min-width:0; max-width:100%; overflow-wrap:anywhere; word-break:break-word; }
+  .task-row:first-child { border-top:0; padding-top:8px; }
+  .task-row-line { display:grid; width:100%; min-width:0;
+                   grid-template-columns:minmax(0,1.1fr) minmax(0,1.6fr) auto;
+                   gap:2px 10px; align-items:baseline; }
+  .task-tool { grid-column:1; color:var(--text); font-weight:600; min-width:0;
+               overflow-wrap:anywhere; }
+  .task-intent { grid-column:2; color:var(--text-dim); min-width:0; overflow-wrap:anywhere; }
+  .task-row-status { grid-column:3; justify-self:end; white-space:nowrap; color:var(--text); }
+  .task-summary { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+                  line-clamp:2; overflow:hidden; width:100%; min-width:0; max-width:100%;
+                  overflow-wrap:anywhere; font-size:var(--font-sm);
+                  line-height:var(--leading-body); letter-spacing:0.03em;
+                  max-height:3.4em; }
+  .task-jump { margin:2px 0 0; padding:3px 10px; border-radius:8px;
+               border:1px solid var(--line); background:var(--panel-2); color:var(--text);
+               cursor:pointer; font:12px/1.4 var(--sans); }
+  .task-jump:hover { border-color:var(--text-dim); }
+  .task-row.bad, .task-row.bad .task-row-status { color:var(--danger-text); }
+  @media (max-width: 420px) {
+    .task-head { grid-template-columns:minmax(0,1fr) 16px;
+                 grid-template-areas:"mark chev" "goal goal" "meta meta"; }
+    .task-goal { width:100%; }
+  }
+
+  /* 当前会话的任务入口和面板。桌面是右侧抽屉，窄屏是全屏 sheet。 */
+  #tasks-btn { flex:0 0 auto; display:inline-flex; align-items:center; gap:var(--space-1);
+               padding:var(--space-1) var(--space-2); border-radius:999px;
+               border:1px solid var(--line); background:var(--panel-2); color:var(--text);
+               cursor:pointer; font:var(--font-xs)/1.3 var(--sans); white-space:nowrap; }
+  #tasks-btn:hover { border-color:var(--text-dim); }
+  #tasks-count, #tasks-wait { min-width:16px; height:16px; padding:0 5px;
+               border-radius:999px; border:1px solid var(--line);
+               background:var(--bg); color:var(--text-dim); font-size:11px;
+               display:inline-flex; align-items:center; justify-content:center; }
+  #tasks-wait { color:var(--warn-text); background:var(--warn-bg);
+                border-color:var(--warn-line); }
+  #tasks-panel { position:fixed; top:0; right:0; bottom:0; z-index:36;
+                 width:min(400px, 100%); display:flex; }
+  @media (min-width: 861px) {
+    #tasks-panel { bottom:128px; max-height:calc(100vh - 128px); }
+    body:has(#tasks-panel:not(.hidden)) #thread {
+      margin-right:calc(min(400px, 100%) + 12px);
+    }
+  }
+  #tasks-panel.hidden { display:none; }
+  .tasks-sheet { width:100%; height:100%; min-height:0; display:flex;
+                 flex-direction:column; background:var(--panel); color:var(--text);
+                 border-left:1px solid var(--line); box-shadow:var(--shadow-overlay);
+                 padding-top:env(safe-area-inset-top);
+                 padding-bottom:env(safe-area-inset-bottom); }
+  .tasks-head { display:flex; align-items:center; gap:var(--space-2);
+                padding:var(--space-3) var(--space-3) var(--space-2);
+                border-bottom:1px solid var(--line-soft); }
+  .tasks-head h2 { margin:0; flex:1; font-size:var(--font-md); font-weight:650; }
+  .tasks-head .icon-btn { width:30px; height:30px; padding:0; border:0;
+                          border-radius:var(--radius-sm); background:transparent;
+                          color:var(--text-dim); cursor:pointer;
+                          display:flex; align-items:center; justify-content:center; }
+  .tasks-head .icon-btn:hover { color:var(--text); background:var(--bubble-user); }
+  .tasks-head .icon-btn svg { width:15px; height:15px; }
+  .tasks-find { min-width:0; padding:var(--space-2) var(--space-3) 0; }
+  #tasks-search { display:block; width:100%; max-width:100%; box-sizing:border-box; min-width:0;
+                  padding:var(--space-2) var(--space-3);
+                  border-radius:var(--radius-md); border:1px solid var(--line);
+                  background:var(--bg); color:var(--text);
+                  font:var(--font-sm)/var(--leading-tight) var(--sans); }
+  #tasks-search:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .tasks-match { margin-top:var(--space-1); color:var(--text-dim); font-size:var(--font-xs);
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #tasks-scope { display:flex; flex-wrap:wrap; gap:var(--space-2); min-width:0;
+                 padding:var(--space-2) var(--space-3) 0; }
+  .tasks-scope { max-width:100%; padding:2px var(--space-2); border-radius:999px;
+                 border:1px solid var(--line); background:transparent; color:var(--text-dim);
+                 cursor:pointer; font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .tasks-scope.on { color:var(--text); border-color:var(--text-dim); background:var(--panel-2); }
+  .tasks-history { min-width:0; padding:var(--space-1) var(--space-3) 0; color:var(--text-dim);
+                   font-size:var(--font-xs); }
+  .tasks-history:empty { display:none; }
+  .tasks-history-retry { display:block; width:100%; max-width:100%; box-sizing:border-box;
+                         margin:0; padding:0; border:0; background:transparent; color:var(--warn-text);
+                         cursor:pointer; text-align:left; white-space:normal;
+                         font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  #tasks-filters { display:flex; flex-wrap:wrap; gap:var(--space-2); padding:var(--space-2) var(--space-3); }
+  .tasks-filter { padding:2px var(--space-2); border-radius:999px; border:1px solid var(--line);
+                  background:transparent; color:var(--text-dim); cursor:pointer;
+                  font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .tasks-filter.on { color:var(--text); border-color:var(--text-dim);
+                     background:var(--panel-2); }
+  #tasks-body { flex:1; min-height:0; overflow-x:hidden; overflow-y:auto;
+                padding:0 var(--space-3) var(--space-3); }
+  .task-line { display:flex; flex-direction:column; align-items:flex-start; gap:var(--space-1);
+               width:100%; margin:0 0 var(--space-2); padding:var(--space-2) var(--space-3);
+               box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius-md);
+               background:transparent; color:var(--text); cursor:pointer; text-align:left;
+               font:var(--font-sm)/var(--leading-tight) var(--sans); }
+  .task-line.on { border-color:var(--text-dim); }
+  .task-line .task-goal { width:100%; }
+  .task-line-meta { display:flex; flex-wrap:wrap; gap:4px; min-width:0; max-width:100%; }
+  .task-session { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .task-other { margin:0 0 var(--space-2); color:var(--text-dim); font-size:var(--font-xs); }
+  .task-wait { color:var(--warn-text); background:var(--warn-bg);
+               border-color:var(--warn-line); }
+  .tasks-empty { margin:var(--space-2) 0; color:var(--text-dim); font-size:var(--font-sm); }
+  .tasks-memory { min-width:0; max-width:100%; margin:0 0 var(--space-3);
+                  padding-bottom:var(--space-2); border-bottom:1px solid var(--line-soft); }
+  .tasks-memory-head { display:flex; align-items:baseline; justify-content:space-between;
+                       gap:var(--space-2); min-width:0; margin:var(--space-2) 0 var(--space-1); }
+  .tasks-memory-head h3 { margin:0; min-width:0; font-size:var(--font-sm); font-weight:650; }
+  .tasks-memory-toggle { flex:0 0 auto; margin:0; padding:0; border:0; background:transparent;
+                         color:var(--text-dim); cursor:pointer; font:var(--font-xs)/1.3 var(--sans); }
+  #tasks-memory-body { min-width:0; max-width:100%; overflow-x:hidden; }
+  .tasks-memory.is-collapsed #tasks-memory-body { display:none; }
+  .tasks-memory-headline, .tasks-memory-item, .tasks-memory-turn {
+    display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; line-clamp:2;
+    overflow:hidden; min-width:0; max-width:100%; overflow-wrap:anywhere; }
+  .tasks-memory-headline { font-size:var(--font-sm); }
+  .tasks-memory-label, .tasks-memory-more, .tasks-memory-item, .tasks-memory-turn {
+    color:var(--text-dim); font-size:var(--font-xs); }
+  .tasks-memory-label { margin-top:var(--space-2); }
+  .tasks-memory-item, .tasks-memory-turn { color:var(--text); }
+  .tasks-memory-retry { display:block; width:100%; max-width:100%; box-sizing:border-box;
+                        margin:0; padding:0; border:0; background:transparent; color:var(--warn-text);
+                        cursor:pointer; text-align:left; white-space:normal;
+                        font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .tasks-artifacts { min-width:0; max-width:100%; margin:0 0 var(--space-3);
+                     padding-bottom:var(--space-2); border-bottom:1px solid var(--line-soft); }
+  .tasks-artifacts-head { display:flex; align-items:baseline; justify-content:space-between;
+                          gap:var(--space-2); min-width:0; margin:var(--space-2) 0 var(--space-1); }
+  .tasks-artifacts-head h3 { margin:0; min-width:0; font-size:var(--font-sm); font-weight:650; }
+  #tasks-artifacts-count { flex:0 1 auto; min-width:0; color:var(--text-dim);
+                           font-size:var(--font-xs); white-space:nowrap; }
+  #tasks-artifacts-list { min-width:0; max-width:100%; max-height:168px;
+                          overflow-x:hidden; overflow-y:auto; }
+  .tasks-artifacts-retry { display:block; width:100%; max-width:100%; box-sizing:border-box;
+                           margin:0; padding:0; border:0; background:transparent; color:var(--warn-text);
+                           cursor:pointer; text-align:left; white-space:normal;
+                           font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .artifact-line { display:flex; flex-direction:column; align-items:stretch; gap:2px;
+                   width:100%; max-width:100%; min-width:0; box-sizing:border-box;
+                   margin:0 0 var(--space-2); padding:var(--space-2) 0; }
+  .artifact-line-head { display:flex; align-items:center; gap:var(--space-2);
+                        min-width:0; max-width:100%; }
+  .artifact-kind { flex:0 0 auto; }
+  .artifact-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+                    white-space:nowrap; font-size:var(--font-sm); }
+  .artifact-summary { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+                      line-clamp:2; overflow:hidden; min-width:0; max-width:100%;
+                      color:var(--text-dim); font-size:var(--font-xs); line-height:1.45;
+                      overflow-wrap:anywhere; }
+  .artifact-path-row { display:flex; align-items:center; gap:var(--space-2);
+                       min-width:0; max-width:100%; }
+  .artifact-path { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+                   white-space:nowrap; color:var(--text-dim); font-size:var(--font-xs);
+                   font-family:var(--mono); }
+  .artifact-copy { flex:0 0 auto; margin:0; padding:0; border:0; background:transparent;
+                   color:var(--text-dim); cursor:pointer; font:var(--font-xs)/1.3 var(--sans); }
+  .tasks-checkpoints { min-width:0; max-width:100%; margin:0 0 var(--space-3);
+                       padding-bottom:var(--space-2); border-bottom:1px solid var(--line-soft); }
+  .tasks-checkpoints-head { display:flex; align-items:baseline; min-width:0;
+                            margin:var(--space-2) 0 var(--space-1); }
+  .tasks-checkpoints-head h3 { margin:0; min-width:0; font-size:var(--font-sm); font-weight:650; }
+  #tasks-checkpoints-list { min-width:0; max-width:100%; max-height:168px;
+                            overflow-x:hidden; overflow-y:auto; }
+  .tasks-checkpoints-retry { display:block; width:100%; max-width:100%; box-sizing:border-box;
+                             margin:0; padding:0; border:0; background:transparent; color:var(--warn-text);
+                             cursor:pointer; text-align:left; white-space:normal;
+                             font:var(--font-xs)/var(--leading-tight) var(--sans); }
+  .checkpoint-line { display:flex; flex-direction:column; align-items:stretch; gap:2px;
+                     width:100%; max-width:100%; min-width:0; box-sizing:border-box;
+                     margin:0 0 var(--space-2); }
+  .checkpoint-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+                      line-clamp:2; overflow:hidden; min-width:0; max-width:100%;
+                      overflow-wrap:anywhere; font-size:var(--font-sm); }
+  .checkpoint-path { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis;
+                     white-space:nowrap; color:var(--text-dim); font-size:var(--font-xs);
+                     font-family:var(--mono); }
+  .checkpoint-meta { display:flex; flex-wrap:wrap; gap:4px; min-width:0; max-width:100%;
+                     color:var(--text-dim); font-size:var(--font-xs); }
+  .checkpoint-phase, .checkpoint-status, .checkpoint-updated {
+    min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .checkpoint-resume { align-self:flex-start; max-width:100%; box-sizing:border-box;
+                       margin:2px 0 0; padding:0; border:0; background:transparent;
+                       color:var(--text); cursor:pointer; font:var(--font-xs)/1.3 var(--sans); }
+  .checkpoint-resume:disabled { color:var(--text-dim); cursor:default; }
+  .checkpoint-resume-error { min-width:0; max-width:100%; overflow-wrap:anywhere;
+                             color:var(--warn-text); font-size:var(--font-xs); }
+  #tasks-detail { margin-top:4px; min-width:0; }
+  @media (max-width: 860px) {
+    #tasks-panel { left:0; right:0; top:auto; bottom:0; width:auto;
+                   height:min(78vh, 100%); max-height:none; }
+    body:has(#tasks-panel:not(.hidden)) #thread { margin-right:0; }
+    .tasks-sheet { height:100%; border-left:0;
+                   border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                   box-shadow:var(--shadow-overlay);
+                   padding-top:env(safe-area-inset-top);
+                   padding-bottom:env(safe-area-inset-bottom); }
+    #tasks-btn, #tasks-close { min-height:44px; }
+    #tasks-close { min-width:44px; }
+  }
+
+
+  /* ── 底部输入条：生成中 / 回到最新排在输入框上方，跟着输入条走 ── */
+  #composer-tools { display:flex; justify-content:flex-end; align-items:center;
+                    gap:8px; width:100%; max-width:var(--content-width);
+                    margin:0 auto; min-height:0; }
+  #thinking { position:static; display:none; align-items:center; gap:8px;
+              padding:7px 13px; border-radius:999px; background:var(--panel-2);
+              border:1px solid var(--line); color:var(--text-dim);
+              font-size:13px; box-shadow:0 6px 20px rgba(0,0,0,.28); }
+  #thinking.show { display:flex; }
+  .thinking-dots { display:inline-flex; gap:3px; }
+  .thinking-dots i { width:5px; height:5px; border-radius:50%;
+                     background:var(--text-dim); animation:think 1.2s infinite; }
+  .thinking-dots i:nth-child(2) { animation-delay:.18s; }
+  .thinking-dots i:nth-child(3) { animation-delay:.36s; }
+  @keyframes think {
+    0%, 60%, 100% { opacity:.25; transform:translateY(0); }
+    30% { opacity:1; transform:translateY(-3px); }
+  }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.3; } }
+
+  /* 「回到最新」：人往上翻时才出现，和生成中同一行，不盖住停止键 */
+  #toBottom { position:static; width:38px; height:38px; border-radius:50%;
+              cursor:pointer; border:1px solid var(--line); background:var(--panel-2);
+              color:var(--text); display:none; align-items:center;
+              justify-content:center; box-shadow:0 6px 20px rgba(0,0,0,.28); }
+  #toBottom.show { display:flex; }
+  #toBottom svg { width:18px; height:18px; }
+
+  #composer { position:relative; display:flex; flex-direction:column; gap:var(--space-2);
+              padding:var(--space-2) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom));
+              padding-left:max(var(--space-4), env(safe-area-inset-left));
+              padding-right:calc(var(--scrollbar) + max(var(--space-4), env(safe-area-inset-right))); }
+  .box { position:relative; display:flex; align-items:flex-end; gap:var(--space-2);
+         width:100%; max-width:var(--content-width); margin:0 auto;
+         padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+         border-radius:var(--radius-lg); border:1px solid var(--line);
+         background:var(--panel); box-shadow:var(--shadow-raised); }
+  .box:focus-within { border-color:var(--accent); }
+  #goal { flex:1; min-height:26px; max-height:190px; resize:none; border:0;
+          outline:none; background:transparent; padding:var(--space-1) 0;
+          font-size:var(--font-md); line-height:var(--leading-body); }
+  #goal::placeholder { color:var(--text-dim); opacity:1; font-size:var(--font-md); }
+  .st-hint { font-size:var(--font-sm); line-height:var(--leading-tight); }
+  #send { flex:0 0 auto; width:36px; height:36px; border-radius:50%; border:0;
+          background:var(--accent); color:#fff; cursor:pointer;
+          display:flex; align-items:center; justify-content:center; }
+  #send svg { width:18px; height:18px; }
+  #send[data-mode="stop"] { background:var(--danger-bg); color:var(--danger-text);
+                            box-shadow:inset 0 0 0 1px var(--danger-line); }
+  #send:disabled, #send[data-mode="stopping"] { background:var(--line);
+                            color:var(--text-faint); cursor:default; box-shadow:none; }
+
+
+  /* ── 手机：左栏收成抽屉、气泡占满、输入条不被键盘顶掉 ── */
+  @media (max-width:860px) {
+    #menu { display:flex; }
+    .top-rule { display:none; }
+    #sidebar { position:fixed; top:0; bottom:0; left:0; width:282px;
+               padding-top:env(safe-area-inset-top);
+               padding-bottom:env(safe-area-inset-bottom);
+               transform:translateX(-100%); transition:transform .18s ease;
+               pointer-events:none;
+               box-shadow:0 0 40px rgba(0,0,0,.5); }
+    body.drawer #sidebar { transform:none; pointer-events:auto; }
+    #thread:has(.empty-state) .empty-title { font-size:22px; }
+    #stream { padding:14px var(--space-3) 20px;
+              padding-left:max(var(--space-3), env(safe-area-inset-left));
+              padding-right:max(var(--space-3), env(safe-area-inset-right)); }
+    .msg.user { max-width:92%; }
+    #composer { padding:var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom));
+                padding-left:max(var(--space-3), env(safe-area-inset-left));
+                padding-right:max(var(--space-3), env(safe-area-inset-right)); }
+    /* 手机宽度：提示与通知那一列不越界——左右都压住（`left`/`right` 同时写），
+       宽度交给 `auto` 去算，但它**仍然 fixed**（这里刻意一个 `position` 都不写：
+       写上去就等于把它拉回文档流，"挤下去"那个毛病就回来了）。
+       高低再收一档，免得整列把对话流里那张卡片盖住。 */
+    #corner { top:52px; left:10px; right:10px; width:auto; overflow:visible; }
+    #toasts { max-height:45vh; }
+    #hints { gap:4px; }
+    #hints .st-item { max-width:38vw; padding:2px 7px; }
+    .st { gap:4px; }
+    .st-hint { display:none; }
+    .st-panel { position:fixed; left:0; right:0; bottom:0; top:auto; width:auto;
+                max-height:52vh; z-index:1;
+                border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                padding-top:calc(var(--space-3) + env(safe-area-inset-top));
+                padding-bottom:calc(var(--space-4) + env(safe-area-inset-bottom)); }
+    .msg-time { font-size:10px; margin-top:0; }
+    .day-sep { margin:4px 0 1px; font-size:10px; }
+    body:has(#st-panel:not(.hidden))::before { content:""; position:fixed; inset:0;
+                z-index:29; background:rgba(0,0,0,.5); pointer-events:none; }
+    #st-health { top:8px; height:44px; max-width:128px; }
+    #st-health, #menu, #send, .toast-close, .row-act,
+    .ask-apply, .ask-reject, #toast-all, #st-close,
+    #rename-cancel, #rename-save {
+      min-width:44px; min-height:44px;
+    }
+    #send { width:44px; height:44px; }
+    #menu { width:44px; height:44px; }
+    #settings { align-items:flex-end; padding:env(safe-area-inset-top) 0 0; }
+    .settings-card { width:100%; max-height:78vh;
+                     border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                     padding-bottom:env(safe-area-inset-bottom); }
+    #rename { align-items:flex-end; padding:0; }
+    .rename-card { width:100%; max-height:78vh;
+                   border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                   padding-bottom:calc(var(--space-3) + env(safe-area-inset-bottom)); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #stream { scroll-behavior:auto; }
+    .dot, .thinking-dots i, .bubble.streaming::after, .stream-row { animation:none; }
+    /* 通知与状态详情的入场也关掉：不动画不等于不出现（它只是直接在那里）。 */
+    .toast { animation:none; }
+    .st-panel { animation:none; }
+    #sidebar, .toast, .st-panel, .thinking-dots i { transition:none; }
+  }

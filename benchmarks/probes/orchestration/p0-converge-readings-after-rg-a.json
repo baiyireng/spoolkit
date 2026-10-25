@@ -1,0 +1,335 @@
+{
+  "kind": "P0 off-arm convergence probe",
+  "provider": "http://127.0.0.1:8080",
+  "generated_at": "2026-10-07 02:09:27",
+  "scene": {
+    "head": "8d2eb3d2499358f581637de17ac824826eda386b",
+    "prompt_version": "2026-10-06.1",
+    "tool_count": 18,
+    "system_chars": 3847,
+    "system_tokens": 2557,
+    "effective_tokens": 6964,
+    "tools": [
+      "calc",
+      "check_numbers",
+      "confirm_rewrite",
+      "delete_file",
+      "dir_stats",
+      "dispatch",
+      "list_dir",
+      "orchestrate",
+      "read_diagnosis",
+      "read_file",
+      "replace_lines",
+      "request_diagnosis",
+      "run_command",
+      "search_code",
+      "survey",
+      "tool_help",
+      "verify_file",
+      "write_file"
+    ]
+  },
+  "budget_seconds": 2400,
+  "repeats": 2,
+  "arms": {
+    "base": {
+      "step_budget_hard_cap": 0,
+      "converge_at_steps": 0
+    },
+    "converge": {
+      "step_budget_hard_cap": 0,
+      "converge_at_steps": 3
+    }
+  },
+  "goals": {
+    "A-todo": "把这个仓库里的 TODO 汇总起来，分类，给出优先级。",
+    "B-failing-test": "找出这个失败测试涉及哪些文件，并给出修复计划。"
+  },
+  "local_http_isolated": true,
+  "no_proxy": "127.0.0.1,localhost,::1",
+  "readings": [
+    {
+      "label": "A-todo|base|r0",
+      "task": "A-todo",
+      "arm": "base",
+      "repeat": 0,
+      "head": "8d2eb3d2499358f581637de17ac824826eda386b",
+      "prompt_version": "2026-10-06.1",
+      "tool_count": 20,
+      "system_tokens": 2057,
+      "max_steps": 8,
+      "overrides": {
+        "step_budget_hard_cap": 0,
+        "converge_at_steps": 0
+      },
+      "steps": 3,
+      "model_calls": 3,
+      "prompt_tokens": 8249,
+      "completion_tokens": 980,
+      "wall_seconds": 34.234,
+      "resets": 0,
+      "finished": true,
+      "concluded": true,
+      "model_final": "仓库里共 6 处 TODO，全部是同一标签 `orchestration-bench`、同一类活：把某段逻辑抽成独立函数。没有别的待办。\n\n## 汇总\n\n| 编号 | 位置 | 要抽的内容 | 分类 | 优先级 |\n|---|---|---|---|---|\n| 1 | src/spoolkit/cli/runtime.py:791 | 审批答案→grant 的映射（once/always/block/deny） | 重构·可测性 | 中 |\n| 2 | src/spoolkit/tools/registry.py:316 | 描述截断（按 。；： 切、超 cap 加 …） | 重构·可测性 | 低 |\n| 3 | src/spoolkit/tools/capabilities.py:317 | needs_isolation 判定（network/destructive 且 isolatable） | 重构·可测性 | 中 |\n| 4 | src/spoolkit/agent/audit.py:984 | 证据账本「降级为未验证」的提示文案拼装 | 重构·可测性 | 低 |\n| 5 | src/spoolkit/tools/exec.py:661 | 执行体调用（command/cwd/timeout 等参数打包） | 重构·可测性 | 中 |\n| 6 | src/spoolkit/tools/fs.py:168 | list_dir 工具注册（schema/handler/brief/group） | 重构·可测性 | 低 |\n\n## 分类\n\n全部归一类：**重构 / 可测性**（把内联逻辑抽成独立函数，便于单测与复用）。没有功能缺口、没有 bug 标记、没有性能项。\n\n## 优先级理由\n\n- **中（1、3、5）**：落在审批/隔离/执行三条安全与执行主链上，抽成函数后能被单测直接覆盖，影响面大，先做。\n- **低（2、4、6）**：文案截断、提示拼装、工具注册这类局部逻辑，抽函数收益小、风险低，可后做。\n\n## 建议顺序\n\n1 → 3 → 5（主链先），再 2 → 4 → 6（边角）。每处都是独立小改，互不依赖，可并行。",
+      "terminated_by": "模型完成",
+      "failed_reason": "",
+      "converge_injected": false,
+      "budget_notes": [],
+      "failed_notes": 0,
+      "tool_calls": 8,
+      "turns_tail": [
+        {
+          "n": 1,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"先摸清仓库结构，再搜 TODO 关键词，汇总分类\",\"tool_calls\":[{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"},\"why\":\"看仓库顶层结构，判断项目类型与规模\"},{\"name\":\"search_code\",\"arguments\":{\"pattern\":\"TODO\",\"max_results\":100},\"why\":\"全仓搜 TODO 注释，拿到所有待办条目与位置\"}],\"done\":false,\"final\":null,\"assessment\":\"\"}"
+        },
+        {
+          "n": 2,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"TODO 都带编号与标签，读每处上下文判断分类与优先级\",\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/agent/audit.py\",\"start_line\":975,\"end_line\":1000},\"why\":\"读第4处待办上下文，看它要抽什么、为何重要\"},{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/cli/runtime.py\",\"start_line\":782,\"end_line\":805},\"why\":\"读第1处待办上下文，判断抽函数动机与影响面\"},{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/tools/capabilities.py\""
+        },
+        {
+          "n": 3,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"TODO 全是同一标签的抽函数待办，读上下文已够，汇总分类给优先级\",\"tool_calls\":[],\"done\":true,\"final\":\"仓库里共 6 处 TODO，全部是同一标签 `orchestration-bench`、同一类活：把某段逻辑抽成独立函数。没有别的待办。\\n\\n## 汇总\\n\\n| 编号 | 位置 | 要抽的内容 | 分类 | 优先级 |\\n|---|---|---|---|---|\\n| 1 | src/spoolkit/cli/runtime.py:791 | 审批答案→grant 的映射（once/always/block/deny） | 重构·可测性 | 中 |\\n| 2 | src/spoolkit/tools/registry.py:316 | 描述截断（按 。；： 切、超 cap 加 …） | 重构·可测性 | 低 |\\n| "
+        }
+      ],
+      "checks": {
+        "覆盖预设待办（6/6）": true,
+        "有分类": true,
+        "有优先级": true,
+        "_hits": [
+          "runtime.py",
+          "registry.py",
+          "capabilities.py",
+          "audit.py",
+          "exec.py",
+          "fs.py"
+        ]
+      },
+      "final_text": "【模型结论】仓库里共 6 处 TODO，全部是同一标签 `orchestration-bench`、同一类活：把某段逻辑抽成独立函数。没有别的待办。\n\n## 汇总\n\n| 编号 | 位置 | 要抽的内容 | 分类 | 优先级 |\n|---|---|---|---|---|\n| 1 | src/spoolkit/cli/runtime.py:791 | 审批答案→grant 的映射（once/always/block/deny） | 重构·可测性 | 中 |\n| 2 | src/spoolkit/tools/registry.py:316 | 描述截断（按 。；： 切、超 cap 加 …） | 重构·可测性 | 低 |\n| 3 | src/spoolkit/tools/capabilities.py:317 | needs_isolation 判定（network/destructive 且 isolatable） | 重构·可测性 | 中 |\n| 4 | src/spoolkit/agent/audit.py:984 | 证据账本「降级为未验证」的提示文案拼装 | 重构·可测性 | 低 |\n| 5 | src/spoolkit/tools/exec.py:661 | 执行体调用（command/cwd/timeout 等参数打包） | 重构·可测性 | 中 |\n| 6 | src/spoolkit/tools/fs.py:168 | list_dir 工具注册（schema/handler/brief/group） | 重构·可测性 | 低 |\n\n## 分类\n\n全部归一类：**重构 / 可测性**（把内联逻辑抽成独立函数，便于单测与复用）。没有功能缺口、没有 bug 标记、没有性能项。\n\n## 优先级理由\n\n- **中（1、3、5）**：落在审批/隔离/执行三条安全与执行主链上，抽成函数后能被单测直接覆盖，影响面大，先做。\n- **低（2、4、6）**：文案截断、提示拼装、工具注册这类局部逻辑，抽函数收益小、风险低，可后做。\n\n## 建议顺序\n\n1 → 3 → 5（主链先），再 2 → 4 → 6（边角）。每处都是独立小改，互不依赖，可并行。\n\n仓库里共 6 处 TODO，全部是同一标签 `orchestration-bench`、同一类活：把某段逻辑抽成独立函数。没有别的待办。\n\n## 汇总\n\n| 编号 | 位置 | 要抽的内容 | 分类 | 优先级 |\n|---|---|---|---|---|\n| 1 | src/spoolkit/cli/runtime.py:791 | 审批答案→grant 的映射（once/always/block/deny） | 重构·可测性 | 中 |\n| 2 | src/spoolkit/tools/registry.py:316 | 描述截断（按 。；： 切、超 cap 加 …） | 重构·可测性 | 低 |\n| 3 | src/spoolkit/tools/capabilities.py:317 | needs_isolation 判定（network/destructive 且 isolatable） | 重构·可测性 | 中 |\n| 4 | src/spoolkit/agent/audit.py:984 | 证据账本「降级为未验证」的提示文案拼装 | 重构·可测性 | 低 |\n| 5 | src/spoolkit/tools/exec.py:661 | 执行体调用（command/cwd/timeout 等参数打包） | 重构·可测性 | 中 |\n| 6 | src/spoolkit/tools/fs.py:168 | list_dir 工具注册（schema/handler/brief/group） | 重构·可测性 | 低 |\n\n## 分类\n\n全部归一类：**重构 / 可测性**（把内联逻辑抽成独立函数，便于单测与复用）。没有功能缺口、没有 bug 标记、没有性能项。\n\n## 优先级理由\n\n- **中（1、3、5）**：落在审批/隔离/执行三条安全与执行主链上，抽成函数后能被单测直接覆盖，影响面大，先做。\n- **低（2、4、6）**：文案截断、提示拼装、工具注册这类局部逻辑，抽函数收益小、风险低，可后做。\n\n## 建议顺序\n\n1 → 3 → 5（主链先），再 2 → 4 → 6（边角）。每处都是独立小改，互不依赖，可并行。"
+    },
+    {
+      "label": "A-todo|base|r1",
+      "task": "A-todo",
+      "arm": "base",
+      "repeat": 1,
+      "head": "8d2eb3d2499358f581637de17ac824826eda386b",
+      "prompt_version": "2026-10-06.1",
+      "tool_count": 20,
+      "system_tokens": 2057,
+      "max_steps": 8,
+      "overrides": {
+        "step_budget_hard_cap": 0,
+        "converge_at_steps": 0
+      },
+      "steps": 3,
+      "model_calls": 3,
+      "prompt_tokens": 7977,
+      "completion_tokens": 879,
+      "wall_seconds": 30.602,
+      "resets": 0,
+      "finished": true,
+      "concluded": true,
+      "model_final": "仓库里共 6 处 TODO，全部带同一标签 `orchestration-bench`、同一诉求「把这一段抽成独立函数」，只是所在文件不同。没有别的待办类型。\n\n## 汇总\n| # | 位置 | 待办内容 |\n|---|------|----------|\n| 1 | src/spoolkit/cli/runtime.py:791 | 把这一段抽成独立函数 |\n| 2 | src/spoolkit/tools/registry.py:316 | 把这一段抽成独立函数 |\n| 3 | src/spoolkit/tools/capabilities.py:317 | 把这一段抽成独立函数 |\n| 4 | src/spoolkit/agent/audit.py:984 | 把这一段抽成独立函数 |\n| 5 | src/spoolkit/tools/exec.py:661 | 把这一段抽成独立函数 |\n| 6 | src/spoolkit/tools/fs.py:168 | 把这一段抽成独立函数 |\n\n## 分类\n- **重构/可维护性（抽函数）**：6 处，全部归此类。没有 bug、性能、安全、文档等其他类别的 TODO。\n\n## 优先级建议\n- **P1（先做）**：runtime.py:791、audit.py:984 —— 这两处所在文件行数最大（791、984 行），逻辑最重，抽函数收益最高。\n- **P2（其次）**：capabilities.py:317、exec.py:661 —— 工具执行/能力判定路径，抽函数后利于测试与复用。\n- **P3（最后）**：registry.py:316、fs.py:168 —— 体量较小，顺手做即可。\n\n说明：六处诉求完全相同，优先级排序仅按「所在文件体量 + 逻辑复杂度」给出，供你按顺序推进；若你更看重某条路径（如安全/执行），可把 exec.py 提到 P1。",
+      "terminated_by": "模型完成",
+      "failed_reason": "",
+      "converge_injected": false,
+      "budget_notes": [],
+      "failed_notes": 0,
+      "tool_calls": 8,
+      "turns_tail": [
+        {
+          "n": 1,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"先摸清仓库结构，再搜 TODO 关键词，汇总分类\",\"tool_calls\":[{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"},\"why\":\"看仓库顶层结构，判断项目类型与规模\"},{\"name\":\"search_code\",\"arguments\":{\"pattern\":\"TODO\",\"max_results\":100},\"why\":\"全仓搜 TODO 注释，拿到所有待办条目与位置\"}],\"done\":false,\"final\":null,\"assessment\":\"\"}"
+        },
+        {
+          "n": 2,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"TODO 都带同一标签且内容雷同，读几处上下文确认是否真不同，再分类定优先级\",\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/cli/runtime.py\",\"start_line\":785,\"end_line\":800},\"why\":\"看第1处TODO上下文，确认待办内容\"},{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/agent/audit.py\",\"start_line\":978,\"end_line\":992},\"why\":\"看第4处上下文，对比是否同一段逻辑\"},{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/tools/capabilities."
+        },
+        {
+          "n": 3,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"六处TODO全是同一标签、同一句「抽成独立函数」，只是位置不同。无需再查，直接汇总分类给优先级\",\"tool_calls\":[],\"done\":true,\"final\":\"仓库里共 6 处 TODO，全部带同一标签 `orchestration-bench`、同一诉求「把这一段抽成独立函数」，只是所在文件不同。没有别的待办类型。\\n\\n## 汇总\\n| # | 位置 | 待办内容 |\\n|---|------|----------|\\n| 1 | src/spoolkit/cli/runtime.py:791 | 把这一段抽成独立函数 |\\n| 2 | src/spoolkit/tools/registry.py:316 | 把这一段抽成独立函数 |\\n| 3 | src/spoolkit/tools/capabilities.py:317 | 把这一段抽成独立函数"
+        }
+      ],
+      "checks": {
+        "覆盖预设待办（6/6）": true,
+        "有分类": true,
+        "有优先级": true,
+        "_hits": [
+          "runtime.py",
+          "registry.py",
+          "capabilities.py",
+          "audit.py",
+          "exec.py",
+          "fs.py"
+        ]
+      },
+      "final_text": "【模型结论】仓库里共 6 处 TODO，全部带同一标签 `orchestration-bench`、同一诉求「把这一段抽成独立函数」，只是所在文件不同。没有别的待办类型。\n\n## 汇总\n| # | 位置 | 待办内容 |\n|---|------|----------|\n| 1 | src/spoolkit/cli/runtime.py:791 | 把这一段抽成独立函数 |\n| 2 | src/spoolkit/tools/registry.py:316 | 把这一段抽成独立函数 |\n| 3 | src/spoolkit/tools/capabilities.py:317 | 把这一段抽成独立函数 |\n| 4 | src/spoolkit/agent/audit.py:984 | 把这一段抽成独立函数 |\n| 5 | src/spoolkit/tools/exec.py:661 | 把这一段抽成独立函数 |\n| 6 | src/spoolkit/tools/fs.py:168 | 把这一段抽成独立函数 |\n\n## 分类\n- **重构/可维护性（抽函数）**：6 处，全部归此类。没有 bug、性能、安全、文档等其他类别的 TODO。\n\n## 优先级建议\n- **P1（先做）**：runtime.py:791、audit.py:984 —— 这两处所在文件行数最大（791、984 行），逻辑最重，抽函数收益最高。\n- **P2（其次）**：capabilities.py:317、exec.py:661 —— 工具执行/能力判定路径，抽函数后利于测试与复用。\n- **P3（最后）**：registry.py:316、fs.py:168 —— 体量较小，顺手做即可。\n\n说明：六处诉求完全相同，优先级排序仅按「所在文件体量 + 逻辑复杂度」给出，供你按顺序推进；若你更看重某条路径（如安全/执行），可把 exec.py 提到 P1。\n\n仓库里共 6 处 TODO，全部带同一标签 `orchestration-bench`、同一诉求「把这一段抽成独立函数」，只是所在文件不同。没有别的待办类型。\n\n## 汇总\n| # | 位置 | 待办内容 |\n|---|------|----------|\n| 1 | src/spoolkit/cli/runtime.py:791 | 把这一段抽成独立函数 |\n| 2 | src/spoolkit/tools/registry.py:316 | 把这一段抽成独立函数 |\n| 3 | src/spoolkit/tools/capabilities.py:317 | 把这一段抽成独立函数 |\n| 4 | src/spoolkit/agent/audit.py:984 | 把这一段抽成独立函数 |\n| 5 | src/spoolkit/tools/exec.py:661 | 把这一段抽成独立函数 |\n| 6 | src/spoolkit/tools/fs.py:168 | 把这一段抽成独立函数 |\n\n## 分类\n- **重构/可维护性（抽函数）**：6 处，全部归此类。没有 bug、性能、安全、文档等其他类别的 TODO。\n\n## 优先级建议\n- **P1（先做）**：runtime.py:791、audit.py:984 —— 这两处所在文件行数最大（791、984 行），逻辑最重，抽函数收益最高。\n- **P2（其次）**：capabilities.py:317、exec.py:661 —— 工具执行/能力判定路径，抽函数后利于测试与复用。\n- **P3（最后）**：registry.py:316、fs.py:168 —— 体量较小，顺手做即可。\n\n说明：六处诉求完全相同，优先级排序仅按「所在文件体量 + 逻辑复杂度」给出，供你按顺序推进；若你更看重某条路径（如安全/执行），可把 exec.py 提到 P1。"
+    },
+    {
+      "label": "A-todo|converge|r0",
+      "task": "A-todo",
+      "arm": "converge",
+      "repeat": 0,
+      "head": "8d2eb3d2499358f581637de17ac824826eda386b",
+      "prompt_version": "2026-10-06.1",
+      "tool_count": 20,
+      "system_tokens": 2057,
+      "max_steps": 8,
+      "overrides": {
+        "step_budget_hard_cap": 0,
+        "converge_at_steps": 3
+      },
+      "steps": 3,
+      "model_calls": 3,
+      "prompt_tokens": 8219,
+      "completion_tokens": 1028,
+      "wall_seconds": 35.761,
+      "resets": 0,
+      "finished": true,
+      "concluded": true,
+      "model_final": "仓库里共 6 处 TODO，全部带同一标签 `orchestration-bench`，内容完全雷同（「把这一段抽成独立函数」），属于同一类重构占位，不是分散的独立待办。\n\n## 汇总\n| 编号 | 文件 | 行号 | 上下文 |\n|---|---|---|---|\n| 1 | src/spoolkit/cli/runtime.py | 791 | 审批答案映射（once/always/block/deny）函数尾部 |\n| 2 | src/spoolkit/tools/registry.py | 316 | 描述截断（按 。；： 切、超长加 …）函数尾部 |\n| 3 | src/spoolkit/tools/capabilities.py | 317 | needs_isolation 判定函数尾部 |\n| 4 | src/spoolkit/agent/audit.py | 984 | 证据账本降级提示的 return 块之后 |\n| 5 | src/spoolkit/tools/exec.py | 661 | 执行体调用（command/cwd/timeout…）块之后 |\n| 6 | src/spoolkit/tools/fs.py | 168 | list_dir 工具注册块之后 |\n\n## 分类\n- 全部归一类：**可维护性 / 重构（抽函数）**，标签 orchestration-bench，无功能缺陷、无报错、不影响行为。\n- 无「修复 bug」「补测试」「安全」等其他类别的 TODO。\n\n## 优先级建议\n- 这 6 条彼此独立、互不依赖，且都是纯重构占位，**整体优先级：低（P3 / 可延后）**。它们不阻塞任何功能或发布，可排到专门的重构批次里做。\n- 若必须排序，按「改动风险 / 波及面」从低到高（先做风险小的）：\n  1. registry.py:316（截断小函数，最独立）\n  2. capabilities.py:317（needs_isolation，边界清晰）\n  3. runtime.py:791（答案映射，纯逻辑）\n  4. fs.py:168（工具注册块，牵动 handler 闭包）\n  5. exec.py:661（执行调用块，参数多、易回归）\n  6. audit.py:984（证据账本 return 块，文案与判定耦合，最易改坏）\n\n说明：这些 TODO 只是占位标记，没有写清「抽成哪个函数、签名如何」，所以只能按位置与上下文给相对顺序；真要动手时每条都需先确认目标函数边界。",
+      "terminated_by": "模型完成",
+      "failed_reason": "",
+      "converge_injected": false,
+      "budget_notes": [],
+      "failed_notes": 0,
+      "tool_calls": 8,
+      "turns_tail": [
+        {
+          "n": 1,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"先摸清仓库结构，再搜 TODO 关键词，汇总分类\",\"tool_calls\":[{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"},\"why\":\"看仓库顶层结构，判断项目类型与规模\"},{\"name\":\"search_code\",\"arguments\":{\"pattern\":\"TODO\",\"max_results\":100},\"why\":\"全仓搜 TODO 注释，拿到所有待办条目与位置\"}],\"done\":false,\"final\":null,\"assessment\":\"\"}"
+        },
+        {
+          "n": 2,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"TODO 都带 orchestration-bench 标签且内容雷同，读上下文确认是否同一类重构，再分类定优先级\",\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/agent/audit.py\",\"start_line\":975,\"end_line\":995},\"why\":\"看第4处TODO上下文，确认待办性质\"},{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/tools/capabilities.py\",\"start_line\":308,\"end_line\":328},\"why\":\"看第3处上下文，判断是否同一重构\"},{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spo"
+        },
+        {
+          "n": 3,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"六处TODO全是同一类重构占位，内容雷同。汇总分类给优先级，无需再查\",\"tool_calls\":[],\"done\":true,\"final\":\"仓库里共 6 处 TODO，全部带同一标签 `orchestration-bench`，内容完全雷同（「把这一段抽成独立函数」），属于同一类重构占位，不是分散的独立待办。\\n\\n## 汇总\\n| 编号 | 文件 | 行号 | 上下文 |\\n|---|---|---|---|\\n| 1 | src/spoolkit/cli/runtime.py | 791 | 审批答案映射（once/always/block/deny）函数尾部 |\\n| 2 | src/spoolkit/tools/registry.py | 316 | 描述截断（按 。；： 切、超长加 …）函数尾部 |\\n| 3 | src/spoolkit/tools"
+        }
+      ],
+      "checks": {
+        "覆盖预设待办（6/6）": true,
+        "有分类": true,
+        "有优先级": true,
+        "_hits": [
+          "runtime.py",
+          "registry.py",
+          "capabilities.py",
+          "audit.py",
+          "exec.py",
+          "fs.py"
+        ]
+      },
+      "final_text": "【模型结论】仓库里共 6 处 TODO，全部带同一标签 `orchestration-bench`，内容完全雷同（「把这一段抽成独立函数」），属于同一类重构占位，不是分散的独立待办。\n\n## 汇总\n| 编号 | 文件 | 行号 | 上下文 |\n|---|---|---|---|\n| 1 | src/spoolkit/cli/runtime.py | 791 | 审批答案映射（once/always/block/deny）函数尾部 |\n| 2 | src/spoolkit/tools/registry.py | 316 | 描述截断（按 。；： 切、超长加 …）函数尾部 |\n| 3 | src/spoolkit/tools/capabilities.py | 317 | needs_isolation 判定函数尾部 |\n| 4 | src/spoolkit/agent/audit.py | 984 | 证据账本降级提示的 return 块之后 |\n| 5 | src/spoolkit/tools/exec.py | 661 | 执行体调用（command/cwd/timeout…）块之后 |\n| 6 | src/spoolkit/tools/fs.py | 168 | list_dir 工具注册块之后 |\n\n## 分类\n- 全部归一类：**可维护性 / 重构（抽函数）**，标签 orchestration-bench，无功能缺陷、无报错、不影响行为。\n- 无「修复 bug」「补测试」「安全」等其他类别的 TODO。\n\n## 优先级建议\n- 这 6 条彼此独立、互不依赖，且都是纯重构占位，**整体优先级：低（P3 / 可延后）**。它们不阻塞任何功能或发布，可排到专门的重构批次里做。\n- 若必须排序，按「改动风险 / 波及面」从低到高（先做风险小的）：\n  1. registry.py:316（截断小函数，最独立）\n  2. capabilities.py:317（needs_isolation，边界清晰）\n  3. runtime.py:791（答案映射，纯逻辑）\n  4. fs.py:168（工具注册块，牵动 handler 闭包）\n  5. exec.py:661（执行调用块，参数多、易回归）\n  6. audit.py:984（证据账本 return 块，文案与判定耦合，最易改坏）\n\n说明：这些 TODO 只是占位标记，没有写清「抽成哪个函数、签名如何」，所以只能按位置与上下文给相对顺序；真要动手时每条都需先确认目标函数边界。\n\n仓库里共 6 处 TODO，全部带同一标签 `orchestration-bench`，内容完全雷同（「把这一段抽成独立函数」），属于同一类重构占位，不是分散的独立待办。\n\n## 汇总\n| 编号 | 文件 | 行号 | 上下文 |\n|---|---|---|---|\n| 1 | src/spoolkit/cli/runtime.py | 791 | 审批答案映射（once/always/block/deny）函数尾部 |\n| 2 | src/spoolkit/tools/registry.py | 316 | 描述截断（按 。；： 切、超长加 …）函数尾部 |\n| 3 | src/spoolkit/tools/capabilities.py | 317 | needs_isolation 判定函数尾部 |\n| 4 | src/spoolkit/agent/audit.py | 984 | 证据账本降级提示的 return 块之后 |\n| 5 | src/spoolkit/tools/exec.py | 661 | 执行体调用（command/cwd/timeout…）块之后 |\n| 6 | src/spoolkit/tools/fs.py | 168 | list_dir 工具注册块之后 |\n\n## 分类\n- 全部归一类：**可维护性 / 重构（抽函数）**，标签 orchestration-bench，无功能缺陷、无报错、不影响行为。\n- 无「修复 bug」「补测试」「安全」等其他类别的 TODO。\n\n## 优先级建议\n- 这 6 条彼此独立、互不依赖，且都是纯重构占位，**整体优先级：低（P3 / 可延后）**。它们不阻塞任何功能或发布，可排到专门的重构批次里做。\n- 若必须排序，按「改动风险 / 波及面」从低到高（先做风险小的）：\n  1. registry.py:316（截断小函数，最独立）\n  2. capabilities.py:317（needs_isolation，边界清晰）\n  3. runtime.py:791（答案映射，纯逻辑）\n  4. fs.py:168（工具注册块，牵动 handler 闭包）\n  5. exec.py:661（执行调用块，参数多、易回归）\n  6. audit.py:984（证据账本 return 块，文案与判定耦合，最易改坏）\n\n说明：这些 TODO 只是占位标记，没有写清「抽成哪个函数、签名如何」，所以只能按位置与上下文给相对顺序；真要动手时每条都需先确认目标函数边界。"
+    },
+    {
+      "label": "A-todo|converge|r1",
+      "task": "A-todo",
+      "arm": "converge",
+      "repeat": 1,
+      "head": "8d2eb3d2499358f581637de17ac824826eda386b",
+      "prompt_version": "2026-10-06.1",
+      "tool_count": 20,
+      "system_tokens": 2057,
+      "max_steps": 8,
+      "overrides": {
+        "step_budget_hard_cap": 0,
+        "converge_at_steps": 3
+      },
+      "steps": 3,
+      "model_calls": 3,
+      "prompt_tokens": 8249,
+      "completion_tokens": 980,
+      "wall_seconds": 33.613,
+      "resets": 0,
+      "finished": true,
+      "concluded": true,
+      "model_final": "仓库里共 6 处 TODO，全部是同一标签 `orchestration-bench`、同一类活：把某段逻辑抽成独立函数。没有别的待办。\n\n## 汇总\n\n| 编号 | 位置 | 要抽的内容 | 分类 | 优先级 |\n|---|---|---|---|---|\n| 1 | src/spoolkit/cli/runtime.py:791 | 审批答案→grant 的映射（once/always/block/deny） | 重构·可测性 | 中 |\n| 2 | src/spoolkit/tools/registry.py:316 | 描述截断（按 。；： 切、超 cap 加 …） | 重构·可测性 | 低 |\n| 3 | src/spoolkit/tools/capabilities.py:317 | needs_isolation 判定（network/destructive 且 isolatable） | 重构·可测性 | 中 |\n| 4 | src/spoolkit/agent/audit.py:984 | 证据账本「降级为未验证」的提示文案拼装 | 重构·可测性 | 低 |\n| 5 | src/spoolkit/tools/exec.py:661 | 执行体调用（command/cwd/timeout 等参数打包） | 重构·可测性 | 中 |\n| 6 | src/spoolkit/tools/fs.py:168 | list_dir 工具注册（schema/handler/brief/group） | 重构·可测性 | 低 |\n\n## 分类\n\n全部归一类：**重构 / 可测性**（把内联逻辑抽成独立函数，便于单测与复用）。没有功能缺口、没有 bug 标记、没有性能项。\n\n## 优先级理由\n\n- **中（1、3、5）**：落在审批/隔离/执行三条安全与执行主链上，抽成函数后能被单测直接覆盖，影响面大，先做。\n- **低（2、4、6）**：文案截断、提示拼装、工具注册这类局部逻辑，抽函数收益小、风险低，可后做。\n\n## 建议顺序\n\n1 → 3 → 5（主链先），再 2 → 4 → 6（边角）。每处都是独立小改，互不依赖，可并行。",
+      "terminated_by": "模型完成",
+      "failed_reason": "",
+      "converge_injected": false,
+      "budget_notes": [],
+      "failed_notes": 0,
+      "tool_calls": 8,
+      "turns_tail": [
+        {
+          "n": 1,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"先摸清仓库结构，再搜 TODO 关键词，汇总分类\",\"tool_calls\":[{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"},\"why\":\"看仓库顶层结构，判断项目类型与规模\"},{\"name\":\"search_code\",\"arguments\":{\"pattern\":\"TODO\",\"max_results\":100},\"why\":\"全仓搜 TODO 注释，拿到所有待办条目与位置\"}],\"done\":false,\"final\":null,\"assessment\":\"\"}"
+        },
+        {
+          "n": 2,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"TODO 都带编号与标签，读每处上下文判断分类与优先级\",\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/agent/audit.py\",\"start_line\":975,\"end_line\":1000},\"why\":\"读第4处待办上下文，看它要抽什么、为何重要\"},{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/cli/runtime.py\",\"start_line\":782,\"end_line\":805},\"why\":\"读第1处待办上下文，判断抽函数动机与影响面\"},{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/spoolkit/tools/capabilities.py\""
+        },
+        {
+          "n": 3,
+          "converge_injected": false,
+          "reply_head": "{\"thought\":\"TODO 全是同一标签的抽函数待办，读上下文已够，汇总分类给优先级\",\"tool_calls\":[],\"done\":true,\"final\":\"仓库里共 6 处 TODO，全部是同一标签 `orchestration-bench`、同一类活：把某段逻辑抽成独立函数。没有别的待办。\\n\\n## 汇总\\n\\n| 编号 | 位置 | 要抽的内容 | 分类 | 优先级 |\\n|---|---|---|---|---|\\n| 1 | src/spoolkit/cli/runtime.py:791 | 审批答案→grant 的映射（once/always/block/deny） | 重构·可测性 | 中 |\\n| 2 | src/spoolkit/tools/registry.py:316 | 描述截断（按 。；： 切、超 cap 加 …） | 重构·可测性 | 低 |\\n| "
+        }
+      ],
+      "checks": {
+        "覆盖预设待办（6/6）": true,
+        "有分类": true,
+        "有优先级": true,
+        "_hits": [
+          "runtime.py",
+          "registry.py",
+          "capabilities.py",
+          "audit.py",
+          "exec.py",
+          "fs.py"
+        ]
+      },
+      "final_text": "【模型结论】仓库里共 6 处 TODO，全部是同一标签 `orchestration-bench`、同一类活：把某段逻辑抽成独立函数。没有别的待办。\n\n## 汇总\n\n| 编号 | 位置 | 要抽的内容 | 分类 | 优先级 |\n|---|---|---|---|---|\n| 1 | src/spoolkit/cli/runtime.py:791 | 审批答案→grant 的映射（once/always/block/deny） | 重构·可测性 | 中 |\n| 2 | src/spoolkit/tools/registry.py:316 | 描述截断（按 。；： 切、超 cap 加 …） | 重构·可测性 | 低 |\n| 3 | src/spoolkit/tools/capabilities.py:317 | needs_isolation 判定（network/destructive 且 isolatable） | 重构·可测性 | 中 |\n| 4 | src/spoolkit/agent/audit.py:984 | 证据账本「降级为未验证」的提示文案拼装 | 重构·可测性 | 低 |\n| 5 | src/spoolkit/tools/exec.py:661 | 执行体调用（command/cwd/timeout 等参数打包） | 重构·可测性 | 中 |\n| 6 | src/spoolkit/tools/fs.py:168 | list_dir 工具注册（schema/handler/brief/group） | 重构·可测性 | 低 |\n\n## 分类\n\n全部归一类：**重构 / 可测性**（把内联逻辑抽成独立函数，便于单测与复用）。没有功能缺口、没有 bug 标记、没有性能项。\n\n## 优先级理由\n\n- **中（1、3、5）**：落在审批/隔离/执行三条安全与执行主链上，抽成函数后能被单测直接覆盖，影响面大，先做。\n- **低（2、4、6）**：文案截断、提示拼装、工具注册这类局部逻辑，抽函数收益小、风险低，可后做。\n\n## 建议顺序\n\n1 → 3 → 5（主链先），再 2 → 4 → 6（边角）。每处都是独立小改，互不依赖，可并行。\n\n仓库里共 6 处 TODO，全部是同一标签 `orchestration-bench`、同一类活：把某段逻辑抽成独立函数。没有别的待办。\n\n## 汇总\n\n| 编号 | 位置 | 要抽的内容 | 分类 | 优先级 |\n|---|---|---|---|---|\n| 1 | src/spoolkit/cli/runtime.py:791 | 审批答案→grant 的映射（once/always/block/deny） | 重构·可测性 | 中 |\n| 2 | src/spoolkit/tools/registry.py:316 | 描述截断（按 。；： 切、超 cap 加 …） | 重构·可测性 | 低 |\n| 3 | src/spoolkit/tools/capabilities.py:317 | needs_isolation 判定（network/destructive 且 isolatable） | 重构·可测性 | 中 |\n| 4 | src/spoolkit/agent/audit.py:984 | 证据账本「降级为未验证」的提示文案拼装 | 重构·可测性 | 低 |\n| 5 | src/spoolkit/tools/exec.py:661 | 执行体调用（command/cwd/timeout 等参数打包） | 重构·可测性 | 中 |\n| 6 | src/spoolkit/tools/fs.py:168 | list_dir 工具注册（schema/handler/brief/group） | 重构·可测性 | 低 |\n\n## 分类\n\n全部归一类：**重构 / 可测性**（把内联逻辑抽成独立函数，便于单测与复用）。没有功能缺口、没有 bug 标记、没有性能项。\n\n## 优先级理由\n\n- **中（1、3、5）**：落在审批/隔离/执行三条安全与执行主链上，抽成函数后能被单测直接覆盖，影响面大，先做。\n- **低（2、4、6）**：文案截断、提示拼装、工具注册这类局部逻辑，抽函数收益小、风险低，可后做。\n\n## 建议顺序\n\n1 → 3 → 5（主链先），再 2 → 4 → 6（边角）。每处都是独立小改，互不依赖，可并行。"
+    }
+  ],
+  "skipped": [],
+  "summary": {
+    "A-todo/base": {
+      "runs": 2,
+      "concluded": 2,
+      "finished": 2,
+      "converge_injected": 0,
+      "terminated_by": {
+        "模型完成": 2
+      },
+      "steps_median": 3.0,
+      "prompt_tokens_median": 8113.0,
+      "checks": {
+        "覆盖预设待办（6/6）": 2,
+        "有分类": 2,
+        "有优先级": 2
+      },
+      "checks_of": 2
+    },
+    "A-todo/converge": {
+      "runs": 2,
+      "concluded": 2,
+      "finished": 2,
+      "converge_injected": 0,
+      "terminated_by": {
+        "模型完成": 2
+      },
+      "steps_median": 3.0,
+      "prompt_tokens_median": 8234.0,
+      "checks": {
+        "覆盖预设待办（6/6）": 2,
+        "有分类": 2,
+        "有优先级": 2
+      },
+      "checks_of": 2
+    }
+  },
+  "elapsed_seconds": 177.1
+}
