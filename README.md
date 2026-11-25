@@ -113,35 +113,4 @@ Windows `%APPDATA%\spoolkit\.env`），**非密钥默认值只放 `config.toml`*
 
 ## 开发与许可
 
-关口只有一条命令，两个平台都一样（`scripts/gate.py` 是唯一的实现；
-`scripts\gate.ps1` / `scripts\pytest.ps1` 是 Windows 习惯用的薄壳）：
-
-```bash
-uv sync --extra dev          # 装开发依赖（含 mypy，版本在 uv.lock 里锁死）
-python scripts/gate.py             # 全套：环境体检 + 测试 + 类型检查
-python scripts/gate.py --only doctor   # 只做环境体检（受限环境下先看它）
-python scripts/gate.py --only tests    # 只跑测试
-python scripts/gate.py --only types    # 只跑类型检查
-```
-
-**环境问题与代码回归要分得开**（这是关口最重要的性质）：
-
-- 环境准备只有一处实现：`scripts/dev_env.py`（能力体检 + 环境变量 + 临时目录
-  补丁），`pytest.ps1` / `gate.ps1` / 探针都调它，不再各写一份；
-- 用例自己声明宿主依赖：`@pytest.mark.needs("process_kill")` → 缺能力就**跳过
-  并说明缺什么**（受限沙箱里杀进程被拒就是这种情况）；能力在时照常跑，
-  红了就是真回归；
-- 兜底清单 `tools/known-env-failures.json`：每条带 `requires` / `evidence` /
-  `expires`；**能力回来即失效**、**非受限环境整体失效**、**过期直接让关口红**。
-
-**类型检查带基线棘轮**：存量的 161 条发现记在 `tools/mypy-baseline.json` 里，
-关口**只对新增报红**；修掉的条目下次刷新基线时收账。刷新基线
-（`--update-baseline`）等于承认这一批债务，必须是一次显式提交——换 mypy
-版本同理（基线里记着版本号，对不上会提示）。
-
-为什么是 mypy 而不是 pyright：pyright 在 Node 生态里（PyPI 的包装包也要
-Node，除非再拉 40MB 的 nodejs 轮子），而本仓是纯 Python——`uv sync` 一条命令
-就能在任何只有 Python 的机器上跑起来。这是"同一份代码在多数开发者手里都能
-便利开发"的一部分。
-
-basetemp 放仓库外，避免被当成工作区根。License：MIT。
+License：MIT
