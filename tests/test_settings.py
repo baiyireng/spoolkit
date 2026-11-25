@@ -21,7 +21,7 @@ def config_file(tmp_path: Path, monkeypatch) -> Path:
 
 def test_没有配置文件时返回空(config_file: Path) -> None:
     assert settings.load() == {}
-    assert settings.resolve("provider") == ("", "未设置")
+    assert settings.resolve("provider") == ("", "unset")
 
 
 def test_写进去能读出来(config_file: Path) -> None:
@@ -60,8 +60,8 @@ def test_配置文件损坏时不挡启动(config_file: Path) -> None:
 def test_命令行优先于环境变量与配置(config_file: Path, monkeypatch) -> None:
     settings.save({"provider": "llamacpp"})
     monkeypatch.setenv("AGENTS_DEV_PROVIDER", "gemini")
-    assert settings.resolve("provider") == ("gemini", "环境变量 AGENTS_DEV_PROVIDER")
-    assert settings.resolve("provider", flag="fake") == ("fake", "命令行")
+    assert settings.resolve("provider") == ("gemini", "env AGENTS_DEV_PROVIDER")
+    assert settings.resolve("provider", flag="fake") == ("fake", "CLI")
 
 
 def test_环境变量优先于配置文件(config_file: Path, monkeypatch) -> None:
@@ -109,7 +109,7 @@ def test_配置解析失败要说得出来(config_file: Path) -> None:
     payload, problem = settings.read_config()
     assert payload == {}
     assert problem
-    assert "反斜杠" in problem
+    assert "backslashes" in problem
 
 
 def test_读_mcp_段失败时也能说出原因(config_file: Path) -> None:

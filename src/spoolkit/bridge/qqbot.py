@@ -9,7 +9,7 @@ HTTP 发消息 + WebSocket 网关收事件。所以不需要第三方 hook，也
 1. **拿凭证**：`POST https://bots.qq.com/app/getAppAccessToken`，
    用 AppID + AppSecret 换 access_token（有有效期，缓存起来）。
 2. **发消息**：被动回复要带 `msg_id`（+`msg_seq`）——这是平台的规矩，
-   带上才算"回复那条消息"，不带就是主动推送（有配额限制）。
+   带上它才构成"回复那条消息"，不带就是主动推送（有配额限制）。
    私聊走 `/v2/users/{openid}/messages`，群里 @ 走 `/v2/groups/{openid}/messages`。
 3. **收事件**：WebSocket 网关（op 10 HELLO → 发 op 2 IDENTIFY → 心跳 op 1）。
    私聊事件是 `C2C_MESSAGE_CREATE`、群 @ 是 `GROUP_AT_MESSAGE_CREATE`，
@@ -33,6 +33,7 @@ from spoolkit.bridge.channel import Incoming
 from spoolkit.bridge import credentials
 from spoolkit.bridge.ws import Timeout as WebSocketTimeout
 from spoolkit.bridge.ws import WebSocket
+from spoolkit.net import client_proxy
 
 TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 DEFAULT_API = "https://api.sgroup.qq.com"
@@ -46,7 +47,7 @@ OP_IDENTIFY = 2
 OP_HEARTBEAT = 1
 OP_RESUME = 6
 
-# QQ 对单条消息的内容有上限（按**字节**算，中文一个字 3 字节）。超了我们这边
+# QQ 对单条消息的内容有上限（按**字节**算，中文一个字 3 字节）。超了本端
 # 拿不到任何回应——用户那边就是"看不见结论"。所以长答复要分条发。
 # 取 3000 字节：比常见的 4000 字节上限留足余量，又不至于把一条正常结论切碎。
 MAX_CONTENT_BYTES = 3000
@@ -68,7 +69,7 @@ def _split_for_qq(text: str, limit: int = MAX_CONTENT_BYTES) -> list[str]:
     return chunks
 
 # 心跳**提前**这么多秒发。刚好卡在间隔边界上有风险：平台那边也在数秒，
-# 网络抖一下就成了"这一轮没心跳"。提前一点点不影响规矩（平台只查有没有按时）。
+# 网络抖动一次就成了"这一轮没心跳"。提前一点不影响断言（平台只查有没有按时）。
 HEARTBEAT_MARGIN = 1.0
 
 
@@ -85,6 +86,9 @@ class QQBotChannel:
     """一个 QQ 机器人 = 这条通道。"""
 
     name = "qqbot"
+    # 手机 QQ **渲染一部分 Markdown**（标题、列表、代码块、链接都有格式效果），
+    # 实测只有 `**加粗**` 这类强调标记原样显示——所以只要 `fix`，别折成纯文本。
+    render_mode = "fix"
 
     def __init__(
         self,
@@ -117,7 +121,11 @@ class QQBotChannel:
                 base_url=self._api,
                 timeout=timeout,
                 transport=transport,
-                proxy=proxy or None,
+                proxy=client_proxy(proxy, transport),
+                # 代理由 `client_proxy` 决定，不再让 httpx 去读环境变量：
+                # 环境里的 `NO_PROXY=...,[::1]` 会让它在**构造这一步**抛
+                # InvalidURL（详见 net.py 的注释）。
+                trust_env=False,
             )
         except ImportError as exc:
             # httpx 走 SOCKS 要可选的 socksio，而它报出来的是 `No module named
@@ -139,7 +147,7 @@ class QQBotChannel:
         # 默认回复目标：从最后一条收到的消息来（回给同一个人/同一个群）。
         # 存成 (kind, openid) 而不是拼好的字符串——省的号段里再拆一次。
         self._default_to = ""      # "c2c:<openid>" / "group:<openid>"：最近一条消息
-        self._last_event_id = ""   # 被动回复要带 msg_id，就靠它记住
+        self._last_event_id = ""   # 被动回复要带 msg_id，靠它记录
         self._last_kind = ""       # "c2c" / "group"（规范化过的，不是事件类型名）
         self._seq = 0
         self._thread: threading.Thread | None = None
@@ -161,7 +169,7 @@ class QQBotChannel:
         """
         target = to or self._default_to
         if not target:
-            raise RuntimeError("不知道发给谁：这条通道还没收到过消息")
+            raise RuntimeError("没有收件人：这条通道还没收到过消息")
         kind, _, openid = target.partition(":")
         if not openid:
             kind, openid = (self._last_kind or "c2c"), kind
@@ -174,7 +182,7 @@ class QQBotChannel:
         headers = {"Authorization": f"QQBot {self.access_token()}"}
         chunks = _split_for_qq(text)
         if len(chunks) > 1:
-            self._note(f"答复太长（{len(text)} 字），分 {len(chunks)} 条发")
+            self._note(f"答复过长（{len(text)} 字），分 {len(chunks)} 条发送")
         for index, chunk in enumerate(chunks, start=1):
             self._send_one(url, chunk, kind, index, headers)
 
@@ -202,7 +210,7 @@ class QQBotChannel:
             # 被动回复被拒时退一步试**主动推送**（不带 msg_id）。真机上遇到过
             # `code=11001 不支持的调用`：哪天被动那条路被平台关了，主动这条
             # 至少还能把话送到；两条都不行才报错，并且把两次的原因都带上。
-            self._note(f"被动回复被拒（{passive_error}），改试主动推送")
+            self._note(f"被动回复被拒（{passive_error}），改用主动推送")
         active = self._client.post(
             url,
             json={"content": text, "msg_type": 0},
@@ -216,7 +224,7 @@ class QQBotChannel:
             ) from second
 
     def poll(self) -> list[Incoming]:
-        """取走网关线程攒下的消息。**不阻塞**——没有就返回空列表。"""
+        """取走网关线程收到的消息。**不阻塞**——没有就返回空列表。"""
         messages, self._queue = self._queue, []
         return messages
 
@@ -270,9 +278,9 @@ class QQBotChannel:
         while not self._stop.is_set():
             try:
                 self._run_gateway_once()
-                self._note("QQ 网关断开，5 秒后重连")
+                self._note("QQ 网关已断开，5 秒后重连")
             except Exception as exc:  # noqa: BLE001 - 隧道一断 httpx.ConnectError 也会来
-                # 网络抖动不该把通道打死：退一步重连（resume 留给下一步优化——
+                # 网络抖动不该终止通道：退一步重连（resume 留给下一步优化——
                 # 断了之后 QQ 会把没收到的事件按 op 0 重发一段时间）。
                 self._note(f"QQ 网关出错（{type(exc).__name__}: {exc}），5 秒后重连")
             # 两句提示都写着"5 秒后重连"，但当初只有出错那条真的等了——正常返回
@@ -294,7 +302,7 @@ class QQBotChannel:
                     ws.send_text(json.dumps({"op": OP_HEARTBEAT, "d": self._seq or None}))
                     heartbeat_at = self._clock() + _heartbeat_delay(interval)
                 # 关键：**等到下一次心跳之前就要醒**。
-                # 真机踩过的坑：心跳间隔 41.25s，而 recv 一次要阻塞 20s，心跳只在
+                # 真机实测：心跳间隔 41.25s，而 recv 一次要阻塞 20s，心跳只在
                 # 两次 recv 之间检查——于是它总在 60s 左右才发出去，平台直接掐线，
                 # 表现成"每 60 秒断一次、反复重连"，看着像网络问题，其实是自己的时序。
                 if heartbeat_at is None:
@@ -319,7 +327,7 @@ class QQBotChannel:
                     interval = float((payload.get("d") or {}).get("heartbeat_interval", 30000)) / 1000
                     ws.send_text(json.dumps(self._identify_payload()))
                     # 连上就说一声：真机排查时唯一能看到的"在线"信号。
-                    self._note(f"QQ 网关已连上（心跳 {interval:.0f}s，intents={INTENT_GROUP_AND_C2C}）")
+                    self._note(f"QQ 网关已连接（心跳 {interval:.0f}s，intents={INTENT_GROUP_AND_C2C}）")
                     # 识别之后立刻发一次心跳（各家客户端都这样），之后按间隔来。
                     heartbeat_at = self._clock()
                 elif op == 0:
@@ -367,7 +375,7 @@ class QQBotChannel:
         return messages
 
     def _passive_fields(self, kind: str, seq: int = 1) -> dict:
-        """被动回复的字段：带上 msg_id 才算"回复那条消息"（有 5 分钟窗口）。
+        """被动回复的字段：带上 msg_id 才构成"回复那条消息"（有 5 分钟窗口）。
 
         `msg_seq` 是**同一条消息的第几条回复**：分条发的时候必须递增，否则平台
         会把后面的当重复消息丢掉（真机上试出来过 `40054005 消息被去重`）。

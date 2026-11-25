@@ -61,6 +61,19 @@ def test_本地模型可覆盖地址与模型名(tmp_path: Path) -> None:
     gateway.close()
 
 
+def test_采样设置从配置传进网关(tmp_path: Path) -> None:
+    """探针跑分器靠这条路做「带扰动的重复」：设置必须真到网关，不只是记在记录里。"""
+    default = load_gateway("llamacpp", _config(tmp_path))
+    assert default.temperature == 0.0
+    assert default.seed is None
+    default.close()
+
+    perturbed = load_gateway("llamacpp", _config(tmp_path, temperature=0.7, seed=2))
+    assert perturbed.temperature == 0.7
+    assert perturbed.seed == 2
+    perturbed.close()
+
+
 def test_缺少密钥时给出可操作提示(tmp_path: Path) -> None:
     with pytest.raises(ProviderError) as excinfo:
         load_gateway("gemini", _config(tmp_path, env={}))

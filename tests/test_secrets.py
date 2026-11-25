@@ -1,0 +1,441 @@
+"""密钥从哪来：**环境变量 → 工作区 `.env` → 用户级 `.env`**。
+
+这一批补的是用户级那一层（`%APPDATA%\\spoolkit\\.env`）：通道、网页壳、MCP 都是
+**机器级**服务，"你站在哪个目录"不该决定它读哪份密钥。
+
+真实事故（2026-09-27）：在 `C:\\Users\\32615` 敲
+`spool bridge --channel qqbot …`，报"缺少 AppID 与 AppSecret"、并建议把密钥写进
+`C:\\Users\\32615\\.env`——而凭据在 `D:\\workSpace\\agentWorkSpace\\.env` 里。
+
+头一版只改了 `settings` 这一层，被独立评审逮住：**调用方照样把 cwd 当工作区喂进来**
+（`bridge.py` 的 `Path(getattr(args, "root", "."))`），于是 `cwd/.env` 反而**盖住**
+用户级那份——优先级反转。所以这里有两侧的用例：`settings` 层（解析顺序）与
+**调用方**（`_build_channel` / `_check` 不许拿 cwd 顶数）。
+"""
+
+import argparse
+from pathlib import Path
+
+import pytest
+
+from spoolkit import settings
+from spoolkit.bridge import credentials
+
+QQ = credentials.QQ_APP_ID
+QQ_ALL = credentials.QQ_APP_ID + credentials.QQ_SECRET
+
+
+def _env_file(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _clear_qq(monkeypatch) -> None:
+    for name in QQ_ALL:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _qq_args(root: str = "", **over) -> argparse.Namespace:
+    """`spool bridge --channel qqbot` 那种 Namespace（只给 `_build_channel` 要的字段）。"""
+    base = dict(
+        channel="qqbot", root=root, appid="", secret="", sandbox=False, bridge_proxy=""
+    )
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+# --- settings 层：解析顺序 ---
+
+
+def test_用户级_env_在任何目录都读得到(tmp_path: Path, monkeypatch) -> None:
+    _clear_qq(monkeypatch)
+    user_env = _env_file(tmp_path / "roaming" / ".env", "QQ_AppID=102000000\n")
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(user_env))
+
+    value, source = settings.resolve_secret(QQ, workspace=None)
+
+    assert value == "102000000"
+    # 别写成 `"用户级" in source`：临时目录名里**带着测试名**（`test_用户级_…0/`），
+    # 那句会被目录名意外满足，对标签什么也没断言。这里直接钉前缀。
+    assert source.startswith("user ")
+    assert str(user_env) in source
+
+
+def test_工作区那一份盖住用户级(tmp_path: Path, monkeypatch) -> None:
+    """"更具体的赢"：项目里写的那份优先于个人默认那份。"""
+    _clear_qq(monkeypatch)
+    user_env = _env_file(tmp_path / "roaming" / ".env", "QQ_AppID=from-user\n")
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(user_env))
+    workspace = tmp_path / "ws"
+    _env_file(workspace / ".env", "QQ_AppID=from-workspace\n")
+
+    value, source = settings.resolve_secret(QQ, workspace=workspace)
+
+    assert value == "from-workspace"
+    assert "工作区" in source
+
+
+def test_环境变量盖住两份文件(tmp_path: Path, monkeypatch) -> None:
+    _clear_qq(monkeypatch)
+    user_env = _env_file(tmp_path / "roaming" / ".env", "QQ_AppID=from-user\n")
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(user_env))
+    workspace = tmp_path / "ws"
+    _env_file(workspace / ".env", "QQ_AppID=from-workspace\n")
+    monkeypatch.setenv("AGENTS_DEV_QQ_APPID", "from-env")
+
+    value, source = settings.resolve_secret(QQ, workspace=workspace)
+
+    assert value == "from-env"
+    assert "env" in source
+
+
+def test_别名先给的先赢(tmp_path: Path, monkeypatch) -> None:
+    """规范名（新前缀）优先于旧名与用户自留的拼写。"""
+    _clear_qq(monkeypatch)
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(tmp_path / "missing.env"))
+    monkeypatch.setenv("QQ_AppID", "plain")
+    monkeypatch.setenv("SPOOLKIT_QQ_APPID", "prefixed")
+
+    assert settings.resolve_secret(QQ, workspace=None)[0] == "prefixed"
+
+
+def test_机器级不认cwd_里的_env(tmp_path: Path, monkeypatch) -> None:
+    """回归：`workspace=None` 时只认用户级那一份，当前目录里的 `.env` 不算数。"""
+    _clear_qq(monkeypatch)
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(tmp_path / "missing.env"))
+    elsewhere = tmp_path / "elsewhere"
+    _env_file(elsewhere / ".env", "QQ_AppID=in-cwd\n")
+    monkeypatch.chdir(elsewhere)
+
+    value, source = settings.resolve_secret(QQ, workspace=None)
+
+    assert value == ""
+    assert "not found" in source
+
+
+# --- 调用方：桥不许把 cwd 当工作区 ---
+
+
+def test_机器级桥不拿cwd当工作区(tmp_path: Path, monkeypatch) -> None:
+    """评审 Critical 的回归：`spool bridge` 不给 `--root` 时，cwd 里的 `.env`
+
+    绝不能被当成"工作区那一层"读进来——那会**静默盖住**用户级 `.env`，而缺凭据的
+    文案还会推荐人往那个位置写（照做就得到一个压过正确配置的文件）。
+    """
+    from spoolkit.cli.commands.bridge import _build_channel
+
+    _clear_qq(monkeypatch)
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(tmp_path / "no-user.env"))
+    dirty = tmp_path / "dirty-cwd"
+    _env_file(dirty / ".env", "QQ_AppID=from-cwd\nQQ_AppSecret=from-cwd\n")
+    monkeypatch.chdir(dirty)
+
+    with pytest.raises(SystemExit) as exc:  # cwd 那两个**不算**，所以这里是缺凭据
+        _build_channel(_qq_args(root=""), lambda *_: None)
+
+    text = str(exc.value)
+    assert "QQ 官方机器人需要" in text
+    assert str(settings.env_path()) in text  # 文案指向用户级那层
+    assert "dirty-cwd" not in text  # 不再推荐往 cwd 写
+
+
+def test_显式给了root_就认那个工作区的env(tmp_path: Path, monkeypatch) -> None:
+    """另一侧：`--root` 显式给了就该被当工作区（工作区那层要参与解析）。"""
+    from spoolkit.cli.commands.bridge import _build_channel
+
+    _clear_qq(monkeypatch)
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(tmp_path / "no-user.env"))
+    workspace = tmp_path / "ws"
+    _env_file(workspace / ".env", "QQ_AppID=\n")  # 有键但没值 → 仍算缺凭据
+
+    with pytest.raises(SystemExit) as exc:
+        _build_channel(_qq_args(root=str(workspace)), lambda *_: None)
+
+    text = str(exc.value)
+    assert str(workspace / ".env") in text
+    # `QQ_AppID=`（键在、值空）要单独说，它最容易骗过自己：文件里"明明有这一行"
+    assert "keys present but empty" in text and "QQ_AppID" in text
+
+
+def test_check_在机器级下不再崩(tmp_path: Path, monkeypatch, capsys) -> None:
+    """评审 Important 的回归：`spool bridge --check` 不给 `--root` 时原是 TypeError。
+
+    而它偏偏是这台机器上**唯一能回答"凭据从哪来"**的命令，机器级又正是它最该
+    工作的场合。
+    """
+    from spoolkit.cli.commands.bridge import _check
+
+    _clear_qq(monkeypatch)
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(tmp_path / "no-user.env"))
+
+    code = _check(None, argparse.Namespace(channel="qqbot", sandbox=False, bridge_proxy=""))
+    out = capsys.readouterr().out
+
+    assert code == 2
+    assert "机器级" in out
+    assert "searched:" in out and str(settings.env_path()) in out
+
+
+def test_check_企业微信缺凭据时不假通过(tmp_path: Path, monkeypatch, capsys) -> None:
+    """二轮评审发现：`--check --channel wecom` 原先说"不需要凭据"并 return 0。
+
+    那是**假通过**——真跑时 `_build_channel` 要 corp_id/secret/agent_id 三个值。
+    检查工具骗人比没有检查工具更贵（`--check` 不传代理那次就是同一个形状）。
+    """
+    from spoolkit.cli.commands.bridge import _check
+
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(tmp_path / "no-user.env"))
+    for name in credentials.WECOM_CORP_ID + credentials.WECOM_SECRET + (
+        credentials.WECOM_AGENT_ID
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    code = _check(None, argparse.Namespace(channel="wecom", sandbox=False, bridge_proxy=""))
+    out = capsys.readouterr().out
+
+    assert code == 2
+    assert "searched:" in out
+
+
+# --- 描述："我明明填了" ---
+
+
+def test_找不到时说出找过哪些位置且不印值(tmp_path: Path, monkeypatch) -> None:
+    _clear_qq(monkeypatch)
+    secret = "s3cr3t-value-should-never-show"
+    user_env = _env_file(
+        tmp_path / "roaming" / ".env", f"QQ_AppSecret={secret}\nOTHER=x\n"
+    )
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(user_env))
+
+    text = settings.describe_secret_search(QQ_ALL, workspace=None)
+
+    assert f"[user] {user_env} — has: QQ_AppSecret" in text
+    assert secret not in text  # 值一个字符都不许出现
+
+
+def test_描述区分不存在_不是文件_解析不出(tmp_path: Path, monkeypatch) -> None:
+    """三种"看起来都不是它"的情况要分开说，因为下一步完全不同。"""
+    _clear_qq(monkeypatch)
+    broken = tmp_path / "broken.env"
+    broken.write_bytes(b"\x00\x01\x02not-utf8\xff")
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(broken))
+
+    text = settings.describe_secret_search(QQ, workspace=tmp_path / "no-such-ws")
+
+    assert f"[workspace] {tmp_path / 'no-such-ws' / '.env'} — missing" in text
+    assert "no KEY=VALUE lines parsed" in text and "字节" in text
+
+
+def test_描述说得出路径指到了目录(tmp_path: Path, monkeypatch) -> None:
+    _clear_qq(monkeypatch)
+    a_dir = tmp_path / "a-dir"
+    a_dir.mkdir()
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(a_dir))
+
+    text = settings.describe_secret_search(QQ, workspace=None)
+
+    assert f"[user] {a_dir} — not a file" in text
+
+
+# --- `.env` 的读法（编码两条坑都来自"我明明填了"） ---
+
+
+def test_utf8带bom的键名不带bom(tmp_path: Path) -> None:
+    """记事本存 UTF-8 常带 BOM；不处理的话键名会变成 `\\ufeffQQ_AppID`。"""
+    from spoolkit.envfile import load_env_file
+
+    path = tmp_path / ".env"
+    path.write_bytes("QQ_AppID=102\n".encode("utf-8-sig"))
+
+    assert load_env_file(path) == {"QQ_AppID": "102"}
+
+
+def test_utf16写的env也读得出来(tmp_path: Path) -> None:
+    """记事本存"Unicode"就是 UTF-16——那种文件绝不能被说成"空文件"。"""
+    from spoolkit.envfile import load_env_file
+
+    path = tmp_path / ".env"
+    path.write_bytes("QQ_AppID=102\nQQ_AppSecret=abc\n".encode("utf-16"))
+
+    assert load_env_file(path) == {"QQ_AppID": "102", "QQ_AppSecret": "abc"}
+
+
+# --- 三个消费者共用同一条链 ---
+
+
+def test_通道凭据走同一条链(tmp_path: Path, monkeypatch) -> None:
+    _clear_qq(monkeypatch)
+    user_env = _env_file(tmp_path / "roaming" / ".env", "QQ_AppID=102000000\n")
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(user_env))
+
+    value, source = credentials.find(None, *QQ)
+
+    assert value == "102000000"
+    assert f"user {user_env} (QQ_AppID)" == source
+
+
+def test_网页搜索的_key_也认用户级(tmp_path: Path, monkeypatch) -> None:
+    from spoolkit.cli import runtime
+
+    for name in ("TAVILY_API_KEY", "SPOOLKIT_TAVILY_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    user_env = _env_file(tmp_path / "roaming" / ".env", "TAVILY_API_KEY=tv-user\n")
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(user_env))
+
+    assert runtime._tavily_api_key(None) == "tv-user"
+
+
+def test_模型密钥也认用户级(tmp_path: Path, monkeypatch) -> None:
+    from spoolkit.llm.providers import ProviderConfig, _resolve_key
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    user_env = _env_file(tmp_path / "roaming" / ".env", "GEMINI_API_KEY=g-user\n")
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(user_env))
+
+    config = ProviderConfig(project_root=tmp_path / "ws")
+
+    assert _resolve_key(config) == "g-user"
+
+
+def test_显式传入仍然最高(tmp_path: Path, monkeypatch) -> None:
+    """护栏（对本 diff 不是回归）：将来有人重排优先级时，显式参数仍该在最前。"""
+    from spoolkit.llm.providers import ProviderConfig, _resolve_key
+
+    monkeypatch.setenv("GEMINI_API_KEY", "from-env")
+    config = ProviderConfig(project_root=tmp_path, api_key="explicit")
+
+    assert _resolve_key(config) == "explicit"
+
+
+# --- 用户的字面路径（事故现场） ---
+
+
+def test_事故现场_在别处起桥也能拿到用户级凭据(tmp_path: Path, monkeypatch) -> None:
+    """把当天的现场跑一遍：cwd 是家目录（没有 `.env`），凭据在用户级那层。
+
+    这是那个用户真正要的结果——**在任意目录都能起机器级通道**。
+    """
+    _clear_qq(monkeypatch)
+    home = tmp_path / "home"
+    home.mkdir()
+    user_env = _env_file(tmp_path / "roaming" / ".env", "QQ_AppID=102000000\n")
+    monkeypatch.setenv("SPOOLKIT_ENV_FILE", str(user_env))
+    monkeypatch.chdir(home)
+
+    value, source = settings.resolve_secret(QQ, workspace=None)
+
+    assert value == "102000000"
+    assert str(user_env) in source
+
+
+# --- `.env` 的写法（**向导与 `spool env` 共用同一条路**，评审 I-1） ---
+#
+# 为什么写路径也要一组用例：向导的落点这一批从"工作区 `.env`"变成了**用户级**
+# 那份（`%APPDATA%\spoolkit\.env`）＝这台机器上**全部凭据**所在。老写法是
+# `read_text` + `write_text`：先截断再写（写一半失败＝所有密钥不可恢复）、
+# 只认 UTF-8（记事本存的 UTF-16 会**在写之前**就抛 UnicodeDecodeError，
+# 于是 `spool bridge` / `spool web` 整个起不来）、也不保留原编码与换行。
+# 现在两条写路径都走 `envfile.update_env_file`。
+
+
+def _update(path: Path, **updates: str) -> None:
+    from spoolkit.envfile import update_env_file
+
+    update_env_file(path, updates)
+
+
+def test_utf16的目标改得动且仍是utf16(tmp_path: Path) -> None:
+    """记事本存"Unicode"的 `.env`：能改，而且**改完还是 UTF-16**。
+
+    这条同时钉住"崩"与"悄悄转码"两种坏法：转成 UTF-8 之后 git 会显示整个文件都动了，
+    而人下一次拿记事本打开又会看到乱码。
+    """
+    from spoolkit.envfile import load_env_file
+
+    path = tmp_path / ".env"
+    path.write_bytes("QQ_AppID=old\nOTHERS=1\n".encode("utf-16"))
+
+    _update(path, QQ_AppID="new")
+
+    raw = path.read_bytes()
+    assert raw[:2] in (b"\xff\xfe", b"\xfe\xff"), "写完必须还是 UTF-16（带 BOM）"
+    assert load_env_file(path) == {"QQ_AppID": "new", "OTHERS": "1"}
+
+
+def test_带bom的目标同键替换只剩一行(tmp_path: Path) -> None:
+    """UTF-8 BOM 的目标：同键替换后**只剩一行**（不追加重复键），而且 BOM 还在。
+
+    "只剩一行"是向导最容易踩的坑：老写法若没认出这一行（BOM 让键名变成
+    `\\ufeffGEMINI_API_KEY`），它就会在下面**再追加一份**，于是文件里两行同名键、
+    读到的却还是旧值。
+    """
+    path = tmp_path / ".env"
+    path.write_bytes("GEMINI_API_KEY=old\nOTHERS=1\n".encode("utf-8-sig"))
+
+    _update(path, GEMINI_API_KEY="new")
+
+    raw = path.read_bytes()
+    assert raw[:3] == b"\xef\xbb\xbf"
+    text = raw.decode("utf-8-sig")
+    assert text.count("GEMINI_API_KEY") == 1
+    assert "GEMINI_API_KEY=new" in text
+    assert "OTHERS=1" in text
+
+
+def test_crlf的目标换行照旧(tmp_path: Path) -> None:
+    """整份改写成 LF 在 git 里就是"整个文件都改了"——换行要按原文还原。"""
+    path = tmp_path / ".env"
+    path.write_bytes("QQ_AppID=old\r\nOTHERS=1\r\n".encode("utf-8"))
+
+    _update(path, QQ_AppID="new")
+
+    text = path.read_bytes().decode("utf-8")
+    assert text == "QQ_AppID=new\r\nOTHERS=1\r\n"
+
+
+def test_注释与别人的键原样保留_同前缀的键不被误删(tmp_path: Path) -> None:
+    """向导老写法按"行首是不是 GEMINI_API_KEY"删行，会把 `GEMINI_API_KEY_BACKUP`
+
+    一起删掉。写契约只替换**同名键**，别人的行（含注释、空行）一个字节都不动。
+    """
+    path = tmp_path / ".env"
+    path.write_bytes(
+        "# 我的备注\n\nGEMINI_API_KEY=old\nGEMINI_API_KEY_BACKUP=keep-me\n".encode("utf-8")
+    )
+
+    _update(path, GEMINI_API_KEY="new")
+
+    text = path.read_bytes().decode("utf-8")
+    assert "# 我的备注" in text
+    assert "GEMINI_API_KEY_BACKUP=keep-me" in text
+    assert "GEMINI_API_KEY=new" in text
+    assert "GEMINI_API_KEY=old" not in text
+
+
+def test_替换失败时原文件一字不动且不留临时文件(tmp_path: Path, monkeypatch) -> None:
+    """`os.replace` 失败（Windows 上目标被别的进程占着很常见）＝原文件毫发无伤。
+
+    这条是那个"先截断再写"的直接证伪：`open(path,"wb")` 一调用文件就已经是 0 字节，
+    所以只要实现退回 `write_bytes`/`write_text`，下面这个断言立刻红。
+    """
+    from spoolkit import envfile
+
+    roaming = tmp_path / "roaming"
+    path = roaming / ".env"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes("QQ_AppID=old\nQQ_AppSecret=sec\n".encode("utf-8"))
+    before = path.read_bytes()
+
+    def boom(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(envfile.os, "replace", boom)
+
+    with pytest.raises(envfile.EnvFileError) as exc:
+        envfile.update_env_file(path, {"QQ_AppID": "new"})
+
+    assert "写不了" in str(exc.value) and "Traceback" not in str(exc.value)
+    assert path.read_bytes() == before  # 一字不动
+    assert [p.name for p in roaming.iterdir()] == [".env"]  # 也没留含明文密钥的临时文件

@@ -1,8 +1,17 @@
 """代码搜索工具，基于 ripgrep。
 
 未安装 rg 时返回失败结果并给出明确提示，不静默降级。
+
+**读不了的路径要跳过并如实报告，不许把整条搜索判失败**（实测过的缺陷）：
+本机沙箱里 `mkdir(mode=0o700)` 建出来的目录（pytest 缓存、`pytest-cache-files-*`）
+自己就失去了访问权，`rg` 走到那里会打印一行
+`rg: …\\pytest-cache-files-xxx: 拒绝访问。 (os error 5)` 并以 **2** 退出。
+原先的实现把「退出码不是 0/1」一律当成搜索失败，于是**能读的部分搜到了也全被丢掉**，
+模型只好换路重试（实测多走 3 步、督导介入从 2 涨到 7）。现在：跳过读不了的路径、
+把「跳过了什么」写在结果里（不许静默），只有**别的**错误（比如正则写错）才算失败。
 """
 
+import os
 import shutil
 import re
 import subprocess
@@ -10,11 +19,81 @@ from pathlib import Path
 
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable
-from spoolkit.tools.types import ToolResult, ToolSpec
+from spoolkit.agent.contract import SUMMARY_MAX_CHARS
+from spoolkit.tools.types import Artifact, ToolResult, ToolSpec
 from spoolkit.tools.view import WorkspaceView
 
 DEFAULT_MAX_RESULTS = 50
 TIMEOUT_SECONDS = 20
+
+#: rg 的退出码：0=有命中，1=没有命中，2=**有错误**。
+#: 2 里最常见的一类是「某个路径读不了」。它不等于整条搜索失败——判据见 `_split_errors`。
+RG_ERROR_EXIT = 2
+
+#: 「这个路径读不了」在 stderr 里的形状（中英文系统话术都算）。
+#: 不认得的错误一律按「别的错误」处理（宁可报失败，也不许静默吞掉）。
+_UNREADABLE_HINTS = (
+    "os error 5",  # ERROR_ACCESS_DENIED
+    "os error 13",  # EACCES
+    "permission denied",
+    "access is denied",
+    "拒绝访问",
+)
+#: `rg: <路径>: <系统错误>`。非贪婪取路径 + **要求冒号后面真的有空白**：
+#: Windows 盘符里的冒号后面跟的是 `\`，不能在那里把路径切断
+#: （写成 `:\s*` 会把 `D:\workSpace\...\pytest-bt1` 截成 `D`）。
+_ERROR_LINE = re.compile(r"^rg:\s*(?P<path>.+?):\s+(?P<why>\S.*)$")
+#: 结果里最多点名几个被跳过的路径（点太多会把结果本身挤没）；剩下的只报个数。
+_SKIP_SHOWN = 5
+#: summary 里带上的命中条数。完整列表在 data / raw，不进模型。
+_SUMMARY_HITS = 5
+_SUMMARY_CLIP = "摘要已截断。"
+_HIT_TEXT_CHARS = 80
+_HIT_LINE = re.compile(r"^(?P<path>.*?):(?P<line>\d+):(?P<text>.*)$")
+
+
+def _skip_note(skipped, limit=_SKIP_SHOWN) -> str:
+    """「跳过了什么」必须看得见：静默跳过等于假装搜全了。"""
+    if not skipped:
+        return ""
+    shown = [path for path, _ in skipped[:limit]]
+    more = len(skipped) - len(shown)
+    tail = f"，还有 {more} 个" if more else ""
+    return (
+        f"（跳过 {len(skipped)} 个不可读路径：{'、'.join(shown)}{tail}"
+        "——这些地方没搜到，不是「它们里面没有匹配」）"
+    )
+
+
+def _split_errors(stderr: str):
+    """把 rg 的 stderr 分成「读不了的路径」与「别的错误」。
+
+    返回 `(unreadable, others)`：`unreadable` 是 `[(路径, 原因), …]`，
+    `others` 是认不出是权限/IO 的那些行——**它们仍然算失败**，
+    否则「搜索失败」这件事会被静默吞掉（那正是这次要修的另一半）。
+    """
+    unreadable: list[tuple[str, str]] = []
+    others: list[str] = []
+    for raw in (stderr or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        match = _ERROR_LINE.match(line)
+        path = match.group("path").strip() if match else ""
+        why = (match.group("why") if match else line).strip()
+        if path and any(hint in why.lower() for hint in _UNREADABLE_HINTS):
+            unreadable.append((path, why))
+        else:
+            others.append(line)
+    return unreadable, others
+
+
+def _same_path(left: str, right: Path) -> bool:
+    """两个路径是不是同一处（大小写与分隔符都不敏感）。"""
+    def norm(text: str) -> str:
+        return os.path.normcase(os.path.normpath(str(text))).rstrip("\\/")
+
+    return norm(left) == norm(right)
 
 
 def _search_code(root: Path, args: dict, pending=None, read_roots=()) -> ToolResult:
@@ -55,8 +134,22 @@ def _search_code(root: Path, args: dict, pending=None, read_roots=()) -> ToolRes
         cwd=str(root),
     )
 
-    if proc.returncode not in (0, 1):
-        return ToolResult(ok=False, content=f"搜索失败: {proc.stderr.strip()}")
+    unreadable, other_errors = _split_errors(proc.stderr)
+    note = _skip_note(unreadable)
+    # 退出码不是 rg 认识的三个之一、stderr 里又什么都没说：不许当成功
+    # （「不许静默」这条对失败也成立）。
+    if proc.returncode not in (0, 1, RG_ERROR_EXIT) and not other_errors:
+        return ToolResult(
+            ok=False,
+            content=f"搜索失败: rg 退出码 {proc.returncode}（stderr 没有说明原因）",
+        )
+    # 「别的错误」（正则写错、参数写错…）：**仍然报失败**，不静默吞掉；
+    # 但跳过的路径也一并说出来，否则人以为只是正则的问题。
+    if other_errors:
+        return ToolResult(
+            ok=False,
+            content=f"搜索失败: {' '.join(other_errors)}" + (f"\n{note}" if note else ""),
+        )
 
     root_prefix = str(root)
     lines = proc.stdout.splitlines()[:max_results]
@@ -73,7 +166,146 @@ def _search_code(root: Path, args: dict, pending=None, read_roots=()) -> ToolRes
         merged = [line for line in cleaned if line.split(":", 1)[0] not in stale]
         merged.extend(_search_overlay(view, pattern, base, max_results))
         cleaned = merged[:max_results]
-    return ToolResult(ok=True, content="\n".join(cleaned))
+
+    truncated = len(proc.stdout.splitlines()) > max_results
+    if view.overridden:
+        # 叠加上限之前的条数：改过的文件可能再贡献命中。
+        truncated = truncated or len(merged) > max_results
+
+    if cleaned:
+        content = "\n".join(cleaned)
+        if note:
+            content = f"{content}\n{note}"
+        return _envelope_search(content, cleaned, truncated=truncated)
+
+    # 一条都没搜到。这时「没匹配」与「根本没搜成」必须分得开：搜索的**起点**
+    # 自己就读不了的话，这次搜索一次都没真正执行过，不能拿空结果冒充成功。
+    if unreadable and any(_same_path(path, base) for path, _ in unreadable):
+        return ToolResult(
+            ok=False,
+            content=(
+                f"没有搜成：{args.get('path', '.')} 本身读不了"
+                f"（{[why for path, why in unreadable if _same_path(path, base)][0]}），"
+                "所以这次搜索**一条都没搜**——这不是「没有匹配」。"
+                "换一个可读的目录，或者先把它的权限修好。\n"
+                + _skip_note(unreadable)
+            ),
+        )
+    return _envelope_search(note, [], truncated=truncated)
+
+
+def _parse_hit(line: str) -> dict | None:
+    match = _HIT_LINE.match(line)
+    if match is None:
+        return None
+    return {
+        "path": match.group("path"),
+        "line": int(match.group("line")),
+        "text": match.group("text"),
+    }
+
+
+def _short_hit(hit: dict, text_limit: int = _HIT_TEXT_CHARS) -> str:
+    text = hit["text"]
+    if len(text) > text_limit:
+        text = text[: text_limit - 1] + "…"
+    return f"{hit['path']}:{hit['line']}:{text}"
+
+
+def _pick_summary_hits(hits: list[dict], limit: int) -> list[dict]:
+    """先每个文件取第一条，再按原顺序补满。"""
+    chosen: list[dict] = []
+    used: set[int] = set()
+    seen_files: set[str] = set()
+    for index, hit in enumerate(hits):
+        if hit["path"] in seen_files:
+            continue
+        seen_files.add(hit["path"])
+        used.add(index)
+        chosen.append(hit)
+        if len(chosen) >= limit:
+            return chosen
+    for index, hit in enumerate(hits):
+        if index in used:
+            continue
+        chosen.append(hit)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def _search_footer(count: int, truncated: bool) -> str:
+    if truncated:
+        return f"命中 {count} 条 / 已按 max_results 截断。"
+    return f"命中 {count} 条。"
+
+
+def _fit_search_summary(hits: list[dict], truncated: bool) -> str:
+    """前几条命中加上计数。超过字数上限时写明截断，不悄悄丢掉。"""
+    footer = _search_footer(len(hits), truncated)
+    chosen = _pick_summary_hits(hits, _SUMMARY_HITS)
+    limit = SUMMARY_MAX_CHARS
+
+    def render(items: list[dict], text_limit: int, note: str = "") -> str:
+        body = "\n".join(_short_hit(hit, text_limit) for hit in items)
+        return f"{body}\n{footer}{note}" if body else f"{footer}{note}"
+
+    text = render(chosen, _HIT_TEXT_CHARS)
+    if len(text) <= limit:
+        return text
+    for width in (40, 24, 12):
+        text = render(chosen, width)
+        if len(text) <= limit:
+            return text
+    items = list(chosen)
+    while len(items) > 1:
+        items = items[:-1]
+        text = render(items, 24, _SUMMARY_CLIP)
+        if len(text) <= limit:
+            return text
+    text = render(items, 24, _SUMMARY_CLIP)
+    if len(text) <= limit:
+        return text
+    tail = "\n" + footer + _SUMMARY_CLIP
+    room = limit - len(tail)
+    if room <= 1:
+        clipped = (footer + _SUMMARY_CLIP)[: limit - 1] + "…"
+        return clipped
+    head = _short_hit(items[0], 24) if items else ""
+    if len(head) > room:
+        head = head[: room - 1] + "…"
+    return head + tail
+
+
+def _envelope_search(content: str, lines: list[str], *, truncated: bool) -> ToolResult:
+    """成功搜索的信封。summary 带前几条 path:line:text，raw 是完整结果。"""
+    hits: list[dict] = []
+    for line in lines:
+        hit = _parse_hit(line)
+        if hit is not None:
+            hits.append(hit)
+    if hits:
+        summary = _fit_search_summary(hits, truncated)
+    else:
+        summary = "没有命中。"
+        if content.strip():
+            summary = f"没有命中。{content.strip()}"
+        if len(summary) > SUMMARY_MAX_CHARS:
+            note = _SUMMARY_CLIP
+            room = SUMMARY_MAX_CHARS - len(note)
+            summary = summary[: room - 1].rstrip() + note
+    paths: list[str] = []
+    for hit in hits:
+        if hit["path"] not in paths:
+            paths.append(hit["path"])
+    return ToolResult(
+        ok=True,
+        content=content,
+        raw=content,
+        summary=summary,
+        data={"hits": hits, "count": len(hits), "truncated": truncated},
+        artifacts=tuple(Artifact(type="file", path=path) for path in paths),
+    )
 
 
 def _search_overlay(

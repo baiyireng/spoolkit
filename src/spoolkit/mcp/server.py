@@ -31,6 +31,10 @@ from typing import Any, Callable, TextIO
 
 from spoolkit import __version__, settings
 from spoolkit.agents.plan import load_plan, plan_path
+from spoolkit.kernel import sessions as kernel_sessions
+from spoolkit.kernel import workspaces as kernel_workspaces
+from spoolkit.kernel.target import Target, resolve_target
+from spoolkit.kernel.workspaces import WorkspaceError
 from spoolkit.policy import load_policy, policy_path
 from spoolkit.web.runner import Runner
 
@@ -45,7 +49,7 @@ class WorkspaceRunner(Runner):
     它是"把一件事交给它做完"，不需要调用方先了解我们的计划机制。
     """
 
-    def __init__(self, *args, mode: str = "task", **kwargs) -> None:
+    def __init__(self, *args: Any, mode: str = "task", **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.mode = mode
 
@@ -66,6 +70,10 @@ TOOLS: tuple[dict[str, Any], ...] = (
         "description": (
             "把一件事交给本地 agent，在它的工作区里实施。立刻返回 task_id"
             "（长任务不会阻塞这次调用）；之后用 task_status / task_events 跟进。"
+            "`workspace` 可选：用名字/序号/路径点名一个**已登记**的工作区"
+            "（用 list_workspaces 先看有什么）；不给就用这台机器上 mcp 的指向，"
+            "指向为空而登记表里有多个时会**报错要求点名**，不会替你挑一个。"
+            "工作区只能由人建：没有 `.agent/` 的目录要让主人先 `spool ws add <目录>`。"
             "需要已配置真实模型（llamacpp 或 gemini）。"
             "fake 只回放 --script、不能写代码；没有 LLM 时不要调用本工具当兜底，"
             "改由调用方自己写。"
@@ -74,6 +82,14 @@ TOOLS: tuple[dict[str, Any], ...] = (
             "type": "object",
             "properties": {
                 "goal": {"type": "string", "description": "要做什么，写清楚验收标准"},
+                "workspace": {
+                    "type": "string",
+                    "description": "已登记工作区的名字 / 序号 / 路径（可选）",
+                },
+                "session": {
+                    "type": "string",
+                    "description": "会话 id（可选）；不给就用这个工作区当前的会话",
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["task", "autonomous", "plan"],
@@ -82,8 +98,45 @@ TOOLS: tuple[dict[str, Any], ...] = (
                         "（需要先设好 scope）；plan=推进已有计划的下一个待办步骤"
                     ),
                 },
+                "max_steps": {
+                    "type": "integer",
+                    "description": (
+                        "这次任务的步数预算（不给 = 服务启动时的 `--max-steps`，"
+                        "再不给 = 内置 10）。复杂任务要一次给足：默认 10 步会让它"
+                        "很快踩进收束态、反复靠督导续期。"
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        "mode=autonomous 时最多拆几步（不给 = 服务启动参数，"
+                        "再不给 = 内置 10）。"
+                    ),
+                },
             },
             "required": ["goal"],
+        },
+    },
+    {
+        "name": "list_workspaces",
+        "description": (
+            "**只读**：列出这台机器上已登记的工作区（名字、别名、路径、"
+            "是否已经是工作区），供你在 delegate_task 里点名。"
+            "工作区只能由人建——要加一个，让主人在服务器上敲 `spool ws add <目录>`。"
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_sessions",
+        "description": (
+            "**只读**：列出某个工作区里的会话（id、标题、最近活跃、是否归档）。"
+            "不给 `workspace` 就按这台机器上 mcp 的指向解析。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workspace": {"type": "string", "description": "工作区名字 / 序号 / 路径（可选）"}
+            },
         },
     },
     {
@@ -131,13 +184,25 @@ class McpServer:
 
     def __init__(
         self,
-        project_root: Path,
-        runner: Runner,
+        project_root: Path | None,
+        runner: Runner | None = None,
         writer: Any = None,
+        *,
+        mode: str = "task",
+        extra_args: tuple[str, ...] = (),
     ) -> None:
+        # `project_root` 为 None = "还没定"：每次调用给的 workspace，或这台机器上
+        # mcp 的指向说了算。`runner` 给了就固定用它（老用法，也是测试注入假 Runner
+        # 的路子）；不给就按 (工作区, 会话) 各建一个。
         self.project_root = project_root
         self.runner = runner
         self.writer = writer
+        self.mode = mode
+        self.extra_args = tuple(extra_args)
+        self._runners: dict[str, Runner] = {}
+        self._active: Runner | None = runner
+        self._baselines: dict[int, list[str]] = {}
+        self._last_target: Target | None = None
         # 调用方给的进度令牌（tools/call 的 _meta.progressToken）。
         # 有它才推通知：没要进度还一直推，对方只是多收一堆噪音。
         self._progress_token: Any = None
@@ -188,11 +253,159 @@ class McpServer:
             "task_events": self._events,
             "confirm_changes": self._confirm,
             "workspace_status": lambda _a: self._workspace(),
+            "list_workspaces": lambda _a: self._list_workspaces(),
+            "list_sessions": self._list_sessions,
         }
         handler = handlers.get(name)
         if handler is None:
             return _text(f"没有这个工具：{name}", is_error=True)
         return handler(arguments)
+
+    # --- 目标与 Runner ---
+
+    def _target(self, arguments: dict) -> Target:
+        """这次调用在哪儿干活：调用方点名的 > 这条 MCP 会话钉住的 > mcp 指向。
+
+        说不清时**抛 `WorkspaceError`**，由调用方那边翻成一句"要求点名"的报错——
+        绝不替外部 agent 挑一个最近的。
+        """
+        named = str(arguments.get("workspace") or "").strip()
+        workspace: Path | None
+        if named:
+            # 名字 / 序号 / 别名 / 路径都认（`resolve_workspace` 那几条规则）。
+            # 不能直接把名字当路径丢给 `resolve_target`：`Path("查无此区")` 会
+            # 变成本机下的一个路径，于是"点名一个不存在的工作区"变成悄悄新建。
+            # `use_cwd=False`：这条入口的 cwd 是"服务被谁从哪里拉起"的副产品，
+            # 与调用方想在哪干活无关——拿它当路径线索会点名 b 却在 a 里干活（实测过）。
+            resolved = kernel_workspaces.resolve_workspace(named, use_cwd=False)
+            if self.project_root is not None and resolved != Path(self.project_root).resolve():
+                # `--root` 是主人给的**收紧手段**（MCP 这条入口没有身份级放行，
+                # `--root` 就是唯一的范围限制），所以它必须真的压得住点名，
+                # 否则"我钉住了它"是句空话。而且**既不静默照做、也不静默改道**：
+                # 点名了 b 却在 a 里干活，比直接报错更坏。
+                raise WorkspaceError(
+                    f"这条 MCP 会话被启动参数 --root 钉在 {self.project_root}，"
+                    f"不能点名 {resolved}。要按次点名，请让主人去掉 --root 再启动。"
+                )
+            workspace = resolved
+        else:
+            workspace = self.project_root
+        return resolve_target(
+            workspace=workspace,
+            session=str(arguments.get("session") or "") or None,
+            client="mcp",
+            session_fallback="mcp",
+            # 没给 `--root` 时**不看这个服务进程的 cwd**：它是被 MCP 客户端按配置
+            # 拉起来的，"启动目录"跟调用方想在哪干活毫无关系。给了 `--root` 就已经
+            # 是显式值，这一层用不上。说不清就报错要求点名，不猜。
+            use_cwd=self.project_root is not None,
+        )
+
+    def _runner_for(self, target: Target) -> Runner:
+        """一个 (工作区, 会话) 一个 Runner；换目标就换 Runner。
+
+        "当前任务"跟着最近一次 delegate 走（`task_status` / `task_events` /
+        `confirm_changes` 都作用在它上面）——与原先"一个 MCP 会话一个活跃任务"
+        的语义一致，只是现在那个任务可能落在另一个工作区里。
+        """
+        if self.runner is not None:  # 注入了固定 runner（老用法 / 测试）
+            self._active = self.runner
+            self._last_target = target
+            return self.runner
+        key = f"{target.root}\u0000{target.session}"
+        runner = self._runners.get(key)
+        if runner is None:
+            runner = WorkspaceRunner(
+                target.root,
+                session=target.session,
+                extra_args=self.extra_args,
+                mode=self.mode,
+            )
+            self._runners[key] = runner
+        self._active = runner
+        self._last_target = target
+        return runner
+
+    def _extra_with_budget(self, arguments: dict) -> list[str]:
+        """把这次调用给的步数预算接到服务启动参数后面（`max_steps` / `limit`）。
+
+        只认正整数：0、负数、字符串一律当没给——**不许悄悄把预算改成 0**，
+        那会让一次派发直接收束，看起来像"它自己不肯干"。
+        """
+        extra: list[str] = []
+        for key, flag in (("max_steps", "--max-steps"), ("limit", "--limit")):
+            value = arguments.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                extra += [flag, str(value)]
+        return extra
+
+    def _runner_baseline(self, runner: Runner) -> list[str]:
+        """这个 Runner **本来就带的**转发参数（第一次用到时记下来）。
+
+        为什么要记：按次给的预算要**接在**它自己的参数后面，而不是把它覆盖掉
+        （注入进来的 Runner 可能自带 `--policy` 等）；而且要能"这次不给就退回基线"，
+        否则连着派发几次会让参数越积越长。
+        """
+        key = id(runner)
+        if key not in self._baselines:
+            self._baselines[key] = list(getattr(runner, "extra_args", ()) or ())
+        return self._baselines[key]
+
+    def _active_or_none(self) -> Runner | None:
+        return self._active
+
+    def _no_task(self) -> dict:
+        return _text(
+            "还没有任务。先调 delegate_task（可以带 workspace 点名工作区）。",
+            is_error=True,
+        )
+
+    # --- 只读工具 ---
+
+    def _list_workspaces(self) -> dict:
+        rows = []
+        for index, item in enumerate(kernel_workspaces.list_workspaces(), start=1):
+            rows.append(
+                {
+                    "index": index,
+                    "name": item.name,
+                    "alias": item.alias,
+                    "root": str(item.root),
+                    "ready": (item.root / kernel_workspaces.MARK).is_dir(),
+                }
+            )
+        return _json(
+            {
+                "workspaces": rows,
+                "note": (
+                    "工作区只能由人建：要加一个，让主人在服务器上敲 "
+                    "`spool ws add <目录>`（`ready=false` 的还没有 .agent/）。"
+                ),
+            }
+        )
+
+    def _list_sessions(self, arguments: dict) -> dict:
+        try:
+            target = self._target(arguments)
+        except WorkspaceError as exc:
+            return _text(str(exc), is_error=True)
+        items = kernel_sessions.list_sessions(target.root, include_archived=True)
+        return _json(
+            {
+                "workspace": str(target.root),
+                "current": target.session,
+                "sessions": [
+                    {
+                        "id": item.id,
+                        "title": item.title,
+                        "archived": item.archived,
+                        "last_active": item.last_active,
+                        "is_current": item.id == target.session,
+                    }
+                    for item in items
+                ],
+            }
+        )
 
     def set_progress_token(self, token: Any) -> None:
         self._progress_token = token
@@ -207,8 +420,11 @@ class McpServer:
         """
         if self._forwarding or self.writer is None:
             return
+        runner = self._active_or_none()
+        if runner is None:
+            return
         self._forwarding = True
-        listener = self.runner.subscribe()
+        listener = runner.subscribe()
 
         def pump() -> None:
             while True:
@@ -236,18 +452,28 @@ class McpServer:
         if not goal:
             return _text("goal 不能为空", is_error=True)
         mode = str(arguments.get("mode") or "task")
-        if self.runner.running:
+        try:
+            target = self._target(arguments)
+        except WorkspaceError as exc:
+            # 说不清是哪一个时**要求点名**，不要挑一个最近的替调用方决定。
+            return _text(str(exc), is_error=True)
+        runner = self._runner_for(target)
+        if runner.running:
             return _text(
                 "已经有一个任务在跑。先 task_status 看它，或者等它结束。",
                 is_error=True,
             )
-        self.runner.mode = mode
+        runner.mode = mode
+        # 按次覆盖步数预算：`delegate_task` 一次派发就可能要几十步，而服务启动
+        # 参数是固定的——复杂任务不该只能靠督导 +3/+5 续期零敲碎打（实测：
+        # 默认 10 步的任务在第 8 步就进了收束态，最后连验收命令都被拦）。
+        runner.extra_args = self._runner_baseline(runner) + self._extra_with_budget(arguments)
         # _meta 由调用方给（协议里就长这样）；有令牌就按进度推。
         meta = arguments.get("_meta") if isinstance(arguments, dict) else None
         if isinstance(meta, dict) and meta.get("progressToken") is not None:
             self.set_progress_token(meta["progressToken"])
             self.start_forwarding()
-        started = self.runner.start(goal)
+        started = runner.start(goal)
         if not started:  # pragma: no cover - 上面刚判过
             return _text("任务没能启动", is_error=True)
         return _json(
@@ -255,34 +481,60 @@ class McpServer:
                 "task_id": 1,
                 "goal": goal,
                 "mode": mode,
+                "workspace": str(target.root),
+                "session": target.session,
                 "status": "running",
                 "hint": "用 task_status / task_events 跟进；需要审批时 status.awaiting > 0",
             }
         )
 
     def _status(self) -> dict:
-        snapshot = self.runner.snapshot()
+        runner = self._active_or_none()
+        if runner is None:
+            return self._no_task()
+        snapshot = runner.snapshot()
         snapshot.pop("messages", None)  # 聊天记录是给人看的，外部驱动者用不上
-        with self.runner._lock:  # noqa: SLF001 - 同一个进程里的兄弟类，取序号够用
-            snapshot["last_seq"] = self.runner._log_seq  # noqa: SLF001
+        with runner._lock:  # noqa: SLF001 - 同一个进程里的兄弟类，取序号够用
+            snapshot["last_seq"] = runner._log_seq  # noqa: SLF001
+        if self._last_target is not None:
+            snapshot["workspace"] = str(self._last_target.root)
         return _json(snapshot)
 
     def _events(self, arguments: dict) -> dict:
+        runner = self._active_or_none()
+        if runner is None:
+            return self._no_task()
         since = int(arguments.get("since") or 0)
-        events = self.runner.events(since)
+        events = runner.events(since)
         last = events[-1]["seq"] if events else since
         return _json({"events": events, "last_seq": last})
 
     def _confirm(self, arguments: dict) -> dict:
+        runner = self._active_or_none()
+        if runner is None:
+            return self._no_task()
         apply = bool(arguments.get("apply"))
-        if not self.runner.confirm(apply):
+        if not runner.confirm(apply):
             return _text("当前没有待确认的改动", is_error=True)
         return _text("已应用" if apply else "已丢弃")
 
     def _workspace(self) -> dict:
+        runner = self._active_or_none()
+        root = (
+            self._last_target.root
+            if self._last_target is not None
+            else self.project_root
+        )
+        if root is None:
+            return _text(
+                "还没定在哪个工作区。先 delegate_task（带 workspace）或用 "
+                "list_workspaces 看一眼。",
+                is_error=True,
+            )
         # 计划是**会话级**的（见 session_state.py）：这里读的必须是这个 runner
         # 那个会话的计划，否则外部 agent 看到的是别人的进度。
-        plan_file = plan_path(self.project_root, getattr(self.runner, "session", "mcp"))
+        session = getattr(runner, "session", "") or "mcp"
+        plan_file = plan_path(root, session)
         plan = load_plan(plan_file) if plan_file.is_file() else None
         progress = None
         if plan is not None:
@@ -297,10 +549,11 @@ class McpServer:
         provider, source = settings.resolve("provider")
         return _json(
             {
-                "root": str(self.project_root),
+                "root": str(root),
+                "session": session,
                 # 工作区里**存着**的默认策略，不是这次运行实际用的那个
                 # （后者由调用方用 --policy 给，从 start 事件里能看到）。
-                "default_policy": load_policy(policy_path(self.project_root)),
+                "default_policy": load_policy(policy_path(root)),
                 "plan": progress,
                 "provider": {"name": provider, "source": source},
             }
@@ -366,15 +619,23 @@ class _LockedWriter:
 
 
 def serve_stdio(
-    project_root: Path,
-    runner: Runner,
+    project_root: Path | None,
+    runner: Runner | None = None,
     source: TextIO | None = None,
     sink: TextIO | None = None,
+    *,
+    mode: str = "task",
+    extra_args: tuple[str, ...] = (),
 ) -> None:
-    """从 stdin 读、往 stdout 写，一行一条 JSON-RPC。到 EOF 就结束。"""
+    """从 stdin 读、往 stdout 写，一行一条 JSON-RPC。到 EOF 就结束。
+
+    `runner` 不给就按每次调用的目标各建一个（`delegate_task` 里点名工作区那条路）。
+    """
     reader = source if source is not None else sys.stdin
     writer = _LockedWriter(sink if sink is not None else sys.stdout)
-    server = McpServer(project_root, runner, writer=writer)
+    server = McpServer(
+        project_root, runner, writer=writer, mode=mode, extra_args=tuple(extra_args)
+    )
     for line in reader:
         text = line.strip()
         if not text:

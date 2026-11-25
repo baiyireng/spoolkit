@@ -58,3 +58,23 @@ def test_列目录遇到非目录返回失败(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("x\n", encoding="utf-8")
     assert list_dir_spec(tmp_path).handler({"path": "a.txt"}).ok is False
 
+
+def test_目录读不了要给人话而不是当成空目录(tmp_path: Path, monkeypatch) -> None:
+    """本机沙箱下 0o700 建出来的目录就是这样：目录存在、`is_dir()` 为真，
+    但一列举就 PermissionError。原先它会直接抛出去（工具内部错误），
+    模型分不清「这里什么都没有」和「这里我读不了」。"""
+    (tmp_path / "locked").mkdir()
+    real_iterdir = Path.iterdir
+
+    def fake_iterdir(self):
+        if self.name == "locked":
+            raise PermissionError(5, "拒绝访问")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+    result = list_dir_spec(tmp_path).handler({"path": "locked"})
+
+    assert result.ok is False
+    assert "读不了" in result.content
+    assert "不是「空目录」" in result.content
+

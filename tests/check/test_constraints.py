@@ -98,6 +98,20 @@ def test_方法限定名包含类名() -> None:
     assert "A.long_method" in check_source(source)[0].target
 
 
+def test_非_Python_文件不判语法() -> None:
+    """`.vue` / `.css` / HTML 拿 `ast.parse` 去解，必然在第 1 行报「语法错误」。
+
+    实测（Vue 项目）：这条误报把模型误导去核对落盘内容（`<template>` 怎么会是
+    Python 语法错？），白花好几步。判不了就不判，不冒充检查过。
+    """
+    vue = "<template>\n  <div>{{ x }}</div>\n</template>\n"
+    assert check_source(vue, path="src/App.vue") == []
+    assert check_source("body { color: red }\n", path="src/styles.css") == []
+    assert check_source("<html><body></body></html>", path="index.html") == []
+    # Python 文件照旧判——真的语法错要拦得住
+    assert check_source("def broken(:\n", path="a.py")[0].rule == "syntax"
+
+
 def test_写操作提案附带约束反馈(tmp_path: Path) -> None:
     pending = PendingChanges(tmp_path)
     long_body = "def long_one():\n" + "".join(f"    x{i} = {i}\n" for i in range(50))

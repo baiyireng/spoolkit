@@ -1,0 +1,28 @@
+F                                                                        [100%]
+================================== FAILURES ===================================
+____________________________ test_停下之后状态与pid记录都要对上 ____________________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000020AF1722060>
+
+    def test_停下之后状态与pid记录都要对上(monkeypatch) -> None:
+        workdir = _fresh_workdir("stop")
+        monkeypatch.setattr(svc, "PID_FILE", workdir / "service.pid")
+        monkeypatch.setattr(svc, "STATE", workdir / "state.json")
+        (workdir / "service.pid").write_text(
+            json.dumps({"name": "tunnel", "pid": 4242, "alive": True}), encoding="utf-8"
+        )
+        service = Service("tunnel")
+        service.pid = 4242
+    
+        code, message = stop_service(service)
+    
+        assert code == 0, message
+>       assert service.stopped is True, "停下之后 service.stopped 必须为真"
+E       AssertionError: 停下之后 service.stopped 必须为真
+E       assert False is True
+E        +  where False = <spoolkit.services.Service object at 0x0000020AF16C9160>.stopped
+
+tests\services\test_services.py:39: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/services/test_services.py::test_停下之后状态与pid记录都要对上 - ...
+1 failed in 0.11s

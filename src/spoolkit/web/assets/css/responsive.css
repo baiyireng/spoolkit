@@ -1,0 +1,64 @@
+
+  /* ── 手机：左栏收成抽屉、气泡占满、输入条不被键盘顶掉 ── */
+  @media (max-width:860px) {
+    #menu { display:flex; }
+    .top-rule { display:none; }
+    #sidebar { position:fixed; top:0; bottom:0; left:0; width:282px;
+               padding-top:env(safe-area-inset-top);
+               padding-bottom:env(safe-area-inset-bottom);
+               transform:translateX(-100%); transition:transform .18s ease;
+               pointer-events:none;
+               box-shadow:0 0 40px rgba(0,0,0,.5); }
+    body.drawer #sidebar { transform:none; pointer-events:auto; }
+    #thread:has(.empty-state) .empty-title { font-size:22px; }
+    #stream { padding:14px var(--space-3) 20px;
+              padding-left:max(var(--space-3), env(safe-area-inset-left));
+              padding-right:max(var(--space-3), env(safe-area-inset-right)); }
+    .msg.user { max-width:92%; }
+    #composer { padding:var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom));
+                padding-left:max(var(--space-3), env(safe-area-inset-left));
+                padding-right:max(var(--space-3), env(safe-area-inset-right)); }
+    /* 手机宽度：提示与通知那一列不越界——左右都压住（`left`/`right` 同时写），
+       宽度交给 `auto` 去算，但它**仍然 fixed**（这里刻意一个 `position` 都不写：
+       写上去就等于把它拉回文档流，"挤下去"那个毛病就回来了）。
+       高低再收一档，免得整列把对话流里那张卡片盖住。 */
+    #corner { top:52px; left:10px; right:10px; width:auto; overflow:visible; }
+    #toasts { max-height:45vh; }
+    #hints { gap:4px; }
+    #hints .st-item { max-width:38vw; padding:2px 7px; }
+    .st { gap:4px; }
+    .st-hint { display:none; }
+    .st-panel { position:fixed; left:0; right:0; bottom:0; top:auto; width:auto;
+                max-height:52vh; z-index:1;
+                border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                padding-top:calc(var(--space-3) + env(safe-area-inset-top));
+                padding-bottom:calc(var(--space-4) + env(safe-area-inset-bottom)); }
+    .msg-time { font-size:10px; margin-top:0; }
+    .day-sep { margin:4px 0 1px; font-size:10px; }
+    body:has(#st-panel:not(.hidden))::before { content:""; position:fixed; inset:0;
+                z-index:29; background:rgba(0,0,0,.5); pointer-events:none; }
+    #st-health { top:8px; height:44px; max-width:128px; }
+    #st-health, #menu, #send, .toast-close, .row-act,
+    .ask-apply, .ask-reject, #toast-all, #st-close,
+    #rename-cancel, #rename-save {
+      min-width:44px; min-height:44px;
+    }
+    #send { width:44px; height:44px; }
+    #menu { width:44px; height:44px; }
+    #settings { align-items:flex-end; padding:env(safe-area-inset-top) 0 0; }
+    .settings-card { width:100%; max-height:78vh;
+                     border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                     padding-bottom:env(safe-area-inset-bottom); }
+    #rename { align-items:flex-end; padding:0; }
+    .rename-card { width:100%; max-height:78vh;
+                   border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+                   padding-bottom:calc(var(--space-3) + env(safe-area-inset-bottom)); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #stream { scroll-behavior:auto; }
+    .dot, .thinking-dots i, .bubble.streaming::after, .stream-row { animation:none; }
+    /* 通知与状态详情的入场也关掉：不动画不等于不出现（它只是直接在那里）。 */
+    .toast { animation:none; }
+    .st-panel { animation:none; }
+    #sidebar, .toast, .st-panel, .thinking-dots i { transition:none; }
+  }

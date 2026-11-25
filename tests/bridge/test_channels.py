@@ -67,11 +67,11 @@ def test_telegram_回复发回同一个会话() -> None:
     assert calls[0]["json"] == {"chat_id": "42", "text": "改好了"}
 
 
-def test_telegram_没收到过消息时不知道发给谁() -> None:
+def test_telegram_没收到过消息时没有收件人() -> None:
     channel, _ = _telegram(
         lambda request, payload: httpx.Response(200, json={"ok": True})
     )
-    with pytest.raises(RuntimeError, match="不知道发给谁"):
+    with pytest.raises(RuntimeError, match="没有收件人"):
         channel.send("hi")
 
 

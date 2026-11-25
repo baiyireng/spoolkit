@@ -110,6 +110,6 @@ def calc_spec() -> ToolSpec:
             "additionalProperties": False,
         },
         handler=_calc,
-        brief="算数（别心算）",
+        brief="算数",
         group="量",
     )

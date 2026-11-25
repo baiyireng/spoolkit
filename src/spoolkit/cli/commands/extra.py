@@ -7,10 +7,10 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from spoolkit import readroots
+from spoolkit.cli.term import print_err, print_out
 
 
 def extra_command(args: argparse.Namespace) -> int:
@@ -19,18 +19,24 @@ def extra_command(args: argparse.Namespace) -> int:
     target = str(getattr(args, "path", "") or "").strip()
 
     if action in ("add", "remove") and not target:
-        print(f"spool extra {action} 需要一个目录。", file=sys.stderr)
+        print_err(
+            f"spool extra {action} 需要一个目录。",
+            markup=False,
+            style="bad",
+        )
         return 2
 
     if action == "add":
         before = readroots.load(root)
         roots, message = readroots.add(root, target)
-        print(message)
+        style = "ok" if "已关联" in message or "已经在列表里" in message else "bad"
+        print_out(message, markup=False, style=style)
         return 0 if roots != before or "已经在列表里" in message else 2
     if action == "remove":
         before = readroots.load(root)
         roots, message = readroots.remove(root, target)
-        print(message)
+        style = "ok" if roots != before else "bad"
+        print_out(message, markup=False, style=style)
         return 0 if roots != before else 2
-    print(readroots.render(root))
+    print_out(readroots.render(root))
     return 0

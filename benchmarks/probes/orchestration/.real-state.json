@@ -1,0 +1,8 @@
+{
+  "project": "C:\\Users\\32615\\AppData\\Local\\Temp\\dsh-AwhQWh\\spool-orch-real-wll_v141\\project",
+  "todo_seed": 6,
+  "fail_exit": 1,
+  "fail_tail": "        code, message = stop_service(service)\n    \n        assert code == 0, message\n>       assert service.stopped is True, \"停下之后 service.stopped 必须为真\"\nE       AssertionError: 停下之后 service.stopped 必须为真\nE       assert False is True\nE        +  where False = <spoolkit.services.Service object at 0x0000020AF16C9160>.stopped\n\ntests\\services\\test_services.py:39: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/services/test_services.py::test_停下之后状态与pid记录都要对上 - ...\n1 failed in 0.11s",
+  "fail_seconds": 0.56,
+  "cleanup": "跑完用 `python <本脚本> clean` 删掉这个沙箱"
+}

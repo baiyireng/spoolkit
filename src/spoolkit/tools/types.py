@@ -3,6 +3,40 @@
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+# 出路话术的标记行。循环硬拦「原样重试」时把这一行原样端回给模型——
+# 复用既有的工具输出通道（trace / --events 的 tool 事件），不新造一套事件。
+#
+# 放在这一层（`types`）而不是 `tools/edit.py`：写下这一行的有两个地方
+# ——编辑工具的拒绝话术，和**参数校验**的拒绝话术（`tools/registry.py`）。
+# 后者要是从 `edit` 里 import，工具注册表就为了一个字符串常量拖上整个
+# 编辑模块；而两处各抄一份字面量，改一处漏一处时症状是「硬拦时那一行
+# 端不回去」，最难查。所以常量只有这一份，`edit.py` 从这儿取。
+NEXT_STEP_MARKER = "照做的下一步："
+
+#: 硬拦（**没有执行**）的标记前缀。
+#:
+#: 主循环靠它把「被护栏拦下、根本没跑」和「跑了但失败」分开：只有前者的这一步
+#: 不占步数预算。被拦的动作没有任何产出，也不换来任何新信息——让它白吃一步，
+#: 等于用预算给模型的原地打转付费。
+#:
+#: 放在这一层（与 `NEXT_STEP_MARKER` 同一个理由）：它是跨层共享的判据，
+#: 常量只留一份；各写一份时改一处漏一处，症状是「退款判据时灵时不灵」。
+BLOCKED_PREFIX = "⛔ 未执行："
+
+#: §2.5 的反向条款：把「拦的是这一次动作」与「不许删文件」切开。
+#:
+#: 用户点名过两次：这段话术被读成「一律不许删 / 不许精简」时，模型会把正常的
+#: 合并、删死代码当成违规动作而不敢做，任务反而做不完。所以每条拦截话术都要
+#: 带上这一句，而且是**同一句**（两处说法不一等于两套语义）。
+#:
+#: 放在这一层（与 `NEXT_STEP_MARKER` 同一个理由）：它是跨层共享的**同一句
+#: 话**，各写一份时症状是「同一个条款有两种说法」。所以常量只有这一份。
+REVERSE_CLAUSE = (
+    "拦的是**这一次动作**，不是「不许删文件 / 不许精简代码」：删死代码、"
+    "合并重复实现、删已被替代的文件都是正常编辑，改动照落盘、照样可回退"
+    "（§2.5 反向条款）。"
+)
+
 
 @dataclass(frozen=True)
 class Fact:
@@ -33,6 +67,15 @@ class Usage:
 
 
 @dataclass(frozen=True)
+class Artifact:
+    """一份留给界面或后续编排的产出引用。不进模型提示。"""
+
+    type: str
+    path: str = ""
+    ref: str = ""
+
+
+@dataclass(frozen=True)
 class ToolResult:
     """工具执行结果。失败也是正常返回值，不通过异常表达。"""
 
@@ -42,6 +85,24 @@ class ToolResult:
     facts: tuple[Fact, ...] = ()
     # 这个工具自己花掉的模型开销，由循环累加进用量。
     usage: Usage | None = None
+    # 判据用的**原始**证据，不给模型看。
+    #
+    # 为什么需要它：自动验证回灌给模型的是压缩过的短摘要
+    # （`verify.condense_test_output` 只留 `ERROR tests/x.py` 那一行，
+    # 真正的 `ImportError: cannot import name 'get_rows'` 被丢掉了）。
+    # 而自动审查层判「这次失败是不是改名没铺完造成的」正需要那个名字——
+    # 拿短摘要去判会漏，改成把整个原始输出灌给模型又太贵。所以两份分开：
+    # 模型看 content，审查层看 raw。
+    raw: str = ""
+    # 给模型看的短摘要。旧工具不填，适配器再从 content 截出来。
+    # content 仍是兼容别名：这一轮主循环还读它，投影才改看 summary。
+    summary: str = ""
+    # 给界面和后续编排的结构化结果，不进提示。
+    # dict 不能进哈希；排除后信封仍可哈希，相等仍看 data 的内容。
+    data: dict[str, Any] = field(default_factory=dict, hash=False)
+    artifacts: tuple[Artifact, ...] = ()
+    # 下一步建议，给编排看，不进提示。
+    next: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,8 +125,18 @@ class ToolSpec:
 
 @dataclass(frozen=True)
 class ToolCall:
-    """模型发出的一次工具调用请求。"""
+    """模型发出的一次工具调用请求。
+
+    `intent` 是**这次调用想干什么**，来自模型自己写的 `why`（读不到时退回
+    这一轮的 `thought`，见 protocol._parse_tool_calls）。它不参与任何工具
+    参数校验，也不改变执行——它的用处只有两个：① 让人与督导看得到「它
+    为什么按这个按钮」，从而分得清「工具不完善」还是「它理解错了」；
+    ② 让失败与拒绝的话术能**回应意图**，而不是只给一条通用替代方案。
+
+    默认空串：老检查点与直接构造 ToolCall 的调用方（测试、MCP）都不受影响。
+    """
 
     name: str
     arguments: dict[str, Any]
+    intent: str = ""
 

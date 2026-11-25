@@ -125,3 +125,68 @@ def test_空回合被单独标记() -> None:
 def test_其它解析失败不带空回合标记() -> None:
     assert parse_turn("不是 JSON").kind == ""
 
+
+# ---- 意图（why）与表态（assessment）：工具调用要带上「想干什么」 ----------
+
+
+def test_解析出每次调用的意图() -> None:
+    """意图是排查的第一手材料：没有它，同一个失败只留下工具名与参数，
+    分不清「工具不完善」还是「它理解错了」。"""
+    raw = _payload(
+        tool_calls=[
+            {"name": "read_file", "arguments": {"path": "a.py"}, "why": "看它的当前内容"}
+        ]
+    )
+    turn = parse_turn(raw)
+    assert isinstance(turn, AgentTurn)
+    assert turn.tool_calls[0].intent == "看它的当前内容"
+
+
+def test_没有意图时退回这一轮的说明() -> None:
+    """只退回**单个**调用的场合：一句说明配一个动作，绑上去不会张冠李戴。"""
+    turn = parse_turn(_payload())
+    assert isinstance(turn, AgentTurn)
+    assert turn.tool_calls[0].intent == "先读文件"
+
+
+def test_多个调用时不拿说明冒充每个调用的意图() -> None:
+    """两个调用共用一句说明时，把它绑到每一个上会把第二个调用的意图写成
+    第一个的——那比没有意图更坏，它是一句假话。"""
+    raw = _payload(
+        tool_calls=[
+            {"name": "read_file", "arguments": {"path": "a.py"}},
+            {"name": "read_file", "arguments": {"path": "b.py"}},
+        ]
+    )
+    turn = parse_turn(raw)
+    assert isinstance(turn, AgentTurn)
+    assert [call.intent for call in turn.tool_calls] == ["", ""]
+
+
+def test_意图为空串时不冒充() -> None:
+    raw = _payload(
+        tool_calls=[
+            {"name": "read_file", "arguments": {"path": "a.py"}, "why": "   "}
+        ]
+    )
+    turn = parse_turn(raw)
+    assert isinstance(turn, AgentTurn)
+    assert turn.tool_calls[0].intent == "先读文件"
+
+
+def test_解析对督导建议的表态() -> None:
+    turn = parse_turn(_payload(assessment="接受：预算确实不多了"))
+    assert isinstance(turn, AgentTurn)
+    assert turn.assessment == "接受：预算确实不多了"
+
+
+def test_没有表态时是空串而不是缺失() -> None:
+    """「没有督导建议要回应」和「它拒绝回应」是两件事，不能混。"""
+    turn = parse_turn(_payload())
+    assert isinstance(turn, AgentTurn)
+    assert turn.assessment == ""
+
+
+def test_表态不是字符串时解析失败() -> None:
+    assert isinstance(parse_turn(_payload(assessment=["接受"])), ParseFailure)
+

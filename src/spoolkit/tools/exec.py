@@ -6,6 +6,9 @@
 安全边界靠四条：
 1. **白名单命令**，不做任意 shell 透传；
 2. **不经过 shell**，参数里的 `;`、`|`、`&&` 都是普通字符；
+   （唯一的例外是 Windows 上解析到 `.cmd`/`.bat` 垫片的命令——那种只能经
+   `cmd.exe` 起，见 `resolve_argv`：那时参数里的 `& | < > ^ % "` 一律
+   **明确拒绝并说人话**，绝不悄悄拼进命令行。）
 3. **工作目录锁在项目内**；
 4. **超时强杀 + 输出截断**——跑不完或吐出海量日志的命令会直接吃掉上下文。
 
@@ -17,16 +20,22 @@
 或指向错误的虚拟环境。实测中模型为此白白烧掉了十步。
 """
 
+import os
 import shutil
 import subprocess
-import sys
 import re
 from pathlib import Path
 
 from spoolkit.errors import PathOutsideProjectError
+from spoolkit.interpreter import (
+    PYTHON_PROGRAMS,
+    resolve_python_argv,
+    spoolkit_checkout_root,
+)
 from spoolkit.paths import resolve_within
 from spoolkit.tools.trial import trial_workspace
-from spoolkit.tools.types import ToolResult, ToolSpec
+from spoolkit.agent.contract import SUMMARY_MAX_CHARS
+from spoolkit.tools.types import Artifact, ToolResult, ToolSpec
 from spoolkit import limits as _limits
 from spoolkit.tools.grant import ALLOWED, ASK, DENIED, Grants, classify
 
@@ -34,8 +43,8 @@ from spoolkit.tools.grant import ALLOWED, ASK, DENIED, Grants, classify
 # 加上试跑副本的开销很容易翻倍。超时太小会逼着模型去瞎摸索，
 # 把步数预算浪费在恢复上，而不是任务本身。
 # 默认值来自登记表；名字留着给外部导入。
-DEFAULT_TIMEOUT = int(_limits.knob("command_timeout").default)
-MAX_TIMEOUT = int(_limits.knob("max_command_timeout").default)
+DEFAULT_TIMEOUT = int(_limits.require_knob("command_timeout").default)
+MAX_TIMEOUT = int(_limits.require_knob("max_command_timeout").default)
 MAX_OUTPUT_CHARS = 4000
 
 # 只允许只读的 git 子命令。提交、回滚、推送由人来做——
@@ -100,6 +109,28 @@ def _check_python(args: list[str]) -> str | None:
     return None
 
 
+# --- Windows 上的 `.cmd`/`.bat` 垫片：能起，但不许经它偷渡 shell 元字符 --------
+#
+# 背景（一条被误判过很久的"环境债"）：Windows 上 `subprocess` 只按 PATH 找
+# `.exe`/`.com`，而 `node`、`pnpm`、`ruff` 这类工具在 nvm-for-windows / volta /
+# 本机 DSH 下都是 `.cmd` 垫片。直接 spawn 会报「找不到命令: <名字>」——**而它
+# 明明装着**，报错还把人往"没装"的方向带。得包成 `cmd /c call <垫片> …` 才起得来。
+#
+# 代价是 `cmd.exe` 会把命令行重新解释一遍。所以这里有两条硬规矩：
+# ① 参数**逐字**传（仍是 argv 数组，引用交给 `subprocess.list2cmdline`：
+#    不做任何字符串拼接，也就不存在"拼错一个引号、参数被切开"这回事）；
+# ② 参数里出现 `cmd` 会重新解释的字符就**明确拒绝**，不猜、不转义、不静默丢。
+
+#: `cmd.exe` 会重新解释的字符：`&` 分句、`|`/`<`/`>` 转向、`^` 转义、`%` 展开。
+#: 直接 spawn 一个 `.exe` 时它们都是普通字符（`shell=False`），经 `cmd.exe` 就不是了。
+CMD_METACHARS = "&|<>^%"
+
+#: 双引号单独说：`list2cmdline` 用 `\"` 转义它，而 `cmd.exe` **不认反斜杠转义**
+#: ——`a"b` 会被切成两个参数。既然这条路保证不了"逐字到达"，就不放行。
+#: 何况参数本来就是数组里的一项，不需要自己加引号。
+CMD_QUOTE = '"'
+
+
 def validate_command(argv: list[str]) -> str | None:
     """校验命令是否在白名单内。通过返回 None。"""
     if not argv:
@@ -124,16 +155,33 @@ def validate_command(argv: list[str]) -> str | None:
         return None
 
     # node --check：只允许语法检查，不允许任意脚本执行。
-    # 验证器用它做 HTML 内联 JS 的降级语法检查（dogfood：贪吃蛇写完没有验证）。
+    # 验证器用它做 HTML 内联 JS 的语法检查（dogfood：贪吃蛇写完没有验证）。
     # dogfood 第二轮：agent 直接对 HTML 文件跑 node --check，报 ERR_UNKNOWN_FILE_EXTENSION。
     # 限制文件后缀为 .js——HTML 要先提取 JS 再检查（验证器会自动做）。
     if program == "node" or program.endswith("node.exe"):
         if len(rest) >= 2 and rest[0] == "--check":
             target = rest[1]
             if not target.lower().endswith(".js"):
+                # 这条拒绝必须**指路**。实测模型在这里连撞多次：它只被告知
+                # 「不行」，而正确做法（用 verify_file 验 HTML）它猜不到——
+                # 于是换个文件名再撞。「不行」加「那用什么」才是可行动的。
                 return (
-                    "node --check 只接受 .js 文件。HTML 文件不能直接检查——"
-                    "系统会自动从 HTML 里提取内联 JS 做语法检查，你不需要手动做。"
+                    "node --check 只接受 .js 文件，HTML 不能直接检查。"
+                    "要验 HTML 请用 verify_file（path 指向那个 .html）："
+                    "它会抽出内联 JS 做这个语法检查，并顺带验标签配对、"
+                    "id 引用与本地资源路径；系统自动验证走的也是同一套。"
+                )
+            # 目标路径里不许有 shell 元字符。原因很具体：Windows 上 node 常常是
+            # `.cmd` 垫片（nvm/volta/pnpm/本机 DSH 都是），`resolve_argv` 得把它包成
+            # `cmd /c call <垫片> …` 才起得来，而 `cmd` 会把 `& | ^ < > %` 重新当元字符。
+            # 不收这一条，包装就等于在本模块"不经过 shell"的边界上开了个口子。
+            # （`resolve_argv` 那道口子上还有同一套检查兜着，见 `CMD_METACHARS`；
+            # 这里是更早、更具体的一层：它连"要不要批准"都不用问。）
+            if any(ch in target for ch in CMD_METACHARS):
+                return (
+                    "node --check 的目标路径里不能有 shell 元字符（& | ^ < > %）："
+                    "Windows 上 node 可能是 `.cmd` 垫片，得经 cmd.exe 起它，"
+                    "而那些字符在 cmd 里有特殊含义。换成普通文件名。"
                 )
             return None
         return "node 只允许 --check（语法检查），不允许执行脚本"
@@ -141,26 +189,149 @@ def validate_command(argv: list[str]) -> str | None:
     return f"命令不在白名单内: {program}"
 
 
+class CmdShimRejected(RuntimeError):
+    """这条命令只能经 `cmd.exe` 起（`.cmd`/`.bat` 垫片），而参数里有 cmd 会重新
+    解释的字符。消息就是给人看的那句话，`_run` 原样交给模型。"""
+
+
+def _cmd_shim(program: str) -> str | None:
+    """这个程序名在本机解析到的 `.cmd`/`.bat` 垫片；不是垫片就 None。
+
+    判据只有"解析到的文件后缀"这一条，**不挑程序名**：`node`、`pnpm`、`ruff.cmd`
+    在 Windows 上是同一类东西，没有理由只给其中一个开这条路。
+    `.exe`/`.com` 返回 None——它们直接 spawn 就行，多包一层 `cmd` 只会多一处
+    引号与元字符的坑。
+    """
+    if os.name != "nt":
+        return None
+    found = shutil.which(program)
+    if not found:
+        return None
+    return found if Path(found).suffix.lower() in (".cmd", ".bat") else None
+
+
+def _shim_problem(shim: str, argv: list[str]) -> str | None:
+    """参数（含垫片路径本身）里有没有"经 cmd 就不是原样"的字符。
+
+    返回给人看的那句话；干净就 None。要点三样：**为什么**（这条命令得经
+    `cmd.exe`）、**哪一个值**出问题、**怎么办**（去掉字符，而不是让它反复试）。
+    """
+    offenders: list[str] = []
+    labelled = [("垫片路径", shim)]
+    labelled += [(f"参数 {i}", arg) for i, arg in enumerate(argv[1:], 1)]
+    for label, value in labelled:
+        bad = [ch for ch in CMD_METACHARS if ch in value]
+        if bad:
+            offenders.append(f"{label} {value!r}（含 {' '.join(bad)}）")
+        elif CMD_QUOTE in value:
+            offenders.append(f"{label} {value!r}（含双引号）")
+    if not offenders:
+        return None
+    return (
+        "这条命令在本机解析到的是 `.cmd`/`.bat` 垫片，Windows 上只能经 cmd.exe 起它：\n"
+        f"  {shim}\n"
+        "而 cmd.exe 会把命令行里的 & | < > ^ % 重新解释（分句、转向、转义、展开），"
+        '双引号也会打乱它的引用规则——参数就不是原来那个了，所以这里明确不跑，'
+        "也不替你转义（转义过的参数到底变成什么，没法保证）：\n"
+        "  " + "\n  ".join(offenders) + "\n"
+        "怎么办：把这些字符从参数里去掉。换目录请用 cwd 参数，串联命令请拆成多次调用；"
+        "参数本来就是数组里的一项，不需要自己加引号。"
+        "确实必须原样执行这条命令时，请让用户手动跑。"
+    )
+
+
 def resolve_argv(argv: list[str], root: Path) -> list[str]:
     """把模型写的命令名换算成本机真实可用的可执行文件。
 
     模型不该知道也不该猜「用哪个解释器」——那是环境细节，不是任务信息。
-    优先项目自带虚拟环境，其次当前解释器。
+
+    候选根按优先级排：**① 工作区 `.venv` → ② spoolkit 检出根 `.venv` →
+    ③ `sys.executable`**。选择与映射的实现都不在这里，在 `spoolkit.interpreter`
+    （bench 的验收命令问的是同一个问题，只是第一个候选根换成任务工作区）；
+    这一处只交出自己那两份候选。顺序即优先级，不能调换。
+
+    **为什么要有第二个候选根（代价与边界，写在这里免得以后有人惊讶）**：
+    第一候选仍是项目自带的 `.venv`，所以**正常项目不受影响**——它自己的环境
+    永远排在前面。只有当工作区**没有** `.venv` 时，才会退回**检出目录**的
+    `.venv`（那里有 spoolkit 自己的 dev 依赖，包括 pytest），而**不是**
+    `sys.executable`。这是有意的：agent 的自动验证/自测要和「跑 spool 的那套
+    环境」解耦。spool 由 uv tool / pipx / 系统 Python 启动时，`sys.executable`
+    里通常没有 pytest，于是 agent 每次自测都撞 `No module named pytest`——
+    判定没错，但轨迹和 token 被污染，模型还会去「修」一个它修不了的环境问题。
+    **代价**：用户工作区里跑 `python x.py`，若这个脚本依赖项目独有的第三方包、
+    而工作区**又没有** `.venv`，它可能拿到检出环境的解释器，而不是 spool 环境的。
+    这种情况本来就拿不到 spool 环境的包（spool 环境里也没有该项目的依赖），
+    但依赖「恰好装在 spool 那个解释器里」的脚本会受影响——要消除这个歧义，
+    给工作区建 `.venv` 即可。
+
+    **Windows 上的 `.cmd`/`.bat` 垫片（对任意命令生效）**：`node`、`pnpm`、
+    `ruff` 这类命令常常不是 `.exe`，而是一个 `.cmd` 垫片（nvm-for-windows、
+    volta、pnpm 装的都是；本机 DSH 提供的 node 也是
+    `ELECTRON_RUN_AS_NODE=1 "…DeepSeek Harness.exe"`）。`subprocess` 在 Windows 上
+    只按 `PATH` 找 `.exe`/`.com`，于是直接 spawn 会报「找不到命令: <名字>」——
+    **而那个命令明明装着**，报错还把人往"没装"的方向带。这里把它包成
+    `cmd /c call <垫片> …`（只有这一种形状）。
+
+    为什么是 `cmd /c call …` 而不是 `cmd /c …`（实测四种形状，只有它稳）：
+    `cmd /c "C:\\Program Files\\x\\node.cmd" a b` 会命中 cmd 自己的引号剥离规则
+    ——命令行上出现两对以上引号时，它把**首尾各一个**引号去掉，路径就从空格处
+    断成两截，报的是"`C:\\Program Files\\x\\shim` 不是内部或外部命令"。加一个
+    `call`（它是 cmd 内建，不多起进程）之后，cmd 不再对 `/c` 之后的部分做那套
+    剥离，引号原样交给批处理；实测带空格路径 + 带空格/中文参数逐字到达，
+    退出码也照原样传出来（`exit /b 3` → 3）。
+
+    为什么敢经 `cmd.exe`（本模块自述的边界之一是"不经过 shell"）：
+    **参数逐字进、元字符一律挡在门外。**
+    - 逐字：仍然是 argv 数组，一个参数一个元素，引用交给
+      `subprocess.list2cmdline`（`shell=False` 时它就是这条命令的引用实现）——
+      这里**不做字符串拼接**，所以不存在"引号拼错、参数被切开"这回事。
+    - 挡在门外：解析到垫片、且参数（或垫片路径）里有 `& | < > ^ % "` 时，
+      抛 `CmdShimRejected` 并给出人话（见 `_shim_problem`），**不转义、不猜**。
+      经 `cmd.exe` 的转义结果没法保证，与其悄悄改写参数，不如明确拒绝。
+
+    其余的换算维持原样：`.exe`/`.com` 不包 `cmd`；`python`/`python3`/`pytest`
+    先走解释器换算（那条路不经过这里）；不是垫片、也不在白名单里的命令原样返回，
+    找不到就是找不到。
     """
-    if not argv or argv[0] not in ("python", "python3", "pytest"):
+    if not argv:
         return argv
+    if argv[0] in PYTHON_PROGRAMS:
+        return resolve_python_argv(argv, [root, spoolkit_checkout_root()])
 
-    candidates = (
-        root / ".venv" / "Scripts" / "python.exe",
-        root / ".venv" / "bin" / "python",
-    )
-    interpreter = next(
-        (str(path) for path in candidates if path.exists()), sys.executable
-    )
+    shim = _cmd_shim(argv[0])
+    if shim is None:
+        return argv
+    problem = _shim_problem(shim, argv)
+    if problem is not None:
+        raise CmdShimRejected(problem)
+    return ["cmd", "/c", "call", shim, *argv[1:]]
 
-    if argv[0] == "pytest":
-        return [interpreter, "-m", "pytest", *argv[1:]]
-    return [interpreter, *argv[1:]]
+
+#: 截断时最多在省略标记里点名几条判据行（`FAILED`/`ERROR`）。
+_TRUNCATE_JUDGEMENTS = 3
+#: 每条点名的字符上限，免得一条超长行把标记撑破。
+_TRUNCATE_JUDGEMENT_CHARS = 120
+
+
+def _dropped_judgements(dropped: str) -> str:
+    """中间那一段被省掉的内容里有没有判据行。
+
+    实测（2026-10-07，B 靶现场）：一份 25455 字符的 `pytest -q` 输出，头 2000 字
+    是 9 条 `ERROR tests/cli/...`，**唯一那条 `FAILED tests/services/...` 落在中间
+    被省掉的部分**，标记只写「中间省略 N 字符」——模型于是照着 `tests/cli/` 那条
+    回答。所以省掉的东西里只要是失败/错误记录，就在这里点名。
+    """
+    marked = [
+        line.strip()
+        for line in dropped.splitlines()
+        if line.strip().startswith(("FAILED ", "ERROR "))
+    ]
+    if not marked:
+        return ""
+    shown = " ｜ ".join(one[:_TRUNCATE_JUDGEMENT_CHARS] for one in marked[:_TRUNCATE_JUDGEMENTS])
+    more = len(marked) - min(len(marked), _TRUNCATE_JUDGEMENTS)
+    suffix = f"，另有 {more} 条" if more > 0 else ""
+    return f"；这一段里有 {len(marked)} 条失败/错误记录：{shown}{suffix}"
 
 
 def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
@@ -169,11 +340,87 @@ def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     if len(text) <= limit:
         return text
     half = limit // 2
+    dropped = text[half : len(text) - half]
     return (
         f"{text[:half]}\n"
-        f"…（输出过长，中间省略 {len(text) - limit} 字符）…\n"
+        f"…（输出过长，中间省略 {len(dropped)} 字符{_dropped_judgements(dropped)}）…\n"
         f"{text[-half:]}"
     )
+
+
+_CLIP_MARK = "仅保留关键片段"
+
+
+def _output_lines(stdout: str, stderr: str) -> list[str]:
+    lines: list[str] = []
+    for source in (stdout, stderr):
+        lines.extend(line.rstrip() for line in (source or "").splitlines())
+    return [line for line in lines if line.strip()]
+
+
+def _first_error_line(stdout: str, stderr: str) -> str:
+    for line in (stderr or "").splitlines():
+        if line.strip():
+            return line.strip()
+    for line in (stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("FAILED ", "ERROR ", "Traceback", "Error")) or "Error" in stripped:
+            return stripped
+    for line in (stdout or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _key_output(stdout: str, stderr: str, code: int) -> str:
+    """成功时只留第一行输出。失败另走 _failure_summary，不在这里截成一行。"""
+    del code
+    for source in (stdout, stderr):
+        for line in (source or "").splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped[:160]
+    return ""
+
+
+def _failure_summary(code: int, stdout: str, stderr: str) -> str:
+    """退出码、第一处错误、末尾几行。装不下就写明只留了关键片段。"""
+    limit = SUMMARY_MAX_CHARS
+    prefix = f"退出码 {code}。"
+    lines = _output_lines(stdout, stderr)
+    if not lines:
+        return prefix
+    full = prefix + "\n".join(line.strip() for line in lines)
+    if len(full) <= limit:
+        return full
+    head = _first_error_line(stdout, stderr) or lines[0].strip()
+    if len(head) > 80:
+        head = head[:79] + "…"
+    marker = _CLIP_MARK
+    fixed = len(prefix) + len(head) + len(marker) + 2
+    if fixed >= limit:
+        room = limit - len(prefix) - len(marker) - 2
+        head = (head[: room - 1] + "…") if room > 1 else ""
+        fixed = len(prefix) + len(head) + len(marker) + 2
+    budget = limit - fixed
+    tail: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        piece = line.strip()
+        extra = len(piece) + (1 if tail else 0)
+        if used + extra <= budget:
+            tail.append(piece)
+            used += extra
+            continue
+        if not tail and budget > 1:
+            tail.append(piece[: budget - 1] + "…")
+        break
+    tail.reverse()
+    body = "\n".join(tail)
+    summary = prefix + head + ("\n" + body if body else "") + "\n" + marker
+    if len(summary) > limit:
+        summary = summary[: limit - len(marker) - 1].rstrip() + "\n" + marker
+    return summary[:limit]
 
 
 def _execute(
@@ -183,14 +430,41 @@ def _execute(
     cwd_arg: str,
     timeout: int,
     max_output: int = MAX_OUTPUT_CHARS,
+    extra_env: dict | None = None,
+    requested_argv: list[str] | None = None,
 ) -> ToolResult:
-    """在指定目录里执行。base 可能是原目录，也可能是试跑副本。"""
+    """在指定目录里执行。base 可能是原目录，也可能是试跑副本。
+
+    `extra_env` 只加不改（覆盖同名变量时以它给的值为准），给自动验证用：
+    范围收窄到子目录后要把项目根补进 `PYTHONPATH`，否则测试项目
+    靠 `parents[1]` 找包根时导不进包，报出来的 ERROR 是假警报。
+    """
     try:
         cwd = resolve_within(base, cwd_arg)
     except PathOutsideProjectError as exc:
         return ToolResult(ok=False, content=str(exc))
     if not cwd.is_dir():
-        return ToolResult(ok=False, content=f"工作目录不存在: {cwd_arg}")
+        # 报错话术必须带绝对路径 + 工作区里实际有什么——模型只拿到
+        # 「不存在」三个字时，下一步只会换个写法猜同一个错路径（fix-bug
+        # 真机现场：连续 3 次 run_command 都报同一句话，最后还是没进去）。
+        available = sorted(
+            (item.name + "/" if item.is_dir() else item.name)
+            for item in base.iterdir()
+        )[:20]
+        listing = "、".join(available) if available else "（空目录）"
+        return ToolResult(
+            ok=False,
+            content=(
+                f"工作目录不存在: {cwd_arg}（解析后：{cwd}）。\n"
+                f"工作区根目录 {base} 下有：{listing}\n"
+                "请用上面列出的真实目录名重试。"
+            ),
+        )
+
+    env = None
+    if extra_env:
+        env = dict(os.environ)
+        env.update({str(key): str(value) for key, value in extra_env.items()})
 
     try:
         proc = subprocess.run(
@@ -202,6 +476,7 @@ def _execute(
             errors="replace",
             timeout=timeout,
             shell=False,  # 明确禁止经 shell，参数里的元字符因此是惰性的
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return ToolResult(ok=False, content=f"命令超过 {timeout} 秒未结束，已终止")
@@ -210,14 +485,34 @@ def _execute(
     except OSError as exc:
         return ToolResult(ok=False, content=f"命令执行失败: {exc}")
 
-    body = _truncate(
-        ((proc.stdout or "") + (proc.stderr or "")).strip())
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    body = _truncate((stdout + stderr).strip())
     status = "成功" if proc.returncode == 0 else "失败"
     # 输出放在前面：模型和人都先要知道「错在哪」，
     # 而不是先看到自己刚才发了什么命令。
+    content = f"退出码 {proc.returncode}（{status}）\n$ {requested}\n{body}"
+    if proc.returncode == 0:
+        # 成功不放大：退出码，必要时带第一行输出。
+        summary = f"退出码 {proc.returncode}。"
+        key = _key_output(stdout, stderr, proc.returncode)
+        if key:
+            summary += key
+    else:
+        summary = _failure_summary(proc.returncode, stdout, stderr)
+    command = list(requested_argv) if requested_argv is not None else list(argv)
     return ToolResult(
         ok=proc.returncode == 0,
-        content=f"退出码 {proc.returncode}（{status}）\n$ {requested}\n{body}",
+        content=content,
+        raw=f"stdout:\n{stdout}\nstderr:\n{stderr}",
+        summary=summary,
+        data={
+            "argv": command,
+            "cwd": cwd_arg,
+            "exit": proc.returncode,
+            "timed_out": False,
+        },
+        artifacts=(Artifact(type="command", ref=requested),),
     )
 
 
@@ -330,6 +625,7 @@ def _run(
     max_output: int = MAX_OUTPUT_CHARS,
     default_timeout: int = DEFAULT_TIMEOUT,
     max_timeout: int = MAX_TIMEOUT,
+    extra_env: dict | None = None,
 ) -> ToolResult:
     argv = list(args["command"])
     original = list(argv)
@@ -344,6 +640,15 @@ def _run(
     level, reason = classify(argv)
     if level == DENIED:
         return ToolResult(ok=False, content=reason)
+
+    # 换算（解释器 / `.cmd` 垫片）**在申请授权之前**做完：一条注定起不来的命令
+    # 不该先去打扰人。垫片加元字符的那条拒绝在这里落地——归因要说对，它不是
+    # "没权限"（那会把它引去申请授权），而是"这条路走不通，换写法"。
+    try:
+        resolved = resolve_argv(argv, root)
+    except CmdShimRejected as exc:
+        return ToolResult(ok=False, content=str(exc))
+
     if level == ASK:
         store = grants if grants is not None else Grants()
         if store.blocks(argv):
@@ -376,18 +681,72 @@ def _run(
             content="未找到 uv，无法执行该命令。可以直接告诉用户需要手动安装依赖。",
         )
 
-    resolved = resolve_argv(argv, root)
     cwd_arg = args.get("cwd", ".")
 
     # 有未落盘的改动时，在试跑副本里执行：模型以为文件已经改了，
     # 那就让它在试跑环境里确实已经改了。真实工作区全程一动不动。
     if pending is not None and len(pending):
-        with trial_workspace(root, pending.items()) as work_root:
+        report: dict = {}
+        with trial_workspace(root, pending.items(), report=report) as work_root:
             _restore_originals(work_root, pending, revert)
-            return _execute(
-                work_root, resolved, requested, cwd_arg, timeout, max_output
+            result = _execute(
+                work_root,
+                resolved,
+                requested,
+                cwd_arg,
+                timeout,
+                max_output,
+                extra_env,
+                requested_argv=original,
             )
-    return _execute(root, resolved, requested, cwd_arg, timeout, max_output)
+        return _with_trial_notice(result, report)
+    return _execute(
+        root,
+        resolved,
+        requested,
+        cwd_arg,
+        timeout,
+        max_output,
+        extra_env,
+        requested_argv=original,
+    )
+
+
+def _with_trial_notice(result: ToolResult, report: dict) -> ToolResult:
+    """把"这条命令跑在试跑副本里"说在输出最前面。
+
+    不说明的症状（实测，Vue 项目）：`npm run build` 报
+    `Cannot find module '<试跑副本>\\…\\node_modules\\vite'`——`prompt_sanitize`
+    会把副本路径抹成占位符，但"为什么找不到"一个字都没有，于是模型判定
+    "依赖没装"，接着 `npm install`（装进临时副本）、`npx`（拉了个版本不对的包）
+    连烧几步预算，最后把"构建失败、node_modules 缺入口"写进结论。
+    """
+    linked = [str(item) for item in (report.get("linked") or [])]
+    skipped = [str(item) for item in (report.get("skipped") or [])]
+    head = [
+        "（本次命令在**试跑副本**里执行：真实工作区全程未被改动；"
+        "`.git` 与缓存目录不在副本里。）"
+    ]
+    if linked:
+        head.append(f"依赖目录已经接进副本：{'、'.join(linked)}。")
+    if skipped:
+        head.append(
+            f"**没能接进副本**的依赖目录：{'、'.join(skipped)}——"
+            "这些目录里的东西（例如 `node_modules` 里的包）在副本里不存在，"
+            "依赖类命令因此会报「找不到模块」，那是**副本**造成的，"
+            "不是工作区里没装依赖；不要把这种失败当成「依赖缺失」去重装。"
+        )
+    return ToolResult(
+        ok=result.ok,
+        content="\n".join(head) + "\n" + result.content,
+        facts=result.facts,
+        usage=result.usage,
+        raw=result.raw,
+        summary=result.summary,
+        data=dict(result.data),
+        artifacts=result.artifacts,
+        next=result.next,
+    )
 
 
 def _restore_originals(work_root: Path, pending, paths: object) -> None:
@@ -406,6 +765,11 @@ def _restore_originals(work_root: Path, pending, paths: object) -> None:
         if Path(change.path).is_absolute():
             continue
         target = work_root / change.path
+        if getattr(change, "deleted", False):
+            # 验证要按**原始内容**判定：模型删掉的那个文件没落盘，副本里
+            # 也还在——留着它，测的就是真实的项目状态；而它在待确认清单里
+            # 的删除不该改变验证口径（验证判的是「改动前的测试怎么判」）。
+            continue
         if change.is_new_file:
             if target.exists():
                 target.unlink()
@@ -467,11 +831,16 @@ def run_once(
     revert: object = (),
     cwd: str = ".",
     max_output: int = MAX_OUTPUT_CHARS,
+    extra_env: dict | None = None,
 ) -> ToolResult:
     """执行一条命令，语义与 run_command 工具完全一致。
 
     给自动验证用：它必须走同一套白名单与试跑副本，否则「模型不能随便
     跑命令、但系统可以」就成了一条暗门——而暗门是最难审计的那种东西。
+
+    `extra_env` 只给自动验证用（`run_command` 走同一条 `_run` 但从不传它）：
+    范围收窄到子目录后，项目根要靠它进 `PYTHONPATH`，否则测试项目
+    导不进包、报出来的 ERROR 是假警报。
     """
     return _run(
         root,
@@ -481,4 +850,5 @@ def run_once(
         grants,
         revert,
         max_output,
+        extra_env=extra_env,
     )

@@ -80,12 +80,18 @@ def test_failed步骤自动重试一次(tmp_path: Path, capsys) -> None:
         return result, None  # pending=None
 
     with patch("spoolkit.cli.commands.plan.execute_step", side_effect=fake_execute), \
-         patch("spoolkit.cli.commands.plan.record_step"):
+         patch(
+             "spoolkit.cli.commands.plan.record_step",
+             # record_step 返回 `(结算结果, 撤销命令)`，两样都进 FINAL 事件。
+             return_value=("none", ""),
+         ):
         rc = advance_plan(args, tmp_path, gateway)
 
     assert rc == 0
     assert call_count[0] == 1  # 重试了一次
-    out = capsys.readouterr().out
+    # 「自动重试」这句是人读的进度：计划路径上散文一律走 stderr（D3），
+    # stdout 是事件通道（`--events` 时一行一个 JSON）。
+    out = capsys.readouterr().err
     assert "自动重试" in out
     assert "第 1 次" in out
 
@@ -123,7 +129,10 @@ def test_重试后retries递增(tmp_path: Path) -> None:
         return result, None
 
     with patch("spoolkit.cli.commands.plan.execute_step", side_effect=fake_execute), \
-         patch("spoolkit.cli.commands.plan.record_step"):
+         patch(
+             "spoolkit.cli.commands.plan.record_step",
+             return_value=("none", ""),
+         ):
         advance_plan(args, tmp_path, gateway)
 
     # 重新加载计划，验证 retries 递增了

@@ -1,0 +1,6 @@
+{
+  "project": "C:\\Users\\32615\\AppData\\Local\\Temp\\dsh-mtGIvq\\spool-p0-converge-a2jsegsc\\project",
+  "todo_seed": 6,
+  "fail_exit": 1,
+  "fail_tail": "E        +  where False = <spoolkit.services.Service object at 0x000001D8927F1160>.stopped\n\ntests\\services\\test_services.py:39: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/services/test_services.py::test_停下之后状态与pid记录都要对上 - ...\n1 failed in 0.07s"
+}

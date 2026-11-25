@@ -77,7 +77,8 @@ def test_按行替换的改动也能回滚(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("l1\nl2\nl3\n", encoding="utf-8")
     pending = PendingChanges(tmp_path)
     replace_lines_spec(tmp_path, pending).handler(
-        {"path": "a.py", "start_line": 2, "end_line": 2, "content": "changed\n"}
+        {"path": "a.py", "start_line": 2, "end_line": 2, "content": "changed\n",
+         "expect": "l2"}
     )
     baseline = pending.baseline()
     pending.apply()

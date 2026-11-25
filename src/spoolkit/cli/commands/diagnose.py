@@ -15,10 +15,10 @@ Agent 只能登记问题；回答它需要真实环境权限，所以这一步�
 """
 
 import argparse
-import sys
 from pathlib import Path
 
 from spoolkit import diagnosis
+from spoolkit.cli.term import escape, print_err, print_out
 
 
 def diagnose_command(args: argparse.Namespace) -> int:
@@ -26,12 +26,19 @@ def diagnose_command(args: argparse.Namespace) -> int:
 
     if args.init_key:
         key = diagnosis.ensure_key()
-        print(f"签名密钥已就绪：{diagnosis.key_path()}（{len(key) * 8} 位）")
+        print_out(
+            f"[ok]签名密钥已生成：[/]{escape(str(diagnosis.key_path()))}"
+            f"[muted]（{len(key) * 8} 位）[/]"
+        )
         return 0
 
     if args.report:
         if not args.verdict:
-            print("--report 需要同时给出 --verdict。", file=sys.stderr)
+            print_err(
+                "--report 需要同时给出 --verdict。",
+                markup=False,
+                style="bad",
+            )
             return 2
         try:
             request = diagnosis.write_report(
@@ -42,39 +49,60 @@ def diagnose_command(args: argparse.Namespace) -> int:
                 evidence=args.evidence,
             )
         except ValueError as exc:
-            print(str(exc), file=sys.stderr)
+            print_err(str(exc), markup=False, style="bad")
             return 2
-        print(f"已写回报告 {request.id}。Agent 可以用 read_diagnosis 读到它。")
+        print_out(
+            f"[ok]已写回报告 [/][accent]{escape(request.id)}[/]"
+            "[muted]。Agent 可用 read_diagnosis 读取。[/]"
+        )
         return 0
 
     requests = diagnosis.load_requests(root)
     if not requests:
-        print("没有诊断请求。")
+        print_out("没有诊断请求。", markup=False, style="muted")
         return 0
 
     if args.show:
         target = diagnosis.find_request(root, args.show)
         if target is None:
-            print(f"没有这条诊断请求: {args.show}", file=sys.stderr)
+            print_err(
+                f"没有这条诊断请求：{args.show}",
+                markup=False,
+                style="bad",
+            )
             return 2
-        print(f"编号：{target.id}")
-        print(f"问题：{target.question}")
+        print_out(f"[muted]编号：[/][accent]{escape(target.id)}[/]")
+        print_out(f"[muted]问题：[/]{escape(target.question)}")
         if target.hypothesis:
-            print(f"假设：{target.hypothesis}")
+            print_out(f"[muted]假设：[/]{escape(target.hypothesis)}")
         if target.evidence:
-            print(f"Agent 看到的证据：{target.evidence}")
+            print_out(
+                f"[muted]Agent 看到的证据：[/]{escape(target.evidence)}"
+            )
         if target.report:
             report, verified = diagnosis.read_report(root, target.id)
-            print(f"报告（{'已验签' if verified else '未验签'}）：")
+            seal = "已验签" if verified else "未验签"
+            seal_style = "ok" if verified else "slow"
+            print_out(f"[muted]报告（[/][{seal_style}]{seal}[/][muted]）：[/]")
             for key, value in report.items():
-                print(f"  {key}: {value}")
+                print_out(
+                    f"  [accent]{escape(str(key))}[/][muted]:[/] "
+                    f"{escape(str(value))}"
+                )
         else:
-            print("（还没有报告）")
+            print_out("（尚未有报告）", markup=False, style="muted")
         return 0
 
     for item in requests:
-        mark = "已回复" if item.answered else "待验证"
-        print(f"{item.id}  [{mark}]  {item.question}")
-    print()
-    print("用 --show <id> 看详情，--report <id> --verdict ... 写回结论。")
+        if item.answered:
+            mark = "[ok]已回复[/]"
+        else:
+            mark = "[state.slow]待验证[/]"
+        print_out(
+            f"[accent]{escape(item.id)}[/]  {mark}  {escape(item.question)}"
+        )
+    print_out("")
+    print_out(
+        "[muted]用 --show <id> 查看详情，用 --report <id> --verdict ... 写回结论。[/]"
+    )
     return 0

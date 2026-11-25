@@ -7,7 +7,7 @@
 
 import argparse
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from spoolkit.llm.gateway import ModelGateway
 from spoolkit.policy import (
@@ -77,10 +77,17 @@ def resolve_policy(args: argparse.Namespace, project_root: Path) -> str:
     return load_policy(policy_path(project_root))
 
 
-def report_policy(policy: str, scope: Sequence[str]) -> None:
-    print(f"授权策略：{policy} —— {describe_policy(policy)}")
+def report_policy(
+    policy: str, scope: Sequence[str], out: Callable[[str], None] = print
+) -> None:
+    """把这次生效的授权策略说一句。
+
+    `out` 是出口（默认 stdout）：计划/自主那条路上 stdout 是**事件通道**，
+    人读的散文一律走 stderr，由调用方传 `plan._say` 进来。
+    """
+    out(f"授权策略：{policy}；{describe_policy(policy)}")
     if policy == "auto":
-        print(
+        out(
             f"自动落盘范围：{'、'.join(scope)}"
             if scope
             else "自动落盘范围：（未指定 --scope，改动仍会逐项确认）"

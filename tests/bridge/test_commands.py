@@ -11,7 +11,7 @@ from spoolkit import readroots
 from spoolkit.bridge.core import Bridge
 from spoolkit.bridge.fake import FakeChannel
 from spoolkit.bridge.pairing import Pairings
-from spoolkit.cli.commands.bridge import run_extra_args
+from spoolkit.cli.commands.bridge import read_roots_args, run_extra_args
 
 
 def _bridge(tmp_path: Path, *, access: str = "open", allowed=()) -> tuple[Bridge, FakeChannel, list[str]]:
@@ -82,6 +82,32 @@ def test_远程通道默认开联网取用() -> None:
     assert "--web" in extra
 
 
+def test_机器级桥启动时没有工作区也不许崩(tmp_path: Path) -> None:
+    """真跑才发现的：不给 `--root` 的桥（服务整台机器）启动时 `project_root=None`，
+    而 `run_extra_args` 把它直接丢给了 `readroots.existing(None)` → `TypeError`，
+    **机器级桥根本起不来**。关联目录是工作区级的，得等每一轮定下目标再算。
+    """
+    args = argparse.Namespace(
+        provider="", model="", base_url="", script="", proxy="",
+        policy="", scope="",
+    )
+
+    extra = run_extra_args(args, None)
+
+    assert "--from-channel" in extra and "--web" in extra
+    assert "--allow-read" not in extra  # 关联目录按目标算，不在这里
+
+
+def test_关联目录按目标算(tmp_path: Path) -> None:
+    """机器级桥：每一轮那个目标工作区自己的关联目录要带上（`read_roots_args`）。"""
+    target = tmp_path / "novels"
+    target.mkdir()
+    readroots.add(tmp_path, str(target))
+
+    assert read_roots_args(None) == []  # 还没定服务谁
+    assert read_roots_args(tmp_path) == ["--allow-read", str(target.resolve())]
+
+
 def test_no_web关掉通道联网() -> None:
     args = argparse.Namespace(
         provider="", model="", base_url="", script="", proxy="",
@@ -143,3 +169,75 @@ def test_普通消息不会被当成命令(tmp_path: Path) -> None:
     channel.push("me", "帮我看看 src 里的东西")
     bridge.run_once()
     assert channel.last == "agent 跑了"
+
+
+# --- Task 6：会话那几条命令（`/sessions` `/use` `/new`）----------------------
+
+
+def test_sessions_列出会话并标出当前(tmp_path: Path) -> None:
+    from spoolkit.kernel import sessions
+
+    root = tmp_path.resolve()
+    made = sessions.create_session(root, title="修 calc.py")
+    bridge, channel, _ = _bridge(tmp_path)
+    channel.push("me", "/sessions")
+    bridge.run_once()
+    assert made in channel.last
+    assert "修 calc.py" in channel.last
+
+
+def test_use_切会话并写这条聊天的指针(tmp_path: Path) -> None:
+    from spoolkit.kernel import pointers, sessions
+
+    root = tmp_path.resolve()
+    first = sessions.create_session(root, title="甲")
+    sessions.create_session(root, title="乙")
+    bridge, channel, _ = _bridge(tmp_path)
+    channel.push("me", f"/use {first}")
+    bridge.run_once()
+
+    assert first in channel.last
+    pointer = pointers.get("chat:fake:me")
+    assert pointer is not None and pointer.session == first
+
+
+def test_new_开一条会话并写指针(tmp_path: Path) -> None:
+    from spoolkit.kernel import pointers, sessions
+
+    root = tmp_path.resolve()
+    bridge, channel, _ = _bridge(tmp_path)
+    channel.push("me", "/new 修 calc.py")
+    bridge.run_once()
+
+    pointer = pointers.get("chat:fake:me")
+    assert pointer is not None and pointer.session
+    assert sessions.read_meta(root, pointer.session)["title"] == "修 calc.py"
+    assert "新会话" in channel.last
+
+
+def test_ws_列出工作区并标出现在这个(tmp_path: Path) -> None:
+    from spoolkit.kernel import workspaces as kws
+
+    root = tmp_path.resolve()
+    kws.register(root)
+    bridge, channel, _ = _bridge(tmp_path)
+    channel.push("me", "/ws")
+    bridge.run_once()
+    assert str(root) in channel.last
+    assert "现在" in channel.last
+
+
+def test_没有聊天身份时切不了(tmp_path: Path) -> None:
+    """防御性：拿不到 client_key 就不要偷偷写别人的指针。"""
+    from spoolkit.bridge import commands
+    from spoolkit.kernel.target import Target
+
+    target = Target(
+        root=tmp_path.resolve(),
+        session="s",
+        workspace_source="explicit",
+        session_source="default",
+    )
+    assert "聊天身份" in commands.handle("/new 一", target)
+    assert "聊天身份" in commands.handle("/ws use 别的", target)
+    assert "聊天身份" in commands.handle("/use 1", target)

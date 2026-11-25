@@ -5,6 +5,7 @@ from spoolkit.memory.hot import (
     DEMOTE_ORDER,
     HOT_TITLE,
     hot_budget,
+    importance_hint,
     parse_hot,
     read_hot,
     render_hot,
@@ -69,10 +70,87 @@ def test_降级顺序里事实最后被动() -> None:
     assert DEMOTE_ORDER[-1] == "fact"
 
 
-def test_同一分节内先移除最早的条目() -> None:
-    sections = {"doing": ["第一条" * 20, "第二条" * 20]}
+def test_同分节内低重要度条目先被淘汰() -> None:
+    """契约变更（原 `test_同一分节内先移除最早的条目` 钉的是 FIFO，是错的）。
+
+    原断言是「同分节内先移除最早的条目」——那是先进先出，与同文件
+    `DEMOTE_ORDER` 的注释「事实最稳定、复用价值最高，所以最后才动它」
+    正好相反：今天的一条噪声会把一个月前的构建命令挤掉（设计稿 §3 缺陷 3）。
+    现在钉的要点是：**同分节内部按重要度淘汰，高价值的旧条目必须留下**。
+    位置只作 tie-break（见下一条），所以「谁先写」不再决定「谁先走」。
+    """
+    old_entry = "解析层用 ast 提取符号，见 `src/spoolkit/index/indexer.py`"
+    new_entry = "一条泛泛的当前状态记录（这次）"
+    assert importance_hint(old_entry) > importance_hint(new_entry)
+
+    # 预算只够留一条（旧条目 43 token、两条 59）：留下的必须是有证据形状的旧条目。
+    kept, demoted = trim_to_budget(
+        {"fact": [old_entry, new_entry]}, OfflineTokenCounter(), 50
+    )
+    assert kept["fact"] == [old_entry]
+    assert demoted == [new_entry]
+
+
+def test_同重要度时位置靠前的先走() -> None:
+    """位置只作 tie-break：同分时保持既有顺序语义（越早越先淘汰）。"""
+    sections = {"doing": ["第一条" + "字" * 30, "第二条" + "字" * 30]}
+    assert importance_hint(sections["doing"][0]) == importance_hint(
+        sections["doing"][1]
+    )
     kept, demoted = trim_to_budget(sections, OfflineTokenCounter(), 80)
     assert demoted[0].startswith("第一条")
+    assert kept["doing"][0].startswith("第二条")
+
+
+def test_条目数超上限时按重要度淘汰() -> None:
+    """`hot_max_items` 生效：47 条压到 40 条，被淘汰的是重要度最低的。"""
+    sections = {
+        "fact": [f"事实{i}" for i in range(5)]
+        + ["这次的任务收尾了"] * 40
+        + ["项目事实一", "项目事实二"]
+    }
+    kept, demoted = trim_to_budget(sections, OfflineTokenCounter(), 1000, max_items=40)
+    assert len(kept["fact"]) == 40
+    assert len(demoted) == 7
+    assert [t for t in demoted if t == "这次的任务收尾了"] == ["这次的任务收尾了"] * 7
+    # 有证据形状的短事实与普通事实都留下（重要度高于「这次」的条目）。
+    assert "项目事实一" in kept["fact"]
+    assert "项目事实二" in kept["fact"]
+    assert "事实0" in kept["fact"]
+
+
+def test_条数上限来自登记表() -> None:
+    from spoolkit import limits
+
+    knob = limits.knob("hot_max_items")
+    assert knob is not None
+    assert knob.default == 40
+    assert knob.overridable is True
+
+    chars = limits.knob("hot_item_chars")
+    assert chars is not None
+    assert chars.default == 200
+    assert chars.overridable is True
+
+
+def test_条数上限可被工作区覆盖() -> None:
+    sections = {"fact": ["a", "b", "c"]}
+    kept, demoted = trim_to_budget(
+        sections, OfflineTokenCounter(), 1000, overrides={"hot_max_items": 2}
+    )
+    assert len(kept["fact"]) == 2
+    assert len(demoted) == 1
+
+
+def test_重要度对含证据的条目更高() -> None:
+    """分值差要能说出来是哪条规则给的（可解释）。"""
+    evidence = "测试用 `.\\.venv\\Scripts\\python.exe -m pytest -q` 跑，见 pyproject.toml"
+    vague = "这次大概修好了吧，上面的问题应该没了"
+    assert importance_hint(evidence) > importance_hint(vague)
+    # 长度扣分：越长越先走。
+    assert importance_hint("短事实") > importance_hint("很长的泛泛描述" * 60)
+    # 复述用户的话也扣分。
+    assert importance_hint("项目事实一") > importance_hint("你之前问过两次这个问题")
 
 
 def test_写入后可读回(tmp_path: Path) -> None:

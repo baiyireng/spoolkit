@@ -19,6 +19,10 @@ class ChatRequest:
     messages: tuple[Message, ...]
     max_tokens: int
     response_schema: dict | None = None
+    # 为真时要求服务端复用相同 token 前缀的 KV。默认关闭，但请求体里总会带上这个字段。
+    cache_prompt: bool = False
+    # 空内容第一次重试时追加的 user 消息。空字符串表示原样再发一次。
+    empty_retry: str = ""
 
 
 @dataclass(frozen=True)

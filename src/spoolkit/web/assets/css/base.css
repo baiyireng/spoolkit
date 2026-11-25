@@ -1,0 +1,41 @@
+  * { box-sizing:border-box; }
+  /* ══ 滚动条：细、跟随主题，深色浅色各一档 ══
+     两套写法都要给：WebKit（Chrome / Edge / Safari）认 `::-webkit-scrollbar`，
+     Firefox 认标准的 `scrollbar-width` / `scrollbar-color`。**只做美化不做隐藏**：
+     thumb 平时低调、悬停才亮，"看不见"不等于"不能滚"——真的 `display:none`
+     会让鼠标用户没有任何抓手（触屏与键盘还能滚，但那是另一个故事）。 */
+  * { scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
+  ::-webkit-scrollbar { width:var(--scrollbar); height:var(--scrollbar); }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb {
+    background:var(--scroll-thumb); border-radius:8px;
+    border:2px solid transparent; background-clip:content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background:var(--scroll-thumb-hover);
+    border:2px solid transparent; background-clip:content-box; }
+  ::-webkit-scrollbar-corner { background:transparent; }
+  html, body { height:100%; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:var(--font-md)/var(--leading-body) var(--sans);
+    letter-spacing:0.03em;
+    display:flex; flex-direction:column; overflow:hidden;
+    -webkit-text-size-adjust:100%;
+  }
+  button, input, textarea, select { font:inherit; color:inherit; }
+  code, pre, kbd, samp { letter-spacing:0; }
+  button:focus-visible, [role="button"]:focus-visible, .st-item:focus-visible,
+  .toast-close:focus-visible, .row-act:focus-visible, #menu:focus-visible {
+    outline:2px solid var(--accent); outline-offset:2px;
+  }
+  .dim { color:var(--text-dim); }
+  .ok { color:var(--ok); }
+  .bad { color:var(--bad); }
+
+  /* ══ 顶部**没有**横幅带 ══
+     以前这里是一条常驻的横幅（只读 / 钉住 / 没有目标 / 探活）：它一出现就把对话流
+     往下推，而"一切正常"的时候又白占一行。现在这些**模式与状态**全收进输入条下面
+     那一行小字（见下面的 `.st`），顶部只剩"我在哪儿"（`#top` 里的目标）。
+     判据有两条：没有任何元素还挂着那个横幅类名；`#readonly` / `#target-note` /
+     `#health` / `#pairing` / `#elsewhere` 这几个挂点一个都不在页面上。 */
+  .hidden { display:none !important; }

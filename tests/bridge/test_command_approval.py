@@ -45,13 +45,21 @@ def test_回答映射到四档() -> None:
 
 
 def test_问题里带上命令与原因() -> None:
+    """`reason` 是**升级申请的说明**，不是一句"默认策略不允许你"。
+
+    实测踩过：原先这里直接放默认策略的拒绝理由（「node 只允许 --check」），
+    读的人（外部 agent / MCP 客户端 / 页面）会判成"批准也没用"而放弃申请——
+    其实批准之后这条命令照常执行。所以文案必须说清"这是要你批准"，
+    并保留策略给的理由。
+    """
     writer = _Writer()
     approver = _events_approver(writer, reader=_Lines("y"))
     approver(["find", ".", "-name", "*.txt"], "在项目里找 txt")
 
     _, data = writer.events[0]
     assert data["command"] == "find . -name *.txt"
-    assert data["reason"] == "在项目里找 txt"
+    assert "需要你批准" in data["reason"]
+    assert "在项目里找 txt" in data["reason"]  # 策略给的原话不许丢
     assert data["count"] == 1
 
 

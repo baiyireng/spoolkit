@@ -1,0 +1,476 @@
+{
+  "generated_at": "2026-10-06 14:10:53",
+  "provider": "FakeModel（脚本化假模型，不真调模型）",
+  "repeats": 3,
+  "rg": "C:\\Users\\32615\\AppData\\Local\\cursor-agent\\versions\\2026.08.04-aaa8809",
+  "tasks": {
+    "A-todo": {
+      "goal": "把仓库所有 TODO 汇总并分类、给优先级",
+      "calls": [
+        {
+          "tool": "search_code",
+          "args": {
+            "pattern": "TODO|FIXME|XXX",
+            "path": "src/spoolkit",
+            "max_results": 8
+          },
+          "why": "把 src 里的待办全捞出来"
+        },
+        {
+          "tool": "search_code",
+          "args": {
+            "pattern": "TODO|FIXME|XXX",
+            "path": "tests",
+            "max_results": 8
+          },
+          "why": "测试里的待办也要算"
+        },
+        {
+          "tool": "search_code",
+          "args": {
+            "pattern": "抽成独立函数",
+            "path": "src/spoolkit",
+            "max_results": 8
+          },
+          "why": "按用途再捞一遍"
+        },
+        {
+          "tool": "search_code",
+          "args": {
+            "pattern": "def orchestrate_spec|def run_plan",
+            "path": "src/spoolkit/tools",
+            "max_results": 8
+          },
+          "why": "定位编排那两个入口"
+        },
+        {
+          "tool": "read_file",
+          "args": {
+            "path": "src/spoolkit/tools/orchestrate.py",
+            "start_line": 1,
+            "end_line": 160
+          },
+          "why": "看一处待办的上下文"
+        }
+      ]
+    },
+    "B-failing-test": {
+      "goal": "定位这个失败测试涉及哪些文件并给出修复计划",
+      "calls": [
+        {
+          "tool": "read_file",
+          "args": {
+            "path": "tests/cli/test_service_command.py",
+            "start_line": 1,
+            "end_line": 160
+          },
+          "why": "看失败测试本体"
+        },
+        {
+          "tool": "search_code",
+          "args": {
+            "pattern": "taskkill",
+            "path": "src/spoolkit",
+            "max_results": 8
+          },
+          "why": "谁在 taskkill"
+        },
+        {
+          "tool": "search_code",
+          "args": {
+            "pattern": "def _service|def service",
+            "path": "src/spoolkit/cli",
+            "max_results": 8
+          },
+          "why": "服务命令的入口在哪"
+        },
+        {
+          "tool": "search_code",
+          "args": {
+            "pattern": "service",
+            "path": "src/spoolkit/cli/commands",
+            "max_results": 8
+          },
+          "why": "命令层哪些文件提到 service"
+        },
+        {
+          "tool": "read_file",
+          "args": {
+            "path": "src/spoolkit/cli/commands/service.py",
+            "start_line": 1,
+            "end_line": 160
+          },
+          "why": "读实现层"
+        }
+      ]
+    }
+  },
+  "readings": [
+    {
+      "arm": "off",
+      "task": "A-todo",
+      "steps": 6,
+      "model_calls": 6,
+      "prompt_tokens": 22884,
+      "completion_tokens": 425,
+      "wall_seconds": 0.114,
+      "tool_seconds": 0.099,
+      "wiring_seconds": 2.573,
+      "requests": 6,
+      "last_request_chars": 10469,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 6,
+      "finished": true,
+      "availability": {
+        "素材：# TODO(orchestration-bench)": true,
+        "素材：可定位的待办处数 ≥2": true
+      },
+      "availability_pass": true,
+      "orchestration_materials": {},
+      "repeat": 0
+    },
+    {
+      "arm": "off",
+      "task": "A-todo",
+      "steps": 6,
+      "model_calls": 6,
+      "prompt_tokens": 22884,
+      "completion_tokens": 425,
+      "wall_seconds": 0.081,
+      "tool_seconds": 0.069,
+      "wiring_seconds": 2.348,
+      "requests": 6,
+      "last_request_chars": 10469,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 6,
+      "finished": true,
+      "availability": {
+        "素材：# TODO(orchestration-bench)": true,
+        "素材：可定位的待办处数 ≥2": true
+      },
+      "availability_pass": true,
+      "orchestration_materials": {},
+      "repeat": 1
+    },
+    {
+      "arm": "off",
+      "task": "A-todo",
+      "steps": 6,
+      "model_calls": 6,
+      "prompt_tokens": 22884,
+      "completion_tokens": 425,
+      "wall_seconds": 0.105,
+      "tool_seconds": 0.092,
+      "wiring_seconds": 2.534,
+      "requests": 6,
+      "last_request_chars": 10469,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 6,
+      "finished": true,
+      "availability": {
+        "素材：# TODO(orchestration-bench)": true,
+        "素材：可定位的待办处数 ≥2": true
+      },
+      "availability_pass": true,
+      "orchestration_materials": {},
+      "repeat": 2
+    },
+    {
+      "arm": "on",
+      "task": "A-todo",
+      "steps": 2,
+      "model_calls": 2,
+      "prompt_tokens": 7666,
+      "completion_tokens": 436,
+      "wall_seconds": 0.032,
+      "tool_seconds": 0.026,
+      "wiring_seconds": 2.357,
+      "requests": 2,
+      "last_request_chars": 7919,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 6,
+      "finished": true,
+      "availability": {
+        "素材：# TODO(orchestration-bench)": true,
+        "素材：可定位的待办处数 ≥2": true
+      },
+      "availability_pass": true,
+      "orchestration_materials": {
+        "每条分支的状态行": true,
+        "每条子调用的意图（why）": true,
+        "§2.5 反向条款": true
+      },
+      "repeat": 0
+    },
+    {
+      "arm": "on",
+      "task": "A-todo",
+      "steps": 2,
+      "model_calls": 2,
+      "prompt_tokens": 7666,
+      "completion_tokens": 436,
+      "wall_seconds": 0.039,
+      "tool_seconds": 0.03,
+      "wiring_seconds": 2.349,
+      "requests": 2,
+      "last_request_chars": 7919,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 6,
+      "finished": true,
+      "availability": {
+        "素材：# TODO(orchestration-bench)": true,
+        "素材：可定位的待办处数 ≥2": true
+      },
+      "availability_pass": true,
+      "orchestration_materials": {
+        "每条分支的状态行": true,
+        "每条子调用的意图（why）": true,
+        "§2.5 反向条款": true
+      },
+      "repeat": 1
+    },
+    {
+      "arm": "on",
+      "task": "A-todo",
+      "steps": 2,
+      "model_calls": 2,
+      "prompt_tokens": 7666,
+      "completion_tokens": 436,
+      "wall_seconds": 0.033,
+      "tool_seconds": 0.027,
+      "wiring_seconds": 2.596,
+      "requests": 2,
+      "last_request_chars": 7919,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 6,
+      "finished": true,
+      "availability": {
+        "素材：# TODO(orchestration-bench)": true,
+        "素材：可定位的待办处数 ≥2": true
+      },
+      "availability_pass": true,
+      "orchestration_materials": {
+        "每条分支的状态行": true,
+        "每条子调用的意图（why）": true,
+        "§2.5 反向条款": true
+      },
+      "repeat": 2
+    },
+    {
+      "arm": "off",
+      "task": "B-failing-test",
+      "steps": 6,
+      "model_calls": 6,
+      "prompt_tokens": 25701,
+      "completion_tokens": 420,
+      "wall_seconds": 0.067,
+      "tool_seconds": 0.057,
+      "wiring_seconds": 2.459,
+      "requests": 6,
+      "last_request_chars": 7906,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 0,
+      "finished": true,
+      "availability": {
+        "素材：test_service_command.py": false,
+        "素材：service.py": true,
+        "素材：可定位的待办处数 ≥0": true
+      },
+      "availability_pass": false,
+      "orchestration_materials": {},
+      "repeat": 0
+    },
+    {
+      "arm": "off",
+      "task": "B-failing-test",
+      "steps": 6,
+      "model_calls": 6,
+      "prompt_tokens": 25715,
+      "completion_tokens": 420,
+      "wall_seconds": 0.076,
+      "tool_seconds": 0.066,
+      "wiring_seconds": 2.463,
+      "requests": 6,
+      "last_request_chars": 7897,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 0,
+      "finished": true,
+      "availability": {
+        "素材：test_service_command.py": false,
+        "素材：service.py": true,
+        "素材：可定位的待办处数 ≥0": true
+      },
+      "availability_pass": false,
+      "orchestration_materials": {},
+      "repeat": 1
+    },
+    {
+      "arm": "off",
+      "task": "B-failing-test",
+      "steps": 6,
+      "model_calls": 6,
+      "prompt_tokens": 25761,
+      "completion_tokens": 420,
+      "wall_seconds": 0.075,
+      "tool_seconds": 0.065,
+      "wiring_seconds": 2.466,
+      "requests": 6,
+      "last_request_chars": 7929,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 0,
+      "finished": true,
+      "availability": {
+        "素材：test_service_command.py": false,
+        "素材：service.py": true,
+        "素材：可定位的待办处数 ≥0": true
+      },
+      "availability_pass": false,
+      "orchestration_materials": {},
+      "repeat": 2
+    },
+    {
+      "arm": "on",
+      "task": "B-failing-test",
+      "steps": 2,
+      "model_calls": 2,
+      "prompt_tokens": 7617,
+      "completion_tokens": 432,
+      "wall_seconds": 0.032,
+      "tool_seconds": 0.029,
+      "wiring_seconds": 2.515,
+      "requests": 2,
+      "last_request_chars": 7932,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 0,
+      "finished": true,
+      "availability": {
+        "素材：test_service_command.py": true,
+        "素材：service.py": true,
+        "素材：可定位的待办处数 ≥0": true
+      },
+      "availability_pass": true,
+      "orchestration_materials": {
+        "每条分支的状态行": true,
+        "每条子调用的意图（why）": true,
+        "§2.5 反向条款": true
+      },
+      "repeat": 0
+    },
+    {
+      "arm": "on",
+      "task": "B-failing-test",
+      "steps": 2,
+      "model_calls": 2,
+      "prompt_tokens": 7615,
+      "completion_tokens": 432,
+      "wall_seconds": 0.034,
+      "tool_seconds": 0.031,
+      "wiring_seconds": 2.362,
+      "requests": 2,
+      "last_request_chars": 7932,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 0,
+      "finished": true,
+      "availability": {
+        "素材：test_service_command.py": true,
+        "素材：service.py": true,
+        "素材：可定位的待办处数 ≥0": true
+      },
+      "availability_pass": true,
+      "orchestration_materials": {
+        "每条分支的状态行": true,
+        "每条子调用的意图（why）": true,
+        "§2.5 反向条款": true
+      },
+      "repeat": 1
+    },
+    {
+      "arm": "on",
+      "task": "B-failing-test",
+      "steps": 2,
+      "model_calls": 2,
+      "prompt_tokens": 7617,
+      "completion_tokens": 432,
+      "wall_seconds": 0.026,
+      "tool_seconds": 0.022,
+      "wiring_seconds": 2.425,
+      "requests": 2,
+      "last_request_chars": 7932,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 0,
+      "finished": true,
+      "availability": {
+        "素材：test_service_command.py": true,
+        "素材：service.py": true,
+        "素材：可定位的待办处数 ≥0": true
+      },
+      "availability_pass": true,
+      "orchestration_materials": {
+        "每条分支的状态行": true,
+        "每条子调用的意图（why）": true,
+        "§2.5 反向条款": true
+      },
+      "repeat": 2
+    }
+  ],
+  "summary": {
+    "A-todo/off": {
+      "steps": 6,
+      "model_calls": 6,
+      "prompt_tokens": 22884,
+      "completion_tokens": 425,
+      "wall_seconds": 0.105,
+      "tool_seconds": 0.092,
+      "last_request_chars": 10469,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 6,
+      "availability_pass": true
+    },
+    "A-todo/on": {
+      "steps": 2,
+      "model_calls": 2,
+      "prompt_tokens": 7666,
+      "completion_tokens": 436,
+      "wall_seconds": 0.033,
+      "tool_seconds": 0.027,
+      "last_request_chars": 7919,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 6,
+      "availability_pass": true,
+      "orchestration_materials": {
+        "每条分支的状态行": true,
+        "每条子调用的意图（why）": true,
+        "§2.5 反向条款": true
+      }
+    },
+    "B-failing-test/off": {
+      "steps": 6,
+      "model_calls": 6,
+      "prompt_tokens": 25715,
+      "completion_tokens": 420,
+      "wall_seconds": 0.075,
+      "tool_seconds": 0.065,
+      "last_request_chars": 7906,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 0,
+      "availability_pass": false
+    },
+    "B-failing-test/on": {
+      "steps": 2,
+      "model_calls": 2,
+      "prompt_tokens": 7617,
+      "completion_tokens": 432,
+      "wall_seconds": 0.032,
+      "tool_seconds": 0.029,
+      "last_request_chars": 7932,
+      "executed_tool_calls": 5,
+      "found_seed_hits": 0,
+      "availability_pass": true,
+      "orchestration_materials": {
+        "每条分支的状态行": true,
+        "每条子调用的意图（why）": true,
+        "§2.5 反向条款": true
+      }
+    }
+  }
+}

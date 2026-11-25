@@ -1,0 +1,65 @@
+{
+  "runs": 15,
+  "strategies": {
+    "A": {
+      "n": 3,
+      "complete": 0,
+      "mean_total_tokens": 2480.0,
+      "mean_elapsed_s": 58.3,
+      "mean_ttft_s": 1.954,
+      "mean_ngram_repeat": 0.3854,
+      "mean_repeated_rounds": 0.0,
+      "mean_chars": 2878.0,
+      "mean_headings": 3.0,
+      "ending": 0
+    },
+    "B": {
+      "n": 3,
+      "complete": 0,
+      "mean_total_tokens": 4149.0,
+      "mean_elapsed_s": 86.5,
+      "mean_ttft_s": 2.347,
+      "mean_ngram_repeat": 0.3843,
+      "mean_repeated_rounds": 0.0,
+      "mean_chars": 4125.0,
+      "mean_headings": 3.0,
+      "ending": 0
+    },
+    "C": {
+      "n": 3,
+      "complete": 0,
+      "mean_total_tokens": 7309.7,
+      "mean_elapsed_s": 98.2,
+      "mean_ttft_s": 2.974,
+      "mean_ngram_repeat": 0.6303,
+      "mean_repeated_rounds": 1.33,
+      "mean_chars": 4714.3,
+      "mean_headings": 3.0,
+      "ending": 0
+    },
+    "D": {
+      "n": 3,
+      "complete": 3,
+      "mean_total_tokens": 2703.0,
+      "mean_elapsed_s": 67.0,
+      "mean_ttft_s": 1.973,
+      "mean_ngram_repeat": 0.3123,
+      "mean_repeated_rounds": 0.0,
+      "mean_chars": 3453.0,
+      "mean_headings": 6.0,
+      "ending": 3
+    },
+    "E": {
+      "n": 3,
+      "complete": 0,
+      "mean_total_tokens": 6484.0,
+      "mean_elapsed_s": 150.3,
+      "mean_ttft_s": 2.33,
+      "mean_ngram_repeat": 0.0188,
+      "mean_repeated_rounds": 0.0,
+      "mean_chars": 7681.0,
+      "mean_headings": 2.0,
+      "ending": 0
+    }
+  }
+}

@@ -3,6 +3,7 @@ from pathlib import Path
 
 from spoolkit.agent.loop import AgentLoop
 from spoolkit.config import Config
+from spoolkit.context import templates as T
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.tools.registry import ToolRegistry
@@ -40,10 +41,12 @@ def test_推送的教训出现在首轮提示里(tmp_path: Path) -> None:
 
 
 def test_没有教训时不产生空标题(tmp_path: Path) -> None:
+    # 钉要点：没有教训时连抬头都不该出现（原先钉「踩过的坑」这一旧字面，
+    # 抬头措辞一改那条覆盖就假通过了）。这里钉模板里那句抬头本身。
     loop = _loop(tmp_path, [_turn("完成")], lessons=lambda goal: [])
     loop.run("修解析逻辑")
     first = loop.gateway.requests[0]
-    assert not any("踩过的坑" in m.content for m in first.messages)
+    assert not any(T.LESSONS_HEADER in m.content for m in first.messages)
 
 
 def test_不提供教训来源时行为不变(tmp_path: Path) -> None:
@@ -73,8 +76,10 @@ def test_推送内容带上来源说明(tmp_path: Path) -> None:
     loop = _loop(tmp_path, [_turn("完成")], lessons=lambda goal: [(1, "规则")])
     loop.run("任务")
     text = "\n".join(m.content for m in loop.gateway.requests[0].messages)
-    # 点明这是历史教训而不是当前要求，否则模型会把坑当约束照搬
-    assert "过去类似任务里踩过的坑" in text
+    # 点明这是历史教训而不是当前要求，否则模型会把坑当约束照搬。
+    # 钉要点：抬头必须来自模板里那一句，并且点明是「教训」——不再钉旧整句字面。
+    assert T.LESSONS_HEADER in text
+    assert "教训" in text
 
 
 def test_轨迹里记录推送了几条(tmp_path: Path) -> None:

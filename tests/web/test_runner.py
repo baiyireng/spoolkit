@@ -198,3 +198,15 @@ def test_开始后快照记录目标(tmp_path: Path) -> None:
     runner.start("这件事")
     assert runner.snapshot()["goal"] == "这件事"
 
+
+from spoolkit.web.protocol import AWAIT, WAIT, Event
+
+
+def test_wait事件不改变awaiting(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    runner._absorb(Event(WAIT, {"elapsed": 15, "limit": 491}))
+    assert runner.snapshot()["awaiting"] == 0
+    runner._absorb(Event(AWAIT, {"count": 1, "command": "whoami"}))
+    runner._absorb(Event(WAIT, {"elapsed": 30}))
+    assert runner.snapshot()["awaiting"] == 1
+

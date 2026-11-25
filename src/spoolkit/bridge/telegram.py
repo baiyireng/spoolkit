@@ -18,6 +18,7 @@ import httpx
 
 from spoolkit.bridge import credentials
 from spoolkit.bridge.channel import Incoming
+from spoolkit.net import client_proxy
 
 DEFAULT_API = "https://api.telegram.org"
 
@@ -46,7 +47,10 @@ class TelegramChannel:
             base_url=f"{api.rstrip('/')}/bot{token}",
             timeout=timeout,
             transport=transport,
-            proxy=proxy,
+            proxy=client_proxy(proxy, transport),
+            # 代理由 `client_proxy` 决定，不再让 httpx 读环境变量：环境里的
+            # `NO_PROXY=...,[::1]` 会让它在构造这一步抛 InvalidURL（见 net.py）。
+            trust_env=False,
         )
         self._offset = offset
         self._default_to = ""
@@ -56,7 +60,7 @@ class TelegramChannel:
     def send(self, text: str, to: str = "") -> None:
         chat_id = to or self._default_to
         if not chat_id:
-            raise RuntimeError("不知道发给谁：这条通道还没收到过消息")
+            raise RuntimeError("没有收件人：这条通道还没收到过消息")
         response = self._client.post(
             "/sendMessage",
             json={"chat_id": chat_id, "text": text[:4096]},

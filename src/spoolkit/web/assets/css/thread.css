@@ -1,0 +1,339 @@
+
+  /* ── 对话面 ── */
+  #thread { flex:1; position:relative; display:flex; flex-direction:column; min-width:0; }
+  #stream { flex:1; overflow-y:auto; overflow-x:hidden; scrollbar-gutter:stable;
+            padding:20px var(--space-4) 26px; scroll-behavior:smooth;
+            padding-left:max(var(--space-4), env(safe-area-inset-left));
+            padding-right:max(var(--space-4), env(safe-area-inset-right));
+            scrollbar-width:thin; scrollbar-color:var(--text-faint) transparent; }
+  #stream::-webkit-scrollbar,
+  .trace-body::-webkit-scrollbar,
+  .task-body::-webkit-scrollbar { width:10px; height:10px; }
+  #stream::-webkit-scrollbar-track,
+  .trace-body::-webkit-scrollbar-track,
+  .task-body::-webkit-scrollbar-track { background:transparent; margin:8px 0; }
+  #stream::-webkit-scrollbar-thumb,
+  .trace-body::-webkit-scrollbar-thumb,
+  .task-body::-webkit-scrollbar-thumb {
+    background:var(--text-faint); border-radius:999px;
+    border:2px solid transparent; background-clip:padding-box; min-height:40px;
+  }
+  #stream::-webkit-scrollbar-thumb:hover,
+  .trace-body::-webkit-scrollbar-thumb:hover,
+  .task-body::-webkit-scrollbar-thumb:hover {
+    background:var(--text-dim); border:2px solid transparent;
+    background-clip:padding-box;
+  }
+  #stream .col { width:100%; max-width:var(--content-width); margin:0 auto;
+                 display:flex; flex-direction:column; gap:12px; }
+  /* 消息成块：用户在右、助手在左（宽屏留白更像文档流） */
+  .msg { display:flex; flex-direction:column; min-width:0; }
+  .msg.user { align-self:flex-end; max-width:84%; align-items:flex-end; }
+  .msg.assistant { align-self:flex-start; max-width:100%; }
+  .bubble { padding:9px 14px; border-radius:14px; white-space:pre-wrap;
+            overflow-wrap:anywhere; word-break:break-word; min-width:0;
+            max-width:100%; }
+  /* 普通正文与代码必须看得出是两类：正文是一段话（保留换行），
+     行内代码是带底色的等宽小片——样式上即可区分。 */
+  .empty-state { max-width:var(--content-width); margin:28px auto; padding:4px 2px;
+                 display:flex; flex-direction:column; gap:8px; min-width:0; }
+  .empty-title { font-size:18px; font-weight:600; overflow-wrap:anywhere; }
+  /* 空会话：问候和输入条收成一簇，垂直居中。有消息后这条不再生效，输入条回到底部。 */
+  #thread:has(.empty-state) { justify-content:safe center; }
+  #thread:has(.empty-state) #stream { flex:0 1 auto; overflow:visible;
+                 padding-top:12px; padding-bottom:0; }
+  #thread:has(.empty-state) .empty-state { margin:0 auto; width:100%;
+                 align-items:center; text-align:center; gap:10px; }
+  #thread:has(.empty-state) .empty-title { font-size:28px; font-weight:600;
+                 letter-spacing:-0.03em; }
+  #composer .empty-actions { width:100%; max-width:var(--content-width); margin:2px auto 0;
+                 justify-content:center; }
+  .empty-note, .empty-where { margin:0; color:var(--text-dim); line-height:1.5;
+                              overflow-wrap:anywhere; }
+  .empty-actions { display:flex; flex-wrap:wrap; gap:8px; }
+  .empty-go, .empty-actions button { max-width:100%; padding:8px 12px;
+                 border-radius:10px; border:1px solid var(--line); background:transparent;
+                 color:var(--text); cursor:pointer; text-align:left;
+                 overflow-wrap:anywhere; }
+  .empty-actions button { border-radius:999px; padding:8px 14px; text-align:center;
+                 background:var(--panel); }
+  .prose { white-space:pre-wrap; }
+  .prose + .prose { margin-top:9px; }
+  .inline-code { font:0.92em/1.5 var(--mono); background:var(--inline-bg);
+                 border:1px solid var(--inline-line); border-radius:5px;
+                 padding:1px 5px; overflow-wrap:anywhere; word-break:break-word; }
+  .msg.user .bubble { background:rgba(255,255,255,.06); border-bottom-right-radius:4px; }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) .msg.user .bubble { background:rgba(0,0,0,.04); }
+  }
+  :root[data-theme="light"] .msg.user .bubble { background:rgba(0,0,0,.04); }
+  .msg.user.failed .bubble { background:var(--danger-bg); color:var(--danger-text);
+                             border:1px dashed var(--danger-line); }
+  .msg.user .unsent { margin-top:4px; color:var(--danger-text); font-size:12px; }
+  .msg-retry { margin-top:4px; padding:2px 10px; border-radius:8px; cursor:pointer;
+               border:1px solid var(--danger-line); background:transparent;
+               color:var(--danger-text); font-size:12.5px; }
+  .msg.assistant .bubble { background:transparent; border:0; box-shadow:none;
+                           border-bottom-left-radius:4px;
+                           line-height:var(--leading-body); letter-spacing:0.03em; }
+  .msg.assistant .bubble :is(pre, code, .inline-code, .code) { letter-spacing:0; }
+  .msg.system { align-self:flex-start; max-width:100%; }
+  .sys-line { color:var(--text-dim); font-size:13px; padding-left:4px;
+              white-space:pre-wrap; overflow-wrap:anywhere; }
+  .sys-line.bad { color:var(--bad); }
+  .sys-line.ok { color:var(--ok); }
+  /* 连不上模型这类失败：一行原始异常谁也读不出下一步。做成一块带左边框的说明。 */
+  .sys-line.failure { margin-top:2px; padding:8px 12px; border-left:3px solid var(--danger-line);
+                      background:var(--danger-bg); color:var(--danger-text);
+                      border-radius:0 8px 8px 0;
+                      font-size:var(--font-sm); line-height:var(--leading-body);
+                      letter-spacing:0.03em; }
+  .sys-line.failure .fail-head { font-weight:600; }
+  .sys-line.failure .fail-line { margin-top:2px; }
+  .sys-line.failure .fail-raw { margin-top:6px; color:var(--text-dim);
+                                font:12px/1.5 var(--mono); letter-spacing:0;
+                                overflow-wrap:anywhere; }
+
+  /* ── 消息卡片上的「思考过程」：**默认收起**，收起时一个节点都不建 ──
+     它回答的是"这一轮它到底干了什么、卡在哪一步"（排错用），而这份内容平时不该占版面：
+     所以正文块 `trace-body` 是**点开才建**的，收起状态下页面上只有那一行小标题。
+     刷新 / 切走再切回之后，这一块由服务端只增的 `messages[i].trace` 重新画出来
+     （`makeTrace` + `fillTrace`），所以"看过就没了"这件事不会再有。 */
+  .msg .trace { margin:8px 0 0; min-width:0; max-width:100%;
+                border:1px solid var(--line); border-radius:10px;
+                background:var(--panel); overflow:hidden; }
+  .msg .trace.trace-empty { display:none; }
+  .trace-head { display:flex; align-items:center; gap:8px; width:100%;
+                max-width:100%; padding:8px 10px; cursor:pointer; border:0;
+                border-radius:0; background:transparent; color:var(--text);
+                font:12.5px/1.35 var(--sans); font-weight:600; text-align:left;
+                letter-spacing:0; overflow:hidden; text-overflow:ellipsis;
+                white-space:nowrap; }
+  .trace-head::before { content:""; width:7px; height:7px; border-radius:50%;
+                flex:0 0 auto; background:var(--text-faint); }
+  .trace-head[aria-expanded="true"]::before { background:var(--info-text); }
+  .trace-head::after { content:""; width:6px; height:6px; margin-left:auto; flex:0 0 auto;
+                border-right:2px solid var(--text-dim); border-bottom:2px solid var(--text-dim);
+                transform:translateY(-1px) rotate(45deg); }
+  .trace-head[aria-expanded="true"]::after { transform:translateY(2px) rotate(225deg); }
+  .trace-head:hover { color:var(--text); }
+  .trace-body { margin:0; padding:0 10px 8px; border:0; border-top:1px solid var(--line-soft);
+                border-radius:0; background:transparent; color:var(--text-dim);
+                font-size:12.5px; max-height:46vh; overflow:auto;
+                scrollbar-width:thin; scrollbar-color:var(--text-faint) transparent; }
+  .trace-line { display:grid; grid-template-columns:14px minmax(0,1fr); gap:8px;
+                margin:0; padding:8px 0; border-top:1px solid var(--line-soft);
+                overflow-wrap:anywhere; }
+  .trace-line:first-child { border-top:0; }
+  .trace-rail { position:relative; width:7px; height:7px; margin-top:5px; }
+  .trace-rail::before { content:""; position:absolute; left:3px; top:9px; bottom:-18px;
+                width:1px; background:var(--line); }
+  .trace-line:last-child .trace-rail::before { display:none; }
+  .trace-rail::after { content:""; position:absolute; left:0; top:0; width:7px; height:7px;
+                border-radius:50%; background:var(--panel); box-shadow:inset 0 0 0 1.5px var(--text-dim); }
+  .trace-line.bad .trace-rail::after { box-shadow:inset 0 0 0 1.5px var(--danger-text); }
+  .trace-line.ok .trace-rail::after { box-shadow:inset 0 0 0 1.5px var(--ok); }
+  .trace-main { min-width:0; }
+  .trace-row { display:grid; grid-template-columns:minmax(0,1.1fr) auto minmax(0,1.6fr);
+               gap:2px 8px; align-items:baseline; }
+  .trace-name { color:var(--text); font-weight:600; min-width:0; overflow-wrap:anywhere; }
+  .trace-arrow { color:var(--text-faint); }
+  .trace-status { color:var(--text); justify-self:end; }
+  .trace-text { color:var(--text-dim); white-space:pre-wrap; }
+  .trace-line.bad, .trace-line.bad .trace-status { color:var(--danger-text); }
+  .trace-line.ok .trace-status, .trace-line.ok .trace-text { color:var(--ok); }
+  .trace-detail { margin-top:2px; color:var(--text-faint); white-space:pre-wrap;
+                  font:12px/1.5 var(--mono); overflow-wrap:anywhere; }
+  .bubble.streaming::after { content:""; display:inline-block; width:2px; height:.9em;
+                margin-left:3px; vertical-align:-1px; background:var(--text-dim);
+                animation:caret 1s steps(1) infinite; }
+  @keyframes caret { 50% { opacity:0; } }
+  @keyframes chain-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+  .stream-row { animation:chain-in .28s ease; }
+  /* 失败 / 停止那一轮：气泡让位给那一块说明（`.sys-line.failure` 自己有底色边框），
+     所以这一档把气泡自己的底色与内边距去掉，免得两层框套在一起。 */
+  .bubble.failed { padding:0; background:transparent; border:0; }
+  .bubble.stopped { color:var(--text-dim); font-size:13px; }
+
+  /* 代码块：**明显**的一块——底色、边框、圆角、内边距；自己横向/纵向滚，
+     不撑破气泡（`.bubble` 与 `.msg` 上的 min-width:0 是这条能成立的前提）。 */
+  .code { position:relative; margin:10px 0 0; border:1px solid var(--code-line); border-radius:10px;
+          overflow:hidden; background:var(--code-bg); max-width:100%; }
+  .code-bar { display:flex; align-items:center; gap:8px; padding:5px 8px 5px 12px;
+              background:var(--code-bar); color:var(--text-dim);
+              font:12px/1.6 var(--mono); border-bottom:1px solid var(--code-line); }
+  /* 语言标签可以让位（长语言名不许把复制键挤走），复制键位置固定在最右。 */
+  .code-lang { flex:1 1 auto; min-width:0; overflow:hidden;
+               text-overflow:ellipsis; white-space:nowrap; }
+  .copy-btn { flex:0 0 auto; padding:3px 10px; border-radius:7px;
+              border:1px solid var(--line); background:transparent;
+              color:var(--text-dim); cursor:pointer; font:12px/1.6 var(--sans); }
+  .copy-btn:hover { color:var(--text); border-color:var(--text-dim); }
+  .code pre { margin:0; padding:11px 13px; max-height:360px; overflow:auto; overflow-x:auto;
+              font:13px/1.55 var(--mono); color:var(--text);
+              scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
+  .code.code-x::after { content:"横向滚动"; position:absolute; right:0; bottom:0; z-index:1;
+              pointer-events:none; padding:2px 8px 3px 28px;
+              font:10px/16px var(--sans); color:var(--text-faint);
+              background:linear-gradient(to left, var(--code-bg) 58%, transparent); }
+  .msg.user .code { border-color:var(--line); }
+
+  /* 历史：一条分隔线 + 略淡。**不在页面上写任何实现说明**——
+     用户要看的只是"以前说过什么"。 */
+  .history-sep { display:flex; align-items:center; gap:10px;
+                 color:var(--text-faint); font-size:12px; }
+  .history-sep::before, .history-sep::after { content:""; flex:1;
+                 border-top:1px solid var(--line-soft); }
+  .msg.history { opacity:.86; }
+  .msg-time { align-self:flex-end; margin:1px 2px 0; color:var(--text-faint);
+              font-size:11px; line-height:1.15; }
+  .day-sep { display:flex; align-items:center; gap:8px; margin:6px 0 2px;
+             color:var(--text-faint); font-size:11px; line-height:1.2; }
+  .day-sep::before, .day-sep::after { content:""; flex:1; height:1px; background:var(--line-soft); }
+
+  /* ── 待确认：**对话流里**的一张卡片（ChatGPT 的工具调用卡片那一挂） ──
+     没有待确认内容时它整个不存在：HTML 里没有这块的占位，节点也不建。
+     一个空框会被读成"有待确认项"，而框里那两个按钮是空的、还能被 Tab 到。 */
+  .ask-card { align-self:stretch; border:1px solid var(--line);
+              border-radius:12px; background:var(--panel-2);
+              padding:10px 12px; min-width:0; }
+  .ask-head { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .ask-who { font-weight:600; font-size:13px; }
+  .ask-kind { color:var(--text-dim); font-size:12px; }
+  .ask-body { margin-top:6px; min-width:0; max-height:45vh; overflow:auto; }
+  .ask-card.command,
+  .ask-card.combined { border-color:var(--danger-line); background:var(--danger-bg); }
+  .ask-card.command .ask-kind,
+  .ask-card.command .ask-title,
+  .ask-card.command .ask-warn,
+  .ask-card.combined .ask-kind,
+  .ask-card.combined .ask-title,
+  .ask-card.combined .ask-warn { color:var(--danger-text); }
+  .ask-card.command .ask-apply,
+  .ask-card.combined .ask-apply { background:#7f1d1d; color:#fff; }
+  .ask-title { font-weight:600; margin-bottom:6px; }
+  .ask-mark { margin-right:4px; }
+  .ask-cmd { margin:0; padding:8px 10px; overflow-x:auto; border-radius:8px;
+             background:var(--code-bg); border:1px solid var(--danger-line);
+             font:12.5px/1.5 var(--mono); }
+  .ask-cmd code { font:inherit; }
+  .ask-reason, .ask-warn { margin-top:6px; font-size:12.5px; }
+  .ask-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:9px; }
+  .ask-actions button { padding:7px 16px; border-radius:9px; border:0;
+                        cursor:pointer; font-size:13.5px; }
+  .ask-apply { background:#1f6b32; color:#fff; }
+  .ask-reject { background:transparent; color:var(--text);
+                border:1px solid var(--line); }
+  .ask-actions button:disabled { opacity:.5; cursor:default; }
+  /* 点完之后留下的那一行状态：与工具结果同一挂，不再是一张等你点的卡片。 */
+  .ask-row { align-self:stretch; border-left:3px solid var(--line);
+             border-radius:0 8px 8px 0; padding:6px 10px; font-size:13px;
+             color:var(--text-dim); background:var(--panel-2); }
+  .ask-row.ok { border-left-color:var(--ok); color:var(--ok); }
+  .ask-row.bad { border-left-color:var(--bad); color:var(--bad); }
+  /* ── 「撤销这一轮」：一个**真能点**的动作，不是一条要抄的命令（问题④） ──
+     它是这一轮成果的退路，所以做成对话流里的一行 + 一枚按钮；点完那行就地
+     变成结论，不留一个还能再点的按钮（同一件事点两次会去撞已退过的记录）。 */
+  .undo-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+              align-self:stretch; border-left:3px solid var(--line);
+              border-radius:0 8px 8px 0; padding:6px 10px; font-size:13px;
+              color:var(--text-dim); background:var(--panel-2); }
+  .undo-row button { padding:5px 12px; border-radius:8px; border:1px solid var(--line);
+                     background:transparent; color:var(--text); cursor:pointer;
+                     font-size:13px; }
+  .undo-row button:disabled { opacity:.5; cursor:default; }
+  .undo-row.ok { border-left-color:var(--ok); color:var(--ok); }
+  .undo-row.bad { border-left-color:var(--bad); color:var(--bad); }
+  .diff-file { border:1px solid var(--line); border-radius:10px; margin:6px 0 0;
+               background:var(--code-bg); min-width:0; }
+  .diff-file-head { display:block; width:100%; text-align:left; padding:8px 10px;
+                    border:0; background:transparent; color:var(--text);
+                    cursor:pointer; font:12.5px/1.45 var(--mono);
+                    overflow-wrap:anywhere; }
+  .diff-file-body { display:none; max-height:32vh; overflow:auto; }
+  .diff-file.open .diff-file-body { display:block; }
+  .diff { padding:0 10px 8px; overflow-x:auto; font:12.5px/1.55 var(--mono); }
+  .diff .add { color:var(--ok); } .diff .del { color:var(--bad); }
+  .diff .dim { color:var(--text-dim); }
+
+  .md-h { font-size:15px; line-height:1.45; font-weight:600; margin:8px 0 4px; }
+  .bubble ul, .bubble ol { margin:4px 0 4px 1.2em; padding:0; }
+  .bubble li { margin:2px 0; }
+  .bubble table { border-collapse:collapse; margin:6px 0; max-width:100%; }
+  .bubble th, .bubble td { border:1px solid var(--line); padding:3px 8px; text-align:left; vertical-align:top; }
+  .bubble a { color:var(--accent); }
+  .bubble strong { font-weight:600; }
+
+  /* ── 任务卡：挂在助手气泡下面。状态色只用现有变量。 ── */
+  .task-list { display:flex; flex-direction:column; gap:8px; margin:8px 0 0;
+               min-width:0; max-width:100%; }
+  .task-card { min-width:0; max-width:100%; border:1px solid var(--line);
+               border-radius:10px; background:var(--panel); overflow:hidden; }
+  .task-head { display:grid; grid-template-columns:auto minmax(0,1fr) 16px;
+               grid-template-areas:"mark goal chev" "meta meta chev";
+               column-gap:8px; row-gap:4px; align-items:center;
+               width:100%; max-width:100%; min-width:0; box-sizing:border-box;
+               padding:8px 10px; cursor:pointer; border:0; background:transparent;
+               color:var(--text); font:12.5px/1.35 var(--sans); letter-spacing:0;
+               text-align:left; }
+  .task-mark { grid-area:mark; }
+  .task-goal { grid-area:goal; min-width:0; overflow-wrap:anywhere;
+               display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+               line-clamp:2; overflow:hidden; line-height:1.35; max-height:2.7em; }
+  .task-meta { grid-area:meta; display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
+  .task-chip { display:inline-flex; align-items:center; gap:4px;
+               padding:1px 7px; border-radius:999px; border:1px solid var(--line);
+               background:var(--panel-2); color:var(--text-dim);
+               font-size:11px; line-height:1.45; font-weight:600; white-space:nowrap; }
+  .task-mark::before { font-weight:700; line-height:1; }
+  .task-card-done .task-mark { color:var(--ok); border-color:var(--ok); background:transparent; }
+  .task-card-done .task-mark::before { content:"✓"; }
+  .task-card-running .task-mark { color:var(--info-text); background:var(--info-bg);
+                                  border-color:var(--info-line); }
+  .task-card-running .task-mark::before { content:"●"; font-size:8px; }
+  .task-card-verify_failed .task-mark { color:var(--warn-text); background:var(--warn-bg);
+                                        border-color:var(--warn-line); }
+  .task-card-verify_failed .task-mark::before { content:"!"; }
+  .task-card-failed .task-mark { color:var(--danger-text); background:var(--danger-bg);
+                                 border-color:var(--danger-line); }
+  .task-card-failed .task-mark::before { content:"×"; }
+  .task-card-cancelled .task-mark { color:var(--text-dim); background:var(--panel-2);
+                                    border-color:var(--line); }
+  .task-card-cancelled .task-mark::before { content:"–"; }
+  .task-chevron { grid-area:chev; width:16px; height:16px; position:relative;
+                  justify-self:end; align-self:center; }
+  .task-chevron::before { content:""; position:absolute; left:4px; top:3px;
+                          width:6px; height:6px; border-right:2px solid var(--text);
+                          border-bottom:2px solid var(--text); transform:rotate(45deg); }
+  .task-card.open .task-chevron::before { top:5px; transform:rotate(225deg); }
+  .task-body { padding:0 10px 10px; min-width:0; max-width:100%;
+               max-height:46vh; overflow-x:hidden; overflow-y:auto;
+               border-top:1px solid var(--line-soft);
+               scrollbar-width:thin; scrollbar-color:var(--text-faint) transparent; }
+  .task-row { display:flex; flex-direction:column; align-items:flex-start; gap:4px;
+              margin:0; padding:8px 0; border-top:1px solid var(--line-soft);
+              font-size:12.5px; line-height:1.4; color:var(--text-dim); text-align:left;
+              min-width:0; max-width:100%; overflow-wrap:anywhere; word-break:break-word; }
+  .task-row:first-child { border-top:0; padding-top:8px; }
+  .task-row-line { display:grid; width:100%; min-width:0;
+                   grid-template-columns:minmax(0,1.1fr) minmax(0,1.6fr) auto;
+                   gap:2px 10px; align-items:baseline; }
+  .task-tool { grid-column:1; color:var(--text); font-weight:600; min-width:0;
+               overflow-wrap:anywhere; }
+  .task-intent { grid-column:2; color:var(--text-dim); min-width:0; overflow-wrap:anywhere; }
+  .task-row-status { grid-column:3; justify-self:end; white-space:nowrap; color:var(--text); }
+  .task-summary { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+                  line-clamp:2; overflow:hidden; width:100%; min-width:0; max-width:100%;
+                  overflow-wrap:anywhere; font-size:var(--font-sm);
+                  line-height:var(--leading-body); letter-spacing:0.03em;
+                  max-height:3.4em; }
+  .task-jump { margin:2px 0 0; padding:3px 10px; border-radius:8px;
+               border:1px solid var(--line); background:var(--panel-2); color:var(--text);
+               cursor:pointer; font:12px/1.4 var(--sans); }
+  .task-jump:hover { border-color:var(--text-dim); }
+  .task-row.bad, .task-row.bad .task-row-status { color:var(--danger-text); }
+  @media (max-width: 420px) {
+    .task-head { grid-template-columns:minmax(0,1fr) 16px;
+                 grid-template-areas:"mark chev" "goal goal" "meta meta"; }
+    .task-goal { width:100%; }
+  }

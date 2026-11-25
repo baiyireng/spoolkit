@@ -33,7 +33,7 @@ def test_环境变量优先于_env(tmp_path: Path, monkeypatch) -> None:
     value, source = credentials.find(tmp_path, *credentials.QQ_APP_ID)
 
     assert value == "from-env"
-    assert "环境变量" in source
+    assert "env" in source
 
 
 def test_认常见的几种拼写(tmp_path: Path, monkeypatch) -> None:
@@ -49,7 +49,7 @@ def test_找不到时说实话(tmp_path: Path, monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
     value, source = credentials.find(tmp_path, *credentials.QQ_SECRET)
     assert value == ""
-    assert "没找到" in source
+    assert "not found" in source
 
 
 def test_没有工作区也能用(tmp_path: Path, monkeypatch) -> None:
@@ -60,4 +60,4 @@ def test_没有工作区也能用(tmp_path: Path, monkeypatch) -> None:
 def test_日志里不回显完整密钥() -> None:
     assert credentials.mask("102000000") == "102***00"
     assert credentials.mask("short") == "*****"
-    assert credentials.mask("") == "（空）"
+    assert credentials.mask("") == "(empty)"

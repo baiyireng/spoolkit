@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from spoolkit.net import system_proxy
+from spoolkit.net import client_proxy, system_proxy
 
 ALLOWED_SCHEMES = ("http", "https")
 USER_AGENT = "spoolkit/0.0.1 (+https://github.com/baiyireng/spoolkit)"
@@ -109,7 +109,13 @@ def fetch_text(url: str, policy: WebPolicy) -> Fetched:
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
     try:
         with httpx.Client(
-            timeout=policy.timeout, follow_redirects=True, proxy=proxy, headers=headers
+            timeout=policy.timeout,
+            follow_redirects=True,
+            proxy=client_proxy(proxy),
+            headers=headers,
+            # 代理已经在这里定好，别让 httpx 再去读环境变量：环境里的
+            # `NO_PROXY=...,[::1]` 会让它在构造这一步抛 InvalidURL（见 net.py）。
+            trust_env=False,
         ) as client:
             with client.stream("GET", target) as response:
                 body = b""

@@ -65,7 +65,7 @@ def test_配置生效时来源写清楚(config_file: Path) -> None:
     args = argparse.Namespace(provider="", model="", base_url="", proxy="", script="")
     values = resolve_provider_args(args)
     assert values["provider"] == "llamacpp"
-    assert "配置文件" in values["base_url_source"]
+    assert "config" in values["base_url_source"]
 
 
 def test_解析过的值再解析一次不串来源(config_file: Path) -> None:
@@ -81,7 +81,7 @@ def test_解析过的值再解析一次不串来源(config_file: Path) -> None:
         setattr(args, key, value)
     second = resolve_provider_args(args)
     assert second["base_url"] == "http://127.0.0.1:9999"
-    assert "配置文件" in second["base_url_source"]
+    assert "config" in second["base_url_source"]
 
 
 def test_入口把_config_挂上了() -> None:

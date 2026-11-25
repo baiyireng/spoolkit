@@ -270,6 +270,15 @@ def _find_callers(
         parts.append(
             "尚未落盘的改动里还引用了它：" + "、".join(pending_refs)
         )
+    # 跨文件重命名的硬约束：模型常只改定义处，忘了改引用。
+    # 把「这些文件里的每一处都必须跟着改」直接写进结果，不然它看完就走。
+    if affected:
+        files = sorted({item.path for item in affected})
+        parts.append(
+            "⚠ 改名时上面每一处都必须跟着改，包括这些文件："
+            + "、".join(files)
+            + "。漏改任何一处，自动验证会报「旧名仍有残留」。"
+        )
     return ToolResult(ok=True, content="\n".join(parts) + caveat)
 
 

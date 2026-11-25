@@ -35,6 +35,10 @@ class Config:
     # 能力标定值的按工作区覆盖（`.agent/limits.json`）。空表示全用默认。
     # 取用一律走 `limit()`，不要在别处再读这个字典——那样来源就说不清了。
     overrides: dict[str, float] = field(default_factory=dict)
+    # 显式要求跑语义审查（L3，`--review`）。它是 §5 里 L3 触发条件的第 5 条
+    # 「用户/调用方显式要求」，**不是开关式必跑**：默认关，因为语义审查是一次
+    # 模型调用（成本 ≈ 主循环一步），默认路径（§3.2.1）本来就该零打扰。
+    semantic_review: bool = False
     state_dir_name: str = ".agent"
     # 会话名：计划、进度、检查点都跟着它走（见 session_state.py）。
     # 原先是工作区级，于是换一个会话会读到上一个会话的计划——真出过事。

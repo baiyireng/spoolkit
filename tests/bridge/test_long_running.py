@@ -63,10 +63,13 @@ def test_连发两条不会同时跑两个_agent(monkeypatch) -> None:
         Path("."), timeout=5.0, sleep=lambda _: None, clock=lambda: next(ticks) * 1.0
     )
 
-    assert "不等了" in runner("第一件事")   # 它确实在跑（等到超时）
+    first = runner("第一件事")
+    # 要点：回执要说出"超过 N 秒"与"不再等待"（它确实在跑，等到超时才回）
+    assert "超过" in first and "不再等待" in first
     second = runner("第二件事")
 
-    assert second == "上一轮还在跑，等它结束再发。"
+    # 要点：拒绝第二次时要说清"上一轮仍在运行"并给出下一步（等它结束）
+    assert "上一轮" in second and "仍在运行" in second and "再发" in second
     assert stub.calls == 1, "同一个工作区里不该同时起第二个 agent"
 
 
@@ -82,7 +85,8 @@ def test_超时之后结论要补发回来() -> None:
 
     answer = runner("做一件长活")
 
-    assert "不等了" in answer
+    # 要点：超时回执要说明"不再等待"，且承诺"跑完把结论发回来"
+    assert "不再等待" in answer and "结论" in answer
     deadline = time.monotonic() + 5
     while not sent and time.monotonic() < deadline:
         time.sleep(0.02)

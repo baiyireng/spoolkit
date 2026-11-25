@@ -58,6 +58,33 @@ def test_工作方式告诉agent不要自己提取JS验证() -> None:
     assert "自动跑验证" in T.WORKFLOW_RUN or "自动验" in T.WORKFLOW_RUN
 
 
+def test_工作方式给出按产出类型的验证对照表() -> None:
+    """写 HTML 时该用什么验，提示词里原先一个字都没有——模型只能去撞命令。
+
+    所以这张表是「一条一行」的对照：产出类型 → 用哪种验证。
+    """
+    for row in (".html", ".js", ".py", ".json", ".toml", ".css"):
+        assert row in T.WORKFLOW_VERIFY
+    assert "verify_file" in T.WORKFLOW_VERIFY
+    # 有牙：要写明「查不了」会说出来，不然模型会以为没报错就是全验过了
+    assert "查不了" in T.WORKFLOW_VERIFY
+
+
+def test_没注册验证工具时对照表不出现(tmp_path: Path) -> None:
+    """提到一个没注册的工具，就是给模型一条它做不到的指令。"""
+    from spoolkit.tools.exec import run_command_spec
+    from spoolkit.tools.verify import verify_file_spec
+
+    bare = ToolRegistry()
+    bare.register(run_command_spec(tmp_path))
+    assert "verify_file" not in build_workflow(bare)
+
+    full = ToolRegistry()
+    full.register(run_command_spec(tmp_path))
+    full.register(verify_file_spec(tmp_path))
+    assert "verify_file" in build_workflow(full)
+
+
 def test_归纳模板要求lesson带触发词() -> None:
     # 没有触发词的教训永远推不出去，等于白记
     assert "trigger" in T.DISTILL

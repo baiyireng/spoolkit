@@ -1,0 +1,466 @@
+"""M2' 对照仪器：零依赖检索口径的 P@5 / R@5 / top1（设计稿 §14.8 / 计划 T4 + T5）。
+
+**这份仪器存在的理由**是设计稿 §14.3.6 的原话「脚本与语料都在仓里，不在内存里」
+——而实测它**不在仓里**：原仪器 `.tmp/embed-bench/run_fts5.py` 与夹具
+`.tmp/embed-bench/bench_common.py` 都在 `.gitignore:22` 忽略的 `.tmp/` 下，
+随时会没。T4 把语料与查询**逐字固化**进 `benchmarks/memory/*.jsonl`，这份脚本
+就是围着那两份夹具的仪器；T5 按裁决把**召回口径换回逐字**并加上 `bm25()` 排序，
+臂表随之更新（原来是 `store-char` / `bigram` / `bigram+bm25`）。
+
+臂表（全部零依赖：标准库 + `sqlite3` 自带的 FTS5 与 `bm25()`）：
+
+| 臂 | 召回 | 排序 | 说明 |
+|---|---|---|---|
+| `store-char` | 逐字 | 写入序（`s.id`） | **冻结的基线锚**（T4 读数，`benchmarks/memory/baseline_fts5_store.json`） |
+| `bigram` | 双字 shingle | 写入序 | T4 的负结果臂，保留作对照（谁想把它接回召回，先看它的 R@5） |
+| `char+bm25` | 逐字 | `bm25()` 升序 | **T5 定案口径 = P1 的检索口径** |
+| `char+bigram-rerank` | 逐字 | 双字覆盖率降序 | 打分信号臂（`store.bigram_coverage`） |
+| `char+bm25+bigram` | 逐字 | `bm25()` 主序 + 覆盖率次序 | 组合臂 |
+| `tokenized` | — | — | 方案 B（引分词器）：P1 不引依赖，**桩**：打印 skipped |
+
+四条纪律：
+
+1. **指标口径与 `.tmp/embed-bench` 那套逐字一致**（`bench_common.metrics` /
+   `summarize`）：`p@5 = 命中数/5`、`r@5 = 命中数/相关数`、`top1 = 1 if 首位命中`，
+   最后对 13 条查询取算术平均。本文件把这套指标**独立重写一遍**（不 import
+   `.tmp`，那是随时会没的目录），并用 `tests/memory/test_relevance_harness.py`
+   把"逐位相同"钉在基线上。
+2. **各臂走同一条生产代码路径**（`init_memory_schema` + `insert_semantic` +
+   `search_semantic`），差别只有两个**显式开关**：
+   `_IdOrder`（把排序换回写入序，只为复现基线锚）与 `_BigramRecall`（把召回换成
+   双字，只为 `bigram` 对照臂）。两臂读数的差因此**只**能归因到那一个开关
+   （§14.8 第 2 条"颠倒就说不清这点增益本来该由谁拿到"）。
+3. **重排臂把候选池取全**（`CANDIDATE_POOL`）：`bm25()` 的截断在 SQL 里做，
+   所以"给足 limit 再在 Python 里重排"与"生产里先排后截"对**同一批候选**等价。
+   T6 会给候选池一个上界（`recall_candidates_n`），本仪器在 16 条语料上不需要；
+   **这条读数只在"候选全取"的假设下成立**，不许当成生产形态的读数。
+4. **判据不写在这里的读数里**：`acceptance_line` 只按 §14.8 的口径比较三项读数
+   （P@5 / R@5 不低于基线，且 top1 不下降），读数多少由本脚本打印。
+
+⚠️ **绝对数字不可外推**（§14.3.7 第 3 条 / 计划 T4 要点）：16 条语料太小，
+分组查询的 P@5 上限只有 0.8。本仪器只承诺"**相对**排序不低于基线"，
+**不许**把这里的读数写成"检索口径已达标"。
+
+用法（**零新依赖**）：
+
+    .venv\\Scripts\\python.exe scripts\\memory_relevance.py --arm char+bm25
+    .venv\\Scripts\\python.exe scripts\\memory_relevance.py --arm all
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+# 允许 `python scripts/memory_relevance.py` 直接跑（不起包安装）：把仓根与 src 挂上。
+_HERE = Path(__file__).resolve().parent
+_REPO = _HERE.parent
+for _path in (str(_REPO / "src"), str(_REPO / "scripts")):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from spoolkit.memory.semantic import insert_semantic, search_semantic  # noqa: E402
+from spoolkit.memory.store import (  # noqa: E402
+    _match_query,
+    bigram_coverage,
+    bm25_score,
+    init_memory_schema,
+    normalize_for_fts,
+    normalize_for_fts_bigram,
+    semantic_match_query,
+)
+
+FIXTURE_DIR = _REPO / "benchmarks" / "memory"
+CORPUS_PATH = FIXTURE_DIR / "corpus.jsonl"
+QUERIES_PATH = FIXTURE_DIR / "queries.jsonl"
+BASELINE_PATH = FIXTURE_DIR / "baseline_fts5_store.json"
+
+# 指标口径的常数（与 bench_common.K 一致）：P@5 / R@5 / top1。
+K = 5
+
+# 一次检索最多取几条。`.tmp/embed-bench/run_fts5.py` 取**全部**命中行，再由
+# `metrics()` 截前 5 条打分；本仪器走 `search_semantic` 的 `limit`（默认
+# `recall_limit=5`），两种口径出同一份 `top_k_ids`——差别只在"取回了几行"，
+# 不在"算进指标的哪几条"。
+HARNESS_LIMIT = K
+
+# 重排臂的候选池：大到"16 条语料里的全部逐字候选"都被取回来（见纪律 3）。
+CANDIDATE_POOL = 10_000
+
+ARMS = (
+    "store-char",
+    "bigram",
+    "char+bm25",
+    "char+bigram-rerank",
+    "char+bm25+bigram",
+    "tokenized",
+)
+
+
+# ---- 夹具（逐字固化进仓，见 tests/memory/test_relevance_harness.py）--------
+
+
+def load_corpus(path: Path | None = None) -> list[dict]:
+    """读 16 条语料：`{"id", "group", "text"}`，按 id 升序。"""
+    target = path or CORPUS_PATH
+    rows = [
+        json.loads(line)
+        for line in target.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return sorted(rows, key=lambda row: row["id"])
+
+
+def load_queries(path: Path | None = None) -> list[dict]:
+    """读 13 条查询：`{"query", "kind", "relevant", "note"}`，保持文件顺序。"""
+    target = path or QUERIES_PATH
+    return [
+        json.loads(line)
+        for line in target.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+# ---- 指标（口径照 bench_common.metrics / summarize；独立重写一遍）----------
+
+
+def metrics(ranked_ids: list[int], relevant: set[int], k: int = K) -> dict:
+    """单条查询的 precision@k / recall@k / top1（与 `bench_common.metrics` 同式）。"""
+    top = ranked_ids[:k]
+    hits = [i for i in top if i in relevant]
+    return {
+        "p_at_k": len(hits) / k,
+        "r_at_k": len(hits) / len(relevant) if relevant else 0.0,
+        "top1": 1 if (ranked_ids and ranked_ids[0] in relevant) else 0,
+        "top_k_ids": top,
+        "top1_id": ranked_ids[0] if ranked_ids else None,
+    }
+
+
+def summarize(per_query: dict[str, dict]) -> dict:
+    """对全部查询取算术平均（与 `bench_common.summarize` 同式）。"""
+    n = len(per_query)
+    if not n:
+        return {"n_queries": 0, "precision_at_5": 0.0, "recall_at_5": 0.0, "top1_accuracy": 0.0}
+    return {
+        "n_queries": n,
+        "precision_at_5": sum(v["p_at_k"] for v in per_query.values()) / n,
+        "recall_at_5": sum(v["r_at_k"] for v in per_query.values()) / n,
+        "top1_accuracy": sum(v["top1"] for v in per_query.values()) / n,
+    }
+
+
+def _score(ranked: dict[str, list[int]], queries: list[dict]) -> dict[str, dict]:
+    """把每条查询的排好序 id 列表打成 `{query: metrics}`。"""
+    per_query: dict[str, dict] = {}
+    for item in queries:
+        query = item["query"]
+        m = metrics(ranked[query], set(item["relevant"]))
+        m["note"] = item["note"]
+        m["kind"] = item["kind"]
+        m["ranked"] = ranked[query]
+        per_query[query] = m
+    return per_query
+
+
+# ---- 两个显式开关（各臂共用同一条生产路径，差别只在这两处）-----------------
+
+
+class _IdOrder:
+    """把 `search_semantic` 的排序换回**写入序**（`ORDER BY s.id`）。
+
+    只给 `store-char` 基线臂用：那条读数是 T4 冻结进仓的回归锚，必须能在
+    **同一个函数**里复现，否则"基线"与"定案臂"就是两份平行实现，读数的差
+    说不清是谁贡献的。生产默认是 `bm25(semantic_fts)`（`semantic._RECALL_ORDER_BY`）。
+    """
+
+    def __init__(self, module) -> None:
+        self._module = module
+
+    def __enter__(self):
+        self._saved = self._module._RECALL_ORDER_BY
+        self._module._RECALL_ORDER_BY = "s.id"
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self._module._RECALL_ORDER_BY = self._saved
+        return None
+
+
+class _BigramRecall:
+    """把召回口径临时钉在**双字 shingle** 上（`bigram` 对照臂的开关）。
+
+    `spoolkit.memory.semantic` 把 `store` 的两个逐字口径函数按名字 import 进了
+    自己的命名空间，所以换掉这两个名字就等于换掉整条召回路径——主表写入、
+    FTS 写入、MATCH 串生成**全部**跟着换。T4 当初用同一个开关反向做过这件事
+    （那时生产是双字、基线臂换成逐字）。T5 起生产是逐字，本开关只服务对照臂。
+    """
+
+    def __init__(self, module) -> None:
+        self._module = module
+
+    def __enter__(self):
+        self._saved = (self._module.normalize_for_fts, self._module._match_query)
+        self._module.normalize_for_fts = normalize_for_fts_bigram
+        self._module._match_query = semantic_match_query
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self._module.normalize_for_fts, self._module._match_query = self._saved
+        return None
+
+
+# ---- 各臂 ------------------------------------------------------------------
+
+
+def _build_conn(corpus: list[dict]) -> sqlite3.Connection:
+    """建 v4 结构的空库并灌入 16 条语料（写入走 `insert_semantic`）。"""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_memory_schema(conn)
+    for row in corpus:
+        insert_semantic(conn, "fact", row["text"], content_hash=f"bench-{row['id']}")
+    return conn
+
+
+def _ranked_ids(conn: sqlite3.Connection, queries: list[dict], limit: int) -> dict[str, list[int]]:
+    """逐条查询跑一遍 `search_semantic`（生产路径），只留 id 序列。"""
+    ranked: dict[str, list[int]] = {}
+    for item in queries:
+        hits = search_semantic(conn, item["query"], limit=limit)
+        ranked[item["query"]] = [row.id for row in hits]
+    return ranked
+
+
+def _run_simple(corpus: list[dict], queries: list[dict]) -> dict[str, list[int]]:
+    """建库、灌语料、逐条检索、关库。**必须在开关的 `with` 里面调用**：
+
+    索引是在 `insert_semantic` 里写的，所以「换召回口径」这件事必须同时盖住
+    写入与查询两侧——第一版把 `_build_conn` 放在 `with` 外面，`bigram` 臂就变成
+    「逐字索引 + 双字查询」，读数（P@5=0.138…）比 T4 的真双字臂还差。那种形态
+    不是任何一条臂的口径，是仪器自己错开的两半。
+    """
+    conn = _build_conn(corpus)
+    try:
+        return _ranked_ids(conn, queries, HARNESS_LIMIT)
+    finally:
+        conn.close()
+
+
+def run_store_char(corpus: list[dict], queries: list[dict]) -> dict[str, list[int]]:
+    """`store-char` 臂：逐字召回 + **写入序**（T4 冻结的基线口径）。"""
+    import spoolkit.memory.semantic as semantic_module
+
+    with _IdOrder(semantic_module):
+        return _run_simple(corpus, queries)
+
+
+def run_bigram(corpus: list[dict], queries: list[dict]) -> dict[str, list[int]]:
+    """`bigram` 臂：双字召回 + 写入序（T4 的负结果口径，保留作对照）。"""
+    import spoolkit.memory.semantic as semantic_module
+
+    with _BigramRecall(semantic_module), _IdOrder(semantic_module):
+        return _run_simple(corpus, queries)
+
+
+def run_char_bm25(corpus: list[dict], queries: list[dict]) -> dict[str, list[int]]:
+    """`char+bm25` 臂：逐字召回 + `bm25()` 升序 = **生产口径**（不加任何开关）。"""
+    return _run_simple(corpus, queries)
+
+
+def _candidates(conn: sqlite3.Connection, query: str) -> list:
+    """取回**全部**逐字候选（带 `bm25_raw`），交给 Python 侧重排。"""
+    return search_semantic(conn, query, limit=CANDIDATE_POOL)
+
+
+def _by_bigram_rerank(rows, query: str) -> list:
+    """双字覆盖率降序；并列按 id（零依赖、不需要跨量纲归一化）。"""
+    return sorted(rows, key=lambda row: (-bigram_coverage(query, row.text), row.id))
+
+
+def _by_bm25_then_bigram(rows, query: str) -> list:
+    """`bm25()` 主序 + 双字覆盖率次序。
+
+    主序走 `store.bm25_score`（= `-raw`，"越大越相关"）再取负排序——**符号约定
+    只写在 `store` 一处**，仪器不自己再记一遍（记两遍迟早记反一个）。
+
+    为什么不写成加权求和：`bm25_score(raw)` 的量级随语料/查询变（本夹具上
+    0.29~8.71），覆盖率固定在 `[0,1]`，直接相加等于把权重偷偷交给语料规模。
+    §6.1 的 `normalize` 与 `w_bm25` 正是为这件事存在的，那是 T6 的活。
+    """
+    return sorted(
+        rows,
+        key=lambda row: (
+            -bm25_score(row.bm25_raw if row.bm25_raw is not None else 0.0),
+            -bigram_coverage(query, row.text),
+            row.id,
+        ),
+    )
+
+
+def _run_rerank(corpus: list[dict], queries: list[dict], key) -> dict[str, list[int]]:
+    """重排臂的公共骨架：候选全取 → Python 重排 → 截前 5（见纪律 3）。"""
+    conn = _build_conn(corpus)
+    ranked: dict[str, list[int]] = {}
+    for item in queries:
+        rows = _candidates(conn, item["query"])
+        ranked[item["query"]] = [row.id for row in key(rows, item["query"])][:HARNESS_LIMIT]
+    conn.close()
+    return ranked
+
+
+def run_char_bigram_rerank(corpus: list[dict], queries: list[dict]) -> dict[str, list[int]]:
+    """`char+bigram-rerank` 臂：逐字召回 + 双字覆盖率重排。"""
+    return _run_rerank(corpus, queries, _by_bigram_rerank)
+
+
+def run_char_bm25_bigram(corpus: list[dict], queries: list[dict]) -> dict[str, list[int]]:
+    """`char+bm25+bigram` 臂：逐字召回 + `bm25()` 主序 + 双字覆盖率次序。"""
+    return _run_rerank(corpus, queries, _by_bm25_then_bigram)
+
+
+# ---- 结论行（可证伪：三项读数与基线逐位相同 → 报"未跑出差异"）--------------
+
+
+def _three(summary: dict) -> tuple:
+    return (
+        summary["precision_at_5"],
+        summary["recall_at_5"],
+        summary["top1_accuracy"],
+    )
+
+
+def acceptance_line(summary: dict, baseline: dict | None) -> str:
+    """一行结论：§14.8 的验收口径 = P@5 / R@5 不低于基线，**且 top1 不下降**。
+
+    三项读数与基线**逐位相同**时报「未跑出差异」——T4 验收 6 要的正是这条
+    （把双字改回逐字，两臂读数会一模一样，判据必须能看出来）；T5 起它还是
+    "重排信号被改成常数"那条变异的观察点（那时臂退化回写入序 = 基线读数）。
+    """
+    if baseline is None:
+        return "结论：无基线可比（benchmarks/memory/baseline_fts5_store.json 缺失）"
+    base = _three(baseline)
+    got = _three(summary)
+    if got == base:
+        return (
+            "结论：**未跑出差异**——P@5/R@5/top1 与 store-char 逐位相同，"
+            "本臂的改动对读数没有产生任何影响（这应当判红）"
+        )
+    passed = got[0] >= base[0] and got[1] >= base[1] and got[2] >= base[2]
+    return (
+        f"结论：{'**满足验收**' if passed else '**不满足验收**'}——"
+        f"P@5 {'≥' if got[0] >= base[0] else '<'} 基线 ({got[0]!r} vs {base[0]!r})；"
+        f"R@5 {'≥' if got[1] >= base[1] else '<'} 基线 ({got[1]!r} vs {base[1]!r})；"
+        f"top1 {'≥' if got[2] >= base[2] else '<'} 基线 ({got[2]!r} vs {base[2]!r})"
+    )
+
+
+def load_baseline(path: Path | None = None) -> dict | None:
+    """读回归锚；文件不在就返回 `None`（仪器如实说"无可比"。不编读数）。"""
+    target = path or BASELINE_PATH
+    if not target.exists():
+        return None
+    data = json.loads(target.read_text(encoding="utf-8"))
+    return data.get("summary", data)
+
+
+# ---- 入口 ------------------------------------------------------------------
+
+
+def run_arm(arm: str, *, corpus_path: Path | None = None, queries_path: Path | None = None) -> dict:
+    """跑一条臂，返回 `{"arm", "per_query", "summary", "skipped"}`。
+
+    这是给 pytest 直接调的函数入口（`tests/memory/test_relevance_harness.py`
+    用它复现基线与验收），不必起子进程。
+    """
+    corpus = load_corpus(corpus_path)
+    queries = load_queries(queries_path)
+    if arm == "store-char":
+        ranked = run_store_char(corpus, queries)
+    elif arm == "bigram":
+        ranked = run_bigram(corpus, queries)
+    elif arm == "char+bm25":
+        ranked = run_char_bm25(corpus, queries)
+    elif arm == "char+bigram-rerank":
+        ranked = run_char_bigram_rerank(corpus, queries)
+    elif arm == "char+bm25+bigram":
+        ranked = run_char_bm25_bigram(corpus, queries)
+    elif arm == "tokenized":
+        # 方案 B：另建"已分词检索列"、引分词器。P1 不引依赖（§13.13 第 1 条）。
+        return {
+            "arm": arm,
+            "per_query": {},
+            "summary": summarize({}),
+            "skipped": "skipped: P1 不引依赖（§13.13 第 1 条）",
+        }
+    else:
+        raise SystemExit(f"未知的臂 {arm!r}：可选 {', '.join(ARMS)}")
+    per_query = _score(ranked, queries)
+    return {"arm": arm, "per_query": per_query, "summary": summarize(per_query), "skipped": ""}
+
+
+def _print_result(result: dict, baseline: dict | None) -> None:
+    arm = result["arm"]
+    print(f"== arm: {arm} ==")
+    if result["skipped"]:
+        print(f"  {result['skipped']}")
+        return
+    for query, m in result["per_query"].items():
+        print(
+            "  %-10s p@5=%.3f r@5=%.3f top1=%d  ranked=%s"
+            % (query, m["p_at_k"], m["r_at_k"], m["top1"], m["ranked"])
+        )
+    s = result["summary"]
+    print(
+        "  SUMMARY  P@5=%r  R@5=%r  top1=%r  (n=%d)"
+        % (s["precision_at_5"], s["recall_at_5"], s["top1_accuracy"], s["n_queries"])
+    )
+    if baseline is not None:
+        print(
+            "  BASELINE P@5=%r  R@5=%r  top1=%r（store-char 臂，T4 冻结读数）"
+            % (
+                baseline["precision_at_5"],
+                baseline["recall_at_5"],
+                baseline["top1_accuracy"],
+            )
+        )
+    if arm != "store-char":
+        print("  " + acceptance_line(s, baseline))
+    print("  注：16 条语料上的相对读数，绝对数字不可外推（§14.3.7 第 3 条）")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="M2' 对照仪器（P@5 / R@5 / top1；夹具在 benchmarks/memory/）"
+    )
+    parser.add_argument(
+        "--arm",
+        default="all",
+        choices=(*ARMS, "all"),
+        help="要跑的臂；默认 all（逐条跑完并给结论行）",
+    )
+    parser.add_argument("--corpus", type=Path, default=None, help="覆盖语料 jsonl 路径")
+    parser.add_argument("--queries", type=Path, default=None, help="覆盖查询 jsonl 路径")
+    parser.add_argument("--json", action="store_true", help="额外打印机器可读结果")
+    args = parser.parse_args(argv)
+
+    wanted = list(ARMS) if args.arm == "all" else [args.arm]
+    baseline = load_baseline()
+    if baseline is None:
+        print("⚠️  benchmarks/memory/baseline_fts5_store.json 不在：无基线可比（不编读数）")
+    payload = []
+    for arm in wanted:
+        result = run_arm(arm, corpus_path=args.corpus, queries_path=args.queries)
+        _print_result(result, baseline)
+        payload.append(result)
+        print()
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

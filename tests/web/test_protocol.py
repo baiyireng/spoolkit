@@ -1,9 +1,12 @@
 from spoolkit.web.protocol import (
     AWAIT,
     CONFIRM,
+    DELTA,
     DIFF,
+    FINAL_DELTA,
     FINAL,
     NOTE,
+    WAIT,
     Event,
     parse_line,
 )
@@ -67,4 +70,60 @@ def test_note事件被接受() -> None:
     assert parsed is not None
     assert parsed.type == NOTE
     assert parsed.data["text"] == "数字核对：…"
+
+
+def test_wait事件被接受() -> None:
+    parsed = parse_line(Event(WAIT, {"elapsed": 15, "limit": 491}).to_line())
+    assert parsed is not None
+    assert parsed.type == WAIT
+    assert parsed.data["elapsed"] == 15
+    assert parsed.data["limit"] == 491
+    assert "type" not in parsed.data
+
+
+def test_wait可以没有limit() -> None:
+    parsed = parse_line(Event(WAIT, {"elapsed": 15}).to_line())
+    assert parsed is not None
+    assert parsed.type == WAIT
+    assert "limit" not in parsed.data
+
+
+def test_章节事件被接受() -> None:
+    started = parse_line(
+        Event(
+            "section_start",
+            {"index": 1, "title": "方案", "total": 3, "state": "draft"},
+        ).to_line()
+    )
+    assert started is not None
+    assert started.type == "section_start"
+    assert started.data["title"] == "方案"
+    done = parse_line(
+        Event(
+            "section_done",
+            {"index": 1, "title": "方案", "text": "本节正文", "state": "final"},
+        ).to_line()
+    )
+    assert done is not None
+    assert done.data["text"] == "本节正文"
+
+
+def test_final_delta事件被接受() -> None:
+    """纯文本终稿增量。未登记的类型会被丢掉。"""
+    parsed = parse_line(Event(FINAL_DELTA, {"text": "第一段\n第二段"}).to_line())
+    assert parsed is not None
+    assert parsed.type == FINAL_DELTA
+    assert parsed.data["text"] == "第一段\n第二段"
+    assert "\\n" not in parsed.data["text"]
+
+
+def test_delta事件被接受() -> None:
+    """正文流式增量：未知类型会被丢掉，必须进白名单。"""
+    parsed = parse_line(
+        Event(DELTA, {"text": "一段", "channel": "assistant"}).to_line()
+    )
+    assert parsed is not None
+    assert parsed.type == DELTA
+    assert parsed.data["text"] == "一段"
+    assert parsed.data["channel"] == "assistant"
 

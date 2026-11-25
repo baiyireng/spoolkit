@@ -40,6 +40,25 @@ class _Noisy(Runner):
         ]
 
 
+class _ModelGone(Runner):
+    """像"连不上模型"那样死掉：子进程带着一段回溯退出。
+
+    真实形状就是 `spool run --events` 撞上 `LlamaCppError`（连不上 llama-server）
+    时打的那几行——`final.text` 里只有一截回溯，页面照原样显示出来是"一行原始异常"。
+    """
+
+    def command(self, goal: str) -> list[str]:
+        return [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "sys.stderr.write('Traceback (most recent call last):\\n')\n"
+            "sys.stderr.write('spoolkit.llm.llamacpp.LlamaCppError: "
+            "无法连接 llama-server（ConnectTimeout），请确认服务已启动并监听正确端口\\n')\n"
+            "sys.exit(1)\n",
+        ]
+
+
 def _wait(predicate, timeout: float = 15.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -194,3 +213,53 @@ def test_订阅者断开后不再收到事件(tmp_path: Path) -> None:
     runner.start("做点事")
     time.sleep(0.5)
     assert listener.empty()
+
+
+# --- 连不上模型：只**增**一条结构化线索（展示层据此说人话） ---
+
+
+def test_连不上模型时多给一条结构化线索(tmp_path: Path) -> None:
+    """`final` 的既有字段与文字一个字都没改，只是多了一个 `error` 键。
+
+    页面拿它说「哪一步 / 哪个地址 / 下一步敲什么」；没有它就只能显示一截回溯。
+    """
+    runner = _ModelGone(
+        tmp_path, extra_args=["--provider", "llamacpp", "--base-url", "http://127.0.0.1:8080"]
+    )
+    runner.start("做点事")
+    assert _wait(lambda: runner.snapshot()["final"] is not None, timeout=20)
+
+    final = runner.snapshot()["final"]
+
+    assert final["ok"] is False
+    # 既有语义不许动：还是那句"进程退出，退出码 1：…"，原因仍在正文里。
+    assert "退出码 1" in final["text"]
+    assert "无法连接 llama-server" in final["text"]
+    # 只增的那一条：
+    assert final["error"] == {
+        "stage": "model",
+        "kind": "connect",
+        "url": "http://127.0.0.1:8080",
+    }
+
+
+def test_别的崩溃不冒充模型故障(tmp_path: Path) -> None:
+    """认不出来就**不加**那个键：乱指路比不说更坏。"""
+    runner = _Noisy(tmp_path)
+    runner.start("做点事")
+    assert _wait(lambda: runner.snapshot()["final"] is not None, timeout=20)
+
+    final = runner.snapshot()["final"]
+
+    assert "脚本文件不存在" in final["text"]
+    assert "error" not in final
+
+
+def test_没有给地址时线索里的地址是空的(tmp_path: Path) -> None:
+    """没写 `--base-url` 就给空串：页面退回探活接口给的地址，别在这儿编一个。"""
+    runner = _ModelGone(tmp_path)
+    runner.start("做点事")
+    assert _wait(lambda: runner.snapshot()["final"] is not None, timeout=20)
+
+    assert runner.snapshot()["final"]["error"]["url"] == ""
+

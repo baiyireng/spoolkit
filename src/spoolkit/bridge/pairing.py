@@ -13,7 +13,7 @@
 - `allowlist`：只放行名单里的人（名单外连码都不给）；
 - `open`：谁都放行（**要显式选**，并且在启动时警告）。
 
-状态落在 `.agent/bridge-pairings.json`：这是工作区级的东西（这台机器上谁能
+状态落在 `.agent/bridge-pairings.json`：这是工作区级的记录（这台机器上谁能
 驱动这个工作区），和 `.agent/policy.json` 同类。
 """
 

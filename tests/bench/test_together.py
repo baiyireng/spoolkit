@@ -14,6 +14,11 @@ from spoolkit.bench import (
     verify_together,
 )
 
+#: 仓库根：这一批用例读的是**仓库里**的题集，不是「当前目录下的」题集。
+#: 用相对路径的话，判据会悄悄变成「跑测试时 cwd 在哪」——顺序一乱就红，
+#: 而红了以后每个读到它的人都要重新排一次这个坑。
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _make_task(root: Path, name: str, *, correct: bool) -> Task:
     home = root / name
@@ -94,8 +99,14 @@ def test_验收覆盖回原始测试(tmp_path: Path) -> None:
 
 
 def test_真实的题集能读出来并铺好(tmp_path: Path) -> None:
-    """用仓库里那 50 道真题走一遍摆盘，防止题集结构变了这里不知道。"""
-    tasks = load_tasks(Path("benchmarks/tasks"))
+    """用仓库里那 50 道真题走一遍摆盘，防止题集结构变了这里不知道。
+
+    `benchmarks/tasks` 按**仓库根**锚定，不按 `Path("benchmarks/tasks")`
+    这种「相对当前工作目录」的写法：后者量的其实是「跑测试时 cwd 在哪」，
+    任何一处没还原的 `chdir` 都能把它变成红的，而它要回答的是「仓库里那
+    50 道真题还在不在」。
+    """
+    tasks = load_tasks(_REPO_ROOT / "benchmarks" / "tasks")
     assert len(tasks) == 50
     workspace = tmp_path / "ws"
     prepare_together(tasks, workspace)

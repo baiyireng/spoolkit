@@ -1,0 +1,72 @@
+供应商：llamacpp（http://127.0.0.1:8080）
+沙箱根：C:\Users\32615\AppData\Local\Temp\dsh-RvaPU3\spoolkit-probes\stab-set3
+设置：温度 0.7，种子 2，每探针 3 次，变体轮换
+整批墙钟：1790.0s（预算上限 2400s）
+
+探针                形状                结局          步   调用    输入tok    输出tok     墙钟s     验证器   重试   拦读   督导    督导错    判据    下限
+--------------------------------------------------------------------------------------------------------------------------
+merge-html        merge-html        完成/绿        2    2     8503      906    41.3     2/2    0    0    0      0     绿     过
+merge-html        merge-html        完成/绿        8    8    34782     2496   108.5     5/5    0    0    0      0     绿     过
+merge-html        merge-html        完成/绿        5    5    21138     1087    54.4     3/3    0    0    0      0     绿     过
+vague-optimize    vague-optimize    完成/红        5    5    18751     1359    56.5     2/2    0    0    0      0     红     过
+vague-optimize    vague-optimize    未完成/绿      15   21    89378     6372   286.6     4/4    0    0    6      0     绿     过
+vague-optimize    vague-optimize    未完成/红       8   14    49621     1590    93.0      未跑    6    0    3      0     红    未过
+add-feature       add-feature       完成/绿       14   16    67046     6109   288.7     5/5    0    0    2      0     绿     过
+add-feature       add-feature       未完成/红      17   27   104451     3028   178.6      未跑   14    0    7      0     红    未过
+add-feature       add-feature       完成/绿        7    7    29640     1992    85.8     3/3    0    0    0      0     绿     过
+fix-bug           fix-bug           完成/绿        4    4    17508      503    31.1     2/2    0    0    0      0     绿     过
+fix-bug           fix-bug           完成/绿        3    3    13958      764    39.8     2/2    0    0    0      0     绿     过
+fix-bug           fix-bug           完成/绿        3    3    13095      534    32.2     2/2    0    0    0      0     绿     过
+rename-cross-file rename-cross-file 未完成/红      19   27   107756     5017   264.5     0/6    7    0    5      0     红    未过
+rename-cross-file rename-cross-file 完成/绿        9   10    48119     3107   148.6     3/3    0    0    1      0     绿     过
+rename-cross-file rename-cross-file 完成/红        5    5    21491     1405    65.3     2/3    0    0    0      0     红     过
+
+稳定度（通过率 = 判据绿 且 下限过；指标写 min-max-均，只统计真的跑了的次数）：
+探针                  采样   过     通过率            步数                 墙钟s                     输入tok                   输出tok     不稳定
+------------------------------------------------------------------------------------------------------------------------------
+merge-html           3   3    1.00   2.0-8.0-5.0     41.3-108.5-68.1    8503.0-34782.0-21474.3     906.0-2496.0-1496.3       否
+vague-optimize       3   1    0.33  5.0-15.0-9.3    56.5-286.6-145.4   18751.0-89378.0-52583.3    1359.0-6372.0-3107.0       是
+add-feature          3   2    0.67 7.0-17.0-12.7    85.8-288.7-184.3  29640.0-104451.0-67045.7    1992.0-6109.0-3709.7       是
+fix-bug              3   3    1.00   3.0-4.0-3.3      31.1-39.8-34.4   13095.0-17508.0-14853.7       503.0-764.0-600.3       否
+rename-cross-file    3   1    0.33 5.0-19.0-11.0    65.3-264.5-159.5  21491.0-107756.0-59122.0    1405.0-5017.0-3176.3       是
+
+不过的尝试（失败轨迹从事件流里读）：
+[vague-optimize] 第 0 次（温度 0.7，种子 2，变体 None）步=5 墙钟=56.537s 判据=红 下限=过
+    说明：任务自认完成；验收红；自动验证 2/2 次通过；下限全达标
+    事件流：C:\Users\32615\AppData\Local\Temp\dsh-RvaPU3\spoolkit-probes\stab-set3\vague-optimize-r0\.agent\probe.stdout.jsonl
+    判据尾部： 30000 行，参考摘要 total=30000 · summarize() 实测 0.04s（阈值 4.00s） · 通过：total 与参考一致 · 通过：codes 与参考一致 · 参考 [['/api/search', 754], ['/', 747], ['/api/items', 747], ['/login', 737], ['/api/items/', 736]] · 实际 [] · 通过：耗时低于阈值（0.04s < 4.00s） · 通过：render() 仍能渲染摘要 CHECK-FAIL: top_paths 的次序与参考一致 CHECK-FAIL: 共 1 条不成立
+[vague-optimize] 第 2 次（温度 0.7，种子 4，变体 1）步=8 墙钟=92.956s 判据=红 下限=未过
+    说明：任务自认未完成；验收红；自动验证一次都没跑；原样重试被拦 6 次；整文件重写被拒 1 次；督导介入 3 次；下限未达标：原样重试被拦次数超上限：6 > 0
+    事件流：C:\Users\32615\AppData\Local\Temp\dsh-RvaPU3\spoolkit-probes\stab-set3\vague-optimize-r2\.agent\probe.stdout.jsonl
+    判据尾部：· 通过：logstat.report.summarize 还在 · 输入 30000 行，参考摘要 total=30000 · summarize() 实测 9.72s（阈值 4.00s） · 通过：total 与参考一致 · 通过：codes 与参考一致 · 通过：top_paths 的次序与参考一致 · 通过：render() 仍能渲染摘要 CHECK-FAIL: 耗时低于阈值（9.72s < 4.00s） CHECK-FAIL: 共 1 条不成立
+[add-feature] 第 1 次（温度 0.7，种子 3，变体 0）步=17 墙钟=178.602s 判据=红 下限=未过
+    说明：任务自认未完成；验收红；自动验证一次都没跑；原样重试被拦 14 次；整文件重写被拒 2 次；督导介入 7 次；下限未达标：原样重试被拦次数超上限：14 > 0
+    事件流：C:\Users\32615\AppData\Local\Temp\dsh-RvaPU3\spoolkit-probes\stab-set3\add-feature-r1\.agent\probe.stdout.jsonl
+    判据尾部：onth 2025-03 退出码 0（实际 2） CHECK-FAIL: 这个月总额 512.40 出现在输出里 CHECK-FAIL: 分类 餐饮 出现 CHECK-FAIL: 餐饮 的金额 348.00 出现 CHECK-FAIL: 分类 交通 出现 CHECK-FAIL: 交通 的金额 64.50 出现 CHECK-FAIL: 分类 办公 出现 CHECK-FAIL: 办公 的金额 99.90 出现 CHECK-FAIL: summary --month 2025-04 退出码 0 CHECK-FAIL: 2025-04 合计 57.00 出现 CHECK-FAIL: 共 10 条不成立
+[rename-cross-file] 第 0 次（温度 0.7，种子 2，变体 None）步=19 墙钟=264.49s 判据=红 下限=未过
+    说明：任务自认未完成；验收红；自动验证 0/6 次通过；原样重试被拦 7 次；督导介入 5 次；下限未达标：原样重试被拦次数超上限：7 > 0
+    事件流：C:\Users\32615\AppData\Local\Temp\dsh-RvaPU3\spoolkit-probes\stab-set3\rename-cross-file-r0\.agent\probe.stdout.jsonl
+    判据尾部：n 1 test in 0.000s FAILED (errors=1) · 通过：python -m pipeline.cli data/parts.csv 退出码 0 · 通过：端到端合计仍是 合计 242.75 CHECK-FAIL: 整个沙箱里没有 get_rows 了（残留：['docs\\design.md（2 处）', 'pipeline\\transform.py（2 处）', 'README.md（1 处）']） CHECK-FAIL: 项目自己的测试全过（退出码 1） CHECK-FAIL: 确实跑了 4 条以上测试（实际 1 条） CHECK-FAIL: 共 3 条不成立
+[rename-cross-file] 第 2 次（温度 0.7，种子 4，变体 1）步=5 墙钟=65.282s 判据=红 下限=过
+    说明：任务自认完成；验收红；自动验证 2/3 次通过；下限全达标
+    事件流：C:\Users\32615\AppData\Local\Temp\dsh-RvaPU3\spoolkit-probes\stab-set3\rename-cross-file-r2\.agent\probe.stdout.jsonl
+    判据尾部：· 通过：pipeline/fetch.py 还在 · 通过：load_rows 在 pipeline/fetch.py 里被定义 · 通过：项目测试没有挂死 · 通过：项目自己的测试全过（退出码 0） · 通过：确实跑了 4 条以上测试（实际 4 条） · 通过：python -m pipeline.cli data/parts.csv 退出码 0 · 通过：端到端合计仍是 合计 242.75 CHECK-FAIL: 整个沙箱里没有 get_rows 了（残留：['docs\\design.md（2 处）', 'README.md（1 处）']） CHECK-FAIL: 共 1 条不成立
+
+合计：记录 15 条，真跑的采样 15 次，「判据绿 且 下限过」10 次；完成 11/15，验收绿 10/15，下限达标 12/15，跳过 0 条，步数 124，模型调用 157，token 输入 645237 / 输出 36269
+
+逐条说明：
+  merge-html 第 1/3 次：任务自认完成；验收绿；自动验证 2/2 次通过；下限全达标
+  merge-html 第 2/3 次：任务自认完成；验收绿；自动验证 5/5 次通过；下限全达标
+  merge-html 第 3/3 次：任务自认完成；验收绿；自动验证 3/3 次通过；下限全达标
+  vague-optimize 第 1/3 次：任务自认完成；验收红；自动验证 2/2 次通过；下限全达标
+  vague-optimize 第 2/3 次：任务自认未完成；验收绿；自动验证 4/4 次通过；督导介入 6 次；下限全达标
+  vague-optimize 第 3/3 次：任务自认未完成；验收红；自动验证一次都没跑；原样重试被拦 6 次；整文件重写被拒 1 次；督导介入 3 次；下限未达标：原样重试被拦次数超上限：6 > 0
+  add-feature 第 1/3 次：任务自认完成；验收绿；自动验证 5/5 次通过；督导介入 2 次；下限全达标
+  add-feature 第 2/3 次：任务自认未完成；验收红；自动验证一次都没跑；原样重试被拦 14 次；整文件重写被拒 2 次；督导介入 7 次；下限未达标：原样重试被拦次数超上限：14 > 0
+  add-feature 第 3/3 次：任务自认完成；验收绿；自动验证 3/3 次通过；下限全达标
+  fix-bug 第 1/3 次：任务自认完成；验收绿；自动验证 2/2 次通过；下限全达标
+  fix-bug 第 2/3 次：任务自认完成；验收绿；自动验证 2/2 次通过；下限全达标
+  fix-bug 第 3/3 次：任务自认完成；验收绿；自动验证 2/2 次通过；下限全达标
+  rename-cross-file 第 1/3 次：任务自认未完成；验收红；自动验证 0/6 次通过；原样重试被拦 7 次；督导介入 5 次；下限未达标：原样重试被拦次数超上限：7 > 0
+  rename-cross-file 第 2/3 次：任务自认完成；验收绿；自动验证 3/3 次通过；督导介入 1 次；下限全达标
+  rename-cross-file 第 3/3 次：任务自认完成；验收红；自动验证 2/3 次通过；下限全达标

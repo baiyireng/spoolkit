@@ -109,14 +109,16 @@ def test_达到步数上限会停止(tmp_path: Path) -> None:
     result = loop.run("没完没了")
     assert result.finished is False
     assert result.steps == 3
+    # 一处改动都没有时不加那段状态：判词原样（只读运行不该拖一句噪声）。
     assert result.final == "已达步数上限，任务未完成"
 
 
-def test_服务端说提示词超长时丢掉历史重发(tmp_path: Path) -> None:
+def test_服务端说提示词超长时原样重发(tmp_path: Path) -> None:
     """本地用估算分词判定放行、服务端用真实分词拒绝，这会发生。
 
     实测那条拒绝曾经变成未捕获异常，直接把整个运行打断——一次上下文
-    估算偏差不该让任务崩掉。
+    估算偏差不该让任务崩掉。历史在下一轮硬线重置时才丢；本用例只验证
+    原样重发一次。
     """
     from spoolkit.errors import ContextOverflowError
     from spoolkit.llm.gateway import ModelGateway
@@ -161,6 +163,12 @@ def test_服务端说提示词超长时丢掉历史重发(tmp_path: Path) -> Non
 
 
 def test_上下文需求过大时触发重置(tmp_path: Path) -> None:
+    """撑爆上下文时丢掉历史重发，但任务状态不丢。
+
+    这里关掉督导：**它也会占一次模型调用**（同一个网关），脚本会被它吃掉
+    一条而在这个用例里耗尽；而且被拦的重复调用会退还步数预算，实际跑几轮
+    取决于拦截次数，不是脚本长度能覆盖的。督导那条路有自己的测试文件。
+    """
     long_state = {"current": "很长的当前状态" * 200}
     script = [
         _turn(
@@ -168,9 +176,9 @@ def test_上下文需求过大时触发重置(tmp_path: Path) -> None:
             [{"name": "list_dir", "arguments": {"path": "."}}],
             state=long_state,
         )
-        for i in range(12)
+        for i in range(24)
     ]
-    loop = _build(tmp_path, script, context_window=2000)
+    loop = _build(tmp_path, script, context_window=2000, supervise=False)
     result = loop.run("把上下文撑爆")
     assert result.resets >= 1
 

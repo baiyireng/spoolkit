@@ -1,8 +1,7 @@
-"""强制收敛：连续只查看不修改时，把「继续查」从语法里拿掉。
+"""白看够了就要求给结论。读工具留着。
 
-实测这套模型对文字提醒完全免疫——重复提醒、拦截说明都照发不误。
-能推得动它的只有「这一轮物理上只能选什么」，所以这里断言的是发给模型的
-schema，而不是提示词里写了什么。
+白看是查看了、最近几步里一次成功都没有。读到了新内容不算。
+不把语法收成只能写：没有新内容时，写工具会被拿去读，或交出没有依据的改动。
 """
 
 import json
@@ -10,6 +9,7 @@ from pathlib import Path
 
 from spoolkit.agent.loop import NO_EDIT_LIMIT, AgentLoop
 from spoolkit.config import Config
+from spoolkit.context import templates as T
 from spoolkit.llm.fake import FakeModel
 from spoolkit.llm.tokenizer import OfflineTokenCounter
 from spoolkit.tools.edit import PendingChanges, replace_lines_spec, write_file_spec
@@ -33,6 +33,10 @@ def _turn(thought: str, calls=None, final=None) -> str:
 
 def _read() -> dict:
     return {"name": "read_file", "arguments": {"path": "a.py"}}
+
+
+def _miss() -> dict:
+    return {"name": "read_file", "arguments": {"path": "nope.py"}}
 
 
 def _edit() -> dict:
@@ -70,23 +74,39 @@ def _allowed(loop: AgentLoop, index: int) -> list[str]:
     return list(items["properties"]["name"].get("enum", []))
 
 
-def test_连续只查看后收窄为只能写(tmp_path: Path) -> None:
-    script = [_turn("看", [_read()]) for _ in range(NO_EDIT_LIMIT)]
+def test_连续读到内容不收窄(tmp_path: Path) -> None:
+    """四次都读到了文件，下一轮仍得能读。对比两份代码就是这种形状。"""
+    script = [_turn("看", [_read()]) for _ in range(NO_EDIT_LIMIT + 1)]
+    script.append(_turn("完成", final="看完了"))
+    loop = _build(tmp_path, script)
+    loop.run("对比一下")
+
+    for i in range(NO_EDIT_LIMIT + 1):
+        assert "read_file" in _allowed(loop, i), f"第 {i} 轮不该收窄"
+        text = _text_of(loop.gateway.requests[i])
+        assert T.FORCE_COMMIT not in text
+
+
+def test_连续白看后要求给结论且仍能读(tmp_path: Path) -> None:
+    script = [_turn("看", [_miss()]) for _ in range(NO_EDIT_LIMIT)]
     script += [_turn("改", [_edit()]), _turn("完成", final="改好了")]
     loop = _build(tmp_path, script)
-    loop.run("改一下")
+    result = loop.run("改一下")
 
-    assert "read_file" in _allowed(loop, 0)
     for i in range(NO_EDIT_LIMIT):
-        assert "read_file" in _allowed(loop, i), f"第 {i} 轮不该收窄"
-    forced = _allowed(loop, NO_EDIT_LIMIT)
-    assert set(forced) == {"write_file", "replace_lines"}, forced
-    # 提出改动之后计数清零，下一轮恢复全部工具
+        assert "read_file" in _allowed(loop, i), f"第 {i} 轮不该要求收手"
+    allowed = _allowed(loop, NO_EDIT_LIMIT)
+    assert "read_file" in allowed
+    assert "write_file" in allowed
+    text = _text_of(loop.gateway.requests[NO_EDIT_LIMIT])
+    assert T.FORCE_CONCLUDE in text
+    assert T.FORCE_COMMIT not in text
+    assert any("要求给结论" in line for line in result.trace)
     assert "read_file" in _allowed(loop, NO_EDIT_LIMIT + 1)
 
 
 def test_中途提过改动就不会触发收窄(tmp_path: Path) -> None:
-    script = [_turn("看", [_read()]) for _ in range(NO_EDIT_LIMIT)]
+    script = [_turn("看", [_miss()]) for _ in range(NO_EDIT_LIMIT)]
     script.insert(2, _turn("改", [_edit()]))
     script += [_turn("完成", final="好了")]
     loop = _build(tmp_path, script)
@@ -96,27 +116,36 @@ def test_中途提过改动就不会触发收窄(tmp_path: Path) -> None:
         assert "read_file" in _allowed(loop, i), f"第 {i} 轮不该收窄"
 
 
-def test_只读角色没有收窄这回事(tmp_path: Path) -> None:
-    """没有写工具时收窄成空集合，模型将无路可走——所以压根不该有这条路。"""
+def test_只读角色读到内容不要求收手(tmp_path: Path) -> None:
+    """读到了内容也不该被要求停读。白看够了才注入「直接给结论」。"""
     script = [_turn("看", [_read()]) for _ in range(NO_EDIT_LIMIT + 2)]
     script.append(_turn("完成", final="看完了"))
     loop = _build(tmp_path, script, writable=False)
-    assert loop._commit_schema is None
     loop.run("看看")
     for i in range(len(loop.gateway.requests)):
         assert "read_file" in _allowed(loop, i)
+        assert T.FORCE_CONCLUDE not in _text_of(loop.gateway.requests[i])
 
 
-def test_收窄时说明原因(tmp_path: Path) -> None:
-    """收窄而不说明，模型只会看到工具忽然变少。"""
-    script = [_turn("看", [_read()]) for _ in range(NO_EDIT_LIMIT)]
+def test_只读角色白看后要求给结论(tmp_path: Path) -> None:
+    script = [_turn("看", [_miss()]) for _ in range(NO_EDIT_LIMIT)]
+    script.append(_turn("完成", final="看完了"))
+    loop = _build(tmp_path, script, writable=False)
+    loop.run("看看")
+    assert "read_file" in _allowed(loop, NO_EDIT_LIMIT)
+    assert T.FORCE_CONCLUDE in _text_of(loop.gateway.requests[NO_EDIT_LIMIT])
+
+
+def test_白看时说明该给结论(tmp_path: Path) -> None:
+    """只改语法、不说明，模型不知道这一轮为什么被要求收手。"""
+    script = [_turn("看", [_miss()]) for _ in range(NO_EDIT_LIMIT)]
     script += [_turn("改", [_edit()]), _turn("完成", final="好了")]
     loop = _build(tmp_path, script)
     loop.run("改一下")
 
-    last = loop.gateway.requests[NO_EDIT_LIMIT]
-    text = "\n".join(message.content for message in last.messages)
-    assert "没有提出任何改动" in text
+    text = _text_of(loop.gateway.requests[NO_EDIT_LIMIT])
+    assert T.FORCE_CONCLUDE in text
+    assert "read_file" in _allowed(loop, NO_EDIT_LIMIT)
 
 
 def test_自动验证的结果会回灌给模型(tmp_path: Path) -> None:
@@ -132,9 +161,13 @@ def test_自动验证的结果会回灌给模型(tmp_path: Path) -> None:
     loop.verify = verify
     loop.run("改一下")
 
+    # 只有一次：改完那一步的自动验证。收尾报最终状态时验的是同一批文件，
+    # 沿用那一次的结果，不再起第二次子进程（见 AgentLoop._with_final_state）。
     assert len(calls) == 1
     prompt = _text_of(loop.gateway.requests[-1])
-    assert "自动验证的结果" in prompt
+    # 钉要点：验证的结论与失败正文都要回灌给模型——它自己不会去跑测试，
+    # 措辞可以再改，这两件事缺了这条通路就是白跑。
+    assert "自动验证" in prompt
     assert "assert 1 == 2" in prompt
 
 
@@ -180,7 +213,12 @@ def test_连续空回合会提前收尾(tmp_path: Path) -> None:
     result = loop.run("改一下")
 
     assert result.finished is False
-    assert "停住了" in result.final
+    # 钉要点：这条 final 是给用户的收尾说明——必须讲清「提出改动之后连续几轮
+    # 没有可执行的回合」，并说明改动留在待确认清单里由用户判断。不再钉「停住了」
+    # 这一旧字面（措辞可改，这三件事丢了才是改坏）。
+    assert "提出改动" in result.final
+    assert "连续几轮" in result.final
+    assert "待确认清单" in result.final
     # 只跑了「一次改动 + 两次空回合」，没有把 12 步预算烧光
     assert result.steps <= 4
 

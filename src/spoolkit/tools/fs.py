@@ -4,11 +4,12 @@
 工具失败一律返回 ok=False，不抛异常。
 """
 
+import hashlib
 from pathlib import Path
 
 from spoolkit.errors import PathOutsideProjectError
 from spoolkit.paths import resolve_readable
-from spoolkit.tools.types import ToolResult, ToolSpec
+from spoolkit.tools.types import Artifact, ToolResult, ToolSpec
 from spoolkit.tools.view import WorkspaceView
 
 
@@ -23,19 +24,40 @@ def _read_file(root: Path, args: dict, pending=None, read_roots=()) -> ToolResul
     view = WorkspaceView(root, pending)
 
     if not view.exists(target):
+        # 删除也要出一句人话：只说「文件不存在」时，模型分不清是它自己刚
+        # 删掉的（那是预期状态）、还是路径写错了（那是要改的）。
+        if target.resolve() in view.deleted_paths():
+            # fix-bug 真机现场：模型误删文件后想恢复，反复 read 同一个路径
+            # 9 次——它以为「读不到 = 出问题了，再读一次」。必须把出路写死：
+            # 删除还没落盘，磁盘上的旧内容还在；要恢复就重新 write_file
+            # 写回内容（旧内容可以先用 run_command 跑 `type`/`cat` 读磁盘拿到，
+            # 因为 read_file 看的是「改动生效后」的视图，而 run_command 看的
+            # 是真实磁盘）。
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"{args['path']} 已在待确认改动里被删除（还没落盘）——"
+                    "现在读不到它，这是删除生效后的正常状态，**再读多少次都一样**。\n"
+                    "如果删除是误操作、想恢复它：磁盘上的旧文件还在，"
+                    "用 run_command 跑 `type <路径>`（Windows）或 `cat <路径>`（POSIX）"
+                    "拿到旧内容，再用 write_file 写回去——新写入会顶替掉那处待确认的删除。"
+                ),
+            )
         return ToolResult(ok=False, content=f"文件不存在: {args['path']}")
     if view.is_dir(target):
         return ToolResult(ok=False, content=f"目标是目录而非文件: {args['path']}")
 
     try:
         text = view.read_text(target)
+    except FileNotFoundError:
+        return ToolResult(ok=False, content=f"文件不存在: {args['path']}")
     except UnicodeDecodeError:
         return ToolResult(ok=False, content=f"文件不是 UTF-8 文本: {args['path']}")
 
     start = args.get("start_line")
     end = args.get("end_line")
     if start is None and end is None:
-        return ToolResult(ok=True, content=text)
+        return _envelope_read(root, target, args["path"], text, text)
 
     start = 1 if start is None else start
     if start < 1:
@@ -48,7 +70,60 @@ def _read_file(root: Path, args: dict, pending=None, read_roots=()) -> ToolResul
 
     chunk = lines[start - 1 : end]
     numbered = "\n".join(f"{start + i}\t{line}" for i, line in enumerate(chunk))
-    return ToolResult(ok=True, content=numbered)
+    return _envelope_read(
+        root, target, args["path"], text, numbered, start=start, end=end
+    )
+
+
+def _stored_path(root: Path, target: Path, fallback: str) -> str:
+    try:
+        return target.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return str(fallback).replace("\\", "/")
+
+
+def _fingerprint(text: str) -> str:
+    """与循环里的内容指纹同一算法：sha1 前 12 位 + 行数。"""
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    return f"{digest}/{len(text.splitlines())}行"
+
+
+def _envelope_read(
+    root: Path,
+    target: Path,
+    fallback: str,
+    text: str,
+    content: str,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+) -> ToolResult:
+    """成功读取的信封。content 仍是正文或带行号片段，呈现规则留给循环。"""
+    del end
+    stored = _stored_path(root, target, fallback)
+    total = len(text.splitlines())
+    if start is None:
+        shown_start, shown_end = 1, total
+        summary = f"{stored}：{total} 行"
+    else:
+        span = len(content.splitlines()) if content else 0
+        shown_start = start
+        shown_end = start + span - 1 if span else start - 1
+        summary = f"{stored} 第 {shown_start}–{shown_end} 行（文件 {total} 行）"
+    return ToolResult(
+        ok=True,
+        content=content,
+        raw=content,
+        summary=summary,
+        data={
+            "path": stored,
+            "start": shown_start,
+            "end": shown_end,
+            "lines": total,
+            "fingerprint": _fingerprint(text),
+        },
+        artifacts=(Artifact(type="file", path=stored),),
+    )
 
 
 def _list_dir(root: Path, args: dict, pending=None, read_roots=()) -> ToolResult:
@@ -62,13 +137,57 @@ def _list_dir(root: Path, args: dict, pending=None, read_roots=()) -> ToolResult
     if not target.is_dir():
         return ToolResult(ok=False, content=f"目标不是目录: {args['path']}")
 
-    entries = [f"{c.name}/" if c.is_dir() else c.name for c in sorted(target.iterdir())]
-    # 待确认改动里新建的文件在磁盘上还不存在，但模型应该看得到它们。
+    # 读不了的目录要给人话，不许抛出去（本机沙箱里 0o700 建出来的目录就是这样：
+    # 目录本身存在、`is_dir()` 也为真，但一列举就 PermissionError）。
+    # 「空目录」与「读不了」是两件事，混成一件模型会以为这里真的什么都没有。
+    try:
+        children = sorted(target.iterdir())
+    except OSError as exc:
+        return ToolResult(
+            ok=False,
+            content=(
+                f"目录读不了（{exc.strerror or exc}）: {args['path']}"
+                "——这是权限/IO 问题，**不是「空目录」**；"
+                "换一个可读的目录，或者先把它的权限修好。"
+            ),
+        )
+
+    entries: list[str] = []
+    unreadable: list[str] = []
+    for child in children:
+        try:
+            entries.append(f"{child.name}/" if child.is_dir() else child.name)
+        except OSError:
+            # 读不了的**单个条目**也要留痕：静默跳过等于告诉模型「这里没有它」。
+            unreadable.append(child.name)
+    # 待确认改动里新建的文件在磁盘上还不存在，但模型应该看得到它们；
+    # 反过来，待确认删除的文件不该再被列出来——列出来它就会以为没删掉。
+    view = WorkspaceView(root, pending)
+    gone = {
+        path.name
+        for path in view.deleted_paths()
+        if path.parent.resolve() == target.resolve()
+    }
+    if gone:
+        entries = [name for name in entries if name not in gone]
     known = {name.rstrip("/") for name in entries}
-    for name in WorkspaceView(root, pending).overlay_children(target):
+    for name in view.overlay_children(target):
         if name not in known:
             entries.append(name)
+    if unreadable:
+        entries.append(_unreadable_note(unreadable))
     return ToolResult(ok=True, content="\n".join(entries))
+
+
+def _unreadable_note(unreadable: list[str]) -> str:
+    """跳过的条目要可见（改名/改名残留类判断全靠这份列表可信）。"""
+    shown = unreadable[:5]
+    more = len(unreadable) - len(shown)
+    return (
+        f"（跳过 {len(unreadable)} 个读不了的条目：{'、'.join(shown)}"
+        + (f"，还有 {more} 个" if more else "")
+        + "）"
+    )
 
 
 def read_file_spec(root: Path, pending=None, read_roots=()) -> ToolSpec:

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark light">
+<meta id="theme-color" name="theme-color" content="#212121">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<script src="/assets/theme-boot.js"></script>
+<title>spool</title>
+
+<link rel="stylesheet" href="/assets/dist/app.0c346a5804bb.css">
+</head>
+<body>
+<!-- 右上角那一列：常驻提示（徽标 + 详情浮层）与通知。两者都在**文档流之外**
+     （`#corner` 是 `position:fixed`），所以它们的出现 / 展开 / 收起都不会改对话区的
+     高度、也不挪滚动位置。常驻提示在最上面（它是不该被划走的状态），通知在它下面
+     （通知是不该被盖住的提醒）。 -->
+<div id="corner">
+  <div id="hints">
+    <button id="st-health" type="button" class="st-item ok" aria-expanded="false"></button>
+    <button id="st-mode" type="button" class="st-item ro hidden" aria-expanded="false"></button>
+    <button id="st-target" type="button" class="st-item warn hidden" aria-expanded="false"></button>
+    <button id="st-pair" type="button" class="st-item ask hidden" aria-expanded="false"></button>
+    <button id="st-elsewhere" type="button" class="st-item warn hidden" aria-expanded="false"></button>
+  </div>
+  <div id="st-panel" class="st-panel hidden" role="region" aria-label="状态详情">
+    <button id="st-close" type="button" class="st-close" aria-label="关闭状态详情" title="关闭状态详情"></button>
+  </div>
+  <div id="toasts" role="status" aria-live="polite" aria-relevant="additions"><button id="toast-all" type="button" class="toast-all">全部关闭</button></div>
+</div>
+<div id="top">
+  <button id="menu" title="会话列表" aria-label="会话列表" aria-expanded="false" aria-controls="sidebar"></button>
+  <span class="brand" role="img" aria-label="spool" title="spool">
+    <svg class="brand-mark" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round">
+        <path d="M4.2 3.4v13.2"></path>
+        <path d="M6 6.2v7.6"></path>
+        <path d="M11.4 6.2v7.6"></path>
+        <path d="M13.2 3.4v13.2"></path>
+        <path d="M6 8.6c1.6.55 3.8.55 5.4 0"></path>
+        <path d="M6 11.4c1.6-.55 3.8-.55 5.4 0"></path>
+        <path d="M13.2 10h4.6"></path>
+      </g>
+    </svg>
+    <span class="brand-name">spool</span>
+  </span>
+  <span class="top-rule" aria-hidden="true"></span>
+  <span id="where" class="empty">连接中</span>
+  <button id="tasks-btn" type="button" title="任务" aria-label="任务"
+          aria-expanded="false" aria-controls="tasks-panel">
+    <span>任务</span>
+    <span id="tasks-count">0</span>
+    <span id="tasks-wait" class="hidden"></span>
+  </button>
+</div>
+<div id="scrim"></div>
+<div id="body">
+  <aside id="sidebar">
+    <div class="side-head">
+      <button class="new" id="new-session"><span>＋ 新建会话</span></button>
+      <input id="side-search" type="search" aria-label="搜索工作区或会话" placeholder="搜索工作区 / 会话">
+      <div class="meta dim">工作区</div>
+    </div>
+    <div id="panel">
+      <div id="workspaces"></div>
+      <div id="sessions"></div>
+    </div>
+    <div id="side-foot">
+      <span id="meta" class="dim">连接中</span>
+      <button id="settings-btn" type="button" title="设置" aria-label="设置">
+        <span id="settings-icon"></span><span>设置</span>
+        <span id="archived-count" class="count hidden"></span>
+      </button>
+    </div>
+  </aside>
+  <div id="thread">
+    <div id="stream" role="log" aria-live="off"></div>
+    <div id="composer">
+      <div id="conn" role="alert" aria-live="assertive">与服务连接已断开，正在重连</div>
+      <div id="composer-tools">
+        <div id="thinking" role="status"><span class="thinking-dots"><i></i><i></i><i></i></span>生成中</div>
+        <button id="toBottom" type="button" title="回到最新" aria-label="回到最新"></button>
+      </div>
+      <div class="box">
+        <label id="goal-label" class="sr-only" for="goal">发送给 agent 的任务</label>
+        <textarea id="goal" rows="1" placeholder="发送给 agent 的任务" aria-labelledby="goal-label"></textarea>
+        <button id="send" title="发送"></button>
+      </div>
+      <!-- 输入条下面那一行：**只剩"Enter 发送"这句静态提示**。
+           常驻状态（探活 / 只读 / 钉住 / 待配对 / 别处在跑）已经搬到右上角那一列
+           （`#hints`）：那一行在文档流里，徽标一多就换行、把对话区压矮，而"提示一出现
+           就挤对话区"正是用户这次报的第一条。 -->
+      <div class="st">
+        <span class="st-hint">Enter 发送 · Shift+Enter 换行</span>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="settings" class="hidden" role="dialog" aria-modal="true"
+     aria-labelledby="settings-title" aria-hidden="true">
+  <div class="settings-card">
+    <div class="settings-head">
+      <h2 id="settings-title">设置</h2>
+      <button id="settings-close" type="button" class="icon-btn"
+              aria-label="关闭设置" title="关闭设置"></button>
+    </div>
+    <div class="settings-body">
+      <div class="set-sec">
+        <div class="set-head">外观</div>
+        <div id="theme-choices" class="theme-choices" role="radiogroup" aria-label="外观">
+          <button id="theme-system" type="button" class="on" role="radio" aria-checked="true"
+                  data-focusable="true">跟随系统</button>
+          <button id="theme-dark" type="button" role="radio" aria-checked="false"
+                  data-focusable="true">深色</button>
+          <button id="theme-light" type="button" role="radio" aria-checked="false"
+                  data-focusable="true">浅色</button>
+        </div>
+      </div>
+      <div class="set-sec">
+        <div class="set-head">已归档会话
+          <span id="archived-count-inline" class="count">0</span>
+        </div>
+        <div id="archived-list" class="archive-list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="tasks-panel" class="hidden" role="dialog" aria-modal="true"
+     aria-labelledby="tasks-title" aria-hidden="true">
+  <div class="tasks-sheet">
+    <div class="tasks-head">
+      <h2 id="tasks-title">任务</h2>
+      <button id="tasks-close" type="button" class="icon-btn"
+              aria-label="关闭任务" title="关闭任务"></button>
+    </div>
+    <div class="tasks-find">
+      <input id="tasks-search" type="search" aria-label="搜索任务"
+             placeholder="搜索任务 / 工具 / 文件" autocomplete="off">
+      <div id="tasks-match" class="tasks-match"></div>
+    </div>
+    <div id="tasks-scope" role="group" aria-label="会话范围"></div>
+    <div id="tasks-history" class="tasks-history"></div>
+    <div id="tasks-filters" role="tablist" aria-label="筛选任务"></div>
+    <div id="tasks-body">
+      <section id="tasks-memory" class="tasks-memory" aria-label="会话记忆">
+        <div class="tasks-memory-head">
+          <h3 id="tasks-memory-title">会话记忆</h3>
+          <button id="tasks-memory-toggle" type="button" class="tasks-memory-toggle"
+                  aria-expanded="true" aria-controls="tasks-memory-body">收起</button>
+        </div>
+        <div id="tasks-memory-body"></div>
+      </section>
+      <section id="tasks-artifacts" class="tasks-artifacts" aria-label="产物">
+        <div class="tasks-artifacts-head">
+          <h3 id="tasks-artifacts-title">产物</h3>
+          <span id="tasks-artifacts-count"></span>
+        </div>
+        <div id="tasks-artifacts-list"></div>
+      </section>
+      <section id="tasks-checkpoints" class="tasks-checkpoints" aria-label="未完成文档">
+        <div class="tasks-checkpoints-head">
+          <h3 id="tasks-checkpoints-title">未完成文档</h3>
+        </div>
+        <div id="tasks-checkpoints-list"></div>
+      </section>
+      <div id="tasks-list"></div>
+      <div id="tasks-detail"></div>
+    </div>
+  </div>
+</div>
+
+<div id="rename" class="hidden" role="dialog" aria-modal="true"
+     aria-labelledby="rename-title" aria-hidden="true">
+  <form id="rename-form" class="rename-card" action="#" method="post">
+    <div class="rename-head">
+      <h2 id="rename-title">重命名会话</h2>
+      <button id="rename-close" type="button" class="icon-btn"
+              aria-label="取消重命名" title="取消重命名"></button>
+    </div>
+    <label class="rename-label" for="rename-input">会话标题</label>
+    <input id="rename-input" type="text" aria-label="会话标题" autocomplete="off">
+    <p id="rename-error" class="rename-error" role="alert"></p>
+    <div class="rename-actions">
+      <button id="rename-cancel" type="button">取消</button>
+      <button id="rename-save" type="submit">保存</button>
+    </div>
+  </form>
+</div>
+
+<script src="/assets/dist/app.a6b7de3110dc.js" defer></script>
+</body>
+</html>

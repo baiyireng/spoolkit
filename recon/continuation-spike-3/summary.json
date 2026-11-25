@@ -1,0 +1,68 @@
+{
+  "runs": 18,
+  "requests": 24,
+  "within_budget": 24,
+  "over_budget": 0,
+  "cells": {
+    "compare:D2": {
+      "n": 3,
+      "true_complete": 0,
+      "false_complete": 3,
+      "mechanical_complete": 3,
+      "mean_outline_overlap": 0.4532,
+      "mean_draft_overlap": 0.2302,
+      "mean_total_tokens": 1192.0,
+      "mean_elapsed_s": 29.6
+    },
+    "compare:D3": {
+      "n": 3,
+      "true_complete": 3,
+      "false_complete": 0,
+      "mechanical_complete": 3,
+      "mean_outline_overlap": 0.0,
+      "mean_draft_overlap": 0.0,
+      "mean_total_tokens": 1676.0,
+      "mean_elapsed_s": 43.4
+    },
+    "retro:D2": {
+      "n": 3,
+      "true_complete": 0,
+      "false_complete": 3,
+      "mechanical_complete": 3,
+      "mean_outline_overlap": 0.4234,
+      "mean_draft_overlap": 0.146,
+      "mean_total_tokens": 1439.0,
+      "mean_elapsed_s": 32.8
+    },
+    "retro:D3": {
+      "n": 3,
+      "true_complete": 3,
+      "false_complete": 0,
+      "mechanical_complete": 3,
+      "mean_outline_overlap": 0.0,
+      "mean_draft_overlap": 0.0,
+      "mean_total_tokens": 1632.0,
+      "mean_elapsed_s": 40.5
+    },
+    "tech:D2": {
+      "n": 3,
+      "true_complete": 0,
+      "false_complete": 3,
+      "mechanical_complete": 3,
+      "mean_outline_overlap": 0.0652,
+      "mean_draft_overlap": 0.1151,
+      "mean_total_tokens": 1847.0,
+      "mean_elapsed_s": 39.4
+    },
+    "tech:D3": {
+      "n": 3,
+      "true_complete": 3,
+      "false_complete": 0,
+      "mechanical_complete": 3,
+      "mean_outline_overlap": 0.0409,
+      "mean_draft_overlap": 0.0095,
+      "mean_total_tokens": 1725.0,
+      "mean_elapsed_s": 37.1
+    }
+  }
+}

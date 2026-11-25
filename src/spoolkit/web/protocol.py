@@ -22,9 +22,36 @@ ERROR = "error"
 # 系统说给用户听的一句话。不是工具调用——工具那行只报「成功/失败」，
 # 而「你的交付物里有个数找不到出处」这种事，理由才是全部内容。
 NOTE = "note"
+WAIT = "wait"
+# 面向人的正文增量（流式）。channel 先只实现 assistant。
+DELTA = "delta"
+# 纯文本终稿增量。不经 JSON `final` 抽取；老客户端忽略未知类型，这里登记后网页才收得到。
+FINAL_DELTA = "final_delta"
+# 长文一节的草稿开始 / 正式提交。重写只再发这一节，不重放前面的节。
+SECTION_START = "section_start"
+SECTION_DONE = "section_done"
+# 任务时间线。与 tool / diff / await / final 并行，不替换它们。
+TASK_EVENT = "task_event"
 
 KNOWN = frozenset(
-    {START, STEP, TOOL, DIFF, AWAIT, CONFIRM, USAGE, FINAL, ERROR, NOTE}
+    {
+        START,
+        STEP,
+        TOOL,
+        DIFF,
+        AWAIT,
+        CONFIRM,
+        USAGE,
+        FINAL,
+        ERROR,
+        NOTE,
+        WAIT,
+        DELTA,
+        FINAL_DELTA,
+        SECTION_START,
+        SECTION_DONE,
+        TASK_EVENT,
+    }
 )
 
 

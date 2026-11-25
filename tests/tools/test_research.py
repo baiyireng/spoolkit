@@ -442,6 +442,10 @@ def test_research本轮抓过之后主循环才能核对缓存(tmp_path: Path) -
         ToolCall(name="research", arguments={"question": "T 说什么", "urls": [url]})
     )
     assert researched.ok
+    # 研究会话真的**抓到了**这一页（它自己那次 `web_fetch` 没有被出网闸门拦下）。
+    # 出网这个动作的入口在主循环（`research`），进去之后抓页是那个动作的内部
+    # 机制；子会话里再拦一次的话，`research` 永远只能交回一句「没抓到」。
+    assert url in this_run.released
     result = loop.registry.invoke(
         ToolCall(name="web_read", arguments={"source": url, "chunk": 0})
     )

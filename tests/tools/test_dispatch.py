@@ -124,6 +124,22 @@ def test_派发把改动落进同一份待确认(tmp_path: Path) -> None:
     assert "不要把" in fed_back or "不要自己再写一遍" in fed_back
 
 
+def test_流式调用也记进派发的账() -> None:
+    """实现者和审查者走 AgentLoop 的 chat_stream。只包 chat 时这两笔不进账。"""
+    from spoolkit.agents.dispatcher import _Counting
+    from spoolkit.llm.types import ChatRequest, Message
+
+    gateway = _Counting(FakeModel(["一次", "两次"], OfflineTokenCounter()))
+    request = ChatRequest(
+        messages=(Message(role="user", content="问"),),
+        max_tokens=32,
+    )
+    gateway.chat_stream(request, on_delta=lambda _text: None)
+    gateway.chat(request)
+    assert gateway.calls == 2
+    assert gateway.prompt_tokens > 0
+
+
 def test_派发那一趟的账记进主循环(tmp_path: Path) -> None:
     """子智能体的调用也是这次任务花的钱。
 
